@@ -25,8 +25,29 @@ from backend.account_ops.x_engagement import (
     recover_action_urls,
     validate_engagement_result,
 )
-from backend.models import AccountAutomationFeature, AccountRunStatus
+from backend.models import (
+    AccountAutomationCreate,
+    AccountAutomationFeature,
+    AccountRunStatus,
+    DEFAULT_ENGAGEMENT_PROMPT,
+    DEFAULT_REPLY_STYLE_PROMPT,
+)
 from backend.pipeline.opencli import OpenCLIError, OpenCLIResult
+
+
+async def create_legacy_account_fixtures() -> None:
+    await database.create_account_automation(AccountAutomationCreate())
+    await database.create_account_automation(
+        AccountAutomationCreate(
+            name="Replies & Reposts · Quiet Atlas",
+            feature_type=AccountAutomationFeature.X_ENGAGEMENT,
+            account_handle="AQuietAtlas",
+            schedule_time="01:00",
+            schedule_times=["01:00", "04:30", "23:00"],
+            prompt_template=DEFAULT_ENGAGEMENT_PROMPT,
+            reply_style_prompt=DEFAULT_REPLY_STYLE_PROMPT,
+        )
+    )
 
 
 class AccountScheduleTests(unittest.TestCase):
@@ -59,7 +80,7 @@ class AccountScheduleTests(unittest.TestCase):
         )
 
 
-class AccountDatabaseTests(unittest.IsolatedAsyncioTestCase):
+class AccountRetirementTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addAsyncCleanup(self._cleanup)
@@ -72,7 +93,44 @@ class AccountDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.db_patch.stop()
         self.temp.cleanup()
 
-    async def test_init_seeds_the_quiet_atlas_commission(self):
+    async def test_init_does_not_seed_unrelated_account_products(self):
+        self.assertEqual(await database.list_account_automations(), [])
+
+    async def test_init_retires_existing_products_without_deleting_history(self):
+        automation = await database.create_account_automation(AccountAutomationCreate())
+        run = await database.create_account_run(automation, trigger="manual")
+
+        await database.init_db()
+
+        automations = await database.list_account_automations()
+        runs = await database.list_account_runs()
+
+        self.assertEqual(len(automations), 1)
+        self.assertFalse(automations[0].enabled)
+        self.assertIsNone(automations[0].next_run_at)
+        self.assertEqual(runs[0].id, run.id)
+        self.assertEqual(runs[0].status, AccountRunStatus.FAILED)
+        self.assertEqual(
+            runs[0].error_message,
+            "Account automation retired from this project.",
+        )
+
+
+class AccountDatabaseTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup)
+        self.db_path = Path(self.temp.name) / "account-operations.db"
+        self.db_patch = patch.object(config, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        await database.init_db()
+        await create_legacy_account_fixtures()
+
+    async def _cleanup(self):
+        self.db_patch.stop()
+        self.temp.cleanup()
+
+    async def test_foundation_supports_explicit_account_automations(self):
         automations = await database.list_account_automations()
 
         self.assertEqual(len(automations), 2)
@@ -429,6 +487,7 @@ class EngagementResultTests(unittest.IsolatedAsyncioTestCase):
         self.db_patch.start()
         self.addAsyncCleanup(self.db_patch.stop)
         await database.init_db()
+        await create_legacy_account_fixtures()
         self.automation = next(
             item
             for item in await database.list_account_automations()

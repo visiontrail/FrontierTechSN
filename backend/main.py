@@ -9,9 +9,17 @@ from fastapi.staticfiles import StaticFiles
 from backend.database import init_db, reset_orphaned_account_runs, reset_orphaned_tasks
 from backend.logging_setup import configure_logging
 from backend.worker import start_worker, stop_worker
-from backend.account_ops.worker import start_account_worker, stop_account_worker
 from backend.daily_news.scheduler import start_daily_scheduler, stop_daily_scheduler
-from backend.routers import account_operations, content_planning, daily_news, tasks, settings, providers, prompts, skills, voices
+from backend.routers import (
+    content_planning,
+    daily_news,
+    prompts,
+    providers,
+    settings,
+    skills,
+    tasks,
+    voices,
+)
 from backend import config
 from backend import prompts_registry
 from backend.pipeline.voice_previews import preload_remote_voice_previews
@@ -57,7 +65,6 @@ async def lifespan(app: FastAPI):
             "Reset %d interrupted account-operation run(s) to FAILED", account_reset
         )
     start_worker()
-    start_account_worker()
     start_daily_scheduler()
     preview_preload_task = asyncio.create_task(
         preload_remote_voice_previews(), name="voice-preview-preload"
@@ -71,7 +78,6 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         await stop_daily_scheduler()
-        await stop_account_worker()
         await stop_worker()
 
 
@@ -90,7 +96,6 @@ app.include_router(providers.router)
 app.include_router(prompts.router)
 app.include_router(skills.router)
 app.include_router(voices.router)
-app.include_router(account_operations.router)
 app.include_router(content_planning.router)
 app.include_router(daily_news.router)
 

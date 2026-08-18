@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from backend import config
 from backend.models import (
     AccountAutomationCreate,
-    AccountAutomationFeature,
     AccountAutomationResponse,
     AccountRunResponse,
     AccountRunStatus,
@@ -13,7 +12,6 @@ from backend.models import (
     ContentPlanStatus,
     ContentSeriesCreate,
     ContentSeriesResponse,
-    DEFAULT_ENGAGEMENT_PROMPT,
     DEFAULT_REPLY_STYLE_PROMPT,
     PublicationStatus,
     ProviderResponse,
@@ -271,6 +269,40 @@ async def _migrate_account_operations(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _retire_legacy_account_automations(db: aiosqlite.Connection) -> None:
+    """Keep the Account Ops schema, but retire its two old editorial products.
+
+    Existing deployments may already have scheduled Quiet Atlas jobs. Disabling
+    them during startup makes the product removal effective without deleting its
+    operating history or the reusable Account Ops foundation.
+    """
+    retired_features = ("today_in_history", "x_engagement")
+    now = datetime.now(timezone.utc).isoformat()
+    placeholders = ", ".join("?" for _ in retired_features)
+    await db.execute(
+        f"""UPDATE account_automations
+            SET enabled = 0, next_run_at = NULL, updated_at = ?
+            WHERE feature_type IN ({placeholders})
+              AND (enabled != 0 OR next_run_at IS NOT NULL)""",
+        (now, *retired_features),
+    )
+    await db.execute(
+        f"""UPDATE account_runs
+            SET status = ?, completed_at = ?, error_message = ?,
+                log_text = log_text || ?
+            WHERE feature_type IN ({placeholders}) AND status = ?""",
+        (
+            AccountRunStatus.FAILED.value,
+            now,
+            "Account automation retired from this project.",
+            "Account automation retired from this project.\n",
+            *retired_features,
+            AccountRunStatus.QUEUED.value,
+        ),
+    )
+    await db.commit()
+
+
 async def _migrate_content_planning(db: aiosqlite.Connection) -> None:
     rows = await db.execute_fetchall("PRAGMA table_info(content_plan_items)")
     existing = {row["name"] for row in rows}
@@ -294,6 +326,7 @@ async def init_db():
         await _migrate_tasks(db)
         await _migrate_content_planning(db)
         await _migrate_account_operations(db)
+        await _retire_legacy_account_automations(db)
         # Seed the default provider from the AI engine settings if none exist yet.
         rows = await db.execute_fetchall("SELECT COUNT(*) AS c FROM providers")
         if rows[0]["c"] == 0 and config.AI_ENDPOINT:
@@ -304,29 +337,11 @@ async def init_db():
                 ("Default (settings)", config.AI_ENDPOINT, config.AI_API_KEY, config.AI_MODEL, now),
             )
             await db.commit()
-        automation_rows = await db.execute_fetchall(
-            "SELECT DISTINCT feature_type FROM account_automations"
-        )
-        existing_features = {row["feature_type"] for row in automation_rows}
     except BaseException:
         await db.rollback()
         raise
     finally:
         await db.close()
-    if AccountAutomationFeature.TODAY_IN_HISTORY.value not in existing_features:
-        await create_account_automation(AccountAutomationCreate())
-    if AccountAutomationFeature.X_ENGAGEMENT.value not in existing_features:
-        await create_account_automation(
-            AccountAutomationCreate(
-                name="Replies & Reposts · Quiet Atlas",
-                feature_type=AccountAutomationFeature.X_ENGAGEMENT,
-                account_handle="AQuietAtlas",
-                schedule_time="01:00",
-                schedule_times=["01:00", "04:30", "23:00"],
-                prompt_template=DEFAULT_ENGAGEMENT_PROMPT,
-                reply_style_prompt=DEFAULT_REPLY_STYLE_PROMPT,
-            )
-        )
 
 
 def _row_to_provider(row: aiosqlite.Row) -> ProviderResponse:

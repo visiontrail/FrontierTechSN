@@ -1,3 +1,1 @@
-from backend.routers import account_operations
-
-__all__ = ["account_operations"]
+"""HTTP route modules for the active FrontierTechSN application."""

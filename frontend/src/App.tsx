@@ -1,18 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Routes, Route, NavLink, Link, useLocation, useNavigate } from 'react-router-dom'
+import { Routes, Route, NavLink, Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import TaskList from './components/TaskList'
 import TaskForm from './components/TaskForm'
 import TaskDetail from './components/TaskDetail'
 import SettingsPage from './components/SettingsPage'
-import AccountOperations from './components/AccountOperations'
-import AccountRunDetail from './components/AccountRunDetail'
 import ContentPlanning from './components/ContentPlanning'
 import MorningDesk from './components/MorningDesk'
 import {
   IconTasks,
   IconNew,
   IconAdmin,
-  IconAtlas,
   IconCalendar,
   IconSun,
   IconMoon,
@@ -28,7 +25,6 @@ const NAV = [
   { to: '/', label: 'Tasks', hint: 'Pipeline queue', Icon: IconTasks, end: true },
   { to: '/new', label: 'New Task', hint: 'Start a render', Icon: IconNew, end: false },
   { to: '/planning', label: 'Content Plan', hint: 'Series & release calendar', Icon: IconCalendar, end: false },
-  { to: '/account-operations', label: 'Account Ops', hint: 'Autonomous publishing', Icon: IconAtlas, end: false },
   { to: '/settings', label: 'Admin', hint: 'Models & prompts', Icon: IconAdmin, end: false },
 ]
 
@@ -58,12 +54,6 @@ function pageMeta(pathname: string): PageMeta {
   if (pathname === '/settings') return {
     title: 'Admin Console',
     sub: 'Models, prompts, and skills that drive the pipeline',
-    full: true,
-    chrome: false,
-  }
-  if (pathname.startsWith('/account-operations')) return {
-    title: 'Account Operations',
-    sub: 'Scheduled, auditable autonomous publishing',
     full: true,
     chrome: false,
   }
@@ -225,8 +215,7 @@ export default function App() {
               <Route path="/planning" element={<ContentPlanning />} />
               <Route path="/morning-desk" element={<MorningDesk />} />
               <Route path="/tasks/:id" element={<TaskDetail />} />
-              <Route path="/account-operations" element={<AccountOperations />} />
-              <Route path="/account-operations/runs/:id" element={<AccountRunDetail />} />
+              <Route path="/account-operations/*" element={<Navigate to="/morning-desk" replace />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Routes>
           </div>
