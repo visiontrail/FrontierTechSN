@@ -512,10 +512,12 @@ class SettingsResetRequest(BaseModel):
 
 
 class DailyAutomationSettings(BaseModel):
-    enabled: bool = False
+    enabled: bool = True
     generation_time: str = "05:30"
     timezone: str = "Asia/Singapore"
-    catch_up_after_restart: bool = True
+    # Do not publish a stale morning edition when the app is first started
+    # late in the day. Normal runs still fire once at the configured desk time.
+    catch_up_after_restart: bool = False
     target_duration_minutes: int = Field(default=8, ge=1, le=30)
     language: Literal["en", "zh"] = "en"
     max_stories: int = Field(default=6, ge=3, le=12)
@@ -525,11 +527,11 @@ class DailyAutomationSettings(BaseModel):
     collage_broll_count: int = Field(default=4, ge=2, le=10)
     public_footage_enabled: bool = False
     background_music_provider: Literal["gemini_create_music", "local"] = "gemini_create_music"
-    auto_publish: bool = False
+    auto_publish: bool = True
     publish_targets: list[Literal["youtube", "x", "apple_podcast"]] = Field(
         default_factory=lambda: ["youtube", "x", "apple_podcast"]
     )
-    publish_visibility: Literal["private", "unlisted", "public"] = "private"
+    publish_visibility: Literal["private", "unlisted", "public"] = "public"
     delete_after_test: bool = True
 
     @field_validator("generation_time")

@@ -199,6 +199,16 @@ def test_daily_scheduler_uses_timezone_and_runs_once_after_desk_time():
     assert _is_due(settings, after, {"last_run_date": "2026-08-18"})[0] is False
 
 
+def test_daily_desk_defaults_to_unattended_next_run():
+    settings = DailyAutomationSettings()
+
+    assert settings.enabled is True
+    assert settings.catch_up_after_restart is False
+    assert settings.auto_publish is True
+    assert settings.publish_targets == ["youtube", "x", "apple_podcast"]
+    assert settings.publish_visibility == "public"
+
+
 def test_music_prompt_is_instrumental_and_mix_is_duration_locked(tmp_path: Path):
     prompt = build_music_prompt("Morning edition", {"talking_points": [{"category": "robotics", "headline": "A new actuator"}]})
     assert "No vocals" in prompt

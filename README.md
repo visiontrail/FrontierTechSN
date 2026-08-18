@@ -42,6 +42,8 @@ cp .env.example .env
 
 Open [http://localhost:8101](http://localhost:8101). The production launcher builds the frontend and serves the UI/API/outputs from one port. Override with `PORT` only when needed.
 
+With no saved desk configuration, the next edition runs automatically at 05:30 Asia/Singapore, publishes to YouTube and X through the accounts signed into Chrome, and updates the Apple Podcasts RSS feed. YouTube production visibility defaults to `public`. A first launch later than the two-hour morning window waits for the next scheduled edition instead of publishing stale news.
+
 The **Morning Desk** page configures:
 
 - daily execution time and IANA timezone;
@@ -56,7 +58,7 @@ Use **Run 1-min test** for an end-to-end test edition. It never auto-publishes; 
 
 ### YouTube
 
-The adapter opens YouTube Studio, discovers the current channel from the signed-in session, uploads the final MP4, sets the title/description/audience, and publishes with the configured visibility. The safe default is `private`.
+The adapter opens YouTube Studio, discovers the current channel from the signed-in session, uploads the final MP4, sets the title/description/audience, and publishes with the configured visibility. Production defaults to `public`; test runs use `private` and retain an exact deletion receipt.
 
 ### X
 

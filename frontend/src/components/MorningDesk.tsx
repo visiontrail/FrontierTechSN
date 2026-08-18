@@ -89,12 +89,13 @@ export default function MorningDesk() {
             <label><span>Run length</span><select value={draft.target_duration_minutes} onChange={(e) => patch('target_duration_minutes', Number(e.target.value))}><option value={6}>6 min</option><option value={8}>8 min</option><option value={10}>10 min</option><option value={12}>12 min</option></select></label>
             <label><span>Language</span><select value={draft.language} onChange={(e) => patch('language', e.target.value as 'en' | 'zh')}><option value="en">English</option><option value="zh">中文</option></select></label>
             <label><span>Stories</span><select value={draft.max_stories} onChange={(e) => patch('max_stories', Number(e.target.value))}><option value={4}>4</option><option value={6}>6</option><option value={8}>8</option></select></label>
+            <label><span>YouTube visibility</span><select value={draft.publish_visibility} onChange={(e) => patch('publish_visibility', e.target.value as 'private' | 'unlisted' | 'public')}><option value="public">Public</option><option value="unlisted">Unlisted</option><option value="private">Private</option></select></label>
           </div>
           <label className="morning-switch">
             <span><strong>Automatic distribution</strong><small>YouTube · X · Apple feed</small></span>
             <input type="checkbox" checked={draft.auto_publish} onChange={(e) => patch('auto_publish', e.target.checked)} />
           </label>
-          <p className="morning-safety">The default YouTube visibility is private. The system records the current account identity and exact publication URL; no account is hard-coded.</p>
+          <p className="morning-safety">Production visibility is {draft.publish_visibility}. The system records the current account identity and exact publication URL; no account is hard-coded. Test runs remain private and require exact-receipt cleanup.</p>
           <div className="morning-actions">
             <button type="button" className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(draft)}>{save.isPending ? 'Saving…' : 'Save desk'}</button>
             <button type="button" className="btn-ghost" disabled={run.isPending} onClick={() => run.mutate()}>{run.isPending ? 'Queuing…' : 'Run 1-min test'}</button>
