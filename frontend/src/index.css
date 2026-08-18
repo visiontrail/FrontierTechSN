@@ -5630,7 +5630,7 @@ video {
 .plan-status--published i { background: var(--accent-green); }
 
 /* FrontierTechSN morning desk — an editorial control room, not a generic dashboard. */
-.morning-desk { --ink: var(--text-primary); --rule: color-mix(in srgb, var(--ink) 18%, transparent); width: min(1420px, 100%); margin: 0 auto; padding: clamp(26px, 4vw, 64px); }
+.morning-desk { --ink: var(--text-primary); --rule: color-mix(in srgb, var(--ink) 18%, transparent); width: min(1420px, 100%); height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 auto; padding: clamp(26px, 4vw, 64px); }
 .morning-masthead { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 32px; padding: 12px 0 30px; border-bottom: 3px solid var(--ink); }
 .morning-kicker,.morning-section-label { display: block; font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .15em; text-transform: uppercase; color: var(--accent-2); }
 .morning-masthead h1 { margin: 12px 0 0; font: 700 clamp(48px, 7vw, 96px)/.82 Georgia, 'Times New Roman', serif; letter-spacing: -.065em; }
