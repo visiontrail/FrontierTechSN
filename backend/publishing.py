@@ -86,7 +86,17 @@ def _description(task: TaskResponse, marker: str | None = None) -> str:
     if dossier.is_file():
         try:
             data = json.loads(dossier.read_text(encoding="utf-8"))
-            sources = [str(item.get("url")) for item in data.get("stories", []) if item.get("url")]
+            # Current research dossiers store the final shortlist under
+            # ``selected``.  Keep ``stories`` as a compatibility fallback for
+            # already-generated episodes from the earlier schema.
+            selected = data.get("selected")
+            if not isinstance(selected, list):
+                selected = data.get("stories", [])
+            sources = [
+                str(item.get("url"))
+                for item in selected
+                if isinstance(item, dict) and item.get("url")
+            ]
         except (OSError, json.JSONDecodeError):
             pass
     lines = [

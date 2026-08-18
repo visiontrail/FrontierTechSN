@@ -1,10 +1,47 @@
 import asyncio
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from backend.pipeline.opencli import OpenCLIError
-from backend.publishing import _upload_local_media
+from backend.publishing import _description, _upload_local_media
+
+
+def test_description_includes_selected_research_sources(tmp_path):
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    (research_dir / "dossier.json").write_text(
+        json.dumps({
+            "selected": [
+                {"url": "https://example.com/selected-one"},
+                {"url": "https://example.com/selected-two"},
+            ],
+            "stories": [{"url": "https://example.com/legacy"}],
+        }),
+        encoding="utf-8",
+    )
+
+    description = _description(SimpleNamespace(output_dir=str(tmp_path)), "FTSN-TEST")
+
+    assert "Test run: FTSN-TEST" in description
+    assert "https://example.com/selected-one" in description
+    assert "https://example.com/selected-two" in description
+    assert "https://example.com/legacy" not in description
+
+
+def test_description_supports_legacy_stories_key(tmp_path):
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    (research_dir / "dossier.json").write_text(
+        json.dumps({"stories": [{"url": "https://example.com/legacy"}]}),
+        encoding="utf-8",
+    )
+
+    description = _description(SimpleNamespace(output_dir=str(tmp_path)))
+
+    assert "https://example.com/legacy" in description
 
 
 def test_upload_permission_failure_is_actionable_without_retry():
