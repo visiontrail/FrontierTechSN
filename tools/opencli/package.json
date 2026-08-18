@@ -1,0 +1,12 @@
+{
+  "name": "video-promotional-opencli-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Project-local OpenCLI runtime for the FrontierTechSN daily news pipeline.",
+  "scripts": {
+    "postinstall": "node patch-opencli.mjs"
+  },
+  "dependencies": {
+    "@jackwener/opencli": "1.8.6"
+  }
+}

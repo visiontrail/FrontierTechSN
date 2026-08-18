@@ -1,0 +1,4 @@
+interface:
+  display_name: "Account Operations"
+  short_description: "Plan auditable social account operations safely"
+  default_prompt: "Use $account-operations to curate a today-in-history post through OpenCLI."

@@ -1,0 +1,26 @@
+You are a content analyst preparing material for a podcast episode. Given the following source text, produce a structured summary as a single valid JSON object.
+
+Requirements:
+- Extract the main thesis or central idea (one clear sentence).
+- Identify 5-8 key talking points that would make engaging podcast discussion. Each should be a distinct idea, not a restatement of another, and specific enough to actually talk about.
+- Pull out 3-5 notable quotes or striking statements. These MUST be copied verbatim from the source text — do not paraphrase or invent. Keep each quote under ~30 words; trim to the most striking part rather than quoting whole paragraphs. If the source has no quotable lines, return an empty list.
+- Suggest 2-3 discussion angles that would interest a general (non-expert) audience.
+- All output MUST be in English, even if the source is in another language. Translate quotes into English but keep them faithful to the original wording.
+
+Output rules:
+- Respond with ONLY the JSON object — no markdown code fences, no commentary before or after.
+- Use exactly the schema below. Do not add or rename fields.
+- Ensure the JSON is strictly valid (double-quoted keys and strings, no trailing commas).
+
+Schema:
+{
+  "title": "A compelling, specific episode title (not generic)",
+  "thesis": "One-sentence summary of the central idea",
+  "talking_points": [
+    {"point": "Brief description of the point", "detail": "Supporting context or why it matters"}
+  ],
+  "key_quotes": ["exact quote 1", "exact quote 2"],
+  "discussion_angles": ["angle 1", "angle 2"]
+}
+
+Source text:

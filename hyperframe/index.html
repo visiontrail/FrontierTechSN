@@ -1,0 +1,459 @@
+<!doctype html>
+<html
+  lang="en"
+  data-composition-variables='[{"id":"template","type":"enum","label":"Video template","default":"podcast","options":[{"value":"podcast","label":"Documentary"},{"value":"kinetic","label":"Kinetic"},{"value":"swiss","label":"Swiss Grid"},{"value":"minimal","label":"Minimal"},{"value":"shanshui","label":"Shan Shui"}]}]'
+>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; margin: 0; overflow: hidden; }
+      body { background: #0b0d17; }
+      #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; }
+      .preview-scene {
+        position: absolute;
+        inset: 0;
+        display: none;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+      .preview-scene.is-active { display: block; }
+      .grain {
+        position: absolute;
+        inset: -40%;
+        width: 180%;
+        height: 180%;
+        opacity: .15;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.72' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+        pointer-events: none;
+      }
+      .meta {
+        font-family: "Courier New", monospace;
+        font-size: 21px;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+      }
+
+      /* Documentary — quiet authority, warm ink, cinematic depth. */
+      .podcast { background: #0b0d17; color: #f5f2ea; }
+      .podcast .halo {
+        position: absolute;
+        top: -280px;
+        right: -100px;
+        width: 980px;
+        height: 980px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(240,166,60,.42), rgba(240,166,60,.08) 38%, transparent 70%);
+      }
+      .podcast .ring {
+        position: absolute;
+        top: 180px;
+        right: 170px;
+        width: 470px;
+        height: 470px;
+        border: 3px solid rgba(240,166,60,.55);
+        border-radius: 50%;
+      }
+      .podcast .ring::before, .podcast .ring::after {
+        position: absolute;
+        border: 2px solid rgba(245,242,234,.18);
+        border-radius: 50%;
+        content: "";
+      }
+      .podcast .ring::before { inset: 48px; }
+      .podcast .ring::after { inset: 126px; background: rgba(240,166,60,.9); }
+      .podcast .copy {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        width: 100%;
+        height: 100%;
+        flex-direction: column;
+        justify-content: center;
+        gap: 32px;
+        padding: 120px 160px;
+      }
+      .podcast .meta { color: #f0a63c; }
+      .podcast h1 {
+        max-width: 1080px;
+        margin: 0;
+        font-family: Georgia, serif;
+        font-size: 154px;
+        font-weight: 400;
+        letter-spacing: -.045em;
+        line-height: .92;
+      }
+      .podcast p {
+        max-width: 780px;
+        margin: 0;
+        color: #98a1ba;
+        font-family: "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 38px;
+        font-weight: 300;
+        line-height: 1.42;
+      }
+      .podcast .rule { width: 670px; height: 3px; background: #f0a63c; transform-origin: left; }
+      .podcast .index {
+        position: absolute;
+        right: 150px;
+        bottom: 92px;
+        color: rgba(245,242,234,.58);
+      }
+
+      /* Kinetic — oversized type and abrupt graphic pressure. */
+      .kinetic { background: #08070c; color: #fff; }
+      .kinetic .scan {
+        position: absolute;
+        inset: 0;
+        opacity: .22;
+        background: repeating-linear-gradient(0deg, transparent 0 13px, rgba(255,255,255,.055) 13px 14px);
+      }
+      .kinetic .orange-block {
+        position: absolute;
+        top: -80px;
+        right: 130px;
+        width: 330px;
+        height: 1240px;
+        background: #f0a63c;
+        transform: rotate(8deg);
+      }
+      .kinetic .ghost {
+        position: absolute;
+        right: -120px;
+        bottom: -180px;
+        color: rgba(255,255,255,.075);
+        font-family: "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 500px;
+        line-height: .75;
+      }
+      .kinetic .copy {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        width: 100%;
+        height: 100%;
+        flex-direction: column;
+        justify-content: center;
+        padding: 92px 120px;
+      }
+      .kinetic .meta { margin-bottom: 26px; color: #f0a63c; }
+      .kinetic h1 {
+        width: 1350px;
+        margin: 0;
+        font-family: "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 224px;
+        font-weight: 900;
+        letter-spacing: -.025em;
+        line-height: .79;
+        text-transform: uppercase;
+      }
+      .kinetic h1 span { display: block; }
+      .kinetic h1 span:nth-child(2) { color: #f0a63c; transform: translateX(180px); }
+      .kinetic .stamp {
+        position: absolute;
+        right: 112px;
+        bottom: 90px;
+        border: 5px solid #08070c;
+        padding: 18px 24px;
+        color: #08070c;
+        font-weight: 700;
+        transform: rotate(-6deg);
+      }
+
+      /* Swiss — strict grid, exposed structure, editorial clarity. */
+      .swiss { background: #f4f1ea; color: #14161f; }
+      .swiss .grid {
+        position: absolute;
+        inset: 0;
+        opacity: .22;
+        background-image:
+          linear-gradient(to right, #5c6273 2px, transparent 2px),
+          linear-gradient(to bottom, #5c6273 2px, transparent 2px);
+        background-size: 160px 160px;
+      }
+      .swiss .accent-panel {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 480px;
+        height: 100%;
+        background: #f0a63c;
+      }
+      .swiss .copy {
+        position: relative;
+        z-index: 2;
+        display: grid;
+        width: 100%;
+        height: 100%;
+        grid-template-columns: 1fr 360px;
+        gap: 120px;
+        padding: 110px 120px;
+      }
+      .swiss .main { display: flex; flex-direction: column; justify-content: space-between; }
+      .swiss .meta { color: #5c6273; }
+      .swiss h1 {
+        max-width: 1220px;
+        margin: 0;
+        font-family: "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 176px;
+        font-weight: 700;
+        letter-spacing: -.06em;
+        line-height: .86;
+      }
+      .swiss .lower {
+        display: grid;
+        align-items: end;
+        gap: 70px;
+        grid-template-columns: 220px 1fr;
+      }
+      .swiss .number {
+        font-family: "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 92px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      .swiss p {
+        max-width: 650px;
+        margin: 0;
+        font-family: "Courier New", monospace;
+        font-size: 27px;
+        line-height: 1.45;
+      }
+      .swiss .side {
+        position: relative;
+        display: flex;
+        align-items: flex-end;
+        justify-content: flex-end;
+        padding-bottom: 8px;
+      }
+      .swiss .side strong {
+        color: #14161f;
+        font-family: "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 36px;
+        letter-spacing: -.03em;
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+      }
+
+      /* Minimal — one precise statement and measured negative space. */
+      .minimal { background: #0e0e10; color: #ededed; }
+      .minimal .soft-orb {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 760px;
+        height: 760px;
+        border: 1px solid rgba(240,166,60,.25);
+        border-radius: 50%;
+        box-shadow: 0 0 160px rgba(240,166,60,.08) inset;
+        transform: translate(-50%, -50%);
+      }
+      .minimal .soft-orb::before {
+        position: absolute;
+        inset: 170px;
+        border: 1px solid rgba(237,237,237,.12);
+        border-radius: 50%;
+        content: "";
+      }
+      .minimal .copy {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        width: 100%;
+        height: 100%;
+        align-items: center;
+        flex-direction: column;
+        justify-content: center;
+        gap: 44px;
+        padding: 140px 200px;
+        text-align: center;
+      }
+      .minimal .meta { color: #8b8b92; }
+      .minimal h1 {
+        max-width: 1360px;
+        margin: 0;
+        font-family: "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 136px;
+        font-weight: 300;
+        letter-spacing: -.045em;
+        line-height: .98;
+      }
+      .minimal .rule { width: 110px; height: 3px; background: #f0a63c; }
+      .minimal p {
+        margin: 0;
+        color: #8b8b92;
+        font-family: "Courier New", monospace;
+        font-size: 24px;
+        letter-spacing: .05em;
+      }
+
+      /* Shan Shui — rice paper, layered terrain and an ochre route. */
+      .shanshui { background: #f7f0e4; color: #263a30; }
+      .shanshui .paper {
+        position: absolute;
+        inset: 0;
+        opacity: .32;
+        background-image:
+          radial-gradient(circle at 20% 12%, rgba(255,255,255,.75), transparent 34%),
+          repeating-linear-gradient(8deg, rgba(117,87,48,.06) 0 1px, transparent 1px 8px);
+      }
+      .shanshui svg.terrain { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .shanshui .copy {
+        position: relative;
+        z-index: 3;
+        display: flex;
+        width: 100%;
+        height: 100%;
+        flex-direction: column;
+        justify-content: center;
+        gap: 28px;
+        padding: 118px 150px;
+      }
+      .shanshui .meta { color: #9b5d2f; }
+      .shanshui h1 {
+        max-width: 960px;
+        margin: 0;
+        font-family: Georgia, serif;
+        font-size: 154px;
+        font-weight: 700;
+        letter-spacing: -.045em;
+        line-height: .92;
+      }
+      .shanshui p {
+        max-width: 700px;
+        margin: 0;
+        color: #5e6d61;
+        font-family: "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 34px;
+        line-height: 1.45;
+      }
+      .shanshui .seal {
+        position: absolute;
+        top: 135px;
+        right: 142px;
+        display: grid;
+        width: 98px;
+        height: 98px;
+        place-items: center;
+        border: 5px solid #a85f43;
+        color: #a85f43;
+        font-family: Georgia, serif;
+        font-size: 28px;
+        font-weight: 700;
+        line-height: 1.1;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1920" data-height="1080">
+      <section id="style-preview" class="clip" data-start="0" data-duration="6" data-track-index="1">
+        <div class="preview-scene podcast" data-template="podcast">
+          <div class="grain" data-layout-ignore></div><div class="halo" data-layout-ignore></div><div class="ring" data-layout-ignore></div>
+          <div class="copy"><span class="meta">Field notes / 01</span><h1>Ideas move people.</h1><div class="rule"></div><p>A cinematic visual system for stories with depth, evidence, and a human point of view.</p></div>
+          <span class="meta index">Documentary · 16:9</span>
+        </div>
+
+        <div class="preview-scene kinetic" data-template="kinetic">
+          <div class="scan" data-layout-ignore></div><div class="orange-block" data-layout-ignore></div><div class="ghost" data-layout-ignore>GO</div>
+          <div class="copy"><span class="meta">High impact / 02</span><h1><span>Make</span><span>it</span><span>move.</span></h1></div>
+          <span class="meta stamp">Kinetic</span>
+        </div>
+
+        <div class="preview-scene swiss" data-template="swiss">
+          <div class="grid" data-layout-ignore></div><div class="accent-panel" data-layout-ignore></div>
+          <div class="copy"><div class="main"><span class="meta">System / 03 / Grid 12</span><h1>Clarity<br>has form.</h1><div class="lower"><strong class="number">01</strong><p>Structure creates rhythm. Rhythm turns information into a point of view.</p></div></div><div class="side"><strong>Swiss Grid / Editorial Motion</strong></div></div>
+        </div>
+
+        <div class="preview-scene minimal" data-template="minimal">
+          <div class="grain" data-layout-ignore></div><div class="soft-orb" data-layout-ignore></div>
+          <div class="copy"><span class="meta">Less, precisely / 04</span><h1>Leave room for the idea.</h1><div class="rule"></div><p>Minimal visual system · measured motion</p></div>
+        </div>
+
+        <div class="preview-scene shanshui" data-template="shanshui">
+          <div class="paper" data-layout-ignore></div>
+          <svg class="terrain" data-layout-ignore viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <g class="mountains">
+              <path d="M650 1080 C850 920 930 940 1070 760 C1200 590 1320 680 1430 500 C1560 285 1690 390 1810 190 C1860 110 1900 80 1980 35 L1980 1080Z" fill="#d4b17b" opacity=".56"/>
+              <path d="M860 1080 C1030 900 1130 950 1230 790 C1345 605 1440 690 1545 525 C1660 345 1760 410 1840 250 C1890 150 1940 115 2000 90 L2000 1080Z" fill="#7a8a75" opacity=".76"/>
+              <path d="M1110 1080 C1245 920 1360 980 1440 830 C1535 655 1630 725 1720 570 C1810 415 1900 455 2000 325 L2000 1080Z" fill="#263a30" opacity=".96"/>
+            </g>
+            <g class="contours" fill="none" stroke="#d9c9a8" stroke-width="3" opacity=".46">
+              <path d="M1010 985 C1215 850 1350 905 1475 760 C1610 605 1755 620 1970 420"/><path d="M990 920 C1190 795 1330 840 1455 700 C1590 548 1740 565 1980 355"/><path d="M950 855 C1160 738 1310 778 1435 642 C1575 493 1730 512 1990 290"/>
+            </g>
+            <g class="route" fill="none" stroke="#b46f35" stroke-width="5" stroke-linecap="round"><path d="M-40 965 C320 620 650 820 950 620 C1210 445 1350 170 1690 210 C1815 225 1910 300 1985 385"/></g>
+            <g class="nodes" fill="#b46f35"><circle cx="950" cy="620" r="13"/><circle cx="1690" cy="210" r="13"/></g>
+          </svg>
+          <div class="copy"><span class="meta">山水 / Visual journey / 05</span><h1>Far horizons,<br>drawn in ink.</h1><p>Rice paper, layered terrain, and route marks for stories that travel through time.</p></div>
+          <div class="seal">远山<br>入墨</div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const { template } = window.__hyperframes.getVariables();
+      const scenes = {
+        podcast: document.querySelector('[data-template="podcast"]'),
+        kinetic: document.querySelector('[data-template="kinetic"]'),
+        swiss: document.querySelector('[data-template="swiss"]'),
+        minimal: document.querySelector('[data-template="minimal"]'),
+        shanshui: document.querySelector('[data-template="shanshui"]'),
+      };
+      const active = scenes[template] || scenes.podcast;
+      active.classList.add('is-active');
+
+      const tl = gsap.timeline({ paused: true, defaults: { overwrite: 'auto' } });
+      const q = gsap.utils.selector(active);
+
+      if (template === 'podcast') {
+        tl.fromTo(q('.halo'), { scale: .72, opacity: 0 }, { scale: 1, opacity: 1, overwrite: 'auto', duration: 1.5, ease: 'sine.out' }, .15);
+        tl.fromTo(q('.ring'), { scale: .6, rotation: -18, opacity: 0 }, { scale: 1, rotation: 0, opacity: 1, overwrite: 'auto', duration: 1.05, ease: 'back.out(1.3)' }, .22);
+        tl.fromTo(q('h1'), { x: -100, opacity: 0 }, { x: 0, opacity: 1, overwrite: 'auto', duration: .82, ease: 'expo.out' }, .28);
+        tl.fromTo(q('.copy .meta'), { y: -24, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .48, ease: 'power2.out' }, .48);
+        tl.fromTo(q('.rule'), { scaleX: 0 }, { scaleX: 1, overwrite: 'auto', duration: .7, ease: 'power4.out' }, .62);
+        tl.fromTo(q('p'), { y: 45, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .68, ease: 'circ.out' }, .72);
+        tl.fromTo(q('.index'), { opacity: 0 }, { opacity: 1, overwrite: 'auto', duration: .9, ease: 'sine.out' }, 1.1);
+        tl.to(q('.halo'), { scale: 1.08, overwrite: 'auto', duration: 4.2, ease: 'none' }, 1.7);
+      } else if (template === 'kinetic') {
+        tl.fromTo(q('.orange-block'), { x: 560, rotation: 22 }, { x: 0, rotation: 8, overwrite: 'auto', duration: .46, ease: 'expo.out' }, .12);
+        tl.fromTo(q('h1 span:nth-child(1)'), { x: -900, skewX: -12 }, { x: 0, skewX: 0, overwrite: 'auto', duration: .38, ease: 'power4.out' }, .18);
+        tl.fromTo(q('h1 span:nth-child(2)'), { x: 1100, scale: 1.35 }, { x: 180, scale: 1, overwrite: 'auto', duration: .34, ease: 'back.out(1.4)' }, .32);
+        tl.fromTo(q('h1 span:nth-child(3)'), { x: -1100, opacity: 0 }, { x: 0, opacity: 1, overwrite: 'auto', duration: .42, ease: 'expo.out' }, .47);
+        tl.fromTo(q('.copy .meta'), { y: -55, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .28, ease: 'circ.out' }, .62);
+        tl.fromTo(q('.stamp'), { scale: 2, rotation: 16, opacity: 0 }, { scale: 1, rotation: -6, opacity: 1, overwrite: 'auto', duration: .32, ease: 'power3.out' }, .72);
+        tl.fromTo(q('.ghost'), { x: 130 }, { x: -70, overwrite: 'auto', duration: 5, ease: 'none' }, .2);
+      } else if (template === 'swiss') {
+        tl.fromTo(q('.accent-panel'), { scaleY: 0, transformOrigin: 'top' }, { scaleY: 1, overwrite: 'auto', duration: .62, ease: 'expo.out' }, .16);
+        tl.fromTo(q('.grid'), { opacity: 0 }, { opacity: .22, overwrite: 'auto', duration: 1.25, ease: 'sine.out' }, .18);
+        tl.fromTo(q('h1'), { x: -110, opacity: 0 }, { x: 0, opacity: 1, overwrite: 'auto', duration: .68, ease: 'power4.out' }, .26);
+        tl.fromTo(q('.main > .meta'), { y: -42, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .42, ease: 'circ.out' }, .5);
+        tl.fromTo(q('.number'), { scale: .4, opacity: 0 }, { scale: 1, opacity: 1, overwrite: 'auto', duration: .52, ease: 'back.out(1.8)' }, .68);
+        tl.fromTo(q('p'), { y: 45, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .58, ease: 'expo.out' }, .82);
+        tl.fromTo(q('.side strong'), { y: 80, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .74, ease: 'power2.out' }, .94);
+      } else if (template === 'minimal') {
+        tl.fromTo(q('.soft-orb'), { scale: .55, opacity: 0 }, { scale: 1, opacity: 1, overwrite: 'auto', duration: 1.4, ease: 'sine.out' }, .16);
+        tl.fromTo(q('h1'), { y: 44, opacity: 0, letterSpacing: '.01em' }, { y: 0, opacity: 1, letterSpacing: '-.045em', overwrite: 'auto', duration: 1.05, ease: 'expo.out' }, .35);
+        tl.fromTo(q('.meta'), { opacity: 0 }, { opacity: 1, overwrite: 'auto', duration: .72, ease: 'power2.out' }, .72);
+        tl.fromTo(q('.rule'), { scaleX: 0 }, { scaleX: 1, overwrite: 'auto', duration: .56, ease: 'power4.out' }, .86);
+        tl.fromTo(q('p'), { y: 20, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .82, ease: 'circ.out' }, 1.02);
+        tl.to(q('.soft-orb'), { scale: 1.06, overwrite: 'auto', duration: 3.8, ease: 'sine.inOut' }, 1.7);
+      } else {
+        tl.fromTo(q('.mountains'), { x: 90, opacity: 0 }, { x: 0, opacity: 1, overwrite: 'auto', duration: 1.5, ease: 'sine.out' }, .12);
+        tl.fromTo(q('.contours'), { opacity: 0 }, { opacity: 1, overwrite: 'auto', duration: 1.25, ease: 'power2.out' }, .35);
+        tl.fromTo(q('.route path'), { strokeDasharray: 2300, strokeDashoffset: 2300 }, { strokeDashoffset: 0, overwrite: 'auto', duration: 2.2, ease: 'power3.out' }, .3);
+        tl.fromTo(q('.nodes circle'), { scale: .2, opacity: 0, transformOrigin: '50% 50%' }, { scale: 1, opacity: 1, overwrite: 'auto', duration: .5, stagger: .2, ease: 'back.out(1.8)' }, 1.1);
+        tl.fromTo(q('h1'), { x: -85, opacity: 0 }, { x: 0, opacity: 1, overwrite: 'auto', duration: .85, ease: 'expo.out' }, .28);
+        tl.fromTo(q('.meta'), { y: -30, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .48, ease: 'circ.out' }, .58);
+        tl.fromTo(q('p'), { y: 38, opacity: 0 }, { y: 0, opacity: 1, overwrite: 'auto', duration: .68, ease: 'power2.out' }, .82);
+        tl.fromTo(q('.seal'), { scale: 1.6, rotation: 9, opacity: 0 }, { scale: 1, rotation: 0, opacity: 1, overwrite: 'auto', duration: .52, ease: 'back.out(1.4)' }, 1.05);
+        tl.to(q('.mountains'), { x: -36, overwrite: 'auto', duration: 4.2, ease: 'none' }, 1.65);
+      }
+
+      window.__timelines.main = tl;
+    </script>
+  </body>
+</html>

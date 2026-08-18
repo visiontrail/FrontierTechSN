@@ -1,0 +1,6 @@
+[submodule "claude-agent-sdk-python"]
+	path = claude-agent-sdk-python
+	url = git@github.com:anthropics/claude-agent-sdk-python.git
+[submodule "claude-agent-sdk-demos"]
+	path = claude-agent-sdk-demos
+	url = git@github.com:anthropics/claude-agent-sdk-demos.git

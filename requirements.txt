@@ -1,0 +1,26 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sse-starlette>=2.1.0
+aiosqlite>=0.20.0
+httpx>=0.28.0
+pydantic>=2.10.0
+yt-dlp>=2025.1.0
+pdfplumber>=0.11.0
+ebooklib>=0.18
+python-multipart>=0.0.18
+python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+Pillow>=10.0.0
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+
+# Fast word-level timestamps for post-TTS alignment on Apple Silicon.
+# Microsoft VibeVoice remains the narration generator; MLX Whisper only reads
+# the finished WAV. If unavailable, composition continues with a warning.
+mlx-whisper>=0.4.3; sys_platform == "darwin" and platform_machine == "arm64"
+
+# Claude Agent SDK — installed from the vendored submodule so the pinned
+# source is the single source of truth (see .gitmodules). The `claude` CLI it
+# drives is provided separately: on PATH locally, and via npm in the image.
+./claude-agent-sdk-python

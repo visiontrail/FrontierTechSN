@@ -1,0 +1,23 @@
+{
+  "skill_name": "gbro-collage-broll",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Create four landscape collage B-roll clips for a documentary task and continue automatically through final video generation.",
+      "expected_output": "Four 16:9 specs use Agent planning, ChatGPT Web stills, Gemini Web video, no approval pause, and no GEMINI_API_KEY.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Use paper collage as the opening style for a portrait 9:16 task, with the rest of the visuals following the same task orientation.",
+      "expected_output": "scene-01 is selected and every generated asset is 9:16 without cross-orientation cropping.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Generate collage B-roll but one Gemini Web job fails halfway through.",
+      "expected_output": "The failed item is recorded, successful items remain usable, and the original scene fallback is preserved.",
+      "files": []
+    }
+  ]
+}
