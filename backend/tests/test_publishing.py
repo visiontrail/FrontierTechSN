@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.pipeline.opencli import OpenCLIError
-from backend.publishing import _description, _upload_local_media
+from backend.publishing import _browser, _description, _upload_local_media
 
 
 def test_description_includes_selected_research_sources(tmp_path):
@@ -42,6 +42,34 @@ def test_description_supports_legacy_stories_key(tmp_path):
     description = _description(SimpleNamespace(output_dir=str(tmp_path)))
 
     assert "https://example.com/legacy" in description
+
+
+def test_youtube_browser_sessions_are_foregrounded():
+    runner = AsyncMock(return_value=SimpleNamespace(stdout="ok"))
+
+    with patch("backend.publishing.run_opencli_with_retries", runner):
+        result = asyncio.run(
+            _browser(
+                "ftsn-yt-delete-20260818",
+                "open",
+                "https://studio.youtube.com/",
+            )
+        )
+
+    assert result == "ok"
+    assert runner.await_args.args[0][-2:] == ["--window", "foreground"]
+
+
+def test_non_youtube_browser_sessions_remain_backgrounded():
+    runner = AsyncMock(return_value=SimpleNamespace(stdout="ok"))
+
+    with patch("backend.publishing.run_opencli_with_retries", runner):
+        result = asyncio.run(
+            _browser("ftsn-x-20260818", "open", "https://x.com/compose/post")
+        )
+
+    assert result == "ok"
+    assert runner.await_args.args[0][-2:] == ["--window", "background"]
 
 
 def test_upload_permission_failure_is_actionable_without_retry():

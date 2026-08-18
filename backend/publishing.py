@@ -115,9 +115,16 @@ async def _browser(
     *args: str,
     timeout: int = 180,
     attempts: int | None = None,
+    window: str | None = None,
 ) -> str:
+    # YouTube Studio repeatedly stalls when Chrome leaves its upload/edit tab
+    # in the background.  Keep those sessions foregrounded; X's dedicated
+    # adapter remains safe and faster in the background.
+    effective_window = window or (
+        "foreground" if session.startswith("ftsn-yt-") else "background"
+    )
     result = await run_opencli_with_retries(
-        ["browser", session, *args, "--window", "background"],
+        ["browser", session, *args, "--window", effective_window],
         timeout=timeout,
         attempts=attempts,
         label=f"OpenCLI browser {session}",
@@ -307,7 +314,9 @@ async def publish_youtube(task: TaskResponse, *, visibility: str, test_mode: boo
     if not task.video_path or not Path(task.video_path).is_file():
         raise FileNotFoundError("Final video is missing")
     visibility = visibility if visibility in {"private", "unlisted", "public"} else "private"
-    session = f"ftsn-yt-{task.id[:8]}"
+    # A fresh lease per invocation prevents a previously timed-out Studio tab
+    # from poisoning a later retry of the same task.
+    session = f"ftsn-yt-{task.id[:8]}-{time.time_ns()}"
     marker = f"FTSN-{task.id[:8]}"
     title = f"{_title(task)}{' [TEST]' if test_mode else ''}"[:95]
     link: Any = ""
@@ -390,7 +399,7 @@ async def delete_youtube(task: TaskResponse) -> dict[str, Any]:
     channel_id = str(entry.get("identity", {}).get("channel_id") or "")
     if entry.get("status") != "published" or not re.fullmatch(r"[A-Za-z0-9_-]{6,}", video_id):
         raise OpenCLIError("Refusing to delete YouTube content without an exact recorded video ID")
-    session = f"ftsn-yt-delete-{task.id[:8]}"
+    session = f"ftsn-yt-delete-{task.id[:8]}-{time.time_ns()}"
     try:
         identity = await _youtube_identity(session)
         if identity["channel_id"] != channel_id:
