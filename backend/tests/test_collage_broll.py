@@ -44,7 +44,23 @@ def test_prompts_follow_the_task_orientation_and_keep_media_clean():
     assert "9:16" in motion
     assert "Image 1 is the exact empty first frame" in motion
     assert "No scene cuts, camera movement, zoom" in motion
+    assert "Target running time: 6.000 seconds" in motion
+    assert "Never restart or repeat any motion" in motion
     assert "Avoid all typography" in still
+
+
+def test_clip_duration_matches_script_and_respects_gemini_ceiling():
+    short_scene = {**_board(1)["scenes"][0], "duration": 5.25}
+    long_scene = {**_board(1)["scenes"][0], "duration": 12.0}
+
+    with patch.object(collage_broll.config, "COLLAGE_GEMINI_MAX_SECONDS", 8):
+        short = collage_broll._fallback_spec(short_scene, 0)
+        long = collage_broll._fallback_spec(long_scene, 0)
+
+    assert short["script_duration_seconds"] == 5.25
+    assert short["target_duration_seconds"] == 5.25
+    assert long["script_duration_seconds"] == 12.0
+    assert long["target_duration_seconds"] == 8.0
 
 
 def test_opencli_collage_operation_retries_until_success(monkeypatch):
@@ -99,6 +115,9 @@ def test_attach_collage_only_promotes_ready_existing_clips(tmp_path: Path):
     clip = tmp_path / "collage_broll" / "01-scene-01" / "video" / "final-5s-noaudio.mp4"
     clip.parent.mkdir(parents=True)
     clip.write_bytes(b"video")
+    hold = tmp_path / "collage_broll" / "01-scene-01" / "frames" / "last-frame.jpg"
+    hold.parent.mkdir(parents=True)
+    hold.write_bytes(b"image")
     plans = [
         {"id": "scene-01", "archetype": "topic", "headline": "First"},
         {"id": "scene-02", "archetype": "topic", "headline": "Second"},
@@ -109,6 +128,9 @@ def test_attach_collage_only_promotes_ready_existing_clips(tmp_path: Path):
                 "scene_id": "scene-01",
                 "status": "ready",
                 "video_path": str(clip.relative_to(tmp_path)),
+                "still_path": str(hold.relative_to(tmp_path)),
+                "script_duration_seconds": 12.0,
+                "target_duration_seconds": 8.0,
                 "spec": {"visual_metaphor": "a machine snaps together"},
                 "qa": {"passed": True},
             },
@@ -124,8 +146,44 @@ def test_attach_collage_only_promotes_ready_existing_clips(tmp_path: Path):
     assert plans[0]["archetype"] == "footage"
     assert plans[0]["collage_broll"] is True
     assert plans[0]["footage_src"] == f"../{clip.relative_to(tmp_path).as_posix()}"
+    assert plans[0]["collage_hold_src"] == f"../{hold.relative_to(tmp_path).as_posix()}"
+    assert plans[0]["collage_target_duration_seconds"] == 8.0
     assert plans[0]["footage_credit"] == ""
     assert plans[1]["archetype"] == "topic"
+
+    # Refreshing an already-attached plan must update the same scene instead
+    # of treating its own collage as occupied public footage and rehoming it.
+    assert collage_broll.attach_collage(plans, manifest, tmp_path) == 1
+    assert plans[0]["collage_placed_scene_id"] == "scene-01"
+    assert plans[1]["archetype"] == "topic"
+
+
+def test_attach_collage_keeps_fallback_when_a_required_hold_frame_is_missing(
+    tmp_path: Path,
+):
+    clip = tmp_path / "collage_broll" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"video")
+    plans = [{"id": "scene-01", "archetype": "topic", "headline": "Fallback"}]
+    manifest = {
+        "items": [
+            {
+                "scene_id": "scene-01",
+                "status": "ready",
+                "video_path": str(clip.relative_to(tmp_path)),
+                "still_path": "collage_broll/missing-last-frame.jpg",
+                "script_duration_seconds": 12.0,
+                "target_duration_seconds": 8.0,
+            }
+        ]
+    }
+
+    assert collage_broll.attach_collage(plans, manifest, tmp_path) == 0
+    assert plans[0] == {
+        "id": "scene-01",
+        "archetype": "topic",
+        "headline": "Fallback",
+    }
 
 
 def test_attach_collage_rehomes_a_clip_instead_of_overwriting_public_footage(
@@ -134,6 +192,8 @@ def test_attach_collage_rehomes_a_clip_instead_of_overwriting_public_footage(
     clip = tmp_path / "collage_broll" / "clip.mp4"
     clip.parent.mkdir(parents=True)
     clip.write_bytes(b"video")
+    hold = tmp_path / "collage_broll" / "last-frame.jpg"
+    hold.write_bytes(b"image")
     plans = [
         {
             "id": "scene-01",
@@ -148,6 +208,7 @@ def test_attach_collage_rehomes_a_clip_instead_of_overwriting_public_footage(
                 "scene_id": "scene-01",
                 "status": "ready",
                 "video_path": str(clip.relative_to(tmp_path)),
+                "still_path": str(hold.relative_to(tmp_path)),
                 "spec": {"visual_metaphor": "paper fleet"},
                 "qa": {"passed": True},
             }
@@ -189,18 +250,18 @@ def test_generate_falls_back_locally_when_web_video_fails(tmp_path: Path):
         raw.write_bytes(b"raw")
         return raw, "https://gemini.google.com/videos/test"
 
-    async def normalize(_raw, item_dir, _frame):
-        final = item_dir / "video" / "final-5s-noaudio.mp4"
+    async def normalize(_raw, item_dir, _frame, target_duration):
+        final = collage_broll._final_clip_path(item_dir, target_duration)
         final.write_bytes(b"final")
         return final
 
-    async def local_video(_first, _last, item_dir, _frame):
+    async def local_video(_first, _last, item_dir, _frame, _target_duration):
         raw = item_dir / "video" / "local-paper-assembly.mp4"
         raw.parent.mkdir(parents=True, exist_ok=True)
         raw.write_bytes(b"local")
         return raw
 
-    async def sheet(_video, item_dir, _frame):
+    async def sheet(_video, item_dir, _frame, _target_duration):
         output = item_dir / "video" / "contact-sheet.jpg"
         output.write_bytes(b"sheet")
         return output
@@ -226,6 +287,8 @@ def test_generate_falls_back_locally_when_web_video_fails(tmp_path: Path):
     assert manifest["gemini_api_key_used"] is False
     assert manifest["approval_gates"] == []
     assert [item["status"] for item in manifest["items"]] == ["ready", "ready"]
+    assert [item["target_duration_seconds"] for item in manifest["items"]] == [6.0, 6.0]
+    assert manifest["playback_policy"] == "play_once_then_hold_last_frame"
     assert manifest["items"][1]["video_provider"] == "deterministic_local_paper_assembly"
     saved = json.loads((tmp_path / "collage_broll" / "manifest.json").read_text())
     assert saved["errors"] == []
@@ -246,14 +309,14 @@ def test_generate_falls_back_locally_when_web_still_fails(tmp_path: Path):
         last.write_bytes(b"last")
         return first, last
 
-    async def local_video(_first, _last, item_dir, _frame):
+    async def local_video(_first, _last, item_dir, _frame, _target_duration):
         raw = item_dir / "video" / "local.mp4"
         raw.parent.mkdir(parents=True)
         raw.write_bytes(b"local")
         return raw
 
-    async def normalize(_raw, item_dir, _frame):
-        final = item_dir / "video" / "final-5s-noaudio.mp4"
+    async def normalize(_raw, item_dir, _frame, target_duration):
+        final = collage_broll._final_clip_path(item_dir, target_duration)
         final.write_bytes(b"final")
         return final
 
@@ -280,7 +343,7 @@ def test_generate_falls_back_locally_when_web_still_fails(tmp_path: Path):
     assert manifest["items"][0]["video_provider"] == "deterministic_local_paper_assembly"
 
 
-def test_local_animation_moves_throughout_the_loop_cycle(tmp_path: Path):
+def test_local_animation_assembles_once_and_ends_on_a_distinct_frame(tmp_path: Path):
     frame = FrameSpec("landscape", "16:9", 320, 180, 320, 180, "landscape")
     first = tmp_path / "first.png"
     last = tmp_path / "last.png"
@@ -292,12 +355,19 @@ def test_local_animation_moves_throughout_the_loop_cycle(tmp_path: Path):
     draw.polygon(((92, 12), (230, 88), (80, 172)), fill="#D2A928")
     completed.save(last)
 
-    raw = asyncio.run(collage_broll._animate_still_locally(first, last, tmp_path, frame))
-    qa = asyncio.run(collage_broll.probe_video(raw, frame))
+    target_duration = 6.0
+    raw = asyncio.run(
+        collage_broll._animate_still_locally(
+            first, last, tmp_path, frame, target_duration
+        )
+    )
+    qa = asyncio.run(collage_broll.probe_video(raw, frame, target_duration))
 
     assert qa["passed"] is True
     assert qa["checks"]["sustained_motion"] is True
-    assert qa["motion"]["active_seconds"] >= 4
+    assert qa["checks"]["non_repeating_endpoints"] is True
+    assert qa["motion"]["active_seconds"] >= 3
+    assert qa["motion"]["first_last_delta"] >= 1
 
 
 def test_motion_probe_rejects_a_video_that_becomes_static(tmp_path: Path):
@@ -307,6 +377,7 @@ def test_motion_probe_rejects_a_video_that_becomes_static(tmp_path: Path):
     Image.new("RGB", (320, 180), "#315F4C").save(first)
     Image.new("RGB", (320, 180), "#D2A928").save(last)
     raw = tmp_path / "legacy.mp4"
+    target_duration = 5.0
     asyncio.run(
         collage_broll._media_command(
             [
@@ -317,7 +388,7 @@ def test_motion_probe_rejects_a_video_that_becomes_static(tmp_path: Path):
                 "-framerate",
                 str(collage_broll.CLIP_FPS),
                 "-t",
-                str(collage_broll.CLIP_SECONDS),
+                str(target_duration),
                 "-i",
                 str(first),
                 "-loop",
@@ -325,7 +396,7 @@ def test_motion_probe_rejects_a_video_that_becomes_static(tmp_path: Path):
                 "-framerate",
                 str(collage_broll.CLIP_FPS),
                 "-t",
-                str(collage_broll.CLIP_SECONDS),
+                str(target_duration),
                 "-i",
                 str(last),
                 "-filter_complex",
@@ -333,7 +404,7 @@ def test_motion_probe_rejects_a_video_that_becomes_static(tmp_path: Path):
                 "-map",
                 "[out]",
                 "-t",
-                str(collage_broll.CLIP_SECONDS),
+                str(target_duration),
                 "-an",
                 "-c:v",
                 "libx264",
@@ -345,8 +416,26 @@ def test_motion_probe_rejects_a_video_that_becomes_static(tmp_path: Path):
         )
     )
 
-    qa = asyncio.run(collage_broll.probe_video(raw, frame))
+    qa = asyncio.run(collage_broll.probe_video(raw, frame, target_duration))
 
     assert qa["passed"] is False
     assert qa["checks"]["sustained_motion"] is False
-    assert qa["motion"]["active_seconds"] < 4
+    assert qa["motion"]["active_seconds"] < 2.5
+
+
+def test_normalize_trims_without_replaying_the_source(tmp_path: Path):
+    raw = tmp_path / "gemini.mp4"
+    raw.write_bytes(b"video")
+    target_duration = 6.25
+
+    with patch.object(collage_broll, "_media_command", AsyncMock()) as media_command:
+        final = asyncio.run(
+            collage_broll._normalize_video(
+                raw, tmp_path, LANDSCAPE, target_duration
+            )
+        )
+
+    command = media_command.await_args.args[0]
+    assert "-stream_loop" not in command
+    assert command[command.index("-t") + 1] == str(target_duration)
+    assert final.name == "final-6.25s-noaudio.mp4"

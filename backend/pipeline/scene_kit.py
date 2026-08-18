@@ -396,6 +396,8 @@ class ScenePlan:
     footage_kind: str = ""
     footage_credit: str = ""
     collage_broll: bool = False
+    collage_hold_src: str = ""
+    collage_target_duration_seconds: float = 0.0
     theme: Theme = DEFAULT_THEME
     frame: FrameSpec = LANDSCAPE
 
@@ -440,6 +442,10 @@ class ScenePlan:
             footage_kind=str(data.get("footage_kind") or ""),
             footage_credit=str(data.get("footage_credit") or ""),
             collage_broll=bool(data.get("collage_broll")),
+            collage_hold_src=str(data.get("collage_hold_src") or ""),
+            collage_target_duration_seconds=float(
+                data.get("collage_target_duration_seconds") or 0.0
+            ),
             theme=theme,
             frame=frame,
         )
@@ -830,16 +836,39 @@ def _render_footage(plan: ScenePlan) -> str:
     """Render a full-bleed media plate that remains populated for the full scene."""
     accent = accent_hex(plan.accent, plan.theme)
     if plan.footage_kind == "video":
+        # Public footage may loop to cover a longer narration beat. Generated
+        # paper-collage motion is a one-pass assembly. HyperFrames capture does
+        # not reliably retain an ended video's last frame, so collage scenes
+        # switch to an explicit still layer for the remaining narration beat.
+        loop_attribute = "" if plan.collage_broll else " loop"
+        video_duration = plan.duration
+        hold_media = ""
+        if plan.collage_broll and plan.collage_hold_src:
+            target_duration = min(
+                plan.duration,
+                max(0.0, plan.collage_target_duration_seconds),
+            )
+            if 0 < target_duration < plan.duration:
+                video_duration = target_duration
+                hold_duration = plan.duration - target_duration
+                hold_media = (
+                    f'      <img id="{plan.id}-hold" class="clip media collage-hold" '
+                    f'src="{_esc(plan.collage_hold_src)}" data-start="{target_duration:.2f}" '
+                    f'data-duration="{hold_duration:.2f}" data-track-index="0" alt="" '
+                    f'crossorigin="anonymous">\n'
+                )
         media = (
             f'      <video id="{plan.id}-media" class="clip media" src="{_esc(plan.footage_src)}" '
-            f'data-start="0" data-duration="{plan.duration:.2f}" data-track-index="0" '
-            f'muted playsinline loop crossorigin="anonymous"></video>\n'
+            f'data-start="0" data-duration="{video_duration:.2f}" data-track-index="0" '
+            f'muted playsinline{loop_attribute} crossorigin="anonymous"></video>\n'
+            + hold_media
         )
     else:
         media = f'      <img id="{plan.id}-media" class="media" src="{_esc(plan.footage_src)}" alt="">\n'
     css = f"""
   #{plan.id} .frame {{ position:absolute; inset:0; overflow:hidden; }}
-  #{plan.id} .media {{ width:100%; height:100%; object-fit:cover; }}
+  #{plan.id} .media {{ display:block; width:100%; height:100%; object-fit:cover; }}
+  #{plan.id} .frame > .clip {{ position:absolute; inset:0; }}
   #{plan.id} .scrim {{ position:absolute; inset:0;
       background:linear-gradient(180deg, {_rgba(plan.theme.bg, .55)} 0%, {_rgba(plan.theme.bg, .15)} 38%, {_rgba(plan.theme.bg, .92)} 100%); }}
   #{plan.id} .stage {{ justify-content:flex-end; padding:130px 150px 230px; }}

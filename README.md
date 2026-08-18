@@ -21,6 +21,8 @@ Every daily run is fail-closed around these checks:
 
 All yhroot stages get ten total attempts (one initial call plus nine retries). Browser-backed OpenCLI stages also get ten attempts. A provider turn that has already exceeded its whole-turn hard timeout is stopped immediately because the underlying CLI has already spent that turn retrying.
 
+Each Paper-Collage clip targets the duration of its selected narration scene, capped by Gemini's configured single-generation limit (eight seconds by default). The generated assembly plays once and then holds its completed final frame for the remainder of a longer scene; neither FFmpeg nor HyperFrames replays it. Operators can change the provider ceiling under **Admin → System → Paper-collage B-roll** with `COLLAGE_GEMINI_MAX_SECONDS`.
+
 ## Source roster
 
 The catalog lives in [`config/news_sources.json`](config/news_sources.json). Primary desks are Techmeme, TLDR AI, 机器之心 AI Daily, 量子位 QbitAI, IEEE Spectrum, and DeepTech 深科技. Secondary desks are AIBase AI 日报, IT之家 AI / 智能时代, 极客公园, The Rundown AI, Ars Technica, and VentureBeat AI.

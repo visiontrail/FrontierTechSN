@@ -591,6 +591,14 @@ SPECS: tuple[SettingSpec, ...] = (
         unit="seconds", minimum=120, maximum=3600,
         description="Maximum wait per collage animation generated through Gemini Web Create Video.",
     ),
+    SettingSpec(
+        "COLLAGE_GEMINI_MAX_SECONDS", "collage", "Gemini max clip length", "int",
+        unit="seconds", minimum=4, maximum=60,
+        description=(
+            "Provider ceiling for one Gemini Create Video result. Each paper-collage clip "
+            "targets the shorter of this value and its narration scene."
+        ),
+    ),
     # ── Paths ────────────────────────────────────────────────────────────
     SettingSpec(
         "OUTPUTS_DIR", "paths", "Outputs directory", "path",

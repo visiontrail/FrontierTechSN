@@ -162,9 +162,11 @@ def test_collage_footage_is_clean_locked_off_full_bleed():
     html = sk.render_scene(
         plan(
             archetype="footage",
-            footage_src="collage_broll/01/video/final-5s-noaudio.mp4",
+            footage_src="collage_broll/01/video/final-8s-noaudio.mp4",
             footage_kind="video",
             collage_broll=True,
+            collage_hold_src="collage_broll/01/frames/last-frame.jpg",
+            collage_target_duration_seconds=8.0,
         )
     )
 
@@ -173,7 +175,14 @@ def test_collage_footage_is_clean_locked_off_full_bleed():
     assert 'class="stage"' not in html
     assert "scale: 1.16" not in html
     video = re.search(r"<video[^>]*>", html).group(0)
-    assert " loop" in video
+    assert " loop" not in video
+    assert "muted" in video and "playsinline" in video
+    assert 'data-duration="8.00"' in video
+    hold = re.search(r'<img id="scene-01-hold"[^>]*>', html).group(0)
+    assert 'data-start="8.00"' in hold
+    assert 'data-duration="4.00"' in hold
+    assert 'data-track-index="0"' in hold
+    assert '.frame > .clip { position:absolute; inset:0; }' in html
 
 
 def test_portrait_scene_uses_portrait_root_contract():

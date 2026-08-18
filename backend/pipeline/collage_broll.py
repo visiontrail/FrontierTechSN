@@ -26,12 +26,40 @@ LogCallback = Callable[[str], None]
 
 SOURCE_REPOSITORY = "https://github.com/pyang5166/gbro-collage-broll"
 SOURCE_COMMIT = "a1a4ee2e2abf7d44e460026b706d0c72c2cf8a91"
-CLIP_SECONDS = 5
 CLIP_FPS = 24
 MOTION_SAMPLE_FPS = 4
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _COLORS = ("#D96B35", "#D2A928", "#315F4C", "#594080", "#188C85", "#B73D3D")
+
+
+def _seconds(value: Any, fallback: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if math.isfinite(parsed) else fallback
+
+
+def _with_scene_timing(spec: dict[str, Any], scene: dict[str, Any]) -> dict[str, Any]:
+    """Attach the one-play media duration contract for a narration scene."""
+    maximum = max(1 / CLIP_FPS, _seconds(config.COLLAGE_GEMINI_MAX_SECONDS, 8.0))
+    script_duration = max(0.0, _seconds(scene.get("duration")))
+    target_duration = min(script_duration, maximum) if script_duration else maximum
+    return {
+        **spec,
+        "script_duration_seconds": round(script_duration, 3),
+        "target_duration_seconds": round(target_duration, 3),
+        "gemini_max_duration_seconds": round(maximum, 3),
+    }
+
+
+def _duration_token(duration: float) -> str:
+    return f"{duration:.3f}".rstrip("0").rstrip(".")
+
+
+def _final_clip_path(item_dir: Path, duration: float) -> Path:
+    return item_dir / "video" / f"final-{_duration_token(duration)}s-noaudio.mp4"
 
 
 def _log(log: LogCallback | None, message: str) -> None:
@@ -94,7 +122,7 @@ def _fallback_spec(scene: dict, index: int) -> dict[str, Any]:
     text = str(scene.get("text") or "").strip()
     meaning = re.split(r"(?<=[.!?。！？])\s*", text)[0][:220] or "A hidden process becomes visible"
     objects = ["central halftone subject", "paper mechanism", "connector pieces", "result card"]
-    return {
+    return _with_scene_timing({
         "scene_id": scene["id"],
         "script_meaning": meaning,
         "emotion": "clarity",
@@ -108,7 +136,7 @@ def _fallback_spec(scene: dict, index: int) -> dict[str, Any]:
         "assembly_order": objects,
         "final_frame": "A concentrated completed paper mechanism with generous clear color field.",
         "planner": "deterministic_fallback",
-    }
+    }, scene)
 
 
 def _normalize_spec(raw: dict, scene: dict, index: int) -> dict[str, Any]:
@@ -124,7 +152,7 @@ def _normalize_spec(raw: dict, scene: dict, index: int) -> dict[str, Any]:
     spec["assembly_order"] = order[:6] or [item["what"] for item in spec["elements"]]
     for key in ("script_meaning", "emotion", "visual_metaphor", "final_frame"):
         spec[key] = str(spec.get(key) or fallback[key])[:500]
-    return spec
+    return _with_scene_timing(spec, scene)
 
 
 async def plan_specs(
@@ -234,11 +262,12 @@ Avoid all typography, readable letters, numerals, logos, watermarks, UI, subtitl
 
 def video_prompt(spec: dict[str, Any], frame: FrameSpec) -> str:
     order = " → ".join(spec["assembly_order"])
+    target_duration = _seconds(spec.get("target_duration_seconds"), 8.0)
     return f"""Paper-collage stop-motion assembly. Image 1 is the exact empty first frame and Image 2 is the exact completed last frame. In one continuous locked-off {frame.aspect_ratio} shot, open on the empty flat {spec['background_hex']} paper field.
 
-Assemble the scene piece by piece with crisp physical stop-motion timing in this exact order: {order}. Pieces slide, drop, stamp, and snap into place. End by holding the supplied completed Image 2 composition.
+Assemble the scene piece by piece with crisp physical stop-motion timing in this exact order: {order}. Pieces slide, drop, stamp, and snap into place exactly once. Pace the single assembly across approximately {target_duration:.3f} seconds, then hold the supplied completed Image 2 composition. Never restart or repeat any motion.
 
-Preserve the exact {frame.aspect_ratio} framing, {spec['background_hex']} color field, colored cardstock accents, uncoated paper grain, halftone dots, cream keylines, crisp cut edges, and soft paper shadows. Restrained tactile 2D paper craft only. Aim for five seconds.
+Preserve the exact {frame.aspect_ratio} framing, {spec['background_hex']} color field, colored cardstock accents, uncoated paper grain, halftone dots, cream keylines, crisp cut edges, and soft paper shadows. Restrained tactile 2D paper craft only. Target running time: {target_duration:.3f} seconds.
 
 No scene cuts, camera movement, zoom, morphing, new objects, text, letters, numbers, logos, watermark, UI, or sound."""
 
@@ -489,9 +518,13 @@ async def _render_local_still(spec: dict[str, Any], item_dir: Path, frame: Frame
 
 
 async def _animate_still_locally(
-    first: Path, last: Path, item_dir: Path, frame: FrameSpec
+    first: Path,
+    last: Path,
+    item_dir: Path,
+    frame: FrameSpec,
+    target_duration: float,
 ) -> Path:
-    """Animate a still as staggered paper tiles with motion across all five seconds."""
+    """Assemble staggered paper tiles once, ending on the exact completed still."""
     video_dir = item_dir / "video"
     video_dir.mkdir(parents=True, exist_ok=True)
     raw = video_dir / "local-paper-assembly.mp4"
@@ -550,7 +583,7 @@ async def _animate_still_locally(
         stderr=asyncio.subprocess.PIPE,
     )
     assert process.stdin is not None
-    total_frames = CLIP_SECONDS * CLIP_FPS
+    total_frames = max(1, round(target_duration * CLIP_FPS))
     try:
         for frame_index in range(total_frames):
             progress = frame_index / max(1, total_frames - 1)
@@ -558,23 +591,22 @@ async def _animate_still_locally(
             for index, tile_spec in enumerate(tile_specs):
                 entrance_start = 0.06 + index * 0.095
                 entrance_progress = min(1.0, max(0.0, (progress - entrance_start) / 0.25))
-                exit_start = 0.72 + (len(tile_specs) - index - 1) * 0.035
-                exit_progress = min(1.0, max(0.0, (progress - exit_start) / 0.105))
-                if entrance_progress <= 0 or exit_progress >= 1:
+                if entrance_progress <= 0:
                     continue
                 # Back-ease gives each paper piece a physical snap on arrival.
                 shifted = entrance_progress - 1
                 eased = 1 + 2.70158 * shifted**3 + 1.70158 * shifted**2
-                exit_eased = exit_progress * exit_progress * (3 - 2 * exit_progress)
                 direction_x, direction_y = tile_spec["direction"]
                 target_x, target_y = tile_spec["target"]
-                travel = 1 - eased + exit_eased
+                travel = 1 - eased
                 travel_x = direction_x * width * 0.72 * travel
                 travel_y = direction_y * height * 0.72 * travel
-                ambient = max(0.0, entrance_progress - 0.75) / 0.25
+                # Drift settles back to zero so the last frame is the completed
+                # supplied composition, not the beginning of another cycle.
+                ambient = math.sin(math.pi * progress) * entrance_progress
                 drift_x = math.sin(progress * math.tau * 1.15 + tile_spec["phase"]) * 4 * ambient
                 drift_y = math.cos(progress * math.tau * 0.9 + tile_spec["phase"]) * 3 * ambient
-                rotation = tile_spec["rotation"] + travel * direction_x * 10
+                rotation = travel * direction_x * 10 + tile_spec["rotation"] * ambient
                 piece = tile_spec["image"].rotate(
                     rotation,
                     resample=Image.Resampling.BICUBIC,
@@ -589,8 +621,8 @@ async def _animate_still_locally(
                 canvas.alpha_composite(shadow_layer, (x + 7, y + 9))
                 canvas.alpha_composite(piece, (x, y))
 
-            # A reversible camera push keeps the assembled hold alive and returns
-            # to the exact starting scale at the seamless loop boundary.
+            # A reversible camera push keeps the one-pass assembly alive while
+            # still resolving to the exact completed frame.
             zoom = 1.0 + 0.025 * math.sin(math.pi * progress)
             if zoom > 1:
                 enlarged = canvas.resize(
@@ -647,12 +679,18 @@ async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, 
     return raw, conversation
 
 
-async def _normalize_video(raw: Path, item_dir: Path, frame: FrameSpec) -> Path:
-    final = item_dir / "video" / "final-5s-noaudio.mp4"
+async def _normalize_video(
+    raw: Path,
+    item_dir: Path,
+    frame: FrameSpec,
+    target_duration: float,
+) -> Path:
+    """Trim and normalize a generated clip without replaying source frames."""
+    final = _final_clip_path(item_dir, target_duration)
     await _media_command(
         [
-            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(raw),
-            "-t", str(CLIP_SECONDS), "-vf",
+            "ffmpeg", "-y", "-i", str(raw),
+            "-t", str(target_duration), "-vf",
             f"scale={frame.media_width}:{frame.media_height}:force_original_aspect_ratio=increase,crop={frame.media_width}:{frame.media_height},fps={CLIP_FPS}",
             "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(final),
         ],
@@ -661,7 +699,11 @@ async def _normalize_video(raw: Path, item_dir: Path, frame: FrameSpec) -> Path:
     return final
 
 
-async def probe_video(path: Path, frame: FrameSpec) -> dict[str, Any]:
+async def probe_video(
+    path: Path,
+    frame: FrameSpec,
+    target_duration: float,
+) -> dict[str, Any]:
     process = await asyncio.create_subprocess_exec(
         "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path),
         stdout=asyncio.subprocess.PIPE,
@@ -677,13 +719,22 @@ async def probe_video(path: Path, frame: FrameSpec) -> dict[str, Any]:
     rate = str(stream.get("avg_frame_rate") or "0/1").split("/")
     fps = float(rate[0]) / max(1.0, float(rate[1]))
     duration = float(data.get("format", {}).get("duration") or stream.get("duration") or 0)
-    motion = await _probe_motion(path, width=int(stream.get("width") or 0), height=int(stream.get("height") or 0))
+    motion = await _probe_motion(
+        path,
+        width=int(stream.get("width") or 0),
+        height=int(stream.get("height") or 0),
+        duration_seconds=target_duration,
+    )
+    required_motion_seconds = min(4.0, max(1.0, target_duration * 0.5))
     checks = {
         "dimensions": (stream.get("width"), stream.get("height")) == (frame.media_width, frame.media_height),
-        "duration": abs(duration - CLIP_SECONDS) <= 0.15,
+        "duration": abs(duration - target_duration) <= 0.15,
         "fps": abs(fps - CLIP_FPS) <= 0.1,
         "no_audio": not audio,
-        "sustained_motion": motion["active_seconds"] >= 4,
+        "sustained_motion": motion["active_seconds"] >= required_motion_seconds,
+        # The workflow starts on an empty field and ends on the assembled
+        # composition. Matching endpoints indicate a loop or failed assembly.
+        "non_repeating_endpoints": motion["first_last_delta"] >= 1.0,
     }
     return {
         "passed": all(checks.values()),
@@ -691,16 +742,23 @@ async def probe_video(path: Path, frame: FrameSpec) -> dict[str, Any]:
         "width": stream.get("width"),
         "height": stream.get("height"),
         "duration": round(duration, 3),
+        "target_duration": round(target_duration, 3),
         "fps": round(fps, 3),
         "audio_streams": len(audio),
         "motion": motion,
     }
 
 
-async def _probe_motion(path: Path, *, width: int, height: int) -> dict[str, Any]:
-    """Measure low-resolution frame deltas and reject clips that settle into a still."""
+async def _probe_motion(
+    path: Path,
+    *,
+    width: int,
+    height: int,
+    duration_seconds: float,
+) -> dict[str, Any]:
+    """Measure one-pass motion and distinguish the empty and completed endpoints."""
     if width <= 0 or height <= 0:
-        return {"active_seconds": 0, "second_scores": []}
+        return {"active_seconds": 0, "second_scores": [], "first_last_delta": 0.0}
     sample_width = 96
     sample_height = max(2, round(height * sample_width / width))
     process = await asyncio.create_subprocess_exec(
@@ -724,25 +782,43 @@ async def _probe_motion(path: Path, *, width: int, height: int) -> dict[str, Any
     frames = [stdout[offset : offset + frame_size] for offset in range(0, len(stdout), frame_size)]
     frames = [sample for sample in frames if len(sample) == frame_size]
     second_scores: list[float] = []
-    for second in range(CLIP_SECONDS):
+    active_seconds = 0.0
+    for second in range(max(1, math.ceil(duration_seconds))):
         start = second * MOTION_SAMPLE_FPS
         end = min(len(frames) - 1, (second + 1) * MOTION_SAMPLE_FPS)
         deltas: list[float] = []
         for index in range(start, end):
             before, after = frames[index], frames[index + 1]
             deltas.append(sum(abs(left - right) for left, right in zip(before, after, strict=True)) / frame_size)
-        second_scores.append(round(sum(deltas) / len(deltas), 3) if deltas else 0.0)
-    active_seconds = sum(score >= 0.35 for score in second_scores)
-    return {"active_seconds": active_seconds, "second_scores": second_scores}
+        score = round(sum(deltas) / len(deltas), 3) if deltas else 0.0
+        second_scores.append(score)
+        if score >= 0.35:
+            active_seconds += min(1.0, max(0.0, duration_seconds - second))
+    first_last_delta = 0.0
+    if len(frames) >= 2:
+        first_last_delta = sum(
+            abs(left - right) for left, right in zip(frames[0], frames[-1], strict=True)
+        ) / frame_size
+    return {
+        "active_seconds": round(active_seconds, 3),
+        "second_scores": second_scores,
+        "first_last_delta": round(first_last_delta, 3),
+    }
 
 
-async def _contact_sheet(video: Path, item_dir: Path, frame: FrameSpec) -> Path:
+async def _contact_sheet(
+    video: Path,
+    item_dir: Path,
+    frame: FrameSpec,
+    target_duration: float,
+) -> Path:
     sheet = item_dir / "video" / "contact-sheet.jpg"
     thumb_w, thumb_h = ((256, 144) if not frame.is_portrait else (144, 256))
+    columns = max(1, math.ceil(target_duration))
     await _media_command(
         [
             "ffmpeg", "-y", "-i", str(video), "-vf",
-            f"fps=1,scale={thumb_w}:{thumb_h},tile=5x1", "-frames:v", "1", str(sheet),
+            f"fps=1,scale={thumb_w}:{thumb_h},tile={columns}x1", "-frames:v", "1", str(sheet),
         ],
         timeout=120,
     )
@@ -778,6 +854,8 @@ async def generate_collage_broll(
         "orientation": frame.orientation,
         "aspect_ratio": frame.aspect_ratio,
         "requested_count": count,
+        "gemini_max_clip_seconds": config.COLLAGE_GEMINI_MAX_SECONDS,
+        "playback_policy": "play_once_then_hold_last_frame",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "completed_at": None,
         "items": [],
@@ -826,12 +904,21 @@ async def generate_collage_broll(
             ai_model=ai_model,
             log=log,
         )
+    scenes_by_id = {
+        str(scene.get("id") or ""): scene for scene in storyboard.get("scenes") or []
+    }
+    specs = [
+        _with_scene_timing(spec, scenes_by_id[str(spec.get("scene_id") or "")])
+        for spec in specs
+        if str(spec.get("scene_id") or "") in scenes_by_id
+    ]
     _write_json(specs_path, specs)
     manifest["status"] = "generating"
     _write_json(manifest_path, manifest)
 
     for index, spec in enumerate(specs, start=1):
         scene_id = spec["scene_id"]
+        target_duration = _seconds(spec.get("target_duration_seconds"), 8.0)
         item_dir = root / f"{index:02d}-{scene_id}"
         item_dir.mkdir(parents=True, exist_ok=True)
         still_prompt = image_prompt(spec, frame)
@@ -847,6 +934,9 @@ async def generate_collage_broll(
             "contact_sheet": "",
             "chatgpt_url": "",
             "gemini_url": "",
+            "script_duration_seconds": spec["script_duration_seconds"],
+            "target_duration_seconds": target_duration,
+            "playback_policy": "play_once_then_hold_last_frame",
             "qa": {},
             "generation_warnings": [],
             "error": None,
@@ -854,13 +944,15 @@ async def generate_collage_broll(
         manifest["items"].append(item)
         _write_json(manifest_path, manifest)
         try:
-            cached_final = item_dir / "video" / "final-5s-noaudio.mp4"
+            cached_final = _final_clip_path(item_dir, target_duration)
             if cached_final.is_file():
-                cached_qa = await probe_video(cached_final, frame)
+                cached_qa = await probe_video(cached_final, frame, target_duration)
                 if cached_qa["passed"]:
-                    cached_sheet = item_dir / "video" / "contact-sheet.jpg"
-                    if not cached_sheet.is_file():
-                        cached_sheet = await _contact_sheet(cached_final, item_dir, frame)
+                    # Rebuild the sheet because an existing filename may have
+                    # been produced for an older fixed-duration clip.
+                    cached_sheet = await _contact_sheet(
+                        cached_final, item_dir, frame, target_duration
+                    )
                     cached_still = item_dir / "frames" / "last-frame.jpg"
                     item.update(
                         {
@@ -914,7 +1006,11 @@ async def generate_collage_broll(
                     chatgpt_url = ""
                     item["still_provider"] = "deterministic_local_paper_collage"
             first, last = await _prepare_frames(still, item_dir, spec["background_hex"], frame)
-            _log(log, f"Collage B-roll {index}/{len(specs)}: animating {scene_id} in Gemini Web Create Video")
+            _log(
+                log,
+                f"Collage B-roll {index}/{len(specs)}: animating {scene_id} once for "
+                f"{target_duration:.3f}s in Gemini Web Create Video",
+            )
             try:
                 raw, gemini_url = await _generate_video(motion_prompt, first, last, item_dir, frame)
                 item["video_provider"] = "gemini_web_create_video_via_opencli"
@@ -922,14 +1018,16 @@ async def generate_collage_broll(
                 warning = f"Web video unavailable ({exc}); used deterministic local paper assembly"
                 item["generation_warnings"].append(warning)
                 _log(log, f"Collage B-roll {index}/{len(specs)}: {warning}")
-                raw = await _animate_still_locally(first, last, item_dir, frame)
+                raw = await _animate_still_locally(
+                    first, last, item_dir, frame, target_duration
+                )
                 gemini_url = ""
                 item["video_provider"] = "deterministic_local_paper_assembly"
-            final = await _normalize_video(raw, item_dir, frame)
-            qa = await probe_video(final, frame)
+            final = await _normalize_video(raw, item_dir, frame, target_duration)
+            qa = await probe_video(final, frame, target_duration)
             if not qa["passed"]:
                 raise RuntimeError(f"normalized collage clip failed QA: {qa['checks']}")
-            sheet = await _contact_sheet(final, item_dir, frame)
+            sheet = await _contact_sheet(final, item_dir, frame, target_duration)
             item.update(
                 {
                     "status": "ready",
@@ -975,7 +1073,11 @@ def attach_collage(plans: list[dict], manifest: dict | None, task_dir: Path) -> 
         path = task_dir / raw
         if not plan or not raw or not path.is_file():
             continue
-        if preferred_id in occupied:
+        already_attached = bool(
+            plan.get("collage_broll")
+            and str(plan.get("collage_source_scene_id") or "") == preferred_id
+        )
+        if preferred_id in occupied and not already_attached:
             preferred_position = plan_positions.get(preferred_id, 0)
             candidates = [
                 candidate
@@ -992,6 +1094,18 @@ def attach_collage(plans: list[dict], manifest: dict | None, task_dir: Path) -> 
                 ),
             )
         placed_scene_id = str(plan.get("id") or "")
+        hold_raw = str(item.get("still_path") or "")
+        hold_path = task_dir / hold_raw
+        script_duration = _seconds(item.get("script_duration_seconds"))
+        target_duration = _seconds(
+            item.get("target_duration_seconds"),
+            _seconds((item.get("qa") or {}).get("duration")),
+        )
+        if not hold_raw or not hold_path.is_file():
+            # HyperFrames does not reliably retain an ended video's frame.
+            # Keep the ordinary deterministic scene instead of attaching a
+            # collage that would turn black for the rest of the narration.
+            continue
         plan.update(
             {
                 "archetype": "footage",
@@ -1005,6 +1119,12 @@ def attach_collage(plans: list[dict], manifest: dict | None, task_dir: Path) -> 
                 "collage_placed_scene_id": placed_scene_id,
                 "collage_metaphor": item.get("spec", {}).get("visual_metaphor", ""),
                 "collage_qa": item.get("qa", {}),
+                "collage_hold_src": (
+                    f"../{hold_raw}" if hold_raw and hold_path.is_file() else ""
+                ),
+                "collage_script_duration_seconds": script_duration,
+                "collage_target_duration_seconds": target_duration,
+                "collage_playback_policy": "play_once_then_hold_last_frame",
             }
         )
         item["placed_scene_id"] = placed_scene_id

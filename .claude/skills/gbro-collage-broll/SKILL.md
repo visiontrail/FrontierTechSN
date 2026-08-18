@@ -8,7 +8,8 @@ metadata:
 # gbro Collage B-roll — FrontierTechSN edition
 
 Turn a narration beat into one sharp visual metaphor, a finished editorial
-paper-collage still, and a five-second assemble-from-empty B-roll clip.
+paper-collage still, and a single-play assemble-from-empty B-roll clip whose
+duration matches the narration scene up to Gemini's configured generation cap.
 
 This is the project-adapted version of
 `https://github.com/pyang5166/gbro-collage-broll` at commit
@@ -28,8 +29,11 @@ Use these boundaries:
 3. `scripts/opencli.sh gemini video` opens Gemini Web Create Video, selects the
    task aspect ratio, uploads the ordered empty and completed frames, waits,
    downloads the result, and never reads `GEMINI_API_KEY`.
-4. FFmpeg normalizes every clip to five seconds, 24fps, H.264, and no audio.
-5. HyperFrames mounts successful clips as locked-off, full-bleed scene plates.
+4. FFmpeg trims every clip without looping to the shorter of its narration
+   scene and Gemini's configured single-generation limit, at 24fps, H.264, and
+   with no audio.
+5. HyperFrames mounts successful clips as locked-off, full-bleed scene plates
+   that play once and then hold their completed final frame.
 
 If one generated item fails, record the failure and continue with the remaining
 items. The ordinary deterministic scene remains the fallback; never replace it
@@ -95,11 +99,12 @@ Never generate portrait media and crop it into landscape, or the reverse.
 
 ## Automated QA
 
-Accept an item only when ffprobe confirms the required width, height, roughly
-five seconds, 24fps, and no audio stream. Generate a one-second contact sheet.
-The clip should begin near the empty color field, visibly assemble in stages,
-avoid cuts/zoom/text/UI, and finish near the planned final composition. Record
-machine checks and provenance in `collage_broll/manifest.json`.
+Accept an item only when ffprobe confirms the required width, height, its
+scene-derived target duration, 24fps, and no audio stream. Generate a one-second
+contact sheet. The clip should begin near the empty color field, visibly
+assemble in stages exactly once, avoid cuts/zoom/text/UI, and finish near the
+planned final composition. Record the script duration, target duration, machine
+checks, and provenance in `collage_broll/manifest.json`.
 
 The manifest must state that approval gates are automated, the planner is the
 Claude Agent SDK, the still provider is ChatGPT Web through OpenCLI, the video
