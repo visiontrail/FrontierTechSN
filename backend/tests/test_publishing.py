@@ -11,6 +11,7 @@ from backend.publishing import (
     _browser_json,
     _description,
     _upload_local_media,
+    delete_youtube,
 )
 
 
@@ -93,6 +94,55 @@ def test_browser_json_recovers_prefixed_object_results():
         result = asyncio.run(_browser_json("ftsn-yt-test", "eval", "some-js"))
 
     assert result == {"ready": True}
+
+
+def test_delete_youtube_supports_current_studio_confirmation_flow():
+    task = SimpleNamespace(id="20260818-065410-6bf4df")
+    published = {
+        "status": "published",
+        "identity": {"channel_id": "channel-123"},
+        "external_id": "ZGFa-jK9HbQ",
+    }
+    browser = AsyncMock(return_value="")
+    wait_for = AsyncMock(side_effect=[
+        "Frontier Tech Daily [TEST]",
+        True,
+        True,
+        True,
+        True,
+    ])
+    browser_json = AsyncMock(side_effect=[True, True, True])
+
+    def record(_task, platform, payload):
+        return {"platforms": {platform: payload}}
+
+    with (
+        patch(
+            "backend.publishing.read_publication_manifest",
+            return_value={"platforms": {"youtube": published}},
+        ),
+        patch(
+            "backend.publishing._youtube_identity",
+            AsyncMock(return_value={"channel_id": "channel-123"}),
+        ),
+        patch("backend.publishing._browser", browser),
+        patch("backend.publishing._wait_for", wait_for),
+        patch("backend.publishing._browser_json", browser_json),
+        patch("backend.publishing._record", side_effect=record),
+    ):
+        result = asyncio.run(delete_youtube(task))
+
+    assert result["status"] == "deleted"
+    calls = [call.args for call in browser.await_args_list]
+    assert any(("--name", "Delete", "--role", "menuitem") == args[2:6] for args in calls)
+    assert any(
+        "ytcp-video-delete-dialog #confirm-input textarea" in args
+        and "Frontier Tech Daily [TEST]" in args
+        for args in calls
+    )
+    assert wait_for.await_args_list[-1].args[1] == (
+        "(()=>!location.href.includes('/video/ZGFa-jK9HbQ/edit'))()"
+    )
 
 
 def test_upload_permission_failure_is_actionable_without_retry():

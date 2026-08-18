@@ -413,29 +413,73 @@ async def delete_youtube(task: TaskResponse) -> dict[str, Any]:
         if identity["channel_id"] != channel_id:
             raise OpenCLIError("Refusing YouTube deletion because the active channel changed")
         await _browser(session, "open", f"https://studio.youtube.com/video/{video_id}/edit", timeout=120)
+        current_title = await _wait_for(
+            session,
+            "(()=>document.querySelector('#title-textarea #textbox')?.textContent?.trim()||'')()",
+            timeout_seconds=180,
+        )
         await _wait_for(
             session,
-            "(()=>{const b=document.querySelector('#more-options-button')||document.querySelector('[aria-label*=\"More options\"]');return b?true:false})()",
+            "(()=>{const b=document.querySelector('#overflow-menu-button')||document.querySelector('#more-options-button')||document.querySelector('[aria-label*=\"More options\"]');return b?true:false})()",
             timeout_seconds=180,
         )
         try:
-            await _browser(session, "click", "#more-options-button", timeout=60)
+            await _browser(session, "click", "#overflow-menu-button", timeout=60)
         except Exception:
-            await _browser(session, "click", "--name", "More options", "--role", "button", timeout=60)
-        await _browser(session, "click", "--text", "Delete forever", timeout=60)
+            try:
+                await _browser(session, "click", "#more-options-button", timeout=60)
+            except Exception:
+                await _browser(session, "click", "--name", "More options", "--role", "button", timeout=60)
+        try:
+            await _browser(
+                session,
+                "click",
+                "--name",
+                "Delete",
+                "--role",
+                "menuitem",
+                timeout=60,
+            )
+        except Exception:
+            await _browser(session, "click", "--text", "Delete forever", timeout=60)
         await _wait_for(
             session,
-            "(()=>document.querySelector('tp-yt-paper-checkbox, input[type=checkbox]')?true:false)()",
+            "(()=>document.querySelector('ytcp-video-delete-dialog #confirm-checkbox,ytcp-video-delete-dialog input[type=checkbox]')?true:false)()",
             timeout_seconds=90,
         )
-        await _browser_json(session, "eval", "(()=>{const c=[...document.querySelectorAll('tp-yt-paper-checkbox,input[type=checkbox]')].find(x=>x.offsetParent);if(c){c.click();return true}return false})()")
+        confirm_input = await _browser_json(
+            session,
+            "eval",
+            "(()=>document.querySelector('ytcp-video-delete-dialog #confirm-input textarea')?true:false)()",
+        )
+        if confirm_input:
+            await _browser(
+                session,
+                "fill",
+                "ytcp-video-delete-dialog #confirm-input textarea",
+                str(current_title),
+                timeout=60,
+            )
+        await _browser_json(
+            session,
+            "eval",
+            "(()=>{const c=document.querySelector('ytcp-video-delete-dialog #confirm-checkbox #checkbox')||document.querySelector('ytcp-video-delete-dialog [role=checkbox]')||document.querySelector('ytcp-video-delete-dialog input[type=checkbox]');if(c){if(c.getAttribute('aria-checked')!=='true'&&!c.checked)c.click();return true}return false})()",
+        )
         await _wait_for(
             session,
-            "(()=>{const b=[...document.querySelectorAll('ytcp-button,button')].find(x=>/delete forever/i.test(x.textContent||'')&&!x.disabled);return b?true:false})()",
+            "(()=>{const b=document.querySelector('ytcp-video-delete-dialog #confirm-button')||[...document.querySelectorAll('ytcp-video-delete-dialog ytcp-button,ytcp-video-delete-dialog button')].find(x=>/delete forever/i.test(x.textContent||''));return b&&b.getAttribute('aria-disabled')!=='true'&&!b.disabled?true:false})()",
             timeout_seconds=90,
         )
-        await _browser_json(session, "eval", "(()=>{const b=[...document.querySelectorAll('ytcp-button,button')].find(x=>/delete forever/i.test(x.textContent||'')&&!x.disabled);if(b){b.click();return true}return false})()")
-        await asyncio.sleep(4)
+        await _browser_json(
+            session,
+            "eval",
+            "(()=>{const b=document.querySelector('ytcp-video-delete-dialog #confirm-button')||[...document.querySelectorAll('ytcp-video-delete-dialog ytcp-button,ytcp-video-delete-dialog button')].find(x=>/delete forever/i.test(x.textContent||''));if(b&&b.getAttribute('aria-disabled')!=='true'&&!b.disabled){b.click();return true}return false})()",
+        )
+        await _wait_for(
+            session,
+            f"(()=>!location.href.includes('/video/{video_id}/edit'))()",
+            timeout_seconds=180,
+        )
     finally:
         try:
             await _browser(session, "close", timeout=30)
