@@ -96,6 +96,15 @@ def test_browser_json_recovers_prefixed_object_results():
     assert result == {"ready": True}
 
 
+def test_browser_json_accepts_plain_string_eval_results():
+    browser = AsyncMock(return_value="Frontier Tech Daily [TEST]")
+
+    with patch("backend.publishing._browser", browser):
+        result = asyncio.run(_browser_json("ftsn-yt-test", "eval", "title-js"))
+
+    assert result == "Frontier Tech Daily [TEST]"
+
+
 def test_delete_youtube_supports_current_studio_confirmation_flow():
     task = SimpleNamespace(id="20260818-065410-6bf4df")
     published = {

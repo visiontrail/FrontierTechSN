@@ -180,7 +180,12 @@ async def _browser_json(session: str, *args: str, timeout: int = 180) -> Any:
     except json.JSONDecodeError:
         # Preserve compatibility with OpenCLI commands that prefix a JSON
         # object/array with human-readable status text.
-        return first_json(output)
+        try:
+            return first_json(output)
+        except OpenCLIError:
+            # String-valued ``browser eval`` output is emitted as plain text,
+            # without JSON quotes (for example a YouTube video title).
+            return output.strip()
 
 
 async def _wait_for(
