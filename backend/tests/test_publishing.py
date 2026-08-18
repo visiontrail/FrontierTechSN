@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.pipeline.opencli import OpenCLIError
-from backend.publishing import _browser, _description, _upload_local_media
+from backend.publishing import (
+    _browser,
+    _browser_json,
+    _description,
+    _upload_local_media,
+)
 
 
 def test_description_includes_selected_research_sources(tmp_path):
@@ -70,6 +75,24 @@ def test_non_youtube_browser_sessions_remain_backgrounded():
 
     assert result == "ok"
     assert runner.await_args.args[0][-2:] == ["--window", "background"]
+
+
+def test_browser_json_accepts_boolean_eval_results():
+    browser = AsyncMock(return_value="true")
+
+    with patch("backend.publishing._browser", browser):
+        result = asyncio.run(_browser_json("ftsn-yt-test", "eval", "(()=>true)()"))
+
+    assert result is True
+
+
+def test_browser_json_recovers_prefixed_object_results():
+    browser = AsyncMock(return_value='OpenCLI result: {"ready": true}')
+
+    with patch("backend.publishing._browser", browser):
+        result = asyncio.run(_browser_json("ftsn-yt-test", "eval", "some-js"))
+
+    assert result == {"ready": True}
 
 
 def test_upload_permission_failure_is_actionable_without_retry():

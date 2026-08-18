@@ -172,7 +172,15 @@ async def _upload_local_media(
 
 
 async def _browser_json(session: str, *args: str, timeout: int = 180) -> Any:
-    return first_json(await _browser(session, *args, timeout=timeout))
+    output = await _browser(session, *args, timeout=timeout)
+    try:
+        # ``browser eval`` legitimately emits JSON primitives such as ``true``
+        # for wait predicates, not only objects and arrays.
+        return json.loads(output)
+    except json.JSONDecodeError:
+        # Preserve compatibility with OpenCLI commands that prefix a JSON
+        # object/array with human-readable status text.
+        return first_json(output)
 
 
 async def _wait_for(
