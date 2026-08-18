@@ -13,6 +13,7 @@ from backend.daily_news.scheduler import (
 )
 from backend.daily_news.source_catalog import load_source_catalog
 from backend.models import DailyAutomationResponse, DailyAutomationSettings, TaskResponse
+from backend.publishing import automatic_publication_configuration_errors
 
 router = APIRouter(prefix="/api/daily-news", tags=["daily-news"])
 
@@ -24,6 +25,13 @@ async def get_daily_automation():
 
 @router.put("", response_model=DailyAutomationResponse)
 async def update_daily_automation(body: DailyAutomationSettings):
+    if body.auto_publish:
+        errors = automatic_publication_configuration_errors(body.publish_targets)
+        if errors:
+            raise HTTPException(
+                status_code=409,
+                detail="Automatic publication is not ready: " + "; ".join(errors),
+            )
     save_settings(body)
     return response()
 

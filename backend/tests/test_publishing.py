@@ -6,12 +6,17 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.pipeline.opencli import OpenCLIError
+from backend import config
 from backend.publishing import (
+    _assert_expected_x_identity,
+    _assert_expected_youtube_identity,
     _browser,
     _browser_json,
     _description,
     _upload_local_media,
+    automatic_publication_configuration_errors,
     delete_youtube,
+    run_auto_publish_pipeline,
 )
 
 
@@ -76,6 +81,56 @@ def test_non_youtube_browser_sessions_remain_backgrounded():
 
     assert result == "ok"
     assert runner.await_args.args[0][-2:] == ["--window", "background"]
+
+
+def test_x_identity_gate_refuses_the_wrong_signed_in_account():
+    with patch.object(config, "VIDEO_PUBLISH_X_HANDLE", "expected_handle"):
+        with pytest.raises(OpenCLIError, match="configured @expected_handle"):
+            _assert_expected_x_identity({"username": "other_handle"})
+
+
+def test_youtube_identity_gate_checks_name_and_stable_channel_id():
+    identity = {"channel_name": "Frontier Tech Daily", "channel_id": "UC-wrong"}
+    with (
+        patch.object(config, "VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME", "Frontier Tech Daily"),
+        patch.object(config, "VIDEO_PUBLISH_YOUTUBE_CHANNEL_ID", "UC-expected"),
+    ):
+        with pytest.raises(OpenCLIError, match="configured channel ID UC-expected"):
+            _assert_expected_youtube_identity(identity)
+
+
+def test_automatic_publication_requires_explicit_target_identities():
+    with (
+        patch.object(config, "VIDEO_PUBLISH_YOUTUBE_ENABLED", True),
+        patch.object(config, "VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME", ""),
+        patch.object(config, "VIDEO_PUBLISH_YOUTUBE_CHANNEL_ID", ""),
+        patch.object(config, "VIDEO_PUBLISH_X_ENABLED", True),
+        patch.object(config, "VIDEO_PUBLISH_X_HANDLE", ""),
+    ):
+        errors = automatic_publication_configuration_errors(["youtube", "x"])
+
+    assert "YouTube channel name is not configured" in errors
+    assert "YouTube channel ID is not configured" in errors
+    assert "X account handle is not configured" in errors
+
+
+def test_global_kill_switch_blocks_daily_automatic_publication():
+    task = SimpleNamespace(origin_type="daily_news")
+
+    with patch.object(config, "VIDEO_AUTO_PUBLISH_ENABLED", False):
+        result = asyncio.run(run_auto_publish_pipeline(task))
+
+    assert result.action == "awaiting_review"
+    assert result.reason == "Global automatic publication is disabled"
+
+
+def test_manual_task_is_not_reclassified_when_global_switch_is_off():
+    task = SimpleNamespace(origin_type="manual")
+
+    with patch.object(config, "VIDEO_AUTO_PUBLISH_ENABLED", False):
+        result = asyncio.run(run_auto_publish_pipeline(task))
+
+    assert result.action == "not_applicable"
 
 
 def test_browser_json_accepts_boolean_eval_results():

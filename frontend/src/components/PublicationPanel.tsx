@@ -19,7 +19,7 @@ export default function PublicationPanel({ taskId }: { taskId: string }) {
     <section className="detail-panel publication-panel">
       <span className="eyebrow">Distribution ledger</span>
       <h3>Runtime-bound publishing</h3>
-      <p className="detail-hint">YouTube and X use whichever browser account is signed in at publish time. The discovered identity, exact URL, media hash, and deletion receipt are recorded here.</p>
+      <p className="detail-hint">YouTube and X require the signed-in browser identity to match Admin → Publishing. The matched identity, exact URL, media hash, and deletion receipt are recorded here.</p>
       {entries.length > 0 && <div className="publication-ledger">{entries.map(([platform, entry]) => entry && (
         <article key={platform}>
           <span>{platform.replace('_', ' ')}</span><strong>{entry.status}</strong>

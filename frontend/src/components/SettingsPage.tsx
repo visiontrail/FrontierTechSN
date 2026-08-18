@@ -1,20 +1,29 @@
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import ProvidersPanel from './ProvidersPanel'
 import PromptsPanel from './PromptsPanel'
 import SkillsPanel from './SkillsPanel'
 import SystemPanel from './SystemPanel'
+import PublishingPanel from './PublishingPanel'
 
-type Tab = 'models' | 'prompts' | 'skills' | 'system'
+type Tab = 'models' | 'prompts' | 'skills' | 'publishing' | 'system'
 
 const TABS: { id: Tab; label: string; hint: string; index: string }[] = [
   { id: 'models', label: 'Models', hint: 'Providers & endpoints', index: '01' },
   { id: 'prompts', label: 'Prompts', hint: 'Pipeline instructions', index: '02' },
   { id: 'skills', label: 'Skills', hint: 'Composition bundles', index: '03' },
-  { id: 'system', label: 'System', hint: 'Runtime & environment', index: '04' },
+  { id: 'publishing', label: 'Publishing', hint: 'Platforms & accounts', index: '04' },
+  { id: 'system', label: 'System', hint: 'Runtime & environment', index: '05' },
 ]
 
 export default function SettingsPage() {
-  const [tab, setTab] = useState<Tab>('models')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedTab = searchParams.get('tab') as Tab | null
+  const [tab, setTabState] = useState<Tab>(TABS.some((item) => item.id === requestedTab) ? requestedTab! : 'models')
+  const setTab = (next: Tab) => {
+    setTabState(next)
+    setSearchParams(next === 'models' ? {} : { tab: next }, { replace: true })
+  }
 
   return (
     <div className="admin-console">
@@ -61,6 +70,7 @@ export default function SettingsPage() {
           {tab === 'models' && <ProvidersPanel />}
           {tab === 'prompts' && <PromptsPanel />}
           {tab === 'skills' && <SkillsPanel />}
+          {tab === 'publishing' && <PublishingPanel />}
           {tab === 'system' && <SystemPanel />}
         </div>
       </section>

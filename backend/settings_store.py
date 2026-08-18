@@ -145,9 +145,10 @@ GROUPS: tuple[SettingGroup, ...] = (
     ),
     SettingGroup(
         "publication",
-        "Video Publication",
-        "Safety controls for post-production delivery. Automatic publication "
-        "requires this global switch and an explicit opt-in on the individual plan.",
+        "Publishing & Accounts",
+        "Fail-closed delivery controls. Automatic publication requires the global "
+        "switch, the platform switch, a task-level opt-in, and an exact match "
+        "between the configured identity and the signed-in browser account.",
     ),
     SettingGroup(
         "paths",
@@ -160,9 +161,57 @@ GROUPS: tuple[SettingGroup, ...] = (
 SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         "VIDEO_AUTO_PUBLISH_ENABLED", "publication", "Enable automatic publication", "bool",
-        description="Legacy master switch for content-plan publishing adapters. "
-                    "It is off by default; with it off every finished plan waits for "
-                    "human review and a manually recorded publication.",
+        description="Master kill switch for every unattended video publication. "
+                    "It is off by default; manual private test publishing remains available.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_YOUTUBE_ENABLED", "publication", "YouTube adapter", "bool",
+        description="Allow YouTube as a publication target. Automatic runs still "
+                    "require both channel identity fields below.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME", "publication", "YouTube channel name", "string",
+        placeholder="Frontier Tech Daily",
+        description="Exact visible channel name expected in YouTube Studio. Automatic "
+                    "publishing refuses a blank or mismatched name.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_YOUTUBE_CHANNEL_ID", "publication", "YouTube channel ID", "string",
+        placeholder="UC…",
+        description="Stable channel identifier from the YouTube Studio URL. It is checked "
+                    "together with the channel name before any video is uploaded.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_X_ENABLED", "publication", "X adapter", "bool",
+        description="Allow x.com as a publication target. The configured handle below "
+                    "must match the active X account before the composer opens.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_X_HANDLE", "publication", "X account handle", "string",
+        placeholder="frontiertechdaily",
+        description="Expected account handle without the leading @. Automatic publishing "
+                    "refuses a blank or mismatched handle.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_APPLE_PODCAST_ENABLED", "publication", "Podcast RSS adapter", "bool",
+        description="Maintain the podcast RSS feed for completed editions. This does not "
+                    "submit or update an Apple Podcasts Connect account.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_APPLE_FEED_TITLE", "publication", "Podcast feed title", "string",
+        placeholder="Frontier Tech Daily", allow_blank=False,
+        description="Public show title written into the generated RSS feed.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_APPLE_FEED_AUTHOR", "publication", "Podcast feed author", "string",
+        placeholder="FrontierTechSN", allow_blank=False,
+        description="Author identity written into the RSS and iTunes metadata.",
+    ),
+    SettingSpec(
+        "VIDEO_PUBLISH_APPLE_FEED_PUBLIC_BASE_URL", "publication", "Podcast public base URL", "string",
+        placeholder="https://media.example.com",
+        description="Public origin used for audio enclosure URLs. Leave blank for local "
+                    "preview only; Apple Podcasts submission remains external.",
     ),
     # ── AI engine ────────────────────────────────────────────────────────
     SettingSpec(

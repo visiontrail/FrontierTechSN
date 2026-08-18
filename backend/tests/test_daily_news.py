@@ -242,7 +242,10 @@ def test_apple_podcast_feed_is_prepared_without_external_submission(tmp_path: Pa
     assert result["status"] == "feed_ready"
     assert "podcasts_connect_account" in result["external_submission"]
     assert "<enclosure" in feed
-    assert manifest["platforms"]["apple_podcast"]["identity"] is None
+    assert manifest["platforms"]["apple_podcast"]["identity"] == {
+        "feed_title": "Frontier Tech Daily",
+        "author": "FrontierTechSN",
+    }
 
 
 def test_chatgpt_review_retries_a_browser_failure():

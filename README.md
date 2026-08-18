@@ -60,15 +60,17 @@ Use **Run 1-min test** for an end-to-end test edition. It never auto-publishes; 
 
 ### YouTube
 
-The adapter opens YouTube Studio, discovers the current channel from the signed-in session, uploads the final MP4, sets the title/description/audience, and publishes with the configured visibility. Production defaults to `public`; test runs use `private` and retain an exact deletion receipt.
+The adapter opens YouTube Studio and verifies both the visible channel name and stable Channel ID against **Admin → Publishing** before it uploads anything. It then uploads the final MP4, sets the title/description/audience, and publishes with the configured visibility. Production defaults to `public`; test runs use `private` and retain an exact deletion receipt.
 
 ### X
 
-The adapter asks OpenCLI for the current handle, attaches the final MP4 in the X composer, adds a unique task marker, and verifies the exact post on that handle before recording success.
+The adapter asks OpenCLI for the current handle and compares it with the expected `@handle` in **Admin → Publishing** before the composer opens. It attaches the final MP4, adds a unique task marker, and verifies the exact post on that handle before recording success.
 
 ### Apple Podcasts
 
 The pipeline prepares RSS 2.0 at `/outputs/podcast/feed.xml` and adds the finished narration as an episode. External Podcasts Connect submission is deliberately deferred until an Apple account and a stable public HTTPS feed URL are available.
+
+Unattended publishing is fail-closed: the global kill switch, target-platform switch, task-level opt-in, and exact configured account identity must all agree. Missing or mismatched identities leave the completed task awaiting review and perform no social write.
 
 ### Test cleanup
 

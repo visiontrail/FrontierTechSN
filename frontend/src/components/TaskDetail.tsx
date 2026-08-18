@@ -21,7 +21,7 @@ import PublicationPanel from './PublicationPanel'
 import { IconChevronLeft } from './Icons'
 import { countdown, formatStart, isPendingStart, localInputToIso, toLocalInputValue } from '../schedule'
 
-const STAGES = ['researching', 'digesting', 'reviewing', 'sourcing', 'tts', 'music', 'composing', 'publishing', 'complete'] as const
+const STAGES = ['researching', 'digesting', 'reviewing', 'sourcing', 'tts', 'music', 'composing', 'complete'] as const
 const STAGE_LABELS: Record<string, string> = {
   researching: 'Research',
   extracting: 'Extract',
@@ -33,7 +33,6 @@ const STAGE_LABELS: Record<string, string> = {
   awaiting_review: 'Review',
   music: 'Music',
   composing: 'Compose',
-  publishing: 'Publish',
   complete: 'Done',
 }
 
@@ -227,6 +226,10 @@ export default function TaskDetail() {
           <div>
             <dt>Target release</dt>
             <dd>{task.planned_publish_at ? formatStart(task.planned_publish_at) : 'Not planned'}</dd>
+          </div>
+          <div>
+            <dt>Delivery</dt>
+            <dd>{task.origin_type === 'daily_news' && task.config.auto_publish ? 'Automatic · identity gated' : 'Manual review'}</dd>
           </div>
           <div>
             <dt>Spoken ending</dt>

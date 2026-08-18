@@ -1,8 +1,9 @@
-"""Account-agnostic distribution for finished daily-news episodes.
+"""Fail-closed distribution for finished daily-news episodes.
 
-The browser session is the credential boundary: channel IDs and handles are
-discovered at publish time and written to an immutable-per-attempt manifest.
-No account identifier is accepted from task configuration or stored in code.
+The Admin console stores the expected public channel identifiers. The active
+browser identity is discovered again at publish time and must match before a
+write is attempted; the resolved identity then becomes part of the immutable
+per-attempt receipt.
 """
 
 from __future__ import annotations
@@ -33,6 +34,75 @@ class PublicationResult:
     action: str
     reason: str
     publication_url: str | None = None
+
+
+_PLATFORM_ENABLE_FLAGS = {
+    "youtube": "VIDEO_PUBLISH_YOUTUBE_ENABLED",
+    "x": "VIDEO_PUBLISH_X_ENABLED",
+    "apple_podcast": "VIDEO_PUBLISH_APPLE_PODCAST_ENABLED",
+}
+
+
+def _normalized_identity(value: Any) -> str:
+    return " ".join(str(value or "").strip().split()).casefold()
+
+
+def _platform_enabled(target: str) -> bool:
+    flag = _PLATFORM_ENABLE_FLAGS.get(target)
+    return bool(flag and getattr(config, flag, False))
+
+
+def automatic_publication_configuration_errors(targets: list[str]) -> list[str]:
+    """Return fail-closed configuration errors for an unattended publish.
+
+    Platform enablement and account identities are deliberately read from live
+    Admin settings, not copied into a task. This lets an operator stop a queued
+    publication or rotate the expected account right up to dispatch time.
+    """
+    errors: list[str] = []
+    unique_targets = list(dict.fromkeys(targets))
+    if not unique_targets:
+        return ["No publication platform is selected"]
+    for target in unique_targets:
+        if not _platform_enabled(target):
+            errors.append(f"{target} publication is disabled in Admin → Publishing")
+    if "youtube" in unique_targets:
+        if not config.VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME:
+            errors.append("YouTube channel name is not configured")
+        if not config.VIDEO_PUBLISH_YOUTUBE_CHANNEL_ID:
+            errors.append("YouTube channel ID is not configured")
+    if "x" in unique_targets and not config.VIDEO_PUBLISH_X_HANDLE:
+        errors.append("X account handle is not configured")
+    return errors
+
+
+def _assert_expected_x_identity(identity: dict[str, Any]) -> None:
+    expected = config.VIDEO_PUBLISH_X_HANDLE.lstrip("@")
+    if not expected:
+        return
+    actual = str(identity.get("username") or "").lstrip("@")
+    if actual.casefold() != expected.casefold():
+        raise OpenCLIError(
+            f"Refusing X publication: configured @{expected}, active account is "
+            f"@{actual or 'unknown'}"
+        )
+
+
+def _assert_expected_youtube_identity(identity: dict[str, Any]) -> None:
+    expected_id = config.VIDEO_PUBLISH_YOUTUBE_CHANNEL_ID
+    expected_name = config.VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME
+    actual_id = str(identity.get("channel_id") or "")
+    actual_name = str(identity.get("channel_name") or "")
+    if expected_id and actual_id != expected_id:
+        raise OpenCLIError(
+            "Refusing YouTube publication: configured channel ID "
+            f"{expected_id}, active channel ID is {actual_id or 'unknown'}"
+        )
+    if expected_name and _normalized_identity(actual_name) != _normalized_identity(expected_name):
+        raise OpenCLIError(
+            "Refusing YouTube publication: configured channel name "
+            f"{expected_name!r}, active channel is {actual_name or 'unknown'!r}"
+        )
 
 
 def _task_dir(task: TaskResponse) -> Path:
@@ -227,6 +297,7 @@ async def publish_x(task: TaskResponse, *, test_mode: bool) -> dict[str, Any]:
     if not task.video_path or not Path(task.video_path).is_file():
         raise FileNotFoundError("Final video is missing")
     identity = await _x_identity()
+    _assert_expected_x_identity(identity)
     handle = str(identity["username"]).lstrip("@")
     marker = f"FTSN-{task.id[:8]}"
     text = (
@@ -336,6 +407,7 @@ async def publish_youtube(task: TaskResponse, *, visibility: str, test_mode: boo
     identity: dict[str, str] = {}
     try:
         identity = await _youtube_identity(session)
+        _assert_expected_youtube_identity(identity)
         upload_url = f"https://studio.youtube.com/channel/{quote(identity['channel_id'])}/videos/upload?d=ud"
         await _browser(session, "open", upload_url, timeout=120)
         await _upload_local_media(
@@ -509,12 +581,18 @@ def prepare_apple_podcast(task: TaskResponse) -> dict[str, Any]:
         episodes = []
     audio = Path(task.audio_path)
     relative_audio = audio.resolve().relative_to(config.OUTPUTS_DIR.resolve()).as_posix()
+    public_base = config.VIDEO_PUBLISH_APPLE_FEED_PUBLIC_BASE_URL
+    audio_url = (
+        f"{public_base}/outputs/{relative_audio}"
+        if public_base
+        else f"/outputs/{relative_audio}"
+    )
     episode = {
         "guid": task.id,
         "title": _title(task),
         "published_at": datetime.now(timezone.utc).isoformat(),
         "duration": int(task.duration_seconds or 0),
-        "audio_url": f"/outputs/{relative_audio}",
+        "audio_url": audio_url,
         "audio_bytes": audio.stat().st_size,
         "summary": _description(task),
     }
@@ -523,11 +601,11 @@ def prepare_apple_podcast(task: TaskResponse) -> dict[str, Any]:
 
     rss = ET.Element("rss", {"version": "2.0", "xmlns:itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"})
     channel = ET.SubElement(rss, "channel")
-    ET.SubElement(channel, "title").text = "Frontier Tech Daily"
+    ET.SubElement(channel, "title").text = config.VIDEO_PUBLISH_APPLE_FEED_TITLE
     ET.SubElement(channel, "description").text = "A daily, source-linked frontier technology briefing."
     ET.SubElement(channel, "language").text = "en"
     ET.SubElement(channel, "link").text = "http://localhost:8101/"
-    ET.SubElement(channel, "itunes:author").text = "FrontierTechSN"
+    ET.SubElement(channel, "itunes:author").text = config.VIDEO_PUBLISH_APPLE_FEED_AUTHOR
     for item in episodes:
         node = ET.SubElement(channel, "item")
         ET.SubElement(node, "title").text = item["title"]
@@ -543,7 +621,10 @@ def prepare_apple_podcast(task: TaskResponse) -> dict[str, Any]:
     payload = {
         "status": "feed_ready",
         "prepared_at": datetime.now(timezone.utc).isoformat(),
-        "identity": None,
+        "identity": {
+            "feed_title": config.VIDEO_PUBLISH_APPLE_FEED_TITLE,
+            "author": config.VIDEO_PUBLISH_APPLE_FEED_AUTHOR,
+        },
         "url": "/outputs/podcast/feed.xml",
         "external_submission": "deferred_until_podcasts_connect_account_and_public_https_url",
     }
@@ -560,6 +641,8 @@ async def publish_task(
     if task.status.value != "complete":
         raise ValueError("Only complete tasks can be published")
     for target in dict.fromkeys(targets):
+        if not _platform_enabled(target):
+            raise ValueError(f"{target} publication is disabled in Admin → Publishing")
         if target == "youtube":
             await publish_youtube(task, visibility=visibility, test_mode=test_mode)
         elif target == "x":
@@ -583,10 +666,23 @@ async def delete_test_publications(task: TaskResponse, *, targets: list[str]) ->
 
 
 async def run_auto_publish_pipeline(task: TaskResponse) -> PublicationResult:
-    """Dispatch scheduled daily editions only when their task opted in."""
+    """Dispatch only publishing-workflow tasks with every safety gate open."""
+    if task.origin_type not in {"daily_news", "content_plan"}:
+        return PublicationResult("not_applicable", "Task did not originate from a publishing workflow")
+    if not config.VIDEO_AUTO_PUBLISH_ENABLED:
+        return PublicationResult("awaiting_review", "Global automatic publication is disabled")
+
     if task.origin_type == "daily_news":
         if not task.config.auto_publish:
             return PublicationResult("awaiting_review", "Daily automatic publication is disabled")
+        configuration_errors = automatic_publication_configuration_errors(
+            task.config.publish_targets
+        )
+        if configuration_errors:
+            return PublicationResult(
+                "awaiting_review",
+                "Automatic publication is not ready: " + "; ".join(configuration_errors),
+            )
         try:
             manifest = await publish_task(
                 task,
@@ -599,13 +695,11 @@ async def run_auto_publish_pipeline(task: TaskResponse) -> PublicationResult:
         urls = [str(item.get("url")) for item in manifest.get("platforms", {}).values() if item.get("url")]
         return PublicationResult("published", "Daily publication completed", urls[0] if urls else None)
 
-    if task.origin_type != "content_plan" or not task.origin_id:
-        return PublicationResult("not_applicable", "Task did not originate from a publishing workflow")
+    if not task.origin_id:
+        return PublicationResult("blocked", "Publishing workflow task has no origin identifier")
     item = await database.get_content_plan_item(task.origin_id)
     if item is None:
         return PublicationResult("blocked", "Originating plan no longer exists")
-    if not config.VIDEO_AUTO_PUBLISH_ENABLED:
-        return PublicationResult("awaiting_review", "Global automatic publication is disabled")
     if not item.auto_publish_requested:
         return PublicationResult("awaiting_review", "This content plan requires manual publication")
     return PublicationResult(

@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import {
   fetchDailyAutomation,
   fetchDailySources,
+  fetchSettingsSchema,
   runDailyNow,
   updateDailyAutomation,
   type DailyAutomationSettings,
@@ -23,6 +24,7 @@ export default function MorningDesk() {
   const queryClient = useQueryClient()
   const { data } = useQuery({ queryKey: ['daily-automation'], queryFn: fetchDailyAutomation })
   const { data: sources = [] } = useQuery({ queryKey: ['daily-sources'], queryFn: fetchDailySources })
+  const { data: settingsSchema } = useQuery({ queryKey: ['settings-schema'], queryFn: fetchSettingsSchema })
   const [draftOverride, setDraftOverride] = useState<DailyAutomationSettings | null>(null)
   const draft = draftOverride ?? data?.settings ?? null
 
@@ -46,10 +48,27 @@ export default function MorningDesk() {
     setDraftOverride((current) => ({ ...(current ?? data!.settings), [key]: value }))
   }
 
+  const toggleTarget = (target: DailyAutomationSettings['publish_targets'][number]) => {
+    const selected = draft?.publish_targets ?? []
+    patch(
+      'publish_targets',
+      selected.includes(target) ? selected.filter((item) => item !== target) : [...selected, target],
+    )
+  }
+
   if (!draft || !data) return <div className="empty-state">Opening the morning desk…</div>
 
   const priority = sources.filter((source) => source.priority <= 6)
   const secondary = sources.filter((source) => source.priority > 6)
+  const publicationFields = Object.fromEntries(
+    (settingsSchema?.groups.find((group) => group.id === 'publication')?.fields ?? [])
+      .map((field) => [field.key, field.value]),
+  )
+  const globalPublishingEnabled = Boolean(publicationFields.VIDEO_AUTO_PUBLISH_ENABLED)
+  const youtubeIdentity = String(publicationFields.VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME || 'Channel not configured')
+  const xIdentity = publicationFields.VIDEO_PUBLISH_X_HANDLE
+    ? `@${String(publicationFields.VIDEO_PUBLISH_X_HANDLE).replace(/^@/, '')}`
+    : 'Handle not configured'
 
   return (
     <div className="morning-desk">
@@ -74,7 +93,7 @@ export default function MorningDesk() {
             <span><b>01</b> 10-attempt yhroot policy</span>
             <span><b>02</b> Paper-collage on by default</span>
             <span><b>03</b> Script ↔ speech hard gate</span>
-            <span><b>04</b> Account discovered at publish time</span>
+            <span><b>04</b> Exact account identity gate</span>
           </div>
         </article>
 
@@ -92,10 +111,24 @@ export default function MorningDesk() {
             <label><span>YouTube visibility</span><select value={draft.publish_visibility} onChange={(e) => patch('publish_visibility', e.target.value as 'private' | 'unlisted' | 'public')}><option value="public">Public</option><option value="unlisted">Unlisted</option><option value="private">Private</option></select></label>
           </div>
           <label className="morning-switch">
-            <span><strong>Automatic distribution</strong><small>YouTube · X · Apple feed</small></span>
+            <span><strong>Automatic distribution</strong><small>{globalPublishingEnabled ? 'Global publishing is armed' : 'Blocked by the global kill switch'}</small></span>
             <input type="checkbox" checked={draft.auto_publish} onChange={(e) => patch('auto_publish', e.target.checked)} />
           </label>
-          <p className="morning-safety">Production visibility is {draft.publish_visibility}. The system records the current account identity and exact publication URL; no account is hard-coded. Test runs remain private and require exact-receipt cleanup.</p>
+          <div className="morning-destinations" aria-label="Automatic publication targets">
+            <label className={draft.publish_targets.includes('youtube') ? 'is-selected' : ''}>
+              <input type="checkbox" checked={draft.publish_targets.includes('youtube')} onChange={() => toggleTarget('youtube')} />
+              <span><b>YouTube</b><small>{youtubeIdentity}</small></span>
+            </label>
+            <label className={draft.publish_targets.includes('x') ? 'is-selected' : ''}>
+              <input type="checkbox" checked={draft.publish_targets.includes('x')} onChange={() => toggleTarget('x')} />
+              <span><b>x.com</b><small>{xIdentity}</small></span>
+            </label>
+            <label className={draft.publish_targets.includes('apple_podcast') ? 'is-selected' : ''}>
+              <input type="checkbox" checked={draft.publish_targets.includes('apple_podcast')} onChange={() => toggleTarget('apple_podcast')} />
+              <span><b>Podcast RSS</b><small>Local feed; no Apple account submission</small></span>
+            </label>
+          </div>
+          <p className="morning-safety">Production visibility is {draft.publish_visibility}. Automatic writes require the configured account to match the active browser identity. Test runs remain private and require exact-receipt cleanup. <Link to="/settings?tab=publishing">Configure platform accounts →</Link></p>
           <div className="morning-actions">
             <button type="button" className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(draft)}>{save.isPending ? 'Saving…' : 'Save desk'}</button>
             <button type="button" className="btn-ghost" disabled={run.isPending} onClick={() => run.mutate()}>{run.isPending ? 'Queuing…' : 'Run 1-min test'}</button>

@@ -66,10 +66,32 @@ OPENCLI_RETRY_BASE_SECONDS = float(os.getenv("OPENCLI_RETRY_BASE_SECONDS", "3"))
 OPENCODE_BIN = os.getenv("OPENCODE_BIN", "opencode").strip() or "opencode"
 OPENCODE_TIMEOUT = int(os.getenv("OPENCODE_TIMEOUT", "600"))
 ACCOUNT_OPS_POLL_SECONDS = int(os.getenv("ACCOUNT_OPS_POLL_SECONDS", "10"))
-# Video publication is deliberately human-gated in the first production
-# phase. This process-wide kill switch must be enabled in addition to a plan
-# item's own opt-in before any future publishing adapter may run.
+# Video publication is fail-closed. This process-wide kill switch must be
+# enabled in addition to a task's own opt-in and the target platform switch.
+# Automatic adapters also require an expected account identity so a stale
+# browser login can never silently publish to the wrong channel.
 VIDEO_AUTO_PUBLISH_ENABLED = _env_bool("VIDEO_AUTO_PUBLISH_ENABLED", "0")
+VIDEO_PUBLISH_YOUTUBE_ENABLED = _env_bool("VIDEO_PUBLISH_YOUTUBE_ENABLED", "1")
+VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME = os.getenv(
+    "VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME", ""
+).strip()
+VIDEO_PUBLISH_YOUTUBE_CHANNEL_ID = os.getenv(
+    "VIDEO_PUBLISH_YOUTUBE_CHANNEL_ID", ""
+).strip()
+VIDEO_PUBLISH_X_ENABLED = _env_bool("VIDEO_PUBLISH_X_ENABLED", "1")
+VIDEO_PUBLISH_X_HANDLE = os.getenv("VIDEO_PUBLISH_X_HANDLE", "").strip().lstrip("@")
+VIDEO_PUBLISH_APPLE_PODCAST_ENABLED = _env_bool(
+    "VIDEO_PUBLISH_APPLE_PODCAST_ENABLED", "1"
+)
+VIDEO_PUBLISH_APPLE_FEED_TITLE = os.getenv(
+    "VIDEO_PUBLISH_APPLE_FEED_TITLE", "Frontier Tech Daily"
+).strip()
+VIDEO_PUBLISH_APPLE_FEED_AUTHOR = os.getenv(
+    "VIDEO_PUBLISH_APPLE_FEED_AUTHOR", "FrontierTechSN"
+).strip()
+VIDEO_PUBLISH_APPLE_FEED_PUBLIC_BASE_URL = os.getenv(
+    "VIDEO_PUBLISH_APPLE_FEED_PUBLIC_BASE_URL", ""
+).strip().rstrip("/")
 # ChatGPT image generation routinely takes longer than simple browser reads.
 THUMBNAIL_CHATGPT_TIMEOUT = int(os.getenv("THUMBNAIL_CHATGPT_TIMEOUT", "360"))
 # Collage stills run through ChatGPT Web; motion runs through Gemini Create
