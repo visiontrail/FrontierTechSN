@@ -66,9 +66,49 @@ export default function MorningDesk() {
   )
   const globalPublishingEnabled = Boolean(publicationFields.VIDEO_AUTO_PUBLISH_ENABLED)
   const youtubeIdentity = String(publicationFields.VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME || 'Channel not configured')
+  const youtubeReady = Boolean(
+    publicationFields.VIDEO_PUBLISH_YOUTUBE_ENABLED
+    && publicationFields.VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME
+    && publicationFields.VIDEO_PUBLISH_YOUTUBE_CHANNEL_ID,
+  )
   const xIdentity = publicationFields.VIDEO_PUBLISH_X_HANDLE
     ? `@${String(publicationFields.VIDEO_PUBLISH_X_HANDLE).replace(/^@/, '')}`
     : 'Handle not configured'
+  const xReady = Boolean(publicationFields.VIDEO_PUBLISH_X_ENABLED && publicationFields.VIDEO_PUBLISH_X_HANDLE)
+  const podcastReady = Boolean(publicationFields.VIDEO_PUBLISH_APPLE_PODCAST_ENABLED)
+  const distributionEnabled = globalPublishingEnabled && draft.auto_publish
+  const distributionState = !globalPublishingEnabled
+    ? 'Blocked by global kill switch'
+    : draft.auto_publish ? 'Automatic dispatch armed' : 'Paused · selections retained'
+  const destinations = [
+    {
+      target: 'youtube' as const,
+      index: '01',
+      mark: 'YT',
+      name: 'YouTube',
+      capability: 'Native video upload',
+      identity: youtubeIdentity,
+      ready: youtubeReady,
+    },
+    {
+      target: 'x' as const,
+      index: '02',
+      mark: 'X',
+      name: 'x.com',
+      capability: 'Native video post',
+      identity: xIdentity,
+      ready: xReady,
+    },
+    {
+      target: 'apple_podcast' as const,
+      index: '03',
+      mark: 'RSS',
+      name: 'Podcast RSS',
+      capability: 'Feed generation only',
+      identity: 'Local feed · no Apple account submission',
+      ready: podcastReady,
+    },
+  ]
 
   return (
     <div className="morning-desk">
@@ -108,33 +148,80 @@ export default function MorningDesk() {
             <label><span>Run length</span><select value={draft.target_duration_minutes} onChange={(e) => patch('target_duration_minutes', Number(e.target.value))}><option value={6}>6 min</option><option value={8}>8 min</option><option value={10}>10 min</option><option value={12}>12 min</option></select></label>
             <label><span>Language</span><select value={draft.language} onChange={(e) => patch('language', e.target.value as 'en' | 'zh')}><option value="en">English</option><option value="zh">中文</option></select></label>
             <label><span>Stories</span><select value={draft.max_stories} onChange={(e) => patch('max_stories', Number(e.target.value))}><option value={4}>4</option><option value={6}>6</option><option value={8}>8</option></select></label>
-            <label><span>YouTube visibility</span><select value={draft.publish_visibility} onChange={(e) => patch('publish_visibility', e.target.value as 'private' | 'unlisted' | 'public')}><option value="public">Public</option><option value="unlisted">Unlisted</option><option value="private">Private</option></select></label>
           </div>
-          <label className="morning-switch">
-            <span><strong>Automatic distribution</strong><small>{globalPublishingEnabled ? 'Global publishing is armed' : 'Blocked by the global kill switch'}</small></span>
-            <input type="checkbox" checked={draft.auto_publish} onChange={(e) => patch('auto_publish', e.target.checked)} />
-          </label>
-          <div className="morning-destinations" aria-label="Automatic publication targets">
-            <label className={draft.publish_targets.includes('youtube') ? 'is-selected' : ''}>
-              <input type="checkbox" checked={draft.publish_targets.includes('youtube')} onChange={() => toggleTarget('youtube')} />
-              <span><b>YouTube</b><small>{youtubeIdentity}</small></span>
-            </label>
-            <label className={draft.publish_targets.includes('x') ? 'is-selected' : ''}>
-              <input type="checkbox" checked={draft.publish_targets.includes('x')} onChange={() => toggleTarget('x')} />
-              <span><b>x.com</b><small>{xIdentity}</small></span>
-            </label>
-            <label className={draft.publish_targets.includes('apple_podcast') ? 'is-selected' : ''}>
-              <input type="checkbox" checked={draft.publish_targets.includes('apple_podcast')} onChange={() => toggleTarget('apple_podcast')} />
-              <span><b>Podcast RSS</b><small>Local feed; no Apple account submission</small></span>
-            </label>
-          </div>
-          <p className="morning-safety">Production visibility is {draft.publish_visibility}. Automatic writes require the configured account to match the active browser identity. Test runs remain private and require exact-receipt cleanup. <Link to="/settings?tab=publishing">Configure platform accounts →</Link></p>
           <div className="morning-actions">
             <button type="button" className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(draft)}>{save.isPending ? 'Saving…' : 'Save desk'}</button>
             <button type="button" className="btn-ghost" disabled={run.isPending} onClick={() => run.mutate()}>{run.isPending ? 'Queuing…' : 'Run 1-min test'}</button>
           </div>
           {(save.isError || run.isError) && <div className="error-box">{String((save.error || run.error) as Error)}</div>}
         </aside>
+      </section>
+
+      <section className={`morning-distribution ${distributionEnabled ? 'is-active' : 'is-paused'}`}>
+        <header className="morning-distribution-head">
+          <div className="morning-distribution-copy">
+            <span className="morning-section-label">Dispatch matrix</span>
+            <h2>Automatic distribution</h2>
+            <p>Send every completed edition to the selected destinations. Platform choices are retained while dispatch is paused.</p>
+          </div>
+          <div className="morning-distribution-controls">
+            <label className={`morning-visibility ${distributionEnabled && draft.publish_targets.includes('youtube') ? '' : 'is-disabled'}`}>
+              <span>YouTube visibility</span>
+              <select
+                value={draft.publish_visibility}
+                disabled={!distributionEnabled || !draft.publish_targets.includes('youtube')}
+                onChange={(e) => patch('publish_visibility', e.target.value as 'private' | 'unlisted' | 'public')}
+              >
+                <option value="public">Public</option>
+                <option value="unlisted">Unlisted</option>
+                <option value="private">Private</option>
+              </select>
+            </label>
+            <label className={`morning-distribution-master ${distributionEnabled ? 'is-live' : ''}`}>
+              <span><small>Edition dispatch</small><strong>{distributionState}</strong></span>
+              <input type="checkbox" checked={draft.auto_publish} onChange={(e) => patch('auto_publish', e.target.checked)} />
+            </label>
+          </div>
+        </header>
+
+        <div className="morning-destinations" aria-label="Automatic publication targets" aria-disabled={!distributionEnabled}>
+          {destinations.map((destination) => {
+            const selected = draft.publish_targets.includes(destination.target)
+            const ready = distributionEnabled && selected && destination.ready
+            const state = !distributionEnabled
+              ? 'Paused'
+              : !selected ? 'Not selected' : destination.ready ? 'Ready' : 'Setup required'
+            return (
+              <label
+                className={`morning-destination ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''}`}
+                key={destination.target}
+              >
+                <span className="morning-destination-index">{destination.index}</span>
+                <span className="morning-destination-mark">{destination.mark}</span>
+                <span className="morning-destination-switch">
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    disabled={!distributionEnabled}
+                    onChange={() => toggleTarget(destination.target)}
+                  />
+                  <i aria-hidden="true" />
+                </span>
+                <span className="morning-destination-copy">
+                  <b>{destination.name}</b>
+                  <small>{destination.capability}</small>
+                </span>
+                <span className="morning-destination-identity">{destination.identity}</span>
+                <span className="morning-destination-state"><i />{state}</span>
+              </label>
+            )
+          })}
+        </div>
+
+        <footer className="morning-distribution-foot">
+          <p>Automatic writes require the configured account to match the active browser identity. Test runs remain private and require exact-receipt cleanup.</p>
+          <Link to="/settings?tab=publishing">Configure platform accounts →</Link>
+        </footer>
       </section>
 
       <section className="morning-sources">
