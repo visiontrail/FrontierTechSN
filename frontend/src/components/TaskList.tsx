@@ -70,7 +70,7 @@ export default function TaskList() {
         <div className="tasks-title-block">
           <span className="eyebrow">Production queue</span>
           <h1>Tasks</h1>
-          <p>Track every source from ingestion through final render.</p>
+          <p>Track every Morning Desk edition from research through distribution.</p>
         </div>
 
         <dl className="task-totals" aria-label="Task summary">
@@ -80,9 +80,9 @@ export default function TaskList() {
           <div><dt>Failed</dt><dd>{counts.failed}</dd></div>
         </dl>
 
-        <Link to="/new" className="tasks-new">
-          <span aria-hidden="true">+</span>
-          New Task
+        <Link to="/morning-desk" className="tasks-new">
+          <span aria-hidden="true">↗</span>
+          Configure Desk
         </Link>
       </header>
 
@@ -92,8 +92,8 @@ export default function TaskList() {
         ) : !tasks?.length ? (
           <div className="table-message table-empty">
             <strong>No tasks yet</strong>
-            <span>Create a task to turn a YouTube video, EPUB, or PDF into a podcast video.</span>
-            <Link to="/new">Create first task</Link>
+            <span>The Morning Desk will place each scheduled or test edition here.</span>
+            <Link to="/morning-desk">Configure Morning Desk</Link>
           </div>
         ) : (
           <div className="tasks-table-scroll">
@@ -143,9 +143,14 @@ export default function TaskList() {
                       <td><span className={`badge ${state}`}>{STATUS_LABELS[state] || state}</span></td>
                       <td><span className="table-value">{task.source_type.toUpperCase()}</span></td>
                       <td>
-                        {task.origin_type === 'content_plan' ? (
+                        {task.origin_type === 'daily_news' ? (
                           <span className="task-origin-cell">
-                            <strong>Content plan</strong>
+                            <strong>Morning desk</strong>
+                            <small title={task.origin_label || ''}>{task.origin_label || task.origin_id}</small>
+                          </span>
+                        ) : task.origin_type === 'content_plan' ? (
+                          <span className="task-origin-cell">
+                            <strong>Legacy content plan</strong>
                             <small title={task.origin_label || ''}>{task.origin_label || task.origin_id}</small>
                           </span>
                         ) : <span className="table-muted">Manual</span>}

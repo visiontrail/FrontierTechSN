@@ -1,7 +1,5 @@
 const BASE = '';
 
-export const DEFAULT_CLOSING_REMARKS = "If this gave you something to think about, subscribe for more. Thanks for watching, and I'll see you in the next one."
-
 export interface TaskConfig {
   target_duration_minutes: number;
   script_format?: 'monologue' | 'dialogue';
@@ -99,65 +97,6 @@ export interface Task {
   planned_publish_at: string | null;
 }
 
-export type ContentPlanStatus = 'draft' | 'scheduled' | 'generating' | 'review' | 'ready' | 'published' | 'failed' | 'cancelled';
-export type PublicationStatus = 'not_ready' | 'awaiting_review' | 'approved' | 'published' | 'failed';
-
-export interface ContentSeries {
-  id: string;
-  created_at: string;
-  updated_at: string;
-  name: string;
-  description: string;
-  theme: string;
-  archived: boolean;
-  item_count: number;
-}
-
-export interface ContentPlanItem {
-  id: string;
-  created_at: string;
-  updated_at: string;
-  series_id: string | null;
-  series_name: string | null;
-  title: string;
-  brief: string;
-  source_type: 'topic' | 'youtube';
-  source_url: string | null;
-  episode_number: number | null;
-  generation_at: string | null;
-  publish_at: string | null;
-  platform: string;
-  auto_publish_requested: boolean;
-  status: ContentPlanStatus;
-  publication_status: PublicationStatus;
-  task_config: TaskConfig;
-  task_id: string | null;
-  published_at: string | null;
-  publication_url: string | null;
-  reviewed_at: string | null;
-  error_message: string | null;
-}
-
-export interface ContentPlanningStatus {
-  auto_publish_enabled: boolean;
-  publication_mode: 'automatic' | 'human_review';
-  scheduler: 'video_task_queue';
-}
-
-export interface ContentPlanInput {
-  series_id?: string | null;
-  title: string;
-  brief: string;
-  source_type?: 'topic' | 'youtube';
-  source_url?: string | null;
-  episode_number?: number | null;
-  generation_at?: string | null;
-  publish_at?: string | null;
-  platform?: string;
-  auto_publish_requested?: boolean;
-  task_config?: TaskConfig;
-}
-
 export interface FootageQuery {
   query: string;
   purpose: string;
@@ -238,11 +177,11 @@ export interface DailyAutomationSettings {
   voice: string;
   collage_broll_count: number;
   public_footage_enabled: boolean;
+  footage_clip_count: number;
   background_music_provider: 'gemini_create_music' | 'local';
   auto_publish: boolean;
   publish_targets: Array<'youtube' | 'x' | 'apple_podcast'>;
   publish_visibility: 'private' | 'unlisted' | 'public';
-  delete_after_test: boolean;
 }
 
 export interface DailyAutomationResponse {
@@ -418,25 +357,6 @@ export async function fetchTask(id: string): Promise<Task> {
   return res.json();
 }
 
-export async function createTask(
-  sourceType: string,
-  sourceUrl: string | null,
-  config: TaskConfig,
-  file?: File,
-  scheduledAt?: string | null,
-): Promise<Task> {
-  const form = new FormData();
-  form.append('source_type', sourceType);
-  if (sourceUrl) form.append('source_url', sourceUrl);
-  form.append('config_json', JSON.stringify(config));
-  if (file) form.append('file', file);
-  if (scheduledAt) form.append('scheduled_at', scheduledAt);
-
-  const res = await fetch(`${BASE}/api/tasks`, { method: 'POST', body: form });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
 /** Move a queued task's start time; pass null to release it immediately. */
 export async function scheduleTask(taskId: string, scheduledAt: string | null): Promise<Task> {
   const res = await fetch(`${BASE}/api/tasks/${taskId}/schedule`, {
@@ -450,64 +370,6 @@ export async function scheduleTask(taskId: string, scheduledAt: string | null): 
 
 export async function deleteTask(id: string): Promise<void> {
   await fetch(`${BASE}/api/tasks/${id}`, { method: 'DELETE' });
-}
-
-// ── Editorial content planning ─────────────────────────────────────
-async function planningRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}/api/content-planning${path}`, {
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-    ...init,
-  })
-  if (!res.ok) {
-    const payload = await res.json().catch(() => null) as { detail?: string } | null
-    throw new Error(payload?.detail ?? `Request failed (${res.status})`)
-  }
-  return res.json()
-}
-
-export async function fetchContentPlanningStatus(): Promise<ContentPlanningStatus> {
-  return planningRequest('/status')
-}
-
-export async function fetchContentSeries(): Promise<ContentSeries[]> {
-  const data = await planningRequest<{ series: ContentSeries[] }>('/series')
-  return data.series
-}
-
-export async function createContentSeries(input: Pick<ContentSeries, 'name' | 'description' | 'theme'>): Promise<ContentSeries> {
-  return planningRequest('/series', { method: 'POST', body: JSON.stringify(input) })
-}
-
-export async function updateContentSeries(id: string, input: Partial<Pick<ContentSeries, 'name' | 'description' | 'theme' | 'archived'>>): Promise<ContentSeries> {
-  return planningRequest(`/series/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) })
-}
-
-export async function fetchContentPlanItems(): Promise<ContentPlanItem[]> {
-  const data = await planningRequest<{ items: ContentPlanItem[] }>('/items')
-  return data.items
-}
-
-export async function createContentPlanItem(input: ContentPlanInput): Promise<ContentPlanItem> {
-  return planningRequest('/items', { method: 'POST', body: JSON.stringify(input) })
-}
-
-export async function updateContentPlanItem(id: string, input: Partial<ContentPlanInput>): Promise<ContentPlanItem> {
-  return planningRequest(`/items/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) })
-}
-
-export async function deleteContentPlanItem(id: string): Promise<void> {
-  await planningRequest(`/items/${encodeURIComponent(id)}`, { method: 'DELETE' })
-}
-
-export async function approveContentPlanItem(id: string): Promise<ContentPlanItem> {
-  return planningRequest(`/items/${encodeURIComponent(id)}/approve`, { method: 'POST' })
-}
-
-export async function recordContentPlanPublication(id: string, publicationUrl: string | null): Promise<ContentPlanItem> {
-  return planningRequest(`/items/${encodeURIComponent(id)}/publish`, {
-    method: 'POST',
-    body: JSON.stringify({ publication_url: publicationUrl }),
-  })
 }
 
 export async function fetchSettings(): Promise<Settings> {
@@ -577,11 +439,6 @@ export async function fetchVoices(ttsModel?: string): Promise<VoiceOption[]> {
   const res = await fetch(`${BASE}/api/voices${qs}`);
   if (!res.ok) throw new Error('Failed to load voices');
   return res.json();
-}
-
-export function voicePreviewUrl(voice: string, ttsModel?: string): string {
-  const qs = ttsModel ? `?tts_model=${encodeURIComponent(ttsModel)}` : '';
-  return `${BASE}/api/voices/${encodeURIComponent(voice)}/preview${qs}`;
 }
 
 export async function fetchProviders(): Promise<Provider[]> {

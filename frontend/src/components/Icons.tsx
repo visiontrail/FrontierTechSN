@@ -23,14 +23,6 @@ export function IconTasks(p: P) {
   )
 }
 
-export function IconNew(p: P) {
-  return (
-    <svg {...base} {...p}>
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  )
-}
-
 export function IconAdmin(p: P) {
   return (
     <svg {...base} {...p}>
@@ -47,15 +39,6 @@ export function IconAtlas(p: P) {
     <svg {...base} {...p}>
       <circle cx="12" cy="12" r="9" />
       <path d="M3.5 9h17M3.5 15h17M12 3c2.2 2.4 3.3 5.4 3.3 9S14.2 18.6 12 21M12 3C9.8 5.4 8.7 8.4 8.7 12S9.8 18.6 12 21" />
-    </svg>
-  )
-}
-
-export function IconCalendar(p: P) {
-  return (
-    <svg {...base} {...p}>
-      <rect x="3" y="5" width="18" height="16" rx="2" />
-      <path d="M8 3v4M16 3v4M3 10h18M8 14h2M14 14h2M8 18h2" />
     </svg>
   )
 }

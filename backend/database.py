@@ -548,9 +548,19 @@ async def reschedule_task(task_id: str, scheduled_at: str | None) -> None:
 
 async def delete_task(task_id: str):
     db = await get_db()
-    await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    await db.commit()
-    await db.close()
+    try:
+        # Content Planning is retired, but older databases can still contain
+        # plan rows linked to tasks. Remove that legacy provenance first so a
+        # task can be cleaned up from the canonical Tasks screen without
+        # leaving an orphan (or violating foreign keys when they are enabled).
+        await db.execute("DELETE FROM content_plan_items WHERE task_id = ?", (task_id,))
+        await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        await db.commit()
+    except BaseException:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
 
 
 async def reset_orphaned_tasks() -> int:

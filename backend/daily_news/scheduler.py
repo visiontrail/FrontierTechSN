@@ -46,7 +46,38 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def load_settings() -> DailyAutomationSettings:
-    return DailyAutomationSettings(**_read_json(_settings_path()))
+    payload = _read_json(_settings_path())
+
+    # Recipes written by older releases can reference a model or voice that is
+    # no longer in the live catalog. Heal only that catalog drift on read so the
+    # desk remains operable; all other fields still go through strict Pydantic
+    # validation below. New PUT requests remain strict as well.
+    default_model = (
+        config.TTS_DEFAULT_MODEL
+        if config.TTS_DEFAULT_MODEL in config.TTS_MODELS
+        else next(iter(config.TTS_MODELS))
+    )
+    requested_model = payload.get("tts_model", default_model)
+    migrated = False
+    if requested_model not in config.TTS_MODELS:
+        requested_model = default_model
+        payload["tts_model"] = requested_model
+        migrated = True
+
+    voices = config.voices_for_model(requested_model)
+    default_voice = (
+        config.TTS_DEFAULT_VOICE_1
+        if config.TTS_DEFAULT_VOICE_1 in voices
+        else next(iter(voices))
+    )
+    if payload.get("voice", config.TTS_DEFAULT_VOICE_1) not in voices:
+        payload["voice"] = default_voice
+        migrated = True
+
+    settings = DailyAutomationSettings(**payload)
+    if migrated:
+        _write_json(_settings_path(), settings.model_dump(mode="json"))
+    return settings
 
 
 def save_settings(settings: DailyAutomationSettings) -> DailyAutomationSettings:
@@ -93,6 +124,7 @@ async def create_daily_task(
         video_orientation="landscape",
         opening_style="paper_collage",
         footage_enabled=settings.public_footage_enabled,
+        footage_clip_count=settings.footage_clip_count,
         collage_broll_enabled=True,
         collage_broll_count=settings.collage_broll_count,
         thumbnail_enabled=True,
@@ -125,12 +157,28 @@ async def create_daily_task(
         origin_id=edition_date.isoformat(),
         origin_label=f"Daily automation · {edition_date.isoformat()}",
     )
-    state = {
-        "last_run_at": datetime.now(timezone.utc).isoformat(),
-        "last_run_date": edition_date.isoformat(),
-        "last_task_id": task.id,
-        "last_trigger": trigger,
-    }
+    now = datetime.now(timezone.utc).isoformat()
+    state = _read_json(_state_path())
+    if test_mode:
+        # A one-minute validation run is not today's published edition. Keeping
+        # its receipt separate prevents the test button from suppressing the
+        # real scheduled run through `_is_due`'s once-per-edition guard.
+        state.update(
+            {
+                "last_test_run_at": now,
+                "last_test_task_id": task.id,
+                "last_test_trigger": trigger,
+            }
+        )
+    else:
+        state.update(
+            {
+                "last_run_at": now,
+                "last_run_date": edition_date.isoformat(),
+                "last_task_id": task.id,
+                "last_trigger": trigger,
+            }
+        )
     _write_json(_state_path(), state)
     return task
 

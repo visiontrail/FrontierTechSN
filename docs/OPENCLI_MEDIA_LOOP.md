@@ -39,7 +39,7 @@ back to the existing silence/word estimate and delivery continues with an explic
 3. Sign in to Gemini and ChatGPT as needed.
 4. Run `./scripts/opencli.sh doctor`.
 5. Verify `./scripts/opencli.sh chatgpt status -f json` reports `Login: Yes`.
-6. In the New Task form leave Viral thumbnail enabled; select Hybrid or Web Platforms for web footage.
+6. In **Morning Desk**, enable Public footage and set its clip budget. Thumbnail generation remains part of the fixed automated-edition contract.
 
 The pinned OpenCLI install receives a project-local postinstall patch that adds `gemini ask --file`.
 It uses the same `File`/`DataTransfer` compatibility path as OpenCLI's other upload-capable adapters

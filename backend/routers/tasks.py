@@ -2,13 +2,11 @@ import asyncio
 import json
 import shutil
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 from backend import database as db
 from backend.models import (
-    TaskCreate,
-    TaskConfig,
     TaskListResponse,
     TaskResponse,
     SourceType,
@@ -20,50 +18,14 @@ from backend.models import (
     TaskPublicationDeleteRequest,
     normalize_schedule,
 )
-# Imported as a module, not by name: the Admin console rebinds these paths
-# at runtime, and `config` is shadowed by a local TaskConfig below.
+# Imported as a module, not by name: the Admin console rebinds these paths at
+# runtime.
 from backend import config as app_config
 from backend.pipeline.footage import read_manifest
 from backend.publishing import delete_test_publications, publish_task, read_publication_manifest
 from backend.worker import is_task_logging_active, pipeline_log_file, subscribe_task_logs, unsubscribe_task_logs
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
-
-
-@router.post("", response_model=TaskResponse)
-async def create_task(
-    source_type: str = Form(...),
-    source_url: str | None = Form(None),
-    config_json: str = Form("{}"),
-    scheduled_at: str | None = Form(None),
-    file: UploadFile | None = File(None),
-):
-    st = SourceType(source_type)
-    import json
-    config = TaskConfig(**json.loads(config_json))
-
-    try:
-        start_at = normalize_schedule(scheduled_at)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-
-    upload_path = None
-    if file and st in (SourceType.EPUB, SourceType.PDF):
-        upload_dir = app_config.UPLOADS_DIR / f"{st.value}"
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        dest = upload_dir / file.filename
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-        upload_path = str(dest)
-
-    task = await db.create_task(
-        source_type=st.value,
-        source_url=source_url,
-        config=config,
-        upload_path=upload_path,
-        scheduled_at=start_at,
-    )
-    return task
 
 
 @router.post("/{task_id}/schedule", response_model=TaskResponse)
@@ -406,8 +368,6 @@ async def delete_task(task_id: str):
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    if task.origin_type == "content_plan":
-        raise HTTPException(409, "Delete planned tasks from Content Plan to preserve provenance")
     if task.output_dir:
         out = Path(task.output_dir)
         if out.exists():

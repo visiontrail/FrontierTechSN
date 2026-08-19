@@ -7,8 +7,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from backend import config
-from backend.daily_news.scheduler import _is_due, next_run_at
+from backend.daily_news import scheduler
+from backend.daily_news.scheduler import _is_due, create_daily_task, next_run_at
 from backend.daily_news import research, review
 from backend.daily_news.scriptwriter import (
     SOURCE_SPOKEN_ALIASES,
@@ -207,6 +210,167 @@ def test_daily_desk_defaults_to_unattended_next_run():
     assert settings.auto_publish is True
     assert settings.publish_targets == ["youtube", "x", "apple_podcast"]
     assert settings.publish_visibility == "public"
+
+
+def test_daily_desk_recipe_validates_tts_model_and_voice_before_saving():
+    with pytest.raises(ValueError, match="Unknown TTS model"):
+        DailyAutomationSettings(tts_model="missing-model")
+
+    with pytest.raises(ValueError, match="unavailable"):
+        DailyAutomationSettings(tts_model="orpheus-en", voice="Carter")
+
+    settings = DailyAutomationSettings(tts_model="orpheus-en", voice="tara")
+    assert settings.voice == "tara"
+
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        DailyAutomationSettings(footage_clip_count=0)
+
+
+def test_daily_desk_recipe_backfills_public_footage_count_for_old_settings():
+    settings = DailyAutomationSettings.model_validate(
+        {
+            "tts_model": "vibevoice-0.5b",
+            "voice": "Carter",
+            "collage_broll_count": 5,
+        }
+    )
+
+    assert settings.footage_clip_count == 8
+    assert settings.collage_broll_count == 5
+
+
+def test_load_settings_migrates_a_retired_tts_recipe(tmp_path: Path):
+    settings_path = tmp_path / "daily_automation.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "target_duration_minutes": 12,
+                "tts_model": "retired-model",
+                "voice": "retired-voice",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch.object(scheduler, "_settings_path", return_value=settings_path),
+        patch.object(scheduler.config, "TTS_DEFAULT_MODEL", "vibevoice-0.5b"),
+        patch.object(scheduler.config, "TTS_DEFAULT_VOICE_1", "Carter"),
+    ):
+        settings = scheduler.load_settings()
+
+    assert settings.target_duration_minutes == 12
+    assert settings.tts_model == "vibevoice-0.5b"
+    assert settings.voice == "Carter"
+    persisted = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert persisted["tts_model"] == settings.tts_model
+    assert persisted["voice"] == settings.voice
+
+
+def test_retired_manual_and_content_planning_apis_are_not_exposed():
+    from backend.main import app
+
+    paths = app.openapi()["paths"]
+    assert not any(path.startswith("/api/content-planning") for path in paths)
+    assert "/api/daily-news" in paths
+    assert "get" in paths["/api/tasks"]
+    assert "post" not in paths["/api/tasks"]
+
+
+def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
+    queued = TaskResponse(
+        id="daily-queued-001",
+        created_at="2026-08-19T00:00:00+00:00",
+        updated_at="2026-08-19T00:00:00+00:00",
+        source_type=SourceType.NEWS_DAILY,
+        source_title="Frontier Tech Daily — 2026-08-19",
+        status=TaskStatus.QUEUED,
+        config=TaskConfig(),
+        origin_type="daily_news",
+        origin_id="2026-08-19",
+    )
+    create = AsyncMock(return_value=queued)
+    settings = DailyAutomationSettings(
+        target_duration_minutes=12,
+        tts_model="orpheus-en",
+        voice="tara",
+        collage_broll_count=7,
+        public_footage_enabled=True,
+        footage_clip_count=11,
+        background_music_provider="local",
+        auto_publish=False,
+    )
+
+    with (
+        patch.object(scheduler.database, "create_task", create),
+        patch.object(scheduler, "_state_path", return_value=tmp_path / "state.json"),
+    ):
+        asyncio.run(
+            create_daily_task(
+                settings,
+                edition_date=date(2026, 8, 19),
+                trigger="schedule",
+            )
+        )
+
+    task_config = create.await_args.args[2]
+    assert task_config.target_duration_minutes == 12
+    assert task_config.tts_model == "orpheus-en"
+    assert task_config.voice_1 == "tara"
+    assert task_config.collage_broll_count == 7
+    assert task_config.footage_enabled is True
+    assert task_config.footage_clip_count == 11
+    assert task_config.background_music_provider == "local"
+    assert task_config.auto_publish is False
+
+
+def test_test_run_does_not_consume_the_scheduled_daily_edition(tmp_path: Path):
+    queued = TaskResponse(
+        id="daily-test-queued",
+        created_at="2026-08-19T00:00:00+00:00",
+        updated_at="2026-08-19T00:00:00+00:00",
+        source_type=SourceType.NEWS_DAILY,
+        source_title="Frontier Tech Daily — 2026-08-19",
+        status=TaskStatus.QUEUED,
+        config=TaskConfig(),
+        origin_type="daily_news",
+        origin_id="2026-08-19",
+    )
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "last_run_at": "2026-08-18T00:00:00+00:00",
+                "last_run_date": "2026-08-18",
+                "last_task_id": "yesterday",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    create = AsyncMock(return_value=queued)
+    with (
+        patch.object(scheduler.database, "create_task", create),
+        patch.object(scheduler, "_state_path", return_value=state_path),
+    ):
+        asyncio.run(
+            create_daily_task(
+                DailyAutomationSettings(auto_publish=False),
+                edition_date=date(2026, 8, 19),
+                trigger="manual",
+                test_mode=True,
+                duration_override=1,
+            )
+        )
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["last_run_date"] == "2026-08-18"
+    assert state["last_task_id"] == "yesterday"
+    assert state["last_test_task_id"] == queued.id
+    test_config = create.await_args.args[2]
+    assert test_config.target_duration_minutes == 1
+    assert test_config.auto_publish is False
+    assert test_config.publish_test_mode is True
 
 
 def test_music_prompt_is_instrumental_and_mix_is_duration_locked(tmp_path: Path):

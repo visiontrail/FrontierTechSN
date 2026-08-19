@@ -11,7 +11,6 @@ from backend.logging_setup import configure_logging
 from backend.worker import start_worker, stop_worker
 from backend.daily_news.scheduler import start_daily_scheduler, stop_daily_scheduler
 from backend.routers import (
-    content_planning,
     daily_news,
     prompts,
     providers,
@@ -96,7 +95,6 @@ app.include_router(providers.router)
 app.include_router(prompts.router)
 app.include_router(skills.router)
 app.include_router(voices.router)
-app.include_router(content_planning.router)
 app.include_router(daily_news.router)
 
 # Bound to the directory as it stands at startup — this is why OUTPUTS_DIR is

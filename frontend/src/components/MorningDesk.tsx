@@ -5,6 +5,8 @@ import {
   fetchDailyAutomation,
   fetchDailySources,
   fetchSettingsSchema,
+  fetchTtsModels,
+  fetchVoices,
   runDailyNow,
   updateDailyAutomation,
   type DailyAutomationSettings,
@@ -15,28 +17,71 @@ const SOURCE_LABELS: Record<string, string> = {
   en: 'English',
 }
 
+const TIMEZONE_SUGGESTIONS = [
+  'Asia/Singapore',
+  'Asia/Shanghai',
+  'Asia/Tokyo',
+  'Europe/London',
+  'America/New_York',
+  'America/Los_Angeles',
+]
+
 function formatDateTime(value: string | null) {
   if (!value) return 'Not scheduled'
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 
+function inRange(value: number, minimum: number, maximum: number) {
+  return Number.isFinite(value) && value >= minimum && value <= maximum
+}
+
 export default function MorningDesk() {
   const queryClient = useQueryClient()
-  const { data } = useQuery({ queryKey: ['daily-automation'], queryFn: fetchDailyAutomation })
+  const {
+    data,
+    isError: automationIsError,
+    error: automationError,
+  } = useQuery({ queryKey: ['daily-automation'], queryFn: fetchDailyAutomation })
   const { data: sources = [] } = useQuery({ queryKey: ['daily-sources'], queryFn: fetchDailySources })
   const { data: settingsSchema } = useQuery({ queryKey: ['settings-schema'], queryFn: fetchSettingsSchema })
+  const {
+    data: ttsModels = [],
+    isError: ttsModelsIsError,
+  } = useQuery({ queryKey: ['tts-models'], queryFn: fetchTtsModels })
   const [draftOverride, setDraftOverride] = useState<DailyAutomationSettings | null>(null)
-  const draft = draftOverride ?? data?.settings ?? null
+  const persisted = data?.settings
+  const draft = draftOverride ?? (persisted ? {
+    ...persisted,
+    footage_clip_count: persisted.footage_clip_count ?? 8,
+  } : null)
+  const {
+    data: voices = [],
+    isFetching: voicesAreLoading,
+    isError: voicesAreError,
+  } = useQuery({
+    queryKey: ['voices', draft?.tts_model],
+    queryFn: () => fetchVoices(draft!.tts_model),
+    enabled: Boolean(draft?.tts_model),
+  })
+
+  const applySaved = (next: Awaited<ReturnType<typeof updateDailyAutomation>>) => {
+    setDraftOverride(next.settings)
+    queryClient.setQueryData(['daily-automation'], next)
+  }
 
   const save = useMutation({
     mutationFn: (value: DailyAutomationSettings) => updateDailyAutomation(value),
-    onSuccess: (next) => {
-      setDraftOverride(next.settings)
-      queryClient.setQueryData(['daily-automation'], next)
-    },
+    onSuccess: applySaved,
   })
   const run = useMutation({
-    mutationFn: () => runDailyNow(true, 1),
+    mutationFn: async (value: DailyAutomationSettings) => {
+      const saved = await updateDailyAutomation(value)
+      // Saving and queuing are two separate requests. Reflect the committed
+      // recipe immediately so a queueing failure never looks like the recipe
+      // was lost or remains unsaved.
+      applySaved(saved)
+      return runDailyNow(true, 1)
+    },
     onSuccess: (task) => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['daily-automation'] })
@@ -45,7 +90,8 @@ export default function MorningDesk() {
   })
 
   const patch = <K extends keyof DailyAutomationSettings>(key: K, value: DailyAutomationSettings[K]) => {
-    setDraftOverride((current) => ({ ...(current ?? data!.settings), [key]: value }))
+    if (!draft) return
+    setDraftOverride((current) => ({ ...(current ?? draft), [key]: value }))
   }
 
   const toggleTarget = (target: DailyAutomationSettings['publish_targets'][number]) => {
@@ -56,7 +102,10 @@ export default function MorningDesk() {
     )
   }
 
-  if (!draft || !data) return <div className="empty-state">Opening the morning desk…</div>
+  if (!draft || !data) {
+    if (automationIsError) return <div className="error-box">{String(automationError)}</div>
+    return <div className="empty-state">Opening the morning desk…</div>
+  }
 
   const priority = sources.filter((source) => source.priority <= 6)
   const secondary = sources.filter((source) => source.priority > 6)
@@ -109,12 +158,31 @@ export default function MorningDesk() {
       ready: podcastReady,
     },
   ]
+  const selectedModel = ttsModels.find((model) => model.id === draft.tts_model)
+  const selectedVoiceIsValid = voices.some((voice) => voice.name === draft.voice)
+  const effectiveVoice = selectedVoiceIsValid ? draft.voice : (voices[0]?.name ?? draft.voice)
+  const effectiveVoiceIsValid = voices.some((voice) => voice.name === effectiveVoice)
+  const recipe = effectiveVoice === draft.voice ? draft : { ...draft, voice: effectiveVoice }
+  const catalogReady = Boolean(draft.tts_model && effectiveVoice)
+    && !voicesAreLoading
+    && (voicesAreError || effectiveVoiceIsValid)
+    && (ttsModelsIsError || ttsModels.some((model) => model.id === draft.tts_model))
+  const configReady = catalogReady
+    && Boolean(draft.generation_time && draft.timezone.trim())
+    && inRange(draft.target_duration_minutes, 1, 30)
+    && inRange(draft.max_stories, 3, 12)
+    && inRange(draft.source_window_hours, 12, 96)
+    && inRange(draft.collage_broll_count, 2, 10)
+    && inRange(draft.footage_clip_count, 1, 30)
+  const dirty = JSON.stringify(recipe) !== JSON.stringify(data.settings)
+  const actionPending = save.isPending || run.isPending
+  const actionError = save.error || run.error
 
   return (
     <div className="morning-desk">
       <header className="morning-masthead">
         <div>
-          <span className="morning-kicker">Autonomous edition · Asia/Singapore</span>
+          <span className="morning-kicker">Autonomous edition · {draft.timezone}</span>
           <h1>Frontier Tech<br />Morning Desk</h1>
         </div>
         <div className="morning-status">
@@ -124,37 +192,94 @@ export default function MorningDesk() {
         </div>
       </header>
 
-      <section className="morning-lead-grid">
-        <article className="morning-lead">
-          <span className="morning-section-label">Edition contract</span>
-          <h2>Evidence first. Broadcast ready.</h2>
-          <p>Each run researches a bilingual source set, writes a date-stamped morning-news script, checks every factual claim in ChatGPT, generates a Gemini music bed, then mixes it below the narration.</p>
-          <div className="morning-contracts">
-            <span><b>01</b> 10-attempt yhroot policy</span>
-            <span><b>02</b> Paper-collage on by default</span>
-            <span><b>03</b> Script ↔ speech hard gate</span>
-            <span><b>04</b> Exact account identity gate</span>
+      <section className="morning-config" aria-labelledby="morning-config-title">
+        <header className="morning-config-head">
+          <div>
+            <span className="morning-section-label">Automation specification</span>
+            <h2 id="morning-config-title">One saved recipe.<br />Every morning.</h2>
+            <p>This contract is copied into every scheduled edition. Change it here once; the next research, voice, visual, and distribution run follows it.</p>
           </div>
-        </article>
-
-        <aside className="morning-control-card">
-          <span className="morning-section-label">Run control</span>
-          <label className="morning-switch">
-            <span><strong>Daily automation</strong><small>Catch up once after a restart</small></span>
-            <input type="checkbox" checked={draft.enabled} onChange={(e) => patch('enabled', e.target.checked)} />
+          <label className={`morning-master-switch ${draft.enabled ? 'is-live' : ''}`}>
+            <span><small>Desk state</small><strong>{draft.enabled ? 'Automation armed' : 'Automation paused'}</strong></span>
+            <input type="checkbox" checked={draft.enabled} onChange={(event) => patch('enabled', event.target.checked)} />
           </label>
-          <div className="morning-fields">
-            <label><span>Desk time</span><input type="time" value={draft.generation_time} onChange={(e) => patch('generation_time', e.target.value)} /></label>
-            <label><span>Run length</span><select value={draft.target_duration_minutes} onChange={(e) => patch('target_duration_minutes', Number(e.target.value))}><option value={6}>6 min</option><option value={8}>8 min</option><option value={10}>10 min</option><option value={12}>12 min</option></select></label>
-            <label><span>Language</span><select value={draft.language} onChange={(e) => patch('language', e.target.value as 'en' | 'zh')}><option value="en">English</option><option value="zh">中文</option></select></label>
-            <label><span>Stories</span><select value={draft.max_stories} onChange={(e) => patch('max_stories', Number(e.target.value))}><option value={4}>4</option><option value={6}>6</option><option value={8}>8</option></select></label>
+        </header>
+
+        <div className="morning-config-grid">
+          <article className="morning-config-panel">
+            <header><span>01</span><div><strong>Schedule</strong><small>When the newsroom wakes</small></div></header>
+            <div className="morning-field-grid">
+              <label><span>Desk time</span><input type="time" value={draft.generation_time} onChange={(event) => patch('generation_time', event.target.value)} /></label>
+              <label><span>Timezone</span><input type="text" list="morning-timezones" value={draft.timezone} onChange={(event) => patch('timezone', event.target.value)} /></label>
+              <datalist id="morning-timezones">{TIMEZONE_SUGGESTIONS.map((timezone) => <option value={timezone} key={timezone} />)}</datalist>
+            </div>
+            <label className="morning-inline-switch">
+              <input type="checkbox" checked={draft.catch_up_after_restart} onChange={(event) => patch('catch_up_after_restart', event.target.checked)} />
+              <span><strong>Catch up after restart</strong><small>Queue today’s edition if the desk comes back after its scheduled time.</small></span>
+            </label>
+          </article>
+
+          <article className="morning-config-panel">
+            <header><span>02</span><div><strong>Editorial brief</strong><small>Length, language, and evidence window</small></div></header>
+            <div className="morning-field-grid morning-field-grid--four">
+              <label><span>Run length</span><div className="morning-unit-input"><input type="number" min="1" max="30" value={draft.target_duration_minutes} onChange={(event) => patch('target_duration_minutes', Number(event.target.value))} /><i>min</i></div></label>
+              <label><span>Language</span><select value={draft.language} onChange={(event) => patch('language', event.target.value as 'en' | 'zh')}><option value="en">English</option><option value="zh">中文</option></select></label>
+              <label><span>Stories</span><input type="number" min="3" max="12" value={draft.max_stories} onChange={(event) => patch('max_stories', Number(event.target.value))} /></label>
+              <label><span>Source window</span><div className="morning-unit-input"><input type="number" min="12" max="96" step="12" value={draft.source_window_hours} onChange={(event) => patch('source_window_hours', Number(event.target.value))} /><i>hr</i></div></label>
+            </div>
+            <p className="morning-panel-note">The source quorum remains a hard gate; widening the window never lowers evidence requirements.</p>
+          </article>
+
+          <article className="morning-config-panel">
+            <header><span>03</span><div><strong>Voice desk</strong><small>Model-dependent single-host delivery</small></div></header>
+            <div className="morning-field-grid">
+              <label>
+                <span>TTS model</span>
+                <select value={draft.tts_model} onChange={(event) => patch('tts_model', event.target.value)}>
+                  {!ttsModels.some((model) => model.id === draft.tts_model) && <option value={draft.tts_model}>{draft.tts_model}</option>}
+                  {ttsModels.map((model) => <option value={model.id} key={model.id}>{model.provider} — {model.label}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Host voice</span>
+                <select value={effectiveVoice} disabled={voicesAreLoading} onChange={(event) => patch('voice', event.target.value)}>
+                  {(voicesAreLoading || voicesAreError) && !selectedVoiceIsValid && <option value={draft.voice}>{voicesAreLoading ? 'Loading compatible voices…' : draft.voice}</option>}
+                  {voices.map((voice) => <option value={voice.name} key={voice.name}>{voice.name} · {voice.gender}</option>)}
+                </select>
+              </label>
+            </div>
+            <div className="morning-contract-line"><span>Delivery</span><strong>Monologue · {selectedModel?.single_speaker ? 'single-speaker engine' : 'single host selected'}</strong></div>
+            {(ttsModelsIsError || voicesAreError) && <p className="morning-panel-warning">The live voice catalog could not be loaded. Existing saved values remain available.</p>}
+          </article>
+
+          <article className="morning-config-panel morning-config-panel--visual">
+            <header><span>04</span><div><strong>Visual recipe</strong><small>Generated collage and sourced footage are separate</small></div></header>
+            <div className="morning-visual-row">
+              <div className="morning-visual-copy"><b>Paper-Collage</b><small>Generated visual metaphors · always on</small></div>
+              <label><span>Clips / edition</span><input type="number" min="2" max="10" value={draft.collage_broll_count} onChange={(event) => patch('collage_broll_count', Number(event.target.value))} /></label>
+            </div>
+            <div className={`morning-visual-row ${draft.public_footage_enabled ? 'is-enabled' : ''}`}>
+              <label className="morning-inline-switch morning-inline-switch--compact">
+                <input type="checkbox" checked={draft.public_footage_enabled} onChange={(event) => patch('public_footage_enabled', event.target.checked)} />
+                <span><strong>Public footage</strong><small>Scout eligible external B-roll</small></span>
+              </label>
+              <label><span>Clips / edition</span><input type="number" min="1" max="30" disabled={!draft.public_footage_enabled} value={draft.footage_clip_count} onChange={(event) => patch('footage_clip_count', Number(event.target.value))} /></label>
+            </div>
+            <label className="morning-music-field"><span>Program music</span><select value={draft.background_music_provider} onChange={(event) => patch('background_music_provider', event.target.value as DailyAutomationSettings['background_music_provider'])}><option value="gemini_create_music">Gemini Create Music · local fallback</option><option value="local">Deterministic local bed</option></select></label>
+          </article>
+        </div>
+
+        <footer className="morning-config-actions">
+          <div>
+            <span className={`morning-save-state ${dirty ? 'is-dirty' : ''}`}><i />{dirty ? 'Unsaved changes' : 'Saved recipe'}</span>
+            <small>Test runs are forced to one minute and never auto-publish.</small>
           </div>
-          <div className="morning-actions">
-            <button type="button" className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(draft)}>{save.isPending ? 'Saving…' : 'Save desk'}</button>
-            <button type="button" className="btn-ghost" disabled={run.isPending} onClick={() => run.mutate()}>{run.isPending ? 'Queuing…' : 'Run 1-min test'}</button>
+          <div className="morning-action-buttons">
+            <button type="button" className="btn-ghost" disabled={actionPending || !configReady} onClick={() => save.mutate(recipe)}>{save.isPending ? 'Saving…' : 'Save recipe'}</button>
+            <button type="button" className="btn-primary" disabled={actionPending || !configReady} onClick={() => run.mutate(recipe)}>{run.isPending ? 'Saving & queuing…' : 'Save & run 1-min test'}</button>
           </div>
-          {(save.isError || run.isError) && <div className="error-box">{String((save.error || run.error) as Error)}</div>}
-        </aside>
+          {actionError && <div className="error-box">{String(actionError)}</div>}
+        </footer>
       </section>
 
       <section className={`morning-distribution ${distributionEnabled ? 'is-active' : 'is-paused'}`}>
@@ -170,7 +295,7 @@ export default function MorningDesk() {
               <select
                 value={draft.publish_visibility}
                 disabled={!distributionEnabled || !draft.publish_targets.includes('youtube')}
-                onChange={(e) => patch('publish_visibility', e.target.value as 'private' | 'unlisted' | 'public')}
+                onChange={(event) => patch('publish_visibility', event.target.value as 'private' | 'unlisted' | 'public')}
               >
                 <option value="public">Public</option>
                 <option value="unlisted">Unlisted</option>
@@ -179,7 +304,7 @@ export default function MorningDesk() {
             </label>
             <label className={`morning-distribution-master ${distributionEnabled ? 'is-live' : ''}`}>
               <span><small>Edition dispatch</small><strong>{distributionState}</strong></span>
-              <input type="checkbox" checked={draft.auto_publish} onChange={(e) => patch('auto_publish', e.target.checked)} />
+              <input type="checkbox" checked={draft.auto_publish} onChange={(event) => patch('auto_publish', event.target.checked)} />
             </label>
           </div>
         </header>
@@ -225,7 +350,7 @@ export default function MorningDesk() {
       </section>
 
       <section className="morning-sources">
-        <div className="morning-section-head"><div><span className="morning-section-label">Signal board</span><h2>12 monitored sources</h2></div><p>Six primary desks set the agenda; six secondary desks widen or verify the frame. Per-source failure is isolated, while source quorum remains a hard gate.</p></div>
+        <div className="morning-section-head"><div><span className="morning-section-label">Signal board</span><h2>{sources.length || 12} monitored sources</h2></div><p>Six primary desks set the agenda; six secondary desks widen or verify the frame. Per-source failure is isolated, while source quorum remains a hard gate.</p></div>
         <div className="source-table-wrap">
           <table className="source-table">
             <thead><tr><th>Rank</th><th>Desk</th><th>Language</th><th>Coverage</th><th>Cadence</th><th>Signal</th></tr></thead>

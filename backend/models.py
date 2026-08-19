@@ -160,15 +160,6 @@ class TaskConfig(BaseModel):
         return self
 
 
-class TaskCreate(BaseModel):
-    source_type: SourceType
-    source_url: Optional[str] = None
-    config: TaskConfig = Field(default_factory=TaskConfig)
-    # Hold the task in the queue until this moment (UTC ISO-8601). None starts
-    # it as soon as the worker is free.
-    scheduled_at: Optional[str] = None
-
-
 class TaskSchedule(BaseModel):
     """Move a still-queued task's start time, or clear it to start now."""
     scheduled_at: Optional[str] = None
@@ -526,13 +517,16 @@ class DailyAutomationSettings(BaseModel):
     voice: str = "Carter"
     collage_broll_count: int = Field(default=4, ge=2, le=10)
     public_footage_enabled: bool = False
+    # Public-footage and Paper-Collage clips are separate visual sources. Keep
+    # both counts in the desk recipe so scheduled editions never fall back to
+    # a generic manual-task default that the operator cannot see.
+    footage_clip_count: int = Field(default=8, ge=1, le=30)
     background_music_provider: Literal["gemini_create_music", "local"] = "gemini_create_music"
     auto_publish: bool = True
     publish_targets: list[Literal["youtube", "x", "apple_podcast"]] = Field(
         default_factory=lambda: ["youtube", "x", "apple_podcast"]
     )
     publish_visibility: Literal["private", "unlisted", "public"] = "public"
-    delete_after_test: bool = True
 
     @field_validator("generation_time")
     @classmethod
@@ -555,6 +549,19 @@ class DailyAutomationSettings(BaseModel):
     @classmethod
     def unique_daily_targets(cls, value: list[str]) -> list[str]:
         return list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def validate_daily_voice_contract(self) -> "DailyAutomationSettings":
+        """Reject a desk recipe that is guaranteed to fail when it is due."""
+        from backend import config as app_config
+
+        if self.tts_model not in app_config.TTS_MODELS:
+            raise ValueError(f"Unknown TTS model '{self.tts_model}'")
+        if self.voice not in app_config.voices_for_model(self.tts_model):
+            raise ValueError(
+                f"Voice '{self.voice}' is unavailable for TTS model '{self.tts_model}'"
+            )
+        return self
 
 
 class DailyAutomationResponse(BaseModel):

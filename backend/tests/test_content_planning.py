@@ -161,6 +161,20 @@ class ContentPlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.scheduled_at, "2030-05-02T02:30:00+00:00")
         self.assertEqual(refreshed.generation_at, task.scheduled_at)
 
+    async def test_retired_plan_task_can_be_deleted_from_task_history(self):
+        item = await database.create_content_plan_item(
+            ContentPlanItemCreate(
+                title="A legacy editorial plan",
+                brief="Keep old provenance readable until the operator removes the task.",
+                generation_at="2030-05-01T01:00:00Z",
+            )
+        )
+
+        await database.delete_task(item.task_id)
+
+        self.assertIsNone(await database.get_task(item.task_id))
+        self.assertIsNone(await database.get_content_plan_item(item.id))
+
     async def test_due_plan_is_prioritized_and_future_plan_stays_parked(self):
         manual = await database.create_task(
             "youtube", "https://example.com/manual", config=TaskConfig()

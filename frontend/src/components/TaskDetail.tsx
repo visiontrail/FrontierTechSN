@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchTask,
@@ -179,17 +179,13 @@ export default function TaskDetail() {
                 <button className="btn-primary" type="button">Download Thumbnail</button>
               </a>
             )}
-            {task.origin_type === 'content_plan' ? (
-              <Link to="/planning"><button className="btn-ghost" type="button">Open Content Plan</button></Link>
-            ) : (
-              <button
-                className="btn-danger"
-                type="button"
-                onClick={() => { if (confirm('Delete this task?')) deleteMutation.mutate() }}
-              >
-                Delete
-              </button>
-            )}
+            <button
+              className="btn-danger"
+              type="button"
+              onClick={() => { if (confirm('Delete this task?')) deleteMutation.mutate() }}
+            >
+              Delete
+            </button>
           </div>
         </div>
       </header>
@@ -243,11 +239,11 @@ export default function TaskDetail() {
           {task.origin_type === 'content_plan' && (
             <div className="task-origin-banner">
               <div>
-                <span className="eyebrow">Task source · editorial plan</span>
+                <span className="eyebrow">Task source · retired editorial plan</span>
                 <strong>{task.origin_label || task.origin_id}</strong>
                 {task.source_type === 'topic' && task.source_url && <p>{task.source_url}</p>}
               </div>
-              <Link to="/planning">View plan and publication review →</Link>
+              <span className="task-origin-retired">Legacy provenance retained</span>
             </div>
           )}
           {parked && (

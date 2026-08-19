@@ -50,11 +50,13 @@ The **Morning Desk** page configures:
 
 - daily execution time and IANA timezone;
 - language, duration, story count, and research window;
-- TTS voice/model and Paper-Collage clip count;
+- TTS voice/model, Paper-Collage clip count, and the separate public-footage clip budget;
 - Gemini or deterministic local music;
 - automatic distribution targets and YouTube visibility.
 
-Use **Run 1-min test** for an end-to-end test edition. It never auto-publishes; external test publishing is a separate explicit action on the completed task.
+Use **Save & run 1-min test** for an end-to-end test edition. The current desk recipe is saved before the task is queued, the test never auto-publishes, and it does not consume that day's scheduled edition. External test publishing is a separate explicit action on the completed task.
+
+The operator UI is deliberately limited to **Morning Desk**, **Tasks**, and **Admin**. The manual **New Task** workbench and **Content Plan** calendar inherited from Video-Promotional are not part of this autonomous-desk product; old browser bookmarks redirect to Morning Desk. Manual task creation and content-planning APIs are not exposed. The database keeps non-destructive compatibility with historical planned tasks so their output remains readable and removable from Tasks.
 
 ## Distribution
 

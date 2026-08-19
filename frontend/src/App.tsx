@@ -1,16 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Routes, Route, NavLink, Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import TaskList from './components/TaskList'
-import TaskForm from './components/TaskForm'
 import TaskDetail from './components/TaskDetail'
 import SettingsPage from './components/SettingsPage'
-import ContentPlanning from './components/ContentPlanning'
 import MorningDesk from './components/MorningDesk'
 import {
   IconTasks,
-  IconNew,
   IconAdmin,
-  IconCalendar,
   IconSun,
   IconMoon,
   IconMenu,
@@ -23,8 +19,6 @@ type Theme = 'light' | 'dark'
 const NAV = [
   { to: '/morning-desk', label: 'Morning Desk', hint: 'Daily tech briefing', Icon: IconSun, end: false },
   { to: '/', label: 'Tasks', hint: 'Pipeline queue', Icon: IconTasks, end: true },
-  { to: '/new', label: 'New Task', hint: 'Start a render', Icon: IconNew, end: false },
-  { to: '/planning', label: 'Content Plan', hint: 'Series & release calendar', Icon: IconCalendar, end: false },
   { to: '/settings', label: 'Admin', hint: 'Models & prompts', Icon: IconAdmin, end: false },
 ]
 
@@ -34,16 +28,15 @@ type PageMeta = {
   title: string
   sub: string
   back?: boolean
-  action?: 'new'
   full?: boolean
   chrome?: boolean
 }
 
 function pageMeta(pathname: string): PageMeta {
   if (pathname === '/') return { title: 'Tasks', sub: 'Every podcast render in the pipeline', full: true, chrome: false }
-  if (pathname === '/new') return { title: 'New Task', sub: 'Configure a podcast video run', full: true, chrome: false }
-  if (pathname === '/planning') return { title: 'Content Plan', sub: 'Editorial series and release calendar', full: true, chrome: false }
-  if (pathname === '/morning-desk') return { title: 'Morning Desk', sub: 'Daily frontier-tech briefing automation', full: true, chrome: false }
+  if (pathname === '/morning-desk' || pathname === '/new' || pathname === '/planning') {
+    return { title: 'Morning Desk', sub: 'Daily frontier-tech briefing automation', full: true, chrome: false }
+  }
   if (pathname.startsWith('/tasks/')) return {
     title: 'Task Detail',
     sub: 'Stages, script review, and output',
@@ -187,11 +180,6 @@ export default function App() {
                 <h1>{meta.title}</h1>
                 {meta.sub && <p>{meta.sub}</p>}
               </div>
-              {meta.action === 'new' && (
-                <Link to="/new" className="topbar-cta">
-                  <button className="btn-primary" type="button">New Task</button>
-                </Link>
-              )}
             </div>
           </header>
         )}
@@ -211,9 +199,9 @@ export default function App() {
           <div className="page" key={location.pathname}>
             <Routes>
               <Route path="/" element={<TaskList />} />
-              <Route path="/new" element={<TaskForm />} />
-              <Route path="/planning" element={<ContentPlanning />} />
               <Route path="/morning-desk" element={<MorningDesk />} />
+              <Route path="/new" element={<Navigate to="/morning-desk" replace />} />
+              <Route path="/planning" element={<Navigate to="/morning-desk" replace />} />
               <Route path="/tasks/:id" element={<TaskDetail />} />
               <Route path="/account-operations/*" element={<Navigate to="/morning-desk" replace />} />
               <Route path="/settings" element={<SettingsPage />} />
