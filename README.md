@@ -19,7 +19,7 @@ Every daily run is fail-closed around these checks:
 9. Render with HyperFrames and run final A/V validation.
 10. When enabled, publish with the current signed-in browser accounts. Account identities and exact URLs are discovered at run time and recorded; nothing is hard-coded.
 
-All yhroot stages get ten total attempts (one initial call plus nine retries). Browser-backed OpenCLI stages also get ten attempts. A provider turn that has already exceeded its whole-turn hard timeout is stopped immediately because the underlying CLI has already spent that turn retrying.
+All yhroot stages get ten total attempts (one initial call plus nine retries). Browser-backed OpenCLI stages also get ten attempts. A provider turn that has already exceeded its whole-turn hard timeout is stopped immediately because the underlying CLI has already spent that turn retrying. Gemini and ChatGPT OpenCLI commands share a cross-process start limiter: adjacent web requests begin at least ten seconds apart by default, including retries and concurrent tasks. Operators can choose 10–30 seconds under **Admin → System → Footage Sources** with `OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`.
 
 Each Paper-Collage clip targets the duration of its selected narration scene, capped by Gemini's configured single-generation limit (eight seconds by default). The generated assembly plays once and then holds its completed final frame for the remainder of a longer scene; neither FFmpeg nor HyperFrames replays it. Operators can change the provider ceiling under **Admin → System → Paper-collage B-roll** with `COLLAGE_GEMINI_MAX_SECONDS`.
 

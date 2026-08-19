@@ -599,6 +599,13 @@ SPECS: tuple[SettingSpec, ...] = (
         minimum=1, maximum=60,
     ),
     SettingSpec(
+        "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "footage",
+        "Gemini / ChatGPT request interval", "int", unit="seconds",
+        minimum=10, maximum=30,
+        description="Minimum start-to-start spacing shared by all OpenCLI Gemini "
+                    "and ChatGPT web commands, including concurrent tasks.",
+    ),
+    SettingSpec(
         "WEB_FOOTAGE_ENABLED", "footage", "Web footage", "bool",
         description="Allow YouTube discovery in hybrid footage mode.",
     ),
