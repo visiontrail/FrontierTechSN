@@ -56,6 +56,8 @@ The **Morning Desk** page configures:
 
 Use **Save & run 1-min test** for an end-to-end test edition. The current desk recipe is saved before the task is queued, the test never auto-publishes, and it does not consume that day's scheduled edition. External test publishing is a separate explicit action on the completed task.
 
+Use **Start full run now** to save the current recipe and immediately queue a full-length edition without waiting for the schedule. It follows the same video-generation and configured automatic-distribution path as a scheduled edition, and counts as that day's production run.
+
 The operator UI is deliberately limited to **Morning Desk**, **Tasks**, and **Admin**. The manual **New Task** workbench and **Content Plan** calendar inherited from Video-Promotional are not part of this autonomous-desk product; old browser bookmarks redirect to Morning Desk. Manual task creation and content-planning APIs are not exposed. The database keeps non-destructive compatibility with historical planned tasks so their output remains readable and removable from Tasks.
 
 ## Distribution

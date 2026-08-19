@@ -74,7 +74,13 @@ export default function MorningDesk() {
     mutationFn: (value: DailyAutomationSettings) => updateDailyAutomation(value),
     onSuccess: applySaved,
   })
-  const run = useMutation({
+  const openQueuedTask = (task: Awaited<ReturnType<typeof runDailyNow>>) => {
+    queryClient.invalidateQueries({ queryKey: ['tasks'] })
+    queryClient.invalidateQueries({ queryKey: ['daily-automation'] })
+    window.location.assign(`/tasks/${task.id}`)
+  }
+
+  const runTest = useMutation({
     mutationFn: async (value: DailyAutomationSettings) => {
       const saved = await updateDailyAutomation(value)
       // Saving and queuing are two separate requests. Reflect the committed
@@ -83,11 +89,18 @@ export default function MorningDesk() {
       applySaved(saved)
       return runDailyNow(true, 1)
     },
-    onSuccess: (task) => {
-      queryClient.invalidateQueries({ queryKey: ['tasks'] })
-      queryClient.invalidateQueries({ queryKey: ['daily-automation'] })
-      window.location.assign(`/tasks/${task.id}`)
+    onSuccess: openQueuedTask,
+  })
+  const runNow = useMutation({
+    mutationFn: async (value: DailyAutomationSettings) => {
+      const saved = await updateDailyAutomation(value)
+      applySaved(saved)
+      // No duration override: the backend snapshots the saved full-length
+      // recipe and follows the same render and distribution path as a
+      // scheduled edition.
+      return runDailyNow(false, null)
     },
+    onSuccess: openQueuedTask,
   })
 
   const patch = <K extends keyof DailyAutomationSettings>(key: K, value: DailyAutomationSettings[K]) => {
@@ -177,8 +190,8 @@ export default function MorningDesk() {
     && inRange(draft.news_image_count, 2, 12)
     && inRange(draft.footage_clip_count, 1, 30)
   const dirty = JSON.stringify(recipe) !== JSON.stringify(data.settings)
-  const actionPending = save.isPending || run.isPending
-  const actionError = save.error || run.error
+  const actionPending = save.isPending || runTest.isPending || runNow.isPending
+  const actionError = save.error || runTest.error || runNow.error
 
   return (
     <div className="morning-desk">
@@ -278,11 +291,20 @@ export default function MorningDesk() {
         <footer className="morning-config-actions">
           <div>
             <span className={`morning-save-state ${dirty ? 'is-dirty' : ''}`}><i />{dirty ? 'Unsaved changes' : 'Saved recipe'}</span>
-            <small>Test runs are forced to one minute and never auto-publish.</small>
+            <small>Tests are one minute and never publish. Full runs use the saved duration and distribution settings.</small>
           </div>
           <div className="morning-action-buttons">
             <button type="button" className="btn-ghost" disabled={actionPending || !configReady} onClick={() => save.mutate(recipe)}>{save.isPending ? 'Saving…' : 'Save recipe'}</button>
-            <button type="button" className="btn-primary" disabled={actionPending || !configReady} onClick={() => run.mutate(recipe)}>{run.isPending ? 'Saving & queuing…' : 'Save & run 1-min test'}</button>
+            <button type="button" className="btn-primary" disabled={actionPending || !configReady} onClick={() => runTest.mutate(recipe)}>{runTest.isPending ? 'Saving & queuing test…' : 'Save & run 1-min test'}</button>
+            <button
+              type="button"
+              className="btn-primary morning-start-now"
+              disabled={actionPending || !configReady}
+              title="Save this recipe and start a full end-to-end edition immediately"
+              onClick={() => runNow.mutate(recipe)}
+            >
+              {runNow.isPending ? 'Saving & starting full run…' : 'Start full run now'}
+            </button>
           </div>
           {actionError && <div className="error-box">{String(actionError)}</div>}
         </footer>

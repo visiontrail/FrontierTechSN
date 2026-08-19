@@ -711,11 +711,11 @@ export async function fetchDailySources(): Promise<DailyNewsSource[]> {
   return payload.sources;
 }
 
-export function runDailyNow(testMode = true, durationMinutes = 1): Promise<Task> {
+export function runDailyNow(testMode = true, durationMinutes: number | null = 1): Promise<Task> {
   const params = new URLSearchParams({
     test_mode: String(testMode),
-    duration_minutes: String(durationMinutes),
   });
+  if (durationMinutes !== null) params.set('duration_minutes', String(durationMinutes));
   return dailyRequest(`/run-now?${params}`, { method: 'POST' });
 }
 
