@@ -123,6 +123,7 @@ ARCHETYPES = (
     "stat",
     "quote",
     "footage",
+    "news_image",
     "outro",
 )
 
@@ -398,6 +399,12 @@ class ScenePlan:
     collage_broll: bool = False
     collage_hold_src: str = ""
     collage_target_duration_seconds: float = 0.0
+    news_image_src: str = ""
+    news_image_mode: str = ""
+    news_image_kind: str = ""
+    news_image_fit: str = "cover"
+    news_image_credit: str = ""
+    news_image_caption: str = ""
     theme: Theme = DEFAULT_THEME
     frame: FrameSpec = LANDSCAPE
 
@@ -446,6 +453,16 @@ class ScenePlan:
             collage_target_duration_seconds=float(
                 data.get("collage_target_duration_seconds") or 0.0
             ),
+            news_image_src=str(data.get("news_image_src") or ""),
+            news_image_mode=str(data.get("news_image_mode") or ""),
+            news_image_kind=str(data.get("news_image_kind") or ""),
+            news_image_fit=(
+                str(data.get("news_image_fit") or "cover")
+                if str(data.get("news_image_fit") or "cover") in {"cover", "contain"}
+                else "cover"
+            ),
+            news_image_credit=str(data.get("news_image_credit") or ""),
+            news_image_caption=str(data.get("news_image_caption") or ""),
             theme=theme,
             frame=frame,
         )
@@ -500,6 +517,12 @@ def _portrait_css(plan: ScenePlan) -> str:
   #{sid} .quote {{ max-width:850px; font-size:min(68px, 6.8vw); }}
   #{sid} .frame, #{sid} .media {{ width:100%; height:100%; }}
   #{sid} .credit {{ right:34px; top:42px; max-width:820px; }}
+  #{sid} .news-inline-stage {{ flex-direction:column; align-items:stretch; padding:170px 92px 330px; }}
+  #{sid} .news-inline-copy {{ width:100%; max-width:880px; }}
+  #{sid} .news-inline-visual {{ width:100%; min-height:720px; }}
+  #{sid} .news-inline-window {{ width:100%; height:720px; }}
+  #{sid} .news-full-stage {{ padding:190px 92px 330px; }}
+  #{sid} .news-full-headline {{ max-width:850px; }}
 """
 
 
@@ -908,6 +931,140 @@ def _render_footage(plan: ScenePlan) -> str:
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
 
 
+def _render_news_image_inline(plan: ScenePlan) -> str:
+    """Place a sourced image inside the HyperFrames editorial text flow."""
+    accent = accent_hex(plan.accent, plan.theme)
+    hsize = headline_size(plan.headline, base=86, floor=52)
+    bsize = body_size(plan.body, base=34, floor=27)
+    contain = plan.news_image_fit == "contain"
+    media_background = _rgba(plan.theme.ink, 0.94) if contain else plan.theme.bg
+    image_padding = "70px" if contain else "0"
+    object_position = "50% 50%"
+    css = f"""
+  #{plan.id} .news-inline-stage {{ flex-direction:row; align-items:center; justify-content:space-between;
+      gap:72px; padding:112px 124px 218px; }}
+  #{plan.id} .news-inline-copy {{ width:47%; display:flex; flex-direction:column; gap:25px; position:relative; z-index:3; }}
+  #{plan.id} .news-inline-headline {{ font-size:{hsize}px; max-width:790px; }}
+  #{plan.id} .news-inline-body {{ font-size:{bsize}px; max-width:760px; }}
+  #{plan.id} .news-inline-rule {{ width:190px; height:4px; border-radius:3px; background:{accent}; }}
+  #{plan.id} .news-inline-visual {{ width:48%; height:690px; display:flex; align-items:center; position:relative;
+      perspective:1400px; z-index:2; }}
+  #{plan.id} .news-inline-window {{ position:relative; width:100%; height:620px; overflow:hidden;
+      border:3px solid {_rgba(accent, .72)}; border-radius:24px; background:{media_background};
+      box-shadow:0 34px 100px {_rgba(plan.theme.bg, .45)}; transform-style:preserve-3d; }}
+  #{plan.id} .news-inline-media {{ display:block; width:100%; height:100%; object-fit:{plan.news_image_fit};
+      object-position:{object_position}; padding:{image_padding}; box-sizing:border-box; }}
+  #{plan.id} .news-inline-credit {{ position:absolute; left:22px; right:22px; bottom:20px; z-index:4;
+      font:500 18px {SANS}; line-height:1.3; letter-spacing:.035em; color:#F5F2EA;
+      background:rgba(11,13,23,.78); border:1px solid {_rgba(accent, .48)};
+      border-radius:999px; padding:11px 18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  #{plan.id} .news-inline-index {{ position:absolute; right:-18px; top:-24px; z-index:5;
+      width:86px; height:86px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+      font:700 22px {SANS}; letter-spacing:.08em; color:{plan.theme.bg}; background:{accent};
+      border:8px solid {plan.theme.bg}; }}
+  #{plan.id} .news-inline-corner {{ position:absolute; left:-18px; bottom:8px; width:94px; height:94px;
+      border-left:3px solid {accent}; border-bottom:3px solid {accent}; opacity:.78; }}
+"""
+    markup = (
+        '    <div class="plate"><div class="wash"></div></div>\n'
+        + _motif_block(
+            plan,
+            style="left:-120px; top:-140px; width:620px; height:620px; opacity:.16;",
+        )
+        + f'    <div class="stage news-inline-stage" id="{plan.id}-inline-stage">\n'
+        + '      <div class="news-inline-copy">\n'
+        + (f'        <div class="kicker" id="{plan.id}-kicker">{_esc(plan.kicker)}</div>\n' if plan.kicker else "")
+        + f'        <div class="headline news-inline-headline" id="{plan.id}-head">{_esc(plan.headline)}</div>\n'
+        + f'        <div class="news-inline-rule" id="{plan.id}-rule"></div>\n'
+        + (f'        <div class="body news-inline-body" id="{plan.id}-body">{_esc(plan.body)}</div>\n' if plan.body else "")
+        + '      </div>\n'
+        + f'      <div class="news-inline-visual" id="{plan.id}-visual" data-layout-allow-overflow>\n'
+        + f'        <div class="news-inline-window" id="{plan.id}-image-frame">\n'
+        + f'          <img class="news-inline-media" id="{plan.id}-image" src="{_esc(plan.news_image_src)}" '
+        + f'alt="{_esc(plan.news_image_caption)}" crossorigin="anonymous">\n'
+        + (f'          <div class="news-inline-credit" id="{plan.id}-credit">{_esc(plan.news_image_credit)}</div>\n' if plan.news_image_credit else "")
+        + '        </div>\n'
+        + f'        <div class="news-inline-index" id="{plan.id}-index">IMG</div>\n'
+        + f'        <div class="news-inline-corner" id="{plan.id}-corner"></div>\n'
+        + '      </div>\n'
+        + '    </div>\n'
+        + '    <div class="vignette"></div>\n'
+    )
+    drift = max(2.2, plan.duration - 0.35)
+    direction = -1 if _seed_from(plan.id) % 2 else 1
+    timeline = f"""        inAt("#{plan.id}-kicker", {{ x: -42, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .52, ease: "power3.out" }}, 0.16);
+        inAt("#{plan.id}-head", {{ y: 58, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .82, ease: "expo.out" }}, 0.28);
+        inAt("#{plan.id}-rule", {{ scaleX: 0, transformOrigin: "0 50%" }}, {{ scaleX: 1, duration: .64, ease: "power2.inOut" }}, 0.58);
+        inAt("#{plan.id}-body", {{ y: 26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .66, ease: "sine.out" }}, 0.68);
+        inAt("#{plan.id}-image-frame", {{ x: {direction * 220}, opacity: 0, rotationY: {direction * -11}, scale: .94 }}, {{ x: 0, opacity: 1, rotationY: 0, scale: 1, duration: .92, ease: "power4.out", transformPerspective: 1400, transformOrigin: "50% 50%" }}, 0.24);
+        inAt("#{plan.id}-image", {{ scale: 1.08, x: {direction * -12} }}, {{ scale: 1.02, x: {direction * 12}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.18);
+        inAt("#{plan.id}-index", {{ scale: .35, opacity: 0, rotate: -18 }}, {{ scale: 1, opacity: 1, rotate: 0, duration: .58, ease: "back.out(1.8)", transformOrigin: "50% 50%" }}, 0.78);
+        inAt("#{plan.id}-corner", {{ scale: .5, opacity: 0, transformOrigin: "0 100%" }}, {{ scale: 1, opacity: .78, duration: .7, ease: "circ.out" }}, 0.66);
+        inAt("#{plan.id}-credit", {{ y: 14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .5, ease: "power1.out" }}, 0.92);
+"""
+    return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(22, 40))
+
+
+def _render_news_image_fullscreen(plan: ScenePlan) -> str:
+    """Give one factual still the frame with a smooth, seekable reveal."""
+    accent = accent_hex(plan.accent, plan.theme)
+    contain = plan.news_image_fit == "contain"
+    media_background = plan.theme.ink if contain else plan.theme.bg
+    image_padding = "150px 220px 260px" if contain else "0"
+    hsize = headline_size(plan.headline, base=88, floor=50)
+    css = f"""
+  #{plan.id} .news-full-frame {{ position:absolute; inset:0; overflow:hidden; background:{media_background};
+      transform-style:preserve-3d; }}
+  #{plan.id} .news-full-media {{ display:block; width:100%; height:100%; object-fit:{plan.news_image_fit};
+      padding:{image_padding}; box-sizing:border-box; }}
+  #{plan.id} .news-full-scrim {{ position:absolute; inset:0; background:
+      linear-gradient(90deg, {_rgba(plan.theme.bg, .92)} 0%, {_rgba(plan.theme.bg, .5)} 48%, {_rgba(plan.theme.bg, .08)} 76%),
+      linear-gradient(0deg, {_rgba(plan.theme.bg, .94)} 0%, {_rgba(plan.theme.bg, 0)} 62%); }}
+  #{plan.id} .news-full-stage {{ justify-content:flex-end; padding:130px 150px 224px; gap:22px; z-index:3; }}
+  #{plan.id} .news-full-headline {{ font-size:{hsize}px; max-width:1240px; color:#F5F2EA;
+      text-shadow:0 8px 42px rgba(0,0,0,.62); }}
+  #{plan.id} .news-full-body {{ font-size:{body_size(plan.body, base=34)}px; max-width:990px;
+      color:rgba(245,242,234,.82); text-shadow:0 4px 22px rgba(0,0,0,.56); }}
+  #{plan.id} .news-full-rule {{ width:220px; height:5px; border-radius:3px; background:{accent}; }}
+  #{plan.id} .news-full-credit {{ position:absolute; top:38px; right:44px; max-width:820px; z-index:4;
+      font:500 18px {SANS}; line-height:1.3; letter-spacing:.035em; color:#F5F2EA;
+      background:rgba(11,13,23,.76); border:1px solid {_rgba(accent, .46)};
+      border-radius:999px; padding:11px 18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  #{plan.id} .news-full-marker {{ position:absolute; left:44px; top:40px; z-index:4;
+      font:700 20px {SANS}; letter-spacing:.2em; color:{accent}; text-transform:uppercase; }}
+  #{plan.id} .news-full-rail {{ position:absolute; left:0; top:0; bottom:0; width:10px; background:{accent}; z-index:5; }}
+"""
+    markup = (
+        f'    <div class="news-full-frame" id="{plan.id}-image-frame" data-layout-allow-overflow>\n'
+        + f'      <img class="news-full-media" id="{plan.id}-image" src="{_esc(plan.news_image_src)}" '
+        + f'alt="{_esc(plan.news_image_caption)}" crossorigin="anonymous">\n'
+        + '    </div>\n'
+        + '    <div class="news-full-scrim"></div>\n'
+        + f'    <div class="news-full-marker" id="{plan.id}-marker">News image</div>\n'
+        + (f'    <div class="news-full-credit" id="{plan.id}-credit">{_esc(plan.news_image_credit)}</div>\n' if plan.news_image_credit else "")
+        + f'    <div class="news-full-rail" id="{plan.id}-rail"></div>\n'
+        + f'    <div class="stage news-full-stage" id="{plan.id}-full-stage">\n'
+        + (f'      <div class="kicker" id="{plan.id}-kicker">{_esc(plan.kicker)}</div>\n' if plan.kicker else "")
+        + f'      <div class="headline news-full-headline" id="{plan.id}-head">{_esc(plan.headline)}</div>\n'
+        + f'      <div class="news-full-rule" id="{plan.id}-rule"></div>\n'
+        + (f'      <div class="body news-full-body" id="{plan.id}-body">{_esc(plan.body)}</div>\n' if plan.body else "")
+        + '    </div>\n'
+    )
+    drift = max(2.4, plan.duration - 0.3)
+    direction = -1 if _seed_from(plan.id) % 2 else 1
+    timeline = f"""        inAt("#{plan.id}-image-frame", {{ clipPath: "inset(0 {100 if direction > 0 else 0}% 0 {0 if direction > 0 else 100}%)", x: {direction * 120}, rotationY: {direction * -6} }}, {{ clipPath: "inset(0 0% 0 0%)", x: 0, rotationY: 0, duration: .96, ease: "power3.inOut", transformPerspective: 1600, transformOrigin: "50% 50%" }}, 0.12);
+        inAt("#{plan.id}-image", {{ scale: 1.08, x: {direction * -16} }}, {{ scale: 1.025, x: {direction * 16}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.15);
+        inAt("#{plan.id}-rail", {{ scaleY: 0, transformOrigin: "50% 0" }}, {{ scaleY: 1, duration: .62, ease: "expo.out" }}, 0.18);
+        inAt("#{plan.id}-marker", {{ x: -32, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .5, ease: "power2.out" }}, 0.48);
+        inAt("#{plan.id}-kicker", {{ x: -38, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .54, ease: "power3.out" }}, 0.42);
+        inAt("#{plan.id}-head", {{ y: 62, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .86, ease: "expo.out" }}, 0.58);
+        inAt("#{plan.id}-rule", {{ scaleX: 0, transformOrigin: "0 50%" }}, {{ scaleX: 1, duration: .62, ease: "circ.out" }}, 0.88);
+        inAt("#{plan.id}-body", {{ y: 24, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .66, ease: "sine.out" }}, 0.96);
+        inAt("#{plan.id}-credit", {{ y: -14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .5, ease: "power1.out" }}, 0.74);
+"""
+    return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
+
+
 def _render_title(plan: ScenePlan) -> str:
     accent = accent_hex(plan.accent, plan.theme)
     hsize = headline_size(plan.headline, base=124, floor=58)
@@ -965,17 +1122,24 @@ _RENDERERS = {
     "stat": _render_stat,
     "quote": _render_quote,
     "footage": _render_footage,
+    "news_image": _render_news_image_fullscreen,
     "outro": _render_outro,
 }
 
 
 def render_scene(plan: ScenePlan) -> str:
     """Full sub-composition HTML for one scene."""
+    if plan.news_image_src and plan.news_image_mode == "inline":
+        return _render_news_image_inline(plan)
+    if plan.news_image_src and plan.news_image_mode == "fullscreen":
+        return _render_news_image_fullscreen(plan)
     if plan.archetype == "contrast" and not (plan.left_text and plan.right_text):
         plan.archetype = "topic"
     if plan.archetype == "list" and len(plan.items) < 2:
         plan.archetype = "topic"
     if plan.archetype == "footage" and not plan.footage_src:
+        plan.archetype = "topic"
+    if plan.archetype == "news_image" and not plan.news_image_src:
         plan.archetype = "topic"
     if plan.archetype == "stat" and not plan.stat:
         # Without a figure the renderer would blow a full sentence up to 130px.

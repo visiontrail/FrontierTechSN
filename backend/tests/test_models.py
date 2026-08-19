@@ -29,6 +29,8 @@ def test_task_config_defaults_to_landscape_and_four_collages():
     assert config.footage_orientation == "landscape"
     assert config.collage_broll_enabled is True
     assert config.collage_broll_count == 4
+    assert config.news_images_enabled is True
+    assert config.news_image_count == 4
     assert config.opening_style == "editorial_motion"
 
 

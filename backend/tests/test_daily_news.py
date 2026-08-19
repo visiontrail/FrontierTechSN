@@ -212,6 +212,7 @@ def test_daily_desk_defaults_to_unattended_next_run():
     assert settings.auto_publish is True
     assert settings.publish_targets == ["youtube", "x", "apple_podcast"]
     assert settings.publish_visibility == "public"
+    assert settings.news_image_count == 4
 
 
 def test_daily_desk_recipe_validates_tts_model_and_voice_before_saving():
@@ -239,6 +240,7 @@ def test_daily_desk_recipe_backfills_public_footage_count_for_old_settings():
 
     assert settings.footage_clip_count == 8
     assert settings.collage_broll_count == 5
+    assert settings.news_image_count == 4
 
 
 def test_load_settings_migrates_a_retired_tts_recipe(tmp_path: Path):
@@ -297,6 +299,7 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
         tts_model="orpheus-en",
         voice="tara",
         collage_broll_count=7,
+        news_image_count=6,
         public_footage_enabled=True,
         footage_clip_count=11,
         background_music_provider="local",
@@ -320,6 +323,8 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
     assert task_config.tts_model == "orpheus-en"
     assert task_config.voice_1 == "tara"
     assert task_config.collage_broll_count == 7
+    assert task_config.news_images_enabled is True
+    assert task_config.news_image_count == 6
     assert task_config.footage_enabled is True
     assert task_config.footage_clip_count == 11
     assert task_config.background_music_provider == "local"

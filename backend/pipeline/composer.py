@@ -33,6 +33,7 @@ from backend.pipeline import (
     footage,
     music,
     multimodal_review,
+    news_images,
     scene_kit,
     storyboard as sb,
     visual_plan,
@@ -95,6 +96,13 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
             plan["archetype"] = "topic"
             for key in tuple(plan):
                 if key.startswith("footage_") or key.startswith("collage_"):
+                    plan.pop(key, None)
+        if plan.get("news_image") or plan.get("archetype") == "news_image":
+            plan["archetype"] = str(
+                plan.get("news_image_original_archetype") or "topic"
+            )
+            for key in tuple(plan):
+                if key.startswith("news_image"):
                     plan.pop(key, None)
         recovered.append(plan)
     return recovered
@@ -380,6 +388,8 @@ async def compose_video(
     opening_style: str = "editorial_motion",
     collage_broll_enabled: bool = False,
     collage_broll_count: int = 4,
+    news_images_enabled: bool = True,
+    news_image_count: int = 4,
     is_monologue: bool = False,
     ai_endpoint: str | None = None,
     ai_model: str | None = None,
@@ -517,10 +527,51 @@ async def compose_video(
                 "Collage B-roll placement incomplete: "
                 f"{final_collages}/{requested_collages} requested clips reached final scenes"
             )
+
+    news_image_inventory = {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
+    eligible_image_scene_ids = {
+        str(plan.get("id") or "")
+        for plan in plans
+        if not plan.get("collage_broll") and plan.get("archetype") != "footage"
+    }
+    if news_images_enabled and eligible_image_scene_ids:
+        image_manifest = await news_images.acquire_news_images(
+            board,
+            output_dir_path,
+            count=news_image_count,
+            excluded_scene_ids={
+                str(plan.get("id") or "")
+                for plan in plans
+                if str(plan.get("id") or "") not in eligible_image_scene_ids
+            },
+            scene_hints={str(plan.get("id") or ""): plan for plan in plans},
+            log=emit,
+        )
+        news_image_inventory = news_images.attach_news_images(
+            plans, board, image_manifest, output_dir_path
+        )
+        required_count = min(news_image_count, len(eligible_image_scene_ids))
+        attached_images = int(news_image_inventory["attached"])
+        image_modes = news_image_inventory["placement_modes"]
+        if attached_images != required_count:
+            raise RuntimeError(
+                "News-image placement incomplete: "
+                f"{attached_images}/{required_count} licensed images reached final scenes"
+            )
+        if required_count >= 2 and (
+            not image_modes.get("inline") or not image_modes.get("fullscreen")
+        ):
+            raise RuntimeError(
+                "News-image placement incomplete: both inline and fullscreen modes "
+                "are required when at least two eligible scenes exist"
+            )
     emit(
         "Final B-roll inventory: "
         f"{final_public_footage} public footage clip(s), "
-        f"{final_collages} paper-collage clip(s)"
+        f"{final_collages} paper-collage clip(s), "
+        f"{news_image_inventory['attached']} news image(s) "
+        f"(inline={news_image_inventory['placement_modes']['inline']}, "
+        f"fullscreen={news_image_inventory['placement_modes']['fullscreen']})"
     )
 
     scene_plans = list(plans)
@@ -607,7 +658,14 @@ async def compose_video(
         emit(f"Provider lookup failed ({exc}); rendering the deterministic scenes")
         endpoint, model, api_key = None, None, None
 
-    director_plans = [plan for plan in scene_plans if not plan.get("collage_broll")]
+    # Image scenes stay on the deterministic renderer. This prevents an authoring
+    # agent from "improving" the composition by dropping a licensed asset whose
+    # exact placement is part of the delivery contract.
+    director_plans = [
+        plan
+        for plan in scene_plans
+        if not plan.get("collage_broll") and not plan.get("news_image")
+    ]
     if config.DIRECTOR_ENABLED and director_plans and model:
         budget = director_plans[: config.DIRECTOR_MAX_SCENES] if config.DIRECTOR_MAX_SCENES else director_plans
         try:

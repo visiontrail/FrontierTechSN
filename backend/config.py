@@ -52,6 +52,18 @@ FOOTAGE_USER_AGENT = os.getenv(
 FOOTAGE_TIMEOUT = int(os.getenv("FOOTAGE_TIMEOUT", "45"))
 FOOTAGE_MAX_BYTES = int(os.getenv("FOOTAGE_MAX_BYTES", str(50 * 1024 * 1024)))
 
+# News stills are planned against exact narrated scenes by ChatGPT through
+# OpenCLI, independently researched with Google News/Search through OpenCLI,
+# and then downloaded from the open-license Wikimedia Commons inventory. Keep their
+# browser and byte ceilings separate from moving footage: one still should never
+# inherit a 50 MB archival-video allowance or a ten-attempt social-write retry.
+NEWS_IMAGE_MAX_BYTES = int(
+    os.getenv("NEWS_IMAGE_MAX_BYTES", str(12 * 1024 * 1024))
+)
+NEWS_IMAGE_OPENCLI_TIMEOUT = int(os.getenv("NEWS_IMAGE_OPENCLI_TIMEOUT", "45"))
+NEWS_IMAGE_OPENCLI_ATTEMPTS = int(os.getenv("NEWS_IMAGE_OPENCLI_ATTEMPTS", "1"))
+NEWS_IMAGE_SEARCH_TIMEOUT = int(os.getenv("NEWS_IMAGE_SEARCH_TIMEOUT", "60"))
+
 # Project-local OpenCLI + web-footage expansion.  The binary is deliberately a
 # repository wrapper rather than a global npm command, so installing or
 # upgrading this feature never changes the operator's global Claude Code setup.

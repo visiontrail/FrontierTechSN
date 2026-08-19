@@ -564,6 +564,18 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
                 if grounded
                 else "paper-collage failed media QA or moved away from its requested scene"
             )
+        elif plan.get("news_image"):
+            match_terms = plan.get("news_image_match_terms") or []
+            source_scene_id = str(plan.get("news_image_source_scene_id") or "")
+            exact_scene = source_scene_id == scene["id"]
+            open_license = bool(str(plan.get("news_image_license") or "").strip())
+            grounded = grounded and exact_scene and bool(match_terms) and open_license
+            reason = (
+                "licensed news image matched the exact narrated scene on "
+                + ", ".join(match_terms)
+                if grounded
+                else "news image lacked an exact scene, subject, or license anchor"
+            )
         elif plan.get("archetype") == "footage":
             match_terms = plan.get("footage_match_terms") or []
             script_match_terms = plan.get("footage_script_match_terms")

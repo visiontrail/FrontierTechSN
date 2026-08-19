@@ -140,6 +140,52 @@ def test_footage_scene_references_its_asset_relatively():
     assert "CC BY" in html
 
 
+def test_inline_news_image_is_part_of_the_text_flow_with_seekable_motion():
+    html = sk.render_scene(
+        plan(
+            archetype="topic",
+            kicker="NVIDIA VERA",
+            body="The CPU is now in production.",
+            news_image_src="../news_images/nvidia.png",
+            news_image_mode="inline",
+            news_image_kind="logo",
+            news_image_fit="contain",
+            news_image_credit="Image: NVIDIA · Public domain",
+            news_image_caption="NVIDIA logo",
+        )
+    )
+
+    assert validate_scene_html(html, "scene-01") == []
+    assert 'class="stage news-inline-stage"' in html
+    assert 'src="../news_images/nvidia.png"' in html
+    assert "rotationY" in html and "transformPerspective" in html
+    assert "duration: 11.65" in html
+    assert "gsap.to(" not in html
+
+
+def test_fullscreen_news_image_uses_a_masked_reveal_and_separate_ken_burns_layer():
+    html = sk.render_scene(
+        plan(
+            archetype="news_image",
+            kicker="LAUNCH",
+            body="Falcon 9 cleared the tower.",
+            news_image_src="../news_images/launch.jpg",
+            news_image_mode="fullscreen",
+            news_image_kind="event",
+            news_image_fit="cover",
+            news_image_credit="Image: NASA · Public domain",
+            news_image_caption="Falcon 9 launch",
+        )
+    )
+
+    assert validate_scene_html(html, "scene-01") == []
+    assert 'class="news-full-frame"' in html
+    assert "clipPath" in html
+    assert f'#{"scene-01"}-image-frame' in html
+    assert f'#{"scene-01"}-image' in html
+    assert "scale: 1.025" in html
+
+
 def test_video_footage_declares_hyperframes_media_timing():
     html = sk.render_scene(
         plan(

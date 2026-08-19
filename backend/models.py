@@ -85,6 +85,12 @@ class TaskConfig(BaseModel):
     # a visible recurring motif without making every scene visually identical.
     collage_broll_enabled: bool = True
     collage_broll_count: int = Field(default=4, ge=2, le=10)
+    # Scene-grounded still imagery is a third visual source, separate from
+    # generated Paper-Collage motion and public video footage. It is enabled for
+    # new and migrated task payloads so daily editions cannot silently regress
+    # to typography-only scenes.
+    news_images_enabled: bool = True
+    news_image_count: int = Field(default=4, ge=2, le=12)
     # Generate a script-driven cover through the signed-in ChatGPT web app.
     # This runs before TTS and can therefore be tested independently.
     thumbnail_enabled: bool = True
@@ -516,6 +522,7 @@ class DailyAutomationSettings(BaseModel):
     tts_model: str = "orpheus-en"
     voice: str = "leah"
     collage_broll_count: int = Field(default=4, ge=2, le=10)
+    news_image_count: int = Field(default=4, ge=2, le=12)
     public_footage_enabled: bool = False
     # Public-footage and Paper-Collage clips are separate visual sources. Keep
     # both counts in the desk recipe so scheduled editions never fall back to

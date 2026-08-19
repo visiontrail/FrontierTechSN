@@ -383,6 +383,25 @@ def test_visual_grounding_report_rejects_collage_moved_to_another_scene():
     assert report["passed"] is False
 
 
+def test_visual_grounding_report_accepts_exact_licensed_news_image():
+    data = board(1)
+    data["scenes"][0]["text"] = "NVIDIA announced the Vera CPU."
+    plans = visual_plan.fallback_plan(data)
+    plans[0].update(
+        {
+            "news_image": True,
+            "news_image_source_scene_id": "scene-01",
+            "news_image_match_terms": ["nvidia"],
+            "news_image_license": "Public domain",
+        }
+    )
+
+    report = visual_plan.visual_grounding_report(plans, data)
+
+    assert report["passed"] is True
+    assert "licensed news image" in report["scenes"][0]["reason"]
+
+
 def test_outro_plan_is_spine_owned():
     data = board(1)
     outro = visual_plan.outro_plan(data)

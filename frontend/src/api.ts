@@ -25,6 +25,8 @@ export interface TaskConfig {
   footage_multimodal_analyzer?: 'gemini_web';
   collage_broll_enabled?: boolean;
   collage_broll_count?: number;
+  news_images_enabled?: boolean;
+  news_image_count?: number;
   thumbnail_enabled?: boolean;
   auto_render?: boolean;
   news_language?: 'en' | 'zh';
@@ -176,6 +178,7 @@ export interface DailyAutomationSettings {
   tts_model: string;
   voice: string;
   collage_broll_count: number;
+  news_image_count: number;
   public_footage_enabled: boolean;
   footage_clip_count: number;
   background_music_provider: 'gemini_create_music' | 'local';

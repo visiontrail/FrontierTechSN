@@ -57,6 +57,30 @@ def test_cached_scene_plans_require_every_current_storyboard_scene(tmp_path):
     assert composer._load_cached_scene_plans(tmp_path, board) is None
 
 
+def test_cached_scene_plans_strip_news_image_placement_state(tmp_path):
+    board = {"scenes": [{"id": "scene-01"}]}
+    (tmp_path / "visual_plan.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "scene-01",
+                    "archetype": "news_image",
+                    "headline": "Launch",
+                    "news_image": True,
+                    "news_image_src": "../news_images/launch.jpg",
+                    "news_image_mode": "fullscreen",
+                    "news_image_original_archetype": "statement",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cached = composer._load_cached_scene_plans(tmp_path, board)
+
+    assert cached == [{"id": "scene-01", "archetype": "statement", "headline": "Launch"}]
+
+
 def test_quality_failures_become_final_delivery_warnings():
     warnings = composer._quality_warnings(
         {

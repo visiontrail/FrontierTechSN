@@ -53,6 +53,7 @@ export default function MorningDesk() {
   const draft = draftOverride ?? (persisted ? {
     ...persisted,
     footage_clip_count: persisted.footage_clip_count ?? 8,
+    news_image_count: persisted.news_image_count ?? 4,
   } : null)
   const {
     data: voices = [],
@@ -173,6 +174,7 @@ export default function MorningDesk() {
     && inRange(draft.max_stories, 3, 12)
     && inRange(draft.source_window_hours, 12, 96)
     && inRange(draft.collage_broll_count, 2, 10)
+    && inRange(draft.news_image_count, 2, 12)
     && inRange(draft.footage_clip_count, 1, 30)
   const dirty = JSON.stringify(recipe) !== JSON.stringify(data.settings)
   const actionPending = save.isPending || run.isPending
@@ -253,10 +255,14 @@ export default function MorningDesk() {
           </article>
 
           <article className="morning-config-panel morning-config-panel--visual">
-            <header><span>04</span><div><strong>Visual recipe</strong><small>Generated collage and sourced footage are separate</small></div></header>
+            <header><span>04</span><div><strong>Visual recipe</strong><small>Collage, news imagery, and footage are separate</small></div></header>
             <div className="morning-visual-row">
               <div className="morning-visual-copy"><b>Paper-Collage</b><small>Generated visual metaphors · always on</small></div>
               <label><span>Clips / edition</span><input type="number" min="2" max="10" value={draft.collage_broll_count} onChange={(event) => patch('collage_broll_count', Number(event.target.value))} /></label>
+            </div>
+            <div className="morning-visual-row is-enabled">
+              <div className="morning-visual-copy"><b>News imagery</b><small>OpenCLI-grounded logos and event stills · inline + full screen</small></div>
+              <label><span>Images / edition</span><input type="number" min="2" max="12" value={draft.news_image_count} onChange={(event) => patch('news_image_count', Number(event.target.value))} /></label>
             </div>
             <div className={`morning-visual-row ${draft.public_footage_enabled ? 'is-enabled' : ''}`}>
               <label className="morning-inline-switch morning-inline-switch--compact">

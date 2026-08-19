@@ -585,6 +585,8 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
         opening_style=task.config.opening_style,
         collage_broll_enabled=task.config.collage_broll_enabled,
         collage_broll_count=task.config.collage_broll_count,
+        news_images_enabled=task.config.news_images_enabled,
+        news_image_count=task.config.news_image_count,
         is_monologue=task.config.script_format == ScriptFormat.MONOLOGUE,
         # The compose stage now runs its own AI calls (art direction, then the
         # Claude Agent SDK authoring crews), so it needs the same provider the
