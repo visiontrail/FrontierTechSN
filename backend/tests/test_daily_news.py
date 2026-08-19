@@ -207,6 +207,8 @@ def test_daily_desk_defaults_to_unattended_next_run():
 
     assert settings.enabled is True
     assert settings.catch_up_after_restart is False
+    assert settings.tts_model == "orpheus-en"
+    assert settings.voice == "tara"
     assert settings.auto_publish is True
     assert settings.publish_targets == ["youtube", "x", "apple_podcast"]
     assert settings.publish_visibility == "public"
