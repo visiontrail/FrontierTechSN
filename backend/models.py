@@ -514,7 +514,7 @@ class DailyAutomationSettings(BaseModel):
     max_stories: int = Field(default=6, ge=3, le=12)
     source_window_hours: int = Field(default=36, ge=12, le=96)
     tts_model: str = "orpheus-en"
-    voice: str = "tara"
+    voice: str = "leah"
     collage_broll_count: int = Field(default=4, ge=2, le=10)
     public_footage_enabled: bool = False
     # Public-footage and Paper-Collage clips are separate visual sources. Keep
