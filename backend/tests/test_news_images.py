@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from backend.pipeline import news_images, visual_plan
 
@@ -157,7 +157,13 @@ def _image_bytes(
 ) -> bytes:
     payload = io.BytesIO()
     color = tuple(hashlib.sha256(seed.encode("utf-8")).digest()[:3])
-    Image.new("RGB", size, color).save(payload, format=format_name)
+    image = Image.new("RGB", size, color)
+    accent = (255, 255, 255) if sum(color) < 384 else (0, 0, 0)
+    ImageDraw.Draw(image).rectangle(
+        (size[0] // 4, size[1] // 4, 3 * size[0] // 4, 3 * size[1] // 4),
+        fill=accent,
+    )
+    image.save(payload, format=format_name)
     return payload.getvalue()
 
 
@@ -998,10 +1004,101 @@ def test_cached_asset_rejects_tiny_and_decompression_bomb_rasters(tmp_path: Path
     )
 
 
-def test_license_gate_rejects_mixed_or_proprietary_markers():
-    assert news_images._is_open_license("CC BY-SA 4.0") is True
-    assert news_images._is_open_license("All rights reserved; CC BY", "copyright") is False
-    assert news_images._is_open_license("Proprietary", "CC-BY") is False
+def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
+    asset_dir = tmp_path / "news_images"
+    asset_dir.mkdir()
+
+    def assert_payload(
+        payload: bytes,
+        *,
+        kind: str,
+        expected: bool,
+        suffix: str = ".png",
+    ) -> None:
+        path = asset_dir / f"image-01{suffix}"
+        path.write_bytes(payload)
+        record = {
+            "local_path": f"news_images/image-01{suffix}",
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "kind": kind,
+        }
+        assert news_images._cached_asset_is_intact(tmp_path, record) is expected
+
+    transparent = io.BytesIO()
+    Image.new("RGBA", (800, 450), (0, 0, 0, 0)).save(transparent, format="PNG")
+    assert_payload(transparent.getvalue(), kind="event", expected=False)
+
+    single_pixel = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    single_pixel.putpixel((400, 225), (255, 255, 255, 255))
+    one_pixel = io.BytesIO()
+    single_pixel.save(one_pixel, format="PNG")
+    assert_payload(one_pixel.getvalue(), kind="event", expected=False)
+
+    barely_visible = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    ImageDraw.Draw(barely_visible).rectangle((0, 0, 9, 9), fill=(20, 80, 220, 255))
+    sparse = io.BytesIO()
+    barely_visible.save(sparse, format="PNG")
+    assert_payload(sparse.getvalue(), kind="event", expected=False)
+
+    logo = Image.new("RGBA", (656, 120), (0, 0, 0, 0))
+    ImageDraw.Draw(logo).rectangle((80, 30, 575, 89), fill=(15, 75, 210, 255))
+    transparent_logo = io.BytesIO()
+    logo.save(transparent_logo, format="PNG")
+    assert_payload(transparent_logo.getvalue(), kind="logo", expected=True)
+
+    assert_payload(
+        _image_bytes("JPEG", "ordinary-photo"),
+        kind="event",
+        expected=True,
+        suffix=".jpg",
+    )
+
+    blank = io.BytesIO()
+    Image.new("RGB", (800, 450), "white").save(blank, format="PNG")
+    assert_payload(blank.getvalue(), kind="event", expected=False)
+
+
+@pytest.mark.parametrize(
+    ("short_name", "license_code"),
+    [
+        ("Public domain", ""),
+        ("Public Domain Mark 1.0", ""),
+        ("", "PD-old-auto-expired"),
+        ("", "PD-USGov-NASA"),
+        ("CC0 1.0 Universal", "cc-zero"),
+        ("CC BY", ""),
+        ("CC-BY-4.0", ""),
+        ("CC BY-SA 3.0 DE", ""),
+        ("Creative Commons Attribution-Share Alike 4.0 International", ""),
+    ],
+)
+def test_license_gate_accepts_strict_commons_values(short_name: str, license_code: str):
+    assert news_images._is_open_license(short_name, license_code) is True
+
+
+@pytest.mark.parametrize(
+    ("short_name", "license_code"),
+    [
+        ("All rights reserved; CC BY", "copyright"),
+        ("Proprietary", "CC-BY"),
+        ("Not public domain", ""),
+        ("This file is not licensed under CC BY", ""),
+        ("", "not-cc-by"),
+        ("CC BY", "Creative Commons Attribution Non-Commercial"),
+        ("CC BY 4.0", "unknown-license-code"),
+        ("CC BY-NC 4.0", ""),
+        ("CC BY-ND 4.0", ""),
+        ("PD-totally-bogus", ""),
+        ("CC BY 4.5", ""),
+        ("CC BY 3.0 ZZ", ""),
+    ],
+)
+def test_license_gate_rejects_negated_restricted_or_malformed_values(
+    short_name: str,
+    license_code: str,
+):
+    assert news_images._is_open_license(short_name, license_code) is False
 
 
 @pytest.mark.asyncio

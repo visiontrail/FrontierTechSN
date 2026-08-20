@@ -46,22 +46,56 @@ SUPPORTED_MIME_TYPES = {
     "image/png",
     "image/webp",
 }
-OPEN_LICENSE_MARKERS = (
-    "public domain",
-    "cc0",
-    "cc by",
-    "cc-by",
-    "cc by-sa",
-    "cc-by-sa",
+LICENSE_NEGATIVE_RE = re.compile(
+    r"(?:\ball rights reserved\b|\bcopyright(?:ed)?\b|\b(?:nc|nd|no|not|proprietary|"
+    r"unlicensed|without)\b|\bnon\s*commercial\b)",
+    flags=re.IGNORECASE,
 )
-UNSAFE_LICENSE_MARKERS = (
-    "all rights reserved",
-    "copyright",
-    "noncommercial",
-    "no derivatives",
-    "proprietary",
-    "-nc",
-    "-nd",
+PUBLIC_DOMAIN_LICENSES = frozenset(
+    {
+        "pd",
+        "pd anon expired",
+        "pd art",
+        "pd author",
+        "pd because",
+        "pd ineligible",
+        "pd nasa",
+        "pd old",
+        "pd old 50",
+        "pd old 70",
+        "pd old 80",
+        "pd old 100",
+        "pd old 100 expired",
+        "pd old assumed",
+        "pd old auto",
+        "pd old auto expired",
+        "pd self",
+        "pd shape",
+        "pd textlogo",
+        "pd us",
+        "pd us expired",
+        "pd usgov",
+        "pd usgov nasa",
+        "public domain",
+        "public domain mark",
+        "public domain mark 1.0",
+    }
+)
+CC_VERSION_PATTERN = r"(?:1\.0|2\.0|2\.5|3\.0|4\.0)"
+CC_REGION_PATTERN = (
+    r"(?:ar|at|au|be|br|ca|ch|cl|cn|co|de|dk|ec|eg|es|fi|fr|gr|gt|hk|hr|hu|ie|"
+    r"igo|il|in|international|it|jp|kr|lu|mk|mt|mx|my|nl|nz|pe|ph|pl|pr|pt|ro|"
+    r"rs|scotland|se|sg|si|th|tw|uk|unported|us|ve|za)"
+)
+CC0_LICENSE_RE = re.compile(r"cc(?:0| zero)(?: 1\.0)?(?: universal)?", flags=re.IGNORECASE)
+CC_LICENSE_RE = re.compile(
+    rf"cc by(?: sa)?(?: {CC_VERSION_PATTERN}(?: {CC_REGION_PATTERN})?)?",
+    flags=re.IGNORECASE,
+)
+CC_LONG_LICENSE_RE = re.compile(
+    rf"creative commons attribution(?: share alike)?"
+    rf"(?: {CC_VERSION_PATTERN}(?: {CC_REGION_PATTERN})?)?",
+    flags=re.IGNORECASE,
 )
 PLAN_KINDS = {"logo", "event", "person", "place", "product", "object"}
 PLAN_MODES = {"inline", "fullscreen"}
@@ -136,10 +170,17 @@ def _metadata_value(metadata: dict, key: str) -> str:
 
 
 def _is_open_license(short_name: str, license_code: str = "") -> bool:
-    combined = f"{short_name} {license_code}".strip().lower()
-    if not combined or any(marker in combined for marker in UNSAFE_LICENSE_MARKERS):
+    values = [str(value or "").strip() for value in (short_name, license_code) if str(value or "").strip()]
+    normalized = [" ".join(re.sub(r"[-_]+", " ", value).casefold().split()) for value in values]
+    if not normalized or LICENSE_NEGATIVE_RE.search(" ".join(normalized)):
         return False
-    return any(marker in combined for marker in OPEN_LICENSE_MARKERS)
+    return all(
+        value in PUBLIC_DOMAIN_LICENSES
+        or CC0_LICENSE_RE.fullmatch(value)
+        or CC_LICENSE_RE.fullmatch(value)
+        or CC_LONG_LICENSE_RE.fullmatch(value)
+        for value in normalized
+    )
 
 
 def _terms(value: object) -> set[str]:
@@ -508,6 +549,37 @@ def _owned_generated_asset_path(task_dir: Path, image: dict) -> Path | None:
     return path if digest.hexdigest() == expected_sha256 else None
 
 
+def _raster_has_visible_content(decoded: Image.Image) -> bool:
+    width, height = decoded.size
+    total = width * height
+    minimum_visible = max(256, math.ceil(total * 0.001))
+    alpha = None
+    if "A" in decoded.getbands():
+        alpha = decoded.getchannel("A")
+    elif decoded.mode == "P" and "transparency" in decoded.info:
+        alpha = decoded.convert("RGBA").getchannel("A")
+    if alpha is not None:
+        histogram = alpha.histogram()
+        visible = sum(histogram[16:])
+        if visible < minimum_visible:
+            return False
+        low, high = alpha.getextrema()
+        if low != high:
+            return True
+
+    rgb = decoded.convert("RGB")
+    for channel in rgb.split():
+        histogram = channel.histogram()
+        occupied = [value for value, count in enumerate(histogram) if count]
+        if not occupied or occupied[-1] - occupied[0] < 8:
+            continue
+        dominant = max(range(256), key=histogram.__getitem__)
+        near_dominant = sum(histogram[max(0, dominant - 2) : min(256, dominant + 3)])
+        if total - near_dominant >= minimum_visible:
+            return True
+    return False
+
+
 def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
     local = _generated_asset_path(task_dir, image.get("local_path"))
     if local is None:
@@ -544,8 +616,10 @@ def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
                     return False
             elif width < 640 or height < 360:
                 return False
-            decoded.verify()
-    except (Image.DecompressionBombError, OSError, UnidentifiedImageError, ValueError):
+            decoded.load()
+            if not _raster_has_visible_content(decoded):
+                return False
+    except (Image.DecompressionBombError, OSError, SyntaxError, UnidentifiedImageError, ValueError):
         return False
     return True
 
