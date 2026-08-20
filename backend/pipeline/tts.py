@@ -70,6 +70,11 @@ ORDINAL_DIGITS = {
     "5th": "fifth", "6th": "sixth", "7th": "seventh", "8th": "eighth",
     "9th": "ninth", "10th": "tenth", "20th": "twentieth", "30th": "thirtieth",
 }
+CALENDAR_MONTHS = {
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+}
+CALENDAR_ORDINAL_RE = re.compile(r"([0-9]{1,2})(?:st|nd|rd|th)")
 # Acoustic verification cannot distinguish exact homophones. Keep this list
 # deliberately narrow; near-homophones such as ``feed``/``feet`` must still fail.
 ACOUSTIC_EQUIVALENTS = {
@@ -168,7 +173,23 @@ def _lexical_tokens(text: str) -> list[str]:
             continue
         value = ACOUSTIC_EQUIVALENTS.get(value, value)
         normalized.append(ORDINAL_DIGITS.get(value, NUMBER_WORDS.get(value, value)))
-    return _canonicalize_number_tokens(_canonicalize_acoustic_phrase_tokens(normalized))
+    return _canonicalize_calendar_date_tokens(
+        _canonicalize_number_tokens(_canonicalize_acoustic_phrase_tokens(normalized))
+    )
+
+
+def _canonicalize_calendar_date_tokens(tokens: list[str]) -> list[str]:
+    """Match written month-day dates to their conventionally spoken ordinal."""
+    result = list(tokens)
+    for index in range(1, len(result)):
+        if result[index - 1] not in CALENDAR_MONTHS:
+            continue
+        value = result[index]
+        ordinal_match = CALENDAR_ORDINAL_RE.fullmatch(value)
+        day_text = ordinal_match.group(1) if ordinal_match else value
+        if day_text.isdigit() and 1 <= int(day_text) <= 31:
+            result[index] = f"calendar-day-{int(day_text)}"
+    return result
 
 
 def _canonicalize_acoustic_phrase_tokens(tokens: list[str]) -> list[str]:
@@ -317,7 +338,7 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
         cursor += 1
     tokens = acoustic_tokens
     word_indexes = acoustic_indexes
-    canonical = _canonicalize_number_tokens(tokens)
+    canonical = _canonicalize_calendar_date_tokens(_canonicalize_number_tokens(tokens))
     if len(canonical) == len(tokens):
         return canonical, word_indexes
     # Canonical number collapsing is used only for lexical comparison. Timing
