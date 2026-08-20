@@ -78,6 +78,12 @@ ACOUSTIC_EQUIVALENTS = {
     # Whisper uses the contraction spelling for either meaning, so spelling
     # cannot be used as acoustic evidence that the narration is wrong.
     "it's": "its",
+    # Possessive "your" and the contraction "you're" are likewise
+    # acoustically indistinguishable. The live Morning Desk run returned every
+    # requested word and both edge anchors, but Whisper selected the contraction
+    # spelling. Canonicalize only that exact homophone; missing, repeated, and
+    # merely similar words must still fail the 100% utterance gate.
+    "you're": "your",
     # Whisper consistently labels the rare spoken word "eunuch" as the
     # familiar two-syllable proper noun "Unix", including at 0.8x speed.
     "unix": "eunuch",
@@ -719,6 +725,25 @@ def _validate_wav_part(
     return info
 
 
+def _validate_downloaded_wav_container(path: Path) -> WavInfo:
+    """Reject an invalid or truncated HTTP payload before replacing cached audio."""
+    info = _read_pcm_wav(path)
+    expected_pcm_bytes = info.frame_count * info.channels * info.sample_width
+    try:
+        with wave.open(str(path), "rb") as handle:
+            pcm_bytes = handle.readframes(info.frame_count)
+    except (wave.Error, EOFError, OSError) as exc:
+        raise TtsIntegrityError(
+            f"Orpheus downloaded an unreadable WAV payload at {path}: {exc}"
+        ) from exc
+    if len(pcm_bytes) != expected_pcm_bytes:
+        raise TtsIntegrityError(
+            "Orpheus downloaded a truncated WAV payload: "
+            f"expected {expected_pcm_bytes} PCM bytes, received {len(pcm_bytes)}"
+        )
+    return info
+
+
 async def _concat_wav_parts(
     wav_parts: list[Path], output_dir: Path, *, log: LogCallback | None
 ) -> Path:
@@ -1111,6 +1136,25 @@ async def _recover_orpheus_part(
     return metadata
 
 
+def _orpheus_http_error_text(exc: Exception) -> str:
+    """Keep transport failures useful even when httpx provides an empty message."""
+    error_type = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        error_type = f"{error_type} (HTTP {exc.response.status_code})"
+    detail = str(exc).strip()
+    return f"{error_type}: {detail}" if detail else error_type
+
+
+def _is_permanent_orpheus_http_error(exc: Exception) -> bool:
+    """Return whether retrying the same Orpheus request cannot heal the response."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    status_code = exc.response.status_code
+    if 300 <= status_code < 400:
+        return True
+    return 400 <= status_code < 500 and status_code not in {408, 425, 429}
+
+
 async def _generate_orpheus(
     script_path: str,
     output_dir: str,
@@ -1209,19 +1253,68 @@ async def _generate_orpheus(
                 raise RuntimeError(f"{name} could not submit an Orpheus job: {exc}") from exc
             emit(f"{name}: Orpheus job {job_id} queued (voice={voice})")
             deadline = time.monotonic() + config.TTS_TIMEOUT
+            stall_timeout = max(1, config.TTS_STALL_TIMEOUT)
+            poll_interval = max(1, config.ORPHEUS_TTS_POLL_SECONDS)
+            last_successful_poll = time.monotonic()
+            last_poll_error: Exception | None = None
+            last_poll_error_text = ""
+            last_poll_error_log_at = float("-inf")
             last_status = ""
             while True:
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= deadline:
                     raise TimeoutError(
                         f"{name} Orpheus job {job_id} exceeded {config.TTS_TIMEOUT}s"
                     )
+                if (
+                    last_poll_error is not None
+                    and now - last_successful_poll >= stall_timeout
+                ):
+                    raise TimeoutError(
+                        f"{name} Orpheus job {job_id} had no successful poll for "
+                        f"{stall_timeout}s; last error: "
+                        f"{_orpheus_http_error_text(last_poll_error)}"
+                    ) from last_poll_error
                 try:
                     response = await client.get(f"{base_url}/v1/audio/jobs/{job_id}")
                     response.raise_for_status()
                     job = response.json()
+                    if not isinstance(job, dict):
+                        raise ValueError("Orpheus poll response was not a JSON object")
+                    status = str(job.get("status") or "").strip().lower()
+                    if not status:
+                        raise ValueError(
+                            "Orpheus poll response did not contain a non-empty status"
+                        )
                 except (httpx.HTTPError, ValueError) as exc:
-                    raise RuntimeError(f"{name} could not poll Orpheus job {job_id}: {exc}") from exc
-                status = str(job.get("status", "")).lower()
+                    if _is_permanent_orpheus_http_error(exc):
+                        raise RuntimeError(
+                            f"{name} could not poll Orpheus job {job_id}: "
+                            f"{_orpheus_http_error_text(exc)}"
+                        ) from exc
+                    last_poll_error = exc
+                    error_text = _orpheus_http_error_text(exc)
+                    now = time.monotonic()
+                    if (
+                        error_text != last_poll_error_text
+                        or now - last_poll_error_log_at >= 30
+                    ):
+                        emit(
+                            f"{name}: transient Orpheus poll error for job {job_id} "
+                            f"({error_text}); retrying the same job"
+                        )
+                        last_poll_error_text = error_text
+                        last_poll_error_log_at = now
+                    if now - last_successful_poll >= stall_timeout:
+                        raise TimeoutError(
+                            f"{name} Orpheus job {job_id} had no successful poll for "
+                            f"{stall_timeout}s; last error: {error_text}"
+                        ) from exc
+                    await asyncio.sleep(poll_interval)
+                    continue
+                last_successful_poll = time.monotonic()
+                last_poll_error = None
+                last_poll_error_text = ""
                 if status != last_status:
                     emit(f"{name}: Orpheus job {job_id} is {status or 'unknown'}")
                     last_status = status
@@ -1230,14 +1323,63 @@ async def _generate_orpheus(
                 if status in {"failed", "cancelled", "canceled", "error"}:
                     detail = job.get("error") or job.get("detail") or "no error detail"
                     raise RuntimeError(f"{name} Orpheus job {job_id} failed: {detail}")
-                await asyncio.sleep(max(1, config.ORPHEUS_TTS_POLL_SECONDS))
-            try:
-                response = await client.get(f"{base_url}/v1/audio/jobs/{job_id}/audio")
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise RuntimeError(f"{name} could not download Orpheus job {job_id}: {exc}") from exc
+                await asyncio.sleep(poll_interval)
+
+            download_started_at = time.monotonic()
+            last_download_error: Exception | None = None
+            last_download_error_text = ""
+            last_download_error_log_at = float("-inf")
             staged_part = expected_part.with_suffix(".tmp.wav")
-            staged_part.write_bytes(response.content)
+            while True:
+                now = time.monotonic()
+                if now >= deadline:
+                    raise TimeoutError(
+                        f"{name} Orpheus job {job_id} exceeded {config.TTS_TIMEOUT}s "
+                        "while downloading audio"
+                    )
+                if (
+                    last_download_error is not None
+                    and now - download_started_at >= stall_timeout
+                ):
+                    raise TimeoutError(
+                        f"{name} Orpheus job {job_id} audio download had no success "
+                        f"for {stall_timeout}s; last error: "
+                        f"{_orpheus_http_error_text(last_download_error)}"
+                    ) from last_download_error
+                try:
+                    response = await client.get(
+                        f"{base_url}/v1/audio/jobs/{job_id}/audio"
+                    )
+                    response.raise_for_status()
+                    staged_part.write_bytes(response.content)
+                    _validate_downloaded_wav_container(staged_part)
+                    break
+                except (httpx.HTTPError, TtsIntegrityError) as exc:
+                    staged_part.unlink(missing_ok=True)
+                    if _is_permanent_orpheus_http_error(exc):
+                        raise RuntimeError(
+                            f"{name} could not download Orpheus job {job_id}: "
+                            f"{_orpheus_http_error_text(exc)}"
+                        ) from exc
+                    last_download_error = exc
+                    error_text = _orpheus_http_error_text(exc)
+                    now = time.monotonic()
+                    if (
+                        error_text != last_download_error_text
+                        or now - last_download_error_log_at >= 30
+                    ):
+                        emit(
+                            f"{name}: transient Orpheus audio download error for "
+                            f"job {job_id} ({error_text}); retrying the same job"
+                        )
+                        last_download_error_text = error_text
+                        last_download_error_log_at = now
+                    if now - download_started_at >= stall_timeout:
+                        raise TimeoutError(
+                            f"{name} Orpheus job {job_id} audio download had no "
+                            f"success for {stall_timeout}s; last error: {error_text}"
+                        ) from exc
+                    await asyncio.sleep(poll_interval)
             os.replace(staged_part, expected_part)
             try:
                 _validate_wav_part(
