@@ -218,6 +218,16 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             "Q-bit A-I reports the result.",
         )
 
+    def test_orpheus_prompt_articulates_brem_possessive_vowel(self):
+        self.assertEqual(
+            tts._orpheus_prompt_text("Brem's research indicates a result"),
+            "Brehm's research indicates a result.",
+        )
+        self.assertEqual(
+            tts._orpheus_prompt_text("Alexander Brem reported a result"),
+            "Alexander Brem reported a result.",
+        )
+
     def test_orpheus_prompt_articulates_leading_describes_inflection(self):
         text = "describes situations where employees have promising ideas"
 

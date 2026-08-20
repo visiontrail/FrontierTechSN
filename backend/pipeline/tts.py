@@ -919,6 +919,16 @@ def _orpheus_prompt_text(text: str) -> str:
         "Q-bit A-I",
         stripped,
     )
+    # Orpheus realized the possessive German surname with the central vowel in
+    # "Brum" at every ASR playback speed. The conventional silent-h spelling
+    # exposes the intended /ɛ/ pronunciation to the provider while canonical
+    # verification still requires Brem's (or the exact Brehm's spelling).
+    stripped = re.sub(
+        r"(?<![\w-])Brem(['’]s)(?![\w-])",
+        r"Brehm\1",
+        stripped,
+        flags=re.IGNORECASE,
+    )
     # A generated continuation beginning with this third-person verb repeatedly
     # lost its final /s/, including after a ``describe-s`` tokenizer hint. Give
     # the exact observed transition an articulation pause; the canonical
