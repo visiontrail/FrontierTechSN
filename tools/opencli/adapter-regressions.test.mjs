@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import vm from 'node:vm'
 
 import { selectChatGPTModel } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import {
@@ -12,6 +13,7 @@ import {
 import {
   uploadFrame,
   uploadFrames,
+  submittedVideoPrompt,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
 
 function videoFrameFixture(t, names = ['first-frame.png']) {
@@ -38,6 +40,10 @@ function videoUploadPage({ native = 'success', cdp = false, clear = false, busyR
       actions.push(['wait', value])
     },
     async evaluate(script) {
+      // Parse the exact inner script handed to Browser Bridge. `node --check`
+      // only validates this test/module and misses template-literal unescaping
+      // that can corrupt a regex before Runtime.evaluate sees it.
+      new vm.Script(script)
       if (script.includes("input.setAttribute('data-opencli-video-upload-target'")) {
         const match = script.match(/const marker = ("(?:[^"\\]|\\.)*")/)
         const marker = match ? JSON.parse(match[1]) : 'missing-marker'
@@ -216,6 +222,38 @@ test('Gemini video uploads first and last keyframes sequentially with cumulative
   assert.notEqual(uploads[0][2], uploads[1][2])
   assert.equal(page.actions.filter(([action]) => action === 'click').length, 2)
   assert.equal(page.actions.filter(([action]) => action === 'cleanup').length, 2)
+})
+
+test('Gemini video submitted-state page script compiles and executes after template expansion', async () => {
+  let pathname = '/videos'
+  let draft = ''
+  let userQuery = false
+  const page = {
+    async evaluate(script) {
+      return vm.runInNewContext(script, {
+        document: {
+          querySelector(selector) {
+            if (selector === 'user-query') return userQuery ? {} : null
+            if (selector.includes('[contenteditable="true"]')) {
+              return { textContent: draft }
+            }
+            return null
+          },
+        },
+        location: { pathname },
+      })
+    },
+  }
+
+  assert.equal(await submittedVideoPrompt(page), false)
+  pathname = '/app/abc123'
+  assert.equal(await submittedVideoPrompt(page), true)
+  draft = 'prompt still present'
+  assert.equal(await submittedVideoPrompt(page), false)
+  pathname = '/videos'
+  draft = ''
+  userQuery = true
+  assert.equal(await submittedVideoPrompt(page), true)
 })
 
 test('Gemini clicks a discovered semantic send button instead of pressing Enter', async () => {

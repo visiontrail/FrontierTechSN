@@ -375,11 +375,12 @@ export async function uploadFrames(page, filePaths, options) {
     }
 }
 
-async function submittedVideoPrompt(page) {
+export async function submittedVideoPrompt(page) {
     const state = unwrap(await page.evaluate(`(() => {
       const composer = document.querySelector('[contenteditable="true"][role="textbox"]');
+      const pathParts = location.pathname.toLowerCase().split('/').filter(Boolean);
       return {
-        submitted: !!document.querySelector('user-query') || /^\/app\/[a-z0-9]+/i.test(location.pathname),
+        submitted: !!document.querySelector('user-query') || (pathParts[0] === 'app' && !!pathParts[1]),
         draft: String(composer?.textContent || '').trim(),
       };
     })()`));
