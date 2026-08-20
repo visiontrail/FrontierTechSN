@@ -1348,8 +1348,20 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             report("Nikke Asia reports that China is restricting exports")["verified"]
         )
+        self.assertTrue(
+            report("Nikkei Aja reports that China is restricting exports")["verified"]
+        )
         self.assertFalse(
             report("Nike Asia reports that China is restricting exports")["verified"]
+        )
+        self.assertFalse(
+            report("Nikke Aja reports that China is restricting exports")["verified"]
+        )
+        self.assertFalse(
+            report("Nikkei Ajax reports that China is restricting exports")["verified"]
+        )
+        self.assertFalse(
+            report("Nikkei Asha reports that China is restricting exports")["verified"]
         )
         self.assertFalse(
             report("Nikke Europe reports that China is restricting exports")["verified"]

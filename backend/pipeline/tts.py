@@ -132,6 +132,10 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     # unrelated Nikke token remains distinct.
     ("nikkei", "asia"): "nikkeiasia",
     ("nikke", "asia"): "nikkeiasia",
+    # A second complete live utterance produced the exact homophonic name
+    # spelling "Nikkei Aja" at three playback speeds. Keep this spelling
+    # equivalence constrained to the verified publication-name context.
+    ("nikkei", "aja"): "nikkeiasia",
     # Hyphenation is not audible; Whisper may split the source compound.
     ("semi", "annual"): "semiannual",
     ("skunk", "works"): "skunkworks",
