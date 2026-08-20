@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from backend import config
 from backend.daily_news.research import ResearchDossier
@@ -18,6 +20,12 @@ from backend.daily_news.scriptwriter import (
 from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
 
 LogCallback = Callable[[str], None]
+
+_REVIEW_REQUEST_RE = re.compile(r"REVIEW_REQUEST_ID:([0-9a-f]{32})", re.I)
+_CHATGPT_CONVERSATION_URL_RE = re.compile(
+    r"https://chatgpt\.com/c/[0-9a-z-]+",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,62 @@ def _field(row: dict[str, Any], name: str) -> str:
     for key, value in row.items():
         if str(key).casefold() == name.casefold():
             return str(value or "").strip()
+    return ""
+
+
+def _normalized_review_token(text: str) -> str:
+    """Normalize only known UI wrappers while preserving exact-token safety."""
+    clean = unicodedata.normalize("NFKC", str(text or ""))
+    clean = clean.translate(
+        {
+            ord("\ufeff"): None,
+            ord("\u200b"): None,
+            ord("\u200c"): None,
+            ord("\u200d"): None,
+            ord("\ufe0f"): None,
+        }
+    ).strip()
+    clean = re.sub(r"^\s*💬\s*", "", clean).strip()
+    fenced = re.fullmatch(
+        r"```(?:text|plaintext)?\s*(.*?)\s*```",
+        clean,
+        flags=re.I | re.S,
+    )
+    if fenced:
+        clean = fenced.group(1).strip()
+    inline = re.fullmatch(r"`([^`]*)`", clean, flags=re.S)
+    if inline:
+        clean = inline.group(1).strip()
+    return "".join(clean.split()).upper()
+
+
+def _assistant_for_review_request(
+    rows: list[dict[str, Any]],
+    request_id: str,
+) -> str:
+    """Return only the assistant turn owned by the current review request."""
+    marker = f"REVIEW_REQUEST_ID:{request_id}".casefold()
+    anchor = -1
+    for index, row in enumerate(rows):
+        if _field(row, "Role").casefold() != "user":
+            continue
+        if marker in _field(row, "Text").casefold():
+            anchor = index
+    if anchor < 0:
+        return ""
+
+    for row in rows[anchor + 1 :]:
+        role = _field(row, "Role").casefold()
+        text = _field(row, "Text")
+        if role == "user":
+            other_request = _REVIEW_REQUEST_RE.search(text)
+            if other_request and other_request.group(1).casefold() != request_id.casefold():
+                return ""
+            # Gemini may expose one submitted prompt as a full User turn plus
+            # several text fragments. Fragment rows have no request marker.
+            continue
+        if role == "assistant" and text:
+            return text
     return ""
 
 
@@ -226,8 +290,8 @@ STORY EVIDENCE
 
 
 def _single_line_payload(text: str, story_number: int) -> dict[str, Any]:
-    clean = " ".join(text.strip().split())
-    if clean.upper() == "P":
+    clean = _normalized_review_token(text)
+    if clean == "P":
         return {
             "approved": True,
             "confidence": 100,
@@ -235,7 +299,7 @@ def _single_line_payload(text: str, story_number: int) -> dict[str, Any]:
             "issues": [],
             "corrected_script": "",
         }
-    if not re.fullmatch(r"[A-F]{1,6}", clean.upper()) or len(set(clean.upper())) != len(clean):
+    if not re.fullmatch(r"[A-F]{1,6}", clean) or len(set(clean)) != len(clean):
         raise ValueError("review response did not contain the complete single-line protocol")
     directives = {
         "A": "Add concise coverage of this selected story using only its evidence.",
@@ -245,7 +309,7 @@ def _single_line_payload(text: str, story_number: int) -> dict[str, Any]:
         "E": "Attribute company or source claims and preserve uncertainty language.",
         "F": "Remove contradictions and stale framing; align the story strictly to the dated evidence.",
     }
-    codes = clean.upper()
+    codes = clean
     correction = " ".join(directives[code] for code in codes)
     return {
         "approved": False,
@@ -254,7 +318,7 @@ def _single_line_payload(text: str, story_number: int) -> dict[str, Any]:
         "issues": [
             {
                 "severity": "blocking",
-                "claim": f"ChatGPT audit codes {codes} for story {story_number}",
+                "claim": f"Web audit codes {codes} for story {story_number}",
                 "verdict": correction,
                 "evidence_story_numbers": [story_number],
                 "correction": correction,
@@ -270,7 +334,7 @@ def _batch_payload(text: str, story_numbers: int | list[int]) -> dict[str, Any]:
         if isinstance(story_numbers, int)
         else story_numbers
     )
-    clean = "".join(text.strip().split()).upper()
+    clean = _normalized_review_token(text)
     matches = list(re.finditer(r"(\d+)(P|[A-F]{1,6})", clean))
     if "".join(match.group(0) for match in matches) != clean:
         raise ValueError("batch review response contained invalid characters")
@@ -335,12 +399,11 @@ def _protocol_payload(text: str) -> dict[str, Any]:
     }
 
 
-async def _chatgpt_review(
+async def _web_story_review(
     prompt: str,
     *,
     story_number: int | None = None,
     story_numbers: list[int] | None = None,
-    reuse_current: bool = False,
     log: LogCallback | None,
 ) -> tuple[dict[str, Any], str, str, str]:
     if (story_number is None) == (story_numbers is None):
@@ -354,33 +417,35 @@ async def _chatgpt_review(
         return _single_line_payload(value, story_number)
 
     timeout = config.DAILY_NEWS_WEB_REVIEW_TIMEOUT
+    request_id = uuid4().hex
     browser_prompt = " ".join(prompt.split())
-    chatgpt_args = [
-        "chatgpt",
-        "ask",
-        browser_prompt,
-        "--new",
-        "false" if reuse_current else "true",
-        "--wait",
-        "true",
-        "--timeout",
-        str(timeout),
-        "--window",
-        "background",
-        "--site-session",
-        "persistent",
-        "--keep-tab",
-        "true",
-        "-f",
-        "json",
-    ]
+    owned_prompt = (
+        f"REVIEW_REQUEST_ID:{request_id}. This marker identifies the browser turn; "
+        f"do not include it in the answer. {browser_prompt}"
+    )
     raw_attempts: list[str] = []
 
-    async def recover_current(provider: str) -> tuple[dict[str, Any], str] | None:
-        read_result = await run_opencli(
+    async def recover_current(
+        provider: str,
+        *,
+        conversation_url: str = "",
+    ) -> tuple[dict[str, Any], str]:
+        if provider == "chatgpt" and conversation_url:
+            command = [
+                "chatgpt",
+                "detail",
+                conversation_url,
+                "--wait",
+                "true",
+                "--timeout",
+                str(timeout),
+                "--stable",
+                "2",
+            ]
+        else:
+            command = [provider, "read"]
+        command.extend(
             [
-                provider,
-                "read",
                 "--window",
                 "foreground" if provider == "gemini" else "background",
                 "--site-session",
@@ -389,95 +454,20 @@ async def _chatgpt_review(
                 "true",
                 "-f",
                 "json",
-            ],
-            timeout=30,
+            ]
+        )
+        read_result = await run_opencli(
+            command,
+            timeout=timeout + 15 if conversation_url else 30,
         )
         messages = _rows(first_json(read_result.stdout))
-        assistant_text = next(
-            (
-                _field(row, "Text")
-                for row in reversed(messages)
-                if _field(row, "Role").casefold() == "assistant"
-                and _field(row, "Text")
-            ),
-            "",
-        )
+        assistant_text = _assistant_for_review_request(messages, request_id)
         if not assistant_text:
-            return None
+            raise ValueError(
+                f"{provider} recovery page did not contain a response owned by this request"
+            )
         raw_attempts.append(f"[{provider.upper()} RECOVERY]\n{assistant_text}")
         return parse_response(assistant_text), assistant_text
-
-    chatgpt_error: Exception | None = None
-    if not reuse_current:
-        try:
-            await run_opencli(
-                [
-                    "chatgpt",
-                    "model",
-                    config.DAILY_NEWS_CHATGPT_REVIEW_MODEL,
-                    "--window",
-                    "background",
-                    "--site-session",
-                    "persistent",
-                    "--keep-tab",
-                    "true",
-                    "-f",
-                    "json",
-                ],
-                timeout=60,
-            )
-            if log:
-                log(
-                    "ChatGPT daily-news review model: "
-                    f"{config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}"
-                )
-        except Exception as exc:  # noqa: BLE001 - model setup failure triggers fallback
-            chatgpt_error = exc
-            if log:
-                log(f"ChatGPT {review_label} model selection failed: {exc}")
-
-    if chatgpt_error is None:
-        try:
-            result = await run_opencli(chatgpt_args, timeout=timeout + 20)
-            rows = _rows(first_json(result.stdout))
-            response = next((_field(row, "response") for row in rows if _field(row, "response")), "")
-            conversation_url = next(
-                (_field(row, "conversationUrl") for row in rows if _field(row, "conversationUrl")), ""
-            )
-            if response:
-                raw_attempts.append(f"[CHATGPT]\n{response}")
-                payload = parse_response(response)
-                return (
-                    payload,
-                    "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
-                    conversation_url,
-                    "chatgpt",
-                )
-            raise ValueError("ChatGPT ask returned no assistant response")
-        except Exception as exc:  # noqa: BLE001 - provider failure triggers fallback
-            chatgpt_error = exc
-            # ChatGPT can finish a response and then show a temporary rate-limit
-            # modal before the adapter captures the new conversation URL. Recover
-            # the completed last assistant message instead of discarding that audit.
-            try:
-                recovered = await recover_current("chatgpt")
-                if recovered:
-                    payload, _ = recovered
-                    if log:
-                        log(f"Recovered completed ChatGPT {review_label} audit from the active page")
-                    return (
-                        payload,
-                        "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
-                        "",
-                        "chatgpt",
-                    )
-            except Exception:
-                pass
-            if log:
-                log(
-                    f"ChatGPT {review_label} review failed; falling back to "
-                    f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL}: {exc}"
-                )
 
     gemini_error: Exception | None = None
     gemini_attempts = 2
@@ -485,7 +475,7 @@ async def _chatgpt_review(
     start_fresh_gemini = True
     for gemini_attempt in range(1, gemini_attempts + 1):
         try:
-            gemini_args = ["gemini", "ask", browser_prompt]
+            gemini_args = ["gemini", "ask", owned_prompt]
             if select_gemini_model:
                 gemini_args.extend(
                     ["--model", config.DAILY_NEWS_GEMINI_REVIEW_MODEL]
@@ -497,9 +487,8 @@ async def _chatgpt_review(
                     "--timeout",
                     str(timeout),
                     "--window",
-                    # Gemini's current composer rejects synthetic submission
-                    # in a background window. Foreground focus is required for
-                    # the adapter's trusted Enter key path.
+                    # Gemini's current composer requires the adapter's trusted
+                    # keyboard path, so the isolated project tab is foregrounded.
                     "foreground",
                     "--site-session",
                     "persistent",
@@ -511,9 +500,7 @@ async def _chatgpt_review(
             )
             result = await run_opencli(
                 gemini_args,
-                # Gemini discovers and selects the requested web model before
-                # its own response timeout starts. Keep that UI setup outside
-                # the answer budget so a slow picker is not killed mid-submit.
+                # Model discovery happens before Gemini's answer timeout.
                 timeout=timeout + 60,
             )
             rows = _rows(first_json(result.stdout))
@@ -521,15 +508,14 @@ async def _chatgpt_review(
                 (_field(row, "response") for row in rows if _field(row, "response")),
                 "",
             )
-            response = re.sub(r"^\s*💬\s*", "", response).strip()
             raw_attempts.append(f"[GEMINI {gemini_attempt}]\n{response or '[EMPTY]'}")
-            if not response or "[NO RESPONSE]" in response:
+            if not response or "[NO RESPONSE]" in response.upper():
                 raise ValueError("Gemini ask returned no completed assistant response")
             payload = parse_response(response)
             if log:
                 log(
                     f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL} completed "
-                    f"{review_label} fallback"
+                    f"{review_label} primary review"
                 )
             return (
                 payload,
@@ -537,45 +523,153 @@ async def _chatgpt_review(
                 "",
                 "gemini",
             )
-        except Exception as exc:  # noqa: BLE001 - bounded provider fallback
+        except Exception as exc:  # noqa: BLE001 - bounded primary-provider retry
             gemini_error = exc
+            try:
+                recovered = await recover_current("gemini")
+                payload, _ = recovered
+                if log:
+                    log(
+                        f"Recovered completed Gemini {review_label} primary review "
+                        "from its owned browser turn"
+                    )
+                return (
+                    payload,
+                    "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
+                    "",
+                    "gemini",
+                )
+            except Exception as recovery_exc:  # noqa: BLE001 - preserve both failures
+                gemini_error = RuntimeError(
+                    f"ask failed ({exc}); owned-turn recovery failed ({recovery_exc})"
+                )
             if "model picker button was not found" in str(exc).casefold():
                 select_gemini_model = False
                 start_fresh_gemini = False
                 if log:
                     log(
                         "Gemini model picker is not ready; the retry will reuse "
-                        "the now-loaded page and its current Flash model"
+                        "the isolated page and its current Flash model"
                     )
-            try:
-                recovered = await recover_current("gemini")
-                if recovered:
-                    payload, _ = recovered
-                    if log:
-                        log(
-                            f"Recovered completed Gemini {review_label} fallback "
-                            "from the active page"
-                        )
-                    return (
-                        payload,
-                        "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
-                        "",
-                        "gemini",
-                    )
-            except Exception as recovery_exc:  # noqa: BLE001 - preserve failure
-                gemini_error = RuntimeError(
-                    f"ask failed ({exc}); active-page recovery failed ({recovery_exc})"
-                )
             if gemini_attempt < gemini_attempts and log:
                 log(
-                    f"Gemini {review_label} fallback attempt {gemini_attempt}/"
+                    f"Gemini {review_label} primary attempt {gemini_attempt}/"
                     f"{gemini_attempts} failed; starting the bounded retry: {gemini_error}"
                 )
 
+    if log:
+        log(
+            f"Gemini {review_label} primary review failed; falling back to "
+            f"ChatGPT {config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}: {gemini_error}"
+        )
+
+    chatgpt_error: Exception | None = None
+    try:
+        await run_opencli(
+            [
+                "chatgpt",
+                "model",
+                config.DAILY_NEWS_CHATGPT_REVIEW_MODEL,
+                "--window",
+                "background",
+                "--site-session",
+                "persistent",
+                "--keep-tab",
+                "true",
+                "-f",
+                "json",
+            ],
+            timeout=60,
+        )
+        if log:
+            log(
+                "ChatGPT fallback review model: "
+                f"{config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}"
+            )
+    except Exception as exc:  # noqa: BLE001 - fail closed on unknown fallback model
+        chatgpt_error = exc
+        raw_attempts.append(f"[CHATGPT MODEL ERROR]\n{exc}")
+
+    conversation_url = ""
+    if chatgpt_error is None:
+        try:
+            chatgpt_args = [
+                "chatgpt",
+                "ask",
+                owned_prompt,
+                "--new",
+                "true",
+                "--wait",
+                "true",
+                "--timeout",
+                str(timeout),
+                "--window",
+                "background",
+                "--site-session",
+                "persistent",
+                "--keep-tab",
+                "true",
+                "-f",
+                "json",
+            ]
+            result = await run_opencli(chatgpt_args, timeout=timeout + 20)
+            rows = _rows(first_json(result.stdout))
+            response = next(
+                (_field(row, "response") for row in rows if _field(row, "response")),
+                "",
+            )
+            conversation_url = next(
+                (
+                    _field(row, "conversationUrl")
+                    for row in rows
+                    if _field(row, "conversationUrl")
+                ),
+                "",
+            )
+            raw_attempts.append(f"[CHATGPT FALLBACK]\n{response or '[EMPTY]'}")
+            if not response:
+                raise ValueError("ChatGPT ask returned no assistant response")
+            payload = parse_response(response)
+            if log:
+                log(f"ChatGPT completed {review_label} fallback review")
+            return (
+                payload,
+                "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
+                conversation_url,
+                "chatgpt",
+            )
+        except Exception as exc:  # noqa: BLE001 - target-specific recovery below
+            chatgpt_error = exc
+            target_match = _CHATGPT_CONVERSATION_URL_RE.search(str(exc))
+            target_url = conversation_url or (target_match.group(0) if target_match else "")
+            try:
+                recovered = await recover_current(
+                    "chatgpt",
+                    conversation_url=target_url,
+                )
+                payload, _ = recovered
+                if log:
+                    recovery_source = "target conversation" if target_url else "owned browser turn"
+                    log(
+                        f"Recovered completed ChatGPT {review_label} fallback from "
+                        f"its {recovery_source}"
+                    )
+                return (
+                    payload,
+                    "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
+                    target_url,
+                    "chatgpt",
+                )
+            except Exception as recovery_exc:  # noqa: BLE001 - preserve both failures
+                chatgpt_error = RuntimeError(
+                    f"ask failed ({exc}); owned-turn recovery failed ({recovery_exc})"
+                )
+
     raise RuntimeError(
-        f"ChatGPT {review_label} review failed ({chatgpt_error}); "
-        f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL} fallback failed ({gemini_error})"
-    ) from gemini_error
+        f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL} primary {review_label} review "
+        f"failed ({gemini_error}); ChatGPT {config.DAILY_NEWS_CHATGPT_REVIEW_MODEL} "
+        f"fallback failed ({chatgpt_error})"
+    ) from chatgpt_error
 
 
 async def review_daily_script(
@@ -597,10 +691,8 @@ async def review_daily_script(
     candidate = script
     max_cycles = 5
     for cycle in range(1, max_cycles + 1):
-        # A corrected script starts a new audit conversation. The three story
-        # groups within that cycle reuse it, avoiding both stale tab leases and
-        # ChatGPT's burst limit on one-new-chat-per-story workflows.
-        chatgpt_session_started = False
+        # Each two-story group owns a fresh Gemini turn. A failed primary turn
+        # gets a fresh ChatGPT fallback instead of reusing mutable active-page state.
         contract = script_contract_report(
             candidate,
             dossier,
@@ -610,7 +702,7 @@ async def review_daily_script(
         )
         if not contract["passed"]:
             raise RuntimeError(
-                "Deterministic script audit failed before ChatGPT review: "
+                "Deterministic script audit failed before web review: "
                 + "; ".join(contract["failures"])
             )
         group_results: list[dict[str, Any]] = []
@@ -618,17 +710,15 @@ async def review_daily_script(
         for group_index, start in enumerate(range(0, len(all_numbers), 2), 1):
             story_numbers = all_numbers[start : start + 2]
             prompt = _batch_review_prompt(candidate, dossier, edition_date, story_numbers)
-            (review_dir / f"chatgpt-prompt-{cycle}-group-{group_index}.txt").write_text(
+            (review_dir / f"story-review-prompt-{cycle}-group-{group_index}.txt").write_text(
                 prompt, encoding="utf-8"
             )
-            group_payload, raw, conversation_url, provider = await _chatgpt_review(
+            group_payload, raw, conversation_url, provider = await _web_story_review(
                 prompt,
                 story_numbers=story_numbers,
-                reuse_current=chatgpt_session_started,
                 log=log,
             )
-            chatgpt_session_started = chatgpt_session_started or provider == "chatgpt"
-            (review_dir / f"chatgpt-response-{cycle}-group-{group_index}.txt").write_text(
+            (review_dir / f"story-review-response-{cycle}-group-{group_index}.txt").write_text(
                 raw, encoding="utf-8"
             )
             group_results.append({
@@ -656,10 +746,10 @@ async def review_daily_script(
         chatgpt_level = config.DAILY_NEWS_CHATGPT_REVIEW_MODEL
         gemini_model = config.DAILY_NEWS_GEMINI_REVIEW_MODEL
         reviewer = (
-            f"ChatGPT Web ({chatgpt_level}) via project-local OpenCLI"
-            if set(providers) == {"chatgpt"}
-            else f"ChatGPT Web ({chatgpt_level}) with Gemini Web "
-            f"({gemini_model}) fallback via project-local OpenCLI"
+            f"Gemini Web ({gemini_model}) via project-local OpenCLI"
+            if set(providers) == {"gemini"}
+            else f"Gemini Web ({gemini_model}) with ChatGPT Web "
+            f"({chatgpt_level}) fallback via project-local OpenCLI"
         )
         blocking = [
             issue
@@ -690,7 +780,7 @@ async def review_daily_script(
                 "reviewed_at": datetime.now(timezone.utc).isoformat(),
                 "reviewer": reviewer,
                 "fallback_used": any(
-                    "gemini" in prior.get("providers", []) for prior in attempts
+                    "chatgpt" in prior.get("providers", []) for prior in attempts
                 ),
                 "attempts": attempts,
                 "final_contract": contract,
@@ -722,10 +812,10 @@ async def review_daily_script(
     report = {
         "passed": False,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
-        "reviewer": f"ChatGPT Web ({config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}) with "
-        f"Gemini Web ({config.DAILY_NEWS_GEMINI_REVIEW_MODEL}) fallback via project-local OpenCLI",
+        "reviewer": f"Gemini Web ({config.DAILY_NEWS_GEMINI_REVIEW_MODEL}) with "
+        f"ChatGPT Web ({config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}) fallback via project-local OpenCLI",
         "fallback_used": any(
-            "gemini" in prior.get("providers", []) for prior in attempts
+            "chatgpt" in prior.get("providers", []) for prior in attempts
         ),
         "attempts": attempts,
     }

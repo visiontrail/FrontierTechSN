@@ -24,6 +24,30 @@ class OpenCLIOutputTests(unittest.TestCase):
             first_json("browser returned no structured payload")
 
 
+class OpenCLISessionIsolationTests(unittest.TestCase):
+    def test_backend_routes_persistent_tabs_through_the_project_namespace(self):
+        env = opencli_module._environment()
+
+        self.assertEqual(env["OPENCLI_SITE_SESSION_NAMESPACE"], "frontiertechsn")
+
+    def test_installed_runtime_contains_the_postinstall_namespace_patch(self):
+        runtime = (
+            config.PROJECT_ROOT
+            / "tools"
+            / "opencli"
+            / "node_modules"
+            / "@jackwener"
+            / "opencli"
+            / "dist"
+            / "src"
+            / "execution.js"
+        )
+        patcher = config.PROJECT_ROOT / "tools" / "opencli" / "patch-opencli.mjs"
+
+        self.assertIn("OPENCLI_SITE_SESSION_NAMESPACE", patcher.read_text(encoding="utf-8"))
+        self.assertIn("OPENCLI_SITE_SESSION_NAMESPACE", runtime.read_text(encoding="utf-8"))
+
+
 class OpenCLIRateLimitTests(unittest.TestCase):
     def test_only_gemini_and_chatgpt_commands_are_rate_limited(self):
         self.assertTrue(is_rate_limited_command(["chatgpt", "ask", "prompt"]))

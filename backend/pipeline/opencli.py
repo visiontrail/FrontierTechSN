@@ -46,6 +46,7 @@ def _environment() -> dict[str, str]:
     env["PATH"] = os.pathsep.join(part for part in path_parts if part)
     env.setdefault("OPENCLI_BROWSER_CONNECT_TIMEOUT", "20")
     env.setdefault("OPENCLI_BROWSER_COMMAND_TIMEOUT", str(config.OPENCLI_TIMEOUT))
+    env["OPENCLI_SITE_SESSION_NAMESPACE"] = config.OPENCLI_SITE_SESSION_NAMESPACE
     if config.OPENCLI_PROFILE:
         env["OPENCLI_PROFILE"] = config.OPENCLI_PROFILE
     return env

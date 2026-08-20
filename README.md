@@ -12,14 +12,14 @@ Every daily run is fail-closed around these checks:
 2. Deduplicate and balance six stories across source, language, and technology category.
 3. Inject an exact, date-stamped morning-news opening and an exact spoken closing.
 4. Generate the script from the evidence dossier only through yhroot AI.
-5. Submit every material claim to ChatGPT Web at the configured non-Pro reasoning level through project-local OpenCLI. A failed, late, or malformed ChatGPT turn falls back to Gemini Flash with at most two fresh attempts; blocking findings trigger a corrected-script review cycle.
+5. Submit every material claim to Gemini Web through project-local OpenCLI. Each story group gets up to two bounded Gemini attempts; a failed, late, or malformed primary review falls back to a fresh ChatGPT conversation at the configured non-Pro reasoning level. Blocking findings trigger a corrected-script review cycle.
 6. Synthesize TTS using the same engines and complete spoken-text integrity gate as Video-Promotional.
 7. Generate four Paper-Collage B-roll clips by default and hard-fail if requested and placed clip counts differ.
 8. Generate an instrumental Gemini Create Music bed (with a deterministic local musical fallback), duck it to `-25 dB` under narration, side-chain it against speech, and duration-lock the program mix.
 9. Render with HyperFrames and run final A/V validation.
 10. When enabled, publish with the current signed-in browser accounts. Account identities and exact URLs are discovered at run time and recorded; nothing is hard-coded.
 
-All yhroot stages get ten total attempts (one initial call plus nine retries). Most browser-backed OpenCLI stages also get ten attempts. The daily-news claim audit instead makes one ChatGPT attempt and at most two Gemini fallback attempts, so a slow Pro-style turn cannot consume the old ten-attempt review window. ChatGPT stays in a background window; the Gemini fallback briefly uses a foreground window because its current composer requires trusted keyboard input. A provider turn that has already exceeded its whole-turn hard timeout is stopped immediately because the underlying CLI has already spent that turn retrying. Gemini and ChatGPT OpenCLI commands share a cross-process start limiter: adjacent web requests begin at least ten seconds apart by default, including retries and concurrent tasks. Operators can choose 10–30 seconds under **Admin → System → Footage Sources** with `OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`; the ChatGPT level, Gemini fallback model, and per-provider claim-review timeout are configured in the same panel.
+All yhroot stages get ten total attempts (one initial call plus nine retries). Most browser-backed OpenCLI stages also get ten attempts. The daily-news claim audit instead makes at most two Gemini primary attempts and one ChatGPT fallback, so a slow web turn cannot consume the old ten-attempt review window. Gemini briefly uses a foreground window because its current composer requires trusted keyboard input; ChatGPT stays in a background window. Every review request carries an ownership marker, and recovery accepts only the assistant turn paired with that marker. FrontierTechSN also namespaces its persistent OpenCLI site sessions, preventing another local OpenCLI project from navigating these Gemini or ChatGPT tabs. The default provider wait is 90 seconds. Gemini and ChatGPT commands retain the cross-process start limiter within this checkout: adjacent requests begin at least ten seconds apart. Operators can choose 10–30 seconds under **Admin → System → Footage Sources** with `OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`; the Gemini primary model, ChatGPT fallback level, and per-provider review timeout are configured in the same panel.
 
 Each Paper-Collage clip targets the duration of its selected narration scene, capped by Gemini's configured single-generation limit (eight seconds by default). The generated assembly plays once and then holds its completed final frame for the remainder of a longer scene; neither FFmpeg nor HyperFrames replays it. Operators can change the provider ceiling under **Admin → System → Paper-collage B-roll** with `COLLAGE_GEMINI_MAX_SECONDS`.
 
@@ -93,8 +93,8 @@ Each task directory contains the evidence needed to audit an edition:
 ```text
 research/dossier.json                 source fetches, candidates, selected stories
 research/dossier.md                   human-readable claim ledger
-review/chatgpt-prompt-*.txt           independent fact-check requests
-review/chatgpt-response-*.txt         raw review responses
+review/story-review-prompt-*.txt      independent fact-check requests
+review/story-review-response-*.txt    raw primary and fallback responses
 review/fact_check_report.json         approval and correction cycles
 tts/                                  engine manifest and speech-integrity evidence
 collage_broll/manifest.json           requested/generated/placed Paper-Collage clips

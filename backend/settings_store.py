@@ -607,25 +607,25 @@ SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         "DAILY_NEWS_CHATGPT_REVIEW_MODEL", "footage",
-        "News review ChatGPT level", "choice",
+        "News review ChatGPT fallback level", "choice",
         options=("instant", "medium", "high", "xhigh"),
-        description="Thinking level selected before the daily-news claim audit. "
-                    "Medium uses GPT-5.6 Sol without Pro-mode latency.",
+        description="Thinking level used only when the primary Gemini story "
+                    "review fails. Medium avoids Pro-mode latency.",
         allow_blank=False,
     ),
     SettingSpec(
         "DAILY_NEWS_GEMINI_REVIEW_MODEL", "footage",
-        "News review Gemini fallback", "string",
+        "News review Gemini primary model", "string",
         placeholder="3.7-flash",
-        description="Canonical Gemini Web model used only after ChatGPT fails, "
-                    "times out, or returns an invalid audit token.",
+        description="Canonical Gemini Web model used first for every story review. "
+                    "Failures fall back to ChatGPT.",
         allow_blank=False,
     ),
     SettingSpec(
         "DAILY_NEWS_WEB_REVIEW_TIMEOUT", "footage",
         "News web review timeout", "int", unit="seconds",
         minimum=15, maximum=180,
-        description="Per-provider wait for the one-token daily-news claim audit.",
+        description="Per-provider wait for each short daily-news story-review token.",
     ),
     SettingSpec(
         "WEB_FOOTAGE_ENABLED", "footage", "Web footage", "bool",

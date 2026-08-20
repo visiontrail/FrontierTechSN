@@ -5,6 +5,11 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OPENCLI_BIN="$PROJECT_ROOT/tools/opencli/node_modules/.bin/opencli"
 RATE_LIMITER="$PROJECT_ROOT/backend/pipeline/opencli_rate_limit.py"
 
+# OpenCLI otherwise gives every checkout the same persistent `site:<provider>`
+# browser lease. Namespace this project's tabs so another local media pipeline
+# cannot navigate an in-flight FrontierTechSN conversation away.
+export OPENCLI_SITE_SESSION_NAMESPACE="${OPENCLI_SITE_SESSION_NAMESPACE:-frontiertechsn}"
+
 if [ ! -x "$OPENCLI_BIN" ]; then
   echo "Project-local OpenCLI is not installed." >&2
   echo "Run: npm install --prefix \"$PROJECT_ROOT/tools/opencli\"" >&2

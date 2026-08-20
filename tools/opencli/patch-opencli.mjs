@@ -23,6 +23,15 @@ const askPath = path.join(geminiDir, 'ask.js')
 const utilsPath = path.join(geminiDir, 'utils.js')
 const modelsPath = path.join(geminiDir, 'models.js')
 const chatgptUtilsPath = path.join(chatgptDir, 'utils.js')
+const executionPath = path.join(
+  runtimeDir,
+  'node_modules',
+  '@jackwener',
+  'opencli',
+  'dist',
+  'src',
+  'execution.js',
+)
 const manifestPath = path.join(
   runtimeDir,
   'node_modules',
@@ -56,6 +65,30 @@ function replaceWithinFunction(source, signature, nextSignature, before, after, 
   const patched = replaceOnce(section, before, after, label)
   return `${source.slice(0, start)}${patched}${source.slice(end)}`
 }
+
+let execution = fs.readFileSync(executionPath, 'utf8')
+execution = replaceOnce(
+  execution,
+  [
+    'function resolveAdapterBrowserSession(cmd, siteSession) {',
+    "    if (siteSession === 'persistent')",
+    '        return `site:${cmd.site}`;',
+    '    return `site:${cmd.site}:${crypto.randomUUID()}`;',
+    '}',
+  ].join('\n'),
+  [
+    'function resolveAdapterBrowserSession(cmd, siteSession) {',
+    "    if (siteSession === 'persistent') {",
+    "        const namespace = String(process.env.OPENCLI_SITE_SESSION_NAMESPACE || '')",
+    "            .trim().replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 64);",
+    '        return namespace ? `site:${namespace}:${cmd.site}` : `site:${cmd.site}`;',
+    '    }',
+    '    return `site:${cmd.site}:${crypto.randomUUID()}`;',
+    '}',
+  ].join('\n'),
+  'persistent site-session namespace',
+)
+fs.writeFileSync(executionPath, execution)
 
 let utils = fs.readFileSync(utilsPath, 'utf8')
 const helperIndex = utils.indexOf(helperMarker)

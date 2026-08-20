@@ -69,6 +69,10 @@ NEWS_IMAGE_SEARCH_TIMEOUT = int(os.getenv("NEWS_IMAGE_SEARCH_TIMEOUT", "60"))
 # upgrading this feature never changes the operator's global Claude Code setup.
 OPENCLI_BIN = resolve_project_path(os.getenv("OPENCLI_BIN", "scripts/opencli.sh"))
 OPENCLI_PROFILE = os.getenv("OPENCLI_PROFILE", "").strip()
+OPENCLI_SITE_SESSION_NAMESPACE = (
+    os.getenv("OPENCLI_SITE_SESSION_NAMESPACE", "frontiertechsn").strip()
+    or "frontiertechsn"
+)
 OPENCLI_TIMEOUT = int(os.getenv("OPENCLI_TIMEOUT", "180"))
 OPENCLI_MAX_ATTEMPTS = int(os.getenv("OPENCLI_MAX_ATTEMPTS", "10"))
 OPENCLI_RETRY_BASE_SECONDS = float(os.getenv("OPENCLI_RETRY_BASE_SECONDS", "3"))
@@ -77,9 +81,8 @@ OPENCLI_RETRY_BASE_SECONDS = float(os.getenv("OPENCLI_RETRY_BASE_SECONDS", "3"))
 OPENCLI_WEB_REQUEST_INTERVAL_SECONDS = int(
     os.getenv("OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "10")
 )
-# Daily-news claim review deliberately avoids ChatGPT Pro: the one-token audit
-# benefits from GPT-5.6 Sol Medium's latency/quality balance, not maximum
-# reasoning.  A failed or late ChatGPT turn falls back to Gemini Flash.
+# Daily-news claim review starts with fast Gemini Flash. A failed or malformed
+# primary turn falls back to ChatGPT at a deliberately non-Pro reasoning level.
 DAILY_NEWS_CHATGPT_REVIEW_MODEL = os.getenv(
     "DAILY_NEWS_CHATGPT_REVIEW_MODEL", "medium"
 ).strip() or "medium"
@@ -87,7 +90,7 @@ DAILY_NEWS_GEMINI_REVIEW_MODEL = os.getenv(
     "DAILY_NEWS_GEMINI_REVIEW_MODEL", "3.7-flash"
 ).strip() or "3.7-flash"
 DAILY_NEWS_WEB_REVIEW_TIMEOUT = int(
-    os.getenv("DAILY_NEWS_WEB_REVIEW_TIMEOUT", "45")
+    os.getenv("DAILY_NEWS_WEB_REVIEW_TIMEOUT", "90")
 )
 # OpenCode is the optional autonomous planner for account operations. It calls
 # the project-local OpenCLI wrapper through the account-operations skill; the

@@ -278,7 +278,7 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
             log=task_log,
         )
         (task_dir / "script.draft.txt").write_text(script, encoding="utf-8")
-        task_log("Stage 2b: Reviewing every script claim with ChatGPT Web + Gemini fallback")
+        task_log("Stage 2b: Reviewing every script claim with Gemini Web + ChatGPT fallback")
         await update_task(task.id, status=TaskStatus.REVIEWING.value)
         reviewed = await review_daily_script(
             script,

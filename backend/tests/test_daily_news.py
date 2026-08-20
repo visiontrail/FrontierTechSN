@@ -154,7 +154,7 @@ def test_repeated_d_audit_keeps_only_the_direct_lead_sentence():
         "Closing.",
     ])
     issues = [{
-        "claim": "ChatGPT audit codes D for story 1",
+        "claim": "Web audit codes D for story 1",
         "evidence_story_numbers": [1],
     }]
 
@@ -165,10 +165,10 @@ def test_repeated_d_audit_keeps_only_the_direct_lead_sentence():
 
 def test_only_pure_d_audits_can_bypass_the_writing_model():
     assert _issues_are_unsupported_only([
-        {"claim": "ChatGPT audit codes D for story 3"},
+        {"claim": "Web audit codes D for story 3"},
     ]) is True
     assert _issues_are_unsupported_only([
-        {"claim": "ChatGPT audit codes DE for story 3"},
+        {"claim": "Web audit codes DE for story 3"},
     ]) is False
     assert _issues_are_unsupported_only([
         {"claim": "unstructured reviewer note"},
@@ -419,127 +419,243 @@ def test_apple_podcast_feed_is_prepared_without_external_submission(tmp_path: Pa
     }
 
 
-def test_chatgpt_review_falls_back_to_gemini_after_a_browser_failure():
-    async def command(args, **kwargs):
-        if args[:2] == ["chatgpt", "model"]:
-            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success","Model":"Balanced"}]', "")
-        if args[:2] == ["chatgpt", "ask"]:
-            raise OpenCLIError("temporary browser lease failure")
-        if args[:2] == ["chatgpt", "read"]:
-            raise OpenCLIError("no completed ChatGPT turn")
-        if args[:2] == ["gemini", "ask"]:
-            return OpenCLIResult(tuple(args), 0, '[{"response":"💬 P"}]', "")
-        raise AssertionError(args)
+def test_review_token_normalization_accepts_only_known_ui_wrappers():
+    payload = review._batch_payload(
+        "💬️ \ufeff\u200b```text\n1P 2D\n```\u200b",
+        [1, 2],
+    )
 
-    command_mock = AsyncMock(side_effect=command)
-    with patch.object(review, "run_opencli", command_mock):
+    assert payload["approved"] is False
+    assert payload["issues"][0]["evidence_story_numbers"] == [2]
+    with pytest.raises(ValueError, match="invalid characters"):
+        review._batch_payload("Result: 1P2P", [1, 2])
+    with pytest.raises(ValueError, match="invalid characters"):
+        review._batch_payload("1P2P because both stories pass", [1, 2])
+
+
+def test_review_recovery_requires_the_current_request_anchor():
+    current = "a" * 32
+    other = "b" * 32
+    rows = [
+        {"Role": "Assistant", "Text": "1D2D"},
+        {"Role": "User", "Text": f"REVIEW_REQUEST_ID:{current}. prompt"},
+        {"Role": "User", "Text": "fragment of the same Gemini prompt"},
+        {"Role": "Assistant", "Text": "1P2P"},
+    ]
+
+    assert review._assistant_for_review_request(rows, current) == "1P2P"
+    assert review._assistant_for_review_request(rows, other) == ""
+    assert review._assistant_for_review_request(
+        [
+            {"Role": "User", "Text": f"REVIEW_REQUEST_ID:{current}. prompt"},
+            {"Role": "User", "Text": f"REVIEW_REQUEST_ID:{other}. another prompt"},
+            {"Role": "Assistant", "Text": "1P2P"},
+        ],
+        current,
+    ) == ""
+
+
+def test_story_review_uses_gemini_primary_without_touching_chatgpt():
+    command = AsyncMock(
+        return_value=OpenCLIResult(
+            ("gemini", "ask"),
+            0,
+            '[{"response":"💬 P"}]',
+            "",
+        )
+    )
+    with patch.object(review, "run_opencli", command):
         payload, _, url, provider = asyncio.run(
-            review._chatgpt_review("audit", story_number=1, log=None)
+            review._web_story_review("audit\nmore", story_number=1, log=None)
         )
 
     assert payload["approved"] is True
     assert url == ""
     assert provider == "gemini"
-    assert any(call.args[0][:3] == ["chatgpt", "model", "medium"] for call in command_mock.await_args_list)
-    gemini_call = next(
-        call for call in command_mock.await_args_list
-        if call.args[0][:2] == ["gemini", "ask"]
-    )
-    assert gemini_call.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 60
+    assert command.await_count == 1
+    args = command.await_args.args[0]
+    assert args[:2] == ["gemini", "ask"]
+    assert args[args.index("--model") + 1] == "3.7-flash"
+    assert args[args.index("--new") + 1] == "true"
+    assert review._REVIEW_REQUEST_RE.search(args[2])
+    assert "\n" not in args[2]
+    assert command.await_args.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 60
 
 
-def test_chatgpt_review_retries_a_truncated_response_until_valid_code():
-    model = OpenCLIResult(
-        args=("chatgpt", "model"), returncode=0,
-        stdout='[{"Status":"Already selected","Model":"Balanced"}]', stderr="",
-    )
-    first = OpenCLIResult(
-        args=("chatgpt", "ask"), returncode=0,
-        stdout='[{"response":"{\\"approved\\":false, citations interrupted","conversationUrl":"https://chatgpt.com/c/test"}]',
-        stderr="",
-    )
-    repaired = OpenCLIResult(
-        args=("chatgpt", "read"), returncode=0,
-        stdout='[{"Index":1,"Role":"Assistant","Text":"D"}]',
-        stderr="",
-    )
-    command = AsyncMock(side_effect=[model, first, repaired])
-    with patch.object(review, "run_opencli", command):
-        payload, raw, _, provider = asyncio.run(
-            review._chatgpt_review("audit\nmore", story_number=2, log=None)
-        )
+def test_gemini_late_recovery_accepts_only_its_owned_turn():
+    owned_prompt = ""
 
-    assert payload["approved"] is False
-    assert "extrapolative sentence" in payload["issues"][0]["correction"]
-    assert "D" in raw
-    assert provider == "chatgpt"
-    assert command.await_args_list[2].args[0][1] == "read"
-    assert "\n" not in command.await_args_list[1].args[0][2]
-
-
-def test_gemini_fallback_recovers_a_late_completed_response():
     async def command(args, **kwargs):
-        if args[:2] == ["chatgpt", "model"]:
-            raise OpenCLIError("model picker unavailable")
+        nonlocal owned_prompt
         if args[:2] == ["gemini", "ask"]:
+            owned_prompt = args[2]
             return OpenCLIResult(
-                tuple(args), 0,
-                '[{"response":"💬 [NO RESPONSE] No Gemini response within 45s."}]',
+                tuple(args),
+                0,
+                '[{"response":"💬 [NO RESPONSE] No Gemini response within 90s."}]',
                 "",
             )
         if args[:2] == ["gemini", "read"]:
-            return OpenCLIResult(
-                tuple(args), 0,
-                '[{"Index":1,"Role":"Assistant","Text":"1P2P"}]',
-                "",
-            )
+            turns = [
+                {"Index": 1, "Role": "Assistant", "Text": "What's the vibe, Leo?"},
+                {"Index": 2, "Role": "User", "Text": owned_prompt},
+                {"Index": 3, "Role": "User", "Text": "split evidence fragment"},
+                {"Index": 4, "Role": "Assistant", "Text": "💬 `1P2P`"},
+            ]
+            return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
         raise AssertionError(args)
 
-    with patch.object(review, "run_opencli", AsyncMock(side_effect=command)):
+    command_mock = AsyncMock(side_effect=command)
+    with patch.object(review, "run_opencli", command_mock):
         payload, raw, _, provider = asyncio.run(
-            review._chatgpt_review("audit", story_numbers=[1, 2], log=None)
+            review._web_story_review("audit", story_numbers=[1, 2], log=None)
         )
 
     assert payload["approved"] is True
     assert provider == "gemini"
     assert "[GEMINI RECOVERY]" in raw
+    assert not any(call.args[0][0] == "chatgpt" for call in command_mock.await_args_list)
 
 
-def test_gemini_fallback_retries_once_with_a_fresh_conversation():
+def test_unowned_gemini_greeting_is_rejected_before_fresh_retry():
     gemini_asks = 0
 
     async def command(args, **kwargs):
         nonlocal gemini_asks
-        if args[:2] == ["chatgpt", "model"]:
-            raise OpenCLIError("model picker unavailable")
         if args[:2] == ["gemini", "ask"]:
             gemini_asks += 1
             response = "[NO RESPONSE]" if gemini_asks == 1 else "1P2P"
-            return OpenCLIResult(tuple(args), 0, f'[{json.dumps({"response": response})}]', "")
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                json.dumps([{"response": response}]),
+                "",
+            )
+        if args[:2] == ["gemini", "read"]:
+            unrelated = [
+                {"Index": 1, "Role": "Assistant", "Text": "What's the vibe, Leo?"},
+                {"Index": 2, "Role": "User", "Text": "Analyze a Kuala Lumpur B-roll video"},
+            ]
+            return OpenCLIResult(tuple(args), 0, json.dumps(unrelated), "")
+        raise AssertionError(args)
+
+    command_mock = AsyncMock(side_effect=command)
+    with patch.object(review, "run_opencli", command_mock):
+        payload, raw, _, provider = asyncio.run(
+            review._web_story_review("audit", story_numbers=[1, 2], log=None)
+        )
+
+    assert payload["approved"] is True
+    assert provider == "gemini"
+    assert gemini_asks == 2
+    assert "What's the vibe" not in raw
+    gemini_calls = [
+        call.args[0]
+        for call in command_mock.await_args_list
+        if call.args[0][:2] == ["gemini", "ask"]
+    ]
+    assert all(args[args.index("--new") + 1] == "true" for args in gemini_calls)
+
+
+def test_story_review_falls_back_to_fresh_chatgpt_after_gemini_exhaustion():
+    gemini_asks = 0
+
+    async def command(args, **kwargs):
+        nonlocal gemini_asks
+        if args[:2] == ["gemini", "ask"]:
+            gemini_asks += 1
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"response":"[NO RESPONSE]"}]',
+                "",
+            )
         if args[:2] == ["gemini", "read"]:
             return OpenCLIResult(
-                tuple(args), 0,
-                '[{"Index":1,"Role":"Assistant","Text":"What is next?"}]',
+                tuple(args),
+                0,
+                '[{"Role":"Assistant","Text":"What is next?"}]',
+                "",
+            )
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"Status":"Success","Model":"Medium"}]',
+                "",
+            )
+        if args[:2] == ["chatgpt", "ask"]:
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"response":"1P2P","conversationUrl":"https://chatgpt.com/c/fallback"}]',
                 "",
             )
         raise AssertionError(args)
 
     command_mock = AsyncMock(side_effect=command)
     with patch.object(review, "run_opencli", command_mock):
-        payload, raw, _, provider = asyncio.run(
-            review._chatgpt_review("audit", story_numbers=[1, 2], log=None)
+        payload, _, url, provider = asyncio.run(
+            review._web_story_review("audit", story_numbers=[1, 2], log=None)
         )
 
     assert payload["approved"] is True
-    assert provider == "gemini"
+    assert provider == "chatgpt"
+    assert url.endswith("/fallback")
     assert gemini_asks == 2
-    assert "[GEMINI 1]" in raw
-    assert "[GEMINI 2]" in raw
-    assert all(
-        call.args[0][call.args[0].index("--new") + 1] == "true"
+    calls = [call.args[0] for call in command_mock.await_args_list]
+    first_chatgpt = next(index for index, args in enumerate(calls) if args[0] == "chatgpt")
+    assert all(args[0] == "gemini" for args in calls[:first_chatgpt])
+    chatgpt_ask = next(args for args in calls if args[:2] == ["chatgpt", "ask"])
+    assert chatgpt_ask[chatgpt_ask.index("--new") + 1] == "true"
+
+
+def test_chatgpt_fallback_recovers_the_target_conversation_after_route_drift():
+    chatgpt_prompt = ""
+    target_url = "https://chatgpt.com/c/6a868e01-3b9c-83ec-b973-e3aee234afe4"
+
+    async def command(args, **kwargs):
+        nonlocal chatgpt_prompt
+        if args[:2] == ["gemini", "ask"]:
+            raise OpenCLIError("Gemini browser lease failed")
+        if args[:2] == ["gemini", "read"]:
+            return OpenCLIResult(tuple(args), 0, "[]", "")
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_prompt = args[2]
+            raise OpenCLIError(
+                "ChatGPT navigated away from the target conversation "
+                f"({target_url}); current URL is https://chatgpt.com/new"
+            )
+        if args[:2] == ["chatgpt", "detail"]:
+            turns = [
+                {"Index": 1, "Role": "User", "Text": chatgpt_prompt},
+                {"Index": 2, "Role": "Assistant", "Text": "1P2P"},
+            ]
+            return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
+        raise AssertionError(args)
+
+    command_mock = AsyncMock(side_effect=command)
+    with patch.object(review, "run_opencli", command_mock):
+        payload, raw, url, provider = asyncio.run(
+            review._web_story_review("audit", story_numbers=[1, 2], log=None)
+        )
+
+    assert payload["approved"] is True
+    assert provider == "chatgpt"
+    assert url == target_url
+    assert "[CHATGPT RECOVERY]" in raw
+    detail = next(
+        call
         for call in command_mock.await_args_list
-        if call.args[0][:2] == ["gemini", "ask"]
+        if call.args[0][:2] == ["chatgpt", "detail"]
     )
+    assert detail.args[0][2] == target_url
+    assert detail.args[0][detail.args[0].index("--timeout") + 1] == str(
+        review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT
+    )
+    assert detail.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 15
 
 
 def test_gemini_retry_uses_current_flash_when_model_picker_is_missing():
@@ -547,29 +663,24 @@ def test_gemini_retry_uses_current_flash_when_model_picker_is_missing():
 
     async def command(args, **kwargs):
         nonlocal gemini_asks
-        if args[:2] == ["chatgpt", "model"]:
-            raise OpenCLIError("model picker unavailable")
         if args[:2] == ["gemini", "ask"]:
             gemini_asks += 1
             if gemini_asks == 1:
                 raise OpenCLIError("Gemini model picker button was not found")
             return OpenCLIResult(tuple(args), 0, '[{"response":"1P2P"}]', "")
         if args[:2] == ["gemini", "read"]:
-            return OpenCLIResult(
-                tuple(args), 0,
-                '[{"Index":1,"Role":"Assistant","Text":"Your move"}]',
-                "",
-            )
+            return OpenCLIResult(tuple(args), 0, "[]", "")
         raise AssertionError(args)
 
     command_mock = AsyncMock(side_effect=command)
     with patch.object(review, "run_opencli", command_mock):
         payload, _, _, provider = asyncio.run(
-            review._chatgpt_review("audit", story_numbers=[1, 2], log=None)
+            review._web_story_review("audit", story_numbers=[1, 2], log=None)
         )
 
     gemini_calls = [
-        call.args[0] for call in command_mock.await_args_list
+        call.args[0]
+        for call in command_mock.await_args_list
         if call.args[0][:2] == ["gemini", "ask"]
     ]
     assert payload["approved"] is True
@@ -578,3 +689,72 @@ def test_gemini_retry_uses_current_flash_when_model_picker_is_missing():
     assert "--model" not in gemini_calls[1]
     assert gemini_calls[0][gemini_calls[0].index("--new") + 1] == "true"
     assert gemini_calls[1][gemini_calls[1].index("--new") + 1] == "false"
+
+
+@pytest.mark.parametrize(
+    ("provider", "fallback_used", "reviewer_fragment"),
+    [
+        ("gemini", False, "Gemini Web (3.7-flash) via"),
+        ("chatgpt", True, "with ChatGPT Web (medium) fallback"),
+    ],
+)
+def test_review_report_records_gemini_primary_and_chatgpt_fallback(
+    tmp_path: Path,
+    provider: str,
+    fallback_used: bool,
+    reviewer_fragment: str,
+):
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-20T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-20",
+        "now",
+        36,
+        articles,
+        articles,
+        [],
+    )
+    payload = {
+        "approved": True,
+        "confidence": 100,
+        "summary": "2/2 story audits passed.",
+        "issues": [],
+        "corrected_script": "",
+    }
+    web_review = AsyncMock(return_value=(payload, "[RAW]", "", provider))
+    contract = {"passed": True, "failures": []}
+
+    with (
+        patch.object(review, "_web_story_review", web_review),
+        patch.object(review, "script_contract_report", return_value=contract),
+    ):
+        result = asyncio.run(
+            review.review_daily_script(
+                "Opening.\nStory one.\nStory two.\nClosing.",
+                dossier,
+                date(2026, 8, 20),
+                tmp_path,
+                language="en",
+                closing_remarks="Closing.",
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+            )
+        )
+
+    assert result.report["fallback_used"] is fallback_used
+    assert reviewer_fragment in result.report["reviewer"]
+    assert (tmp_path / "review" / "story-review-prompt-1-group-1.txt").exists()
+    assert (tmp_path / "review" / "story-review-response-1-group-1.txt").exists()
