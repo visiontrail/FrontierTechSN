@@ -218,6 +218,18 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             "Q-bit A-I reports the result.",
         )
 
+    def test_orpheus_prompt_articulates_qwen_as_two_part_name(self):
+        text = "Alibaba's Qwen Office, known in Chinese as Qianwen"
+
+        self.assertEqual(
+            tts._orpheus_prompt_text(text),
+            "Alibaba's cue-when Office, known in Chinese as Chien-Wen.",
+        )
+        self.assertEqual(
+            tts._orpheus_prompt_text("Qwenish pre-Qwen qianwen"),
+            "Qwenish pre-Qwen qianwen.",
+        )
+
     def test_orpheus_prompt_articulates_brem_possessive_vowel(self):
         self.assertEqual(
             tts._orpheus_prompt_text("Brem's research indicates a result"),
@@ -1023,6 +1035,238 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(report["verified"])
         self.assertEqual(report["matched_exact_words"], 2)
+
+    async def test_orpheus_verifier_rechecks_qwen_on_same_waveform_at_slower_speed(self):
+        expected = "Alibaba's Qwen Office, known in Chinese as Qianwen."
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        original = words("Alibaba's Qwin Office known in Chinese as Qianwen")
+        slower = words("Alibaba's Qwen Office known in Chinese as Qianwen")
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (original, {"passed": True}),
+                    (slower, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "qwen.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=messages.append,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["verification_playback_speed"], 0.8)
+        self.assertEqual(report["speech_end_seconds"], 1.2)
+        self.assertIn("exact name transcript recovered", " ".join(messages))
+        self.assertEqual(transcriber.await_count, 2)
+        self.assertEqual(process.await_count, 1)
+        self.assertIn("atempo=0.8", process.await_args.kwargs["command"])
+
+    async def test_orpheus_name_recheck_remains_fail_closed_at_all_speeds(self):
+        expected = "Alibaba's Qwen Office."
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        wrong = words("Alibaba's Khan Office")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (wrong, {"passed": True}),
+                    (wrong, {"passed": True}),
+                    (wrong, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                with self.assertRaises(tts.TtsIntegrityError):
+                    await tts._verify_orpheus_part(
+                        Path(temp_dir) / "qwen.wav",
+                        expected,
+                        Path(temp_dir) / "verification",
+                        emit=lambda _message: None,
+                    )
+
+        self.assertEqual(transcriber.await_count, 3)
+        self.assertEqual(process.await_count, 2)
+
+    async def test_orpheus_name_recheck_tries_second_slow_speed(self):
+        expected = "Alibaba's Qwen Office."
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        wrong = words("Alibaba's Qwin Office")
+        correct = words("Alibaba's Qwen Office")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (wrong, {"passed": True}),
+                    (wrong, {"passed": True}),
+                    (correct, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "qwen.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=lambda _message: None,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["verification_playback_speed"], 0.7)
+        self.assertEqual(transcriber.await_count, 3)
+        self.assertEqual(process.await_count, 2)
+
+    async def test_orpheus_name_recheck_does_not_override_extra_words(self):
+        expected = "Qwen Office ranked first."
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        original = words("Qwen Office really ranked first")
+        slower = words("Qwen Office ranked first")
+        transcriber = AsyncMock(
+            side_effect=[
+                (original, {"passed": True}),
+                (slower, {"passed": True}),
+            ]
+        )
+        process = AsyncMock(return_value=(0, ""))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                with self.assertRaises(tts.TtsIntegrityError):
+                    await tts._verify_orpheus_part(
+                        Path(temp_dir) / "qwen.wav",
+                        expected,
+                        Path(temp_dir) / "verification",
+                        emit=lambda _message: None,
+                    )
+
+        self.assertEqual(transcriber.await_count, 1)
+        process.assert_not_awaited()
+
+    async def test_orpheus_name_recheck_handles_split_name_spelling(self):
+        expected = "Alibaba's Qwen Office, known in Chinese as Qianwen."
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        original = words("Alibaba's Q Win Office known in Chinese as Can Wen")
+        slower = words("Alibaba's Qwen Office known in Chinese as Qianwen")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (original, {"passed": True}),
+                    (slower, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "qwen.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=lambda _message: None,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["verification_playback_speed"], 0.8)
+        self.assertEqual(transcriber.await_count, 2)
+        self.assertEqual(process.await_count, 1)
+
+    def test_orpheus_name_recheck_rejects_non_name_replacement(self):
+        expected = "Qwen Office ranked first."
+        observed = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate("Qwin really ranked first".split())
+        ]
+
+        self.assertFalse(tts._has_only_name_transcript_mismatches(expected, observed))
+
+    def test_orpheus_name_recheck_rejects_adjacent_extra_or_missing_name(self):
+        expected = "Qwen Office ranked first."
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        self.assertFalse(
+            tts._has_only_name_transcript_mismatches(
+                expected, words("Qwin really Office ranked first")
+            )
+        )
+        self.assertFalse(
+            tts._has_only_name_transcript_mismatches(
+                expected, words("really Qwin Office ranked first")
+            )
+        )
+        self.assertFalse(
+            tts._has_only_name_transcript_mismatches(
+                expected, words("Office ranked first")
+            )
+        )
+
+    def test_orpheus_name_recheck_recognizes_possessive_name_token(self):
+        self.assertTrue(tts._needs_name_playback_recheck("Qwen's launch"))
+        self.assertTrue(tts._needs_name_playback_recheck("Qianwen's launch"))
+        self.assertFalse(tts._needs_name_playback_recheck("Qwin's launch"))
 
     def test_orpheus_transcript_normalizes_numeric_ordinals(self):
         expected = "A scrap of land one-thirtieth the size."

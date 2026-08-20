@@ -53,6 +53,23 @@ VIBEVOICE_PRONUNCIATIONS = (
 ORPHEUS_EDGE_ANCHOR_WORDS = 3
 ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
+ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
+ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
+ORPHEUS_NAME_RECHECK_SPLITS = {
+    "qwen": {
+        ("q", "wen"),
+        ("q", "win"),
+        ("cue", "wen"),
+        ("cue", "when"),
+    },
+    "qianwen": {
+        ("can", "wen"),
+        ("chan", "en"),
+        ("chien", "wen"),
+        ("jian", "wen"),
+        ("qian", "wen"),
+    },
+}
 MAX_PLAUSIBLE_SPEECH_WPM = 320
 LEXICAL_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?|[\u3400-\u9fff]")
 DECIMAL_LITERAL_RE = re.compile(r"(\d+)\.(\d+)")
@@ -1027,6 +1044,23 @@ def _orpheus_request_token_budget(text: str, maximum: int) -> int:
 def _orpheus_prompt_text(text: str) -> str:
     """Give every short LM request an explicit speech termination boundary."""
     stripped = text.rstrip()
+    # The live speech model twice realized Qwen as the one-syllable surname
+    # "Khan". Expose the intended two-part pronunciation to the provider;
+    # canonical verification still requires Qwen in the ASR result.
+    stripped = re.sub(
+        r"(?<![\w-])Qwen(?![\w-])",
+        "cue-when",
+        stripped,
+    )
+    # The same live model produced unstable and incomplete realizations of
+    # Qianwen (Can Wen / Chan 'en / Chanmen) across two generations and three
+    # playback speeds. Give the provider a two-syllable pronunciation target;
+    # ASR verification remains anchored to the canonical product name.
+    stripped = re.sub(
+        r"(?<![\w-])Qianwen(?![\w-])",
+        "Chien-Wen",
+        stripped,
+    )
     # The speech LM can parse the CamelCase publication name as "two-bit AI".
     # Expose the intended letter and word boundaries only in the provider
     # prompt; verification still requires Whisper to recover QbitAI/Qubit AI.
@@ -1194,6 +1228,96 @@ def _trim_pcm_wav(path: Path, end_seconds: float) -> None:
     os.replace(staged, path)
 
 
+def _is_name_recheck_token(token: str) -> bool:
+    base = token[:-2] if token.endswith("'s") else token
+    return base in ORPHEUS_NAME_RECHECK_TOKENS
+
+
+def _name_recheck_base(token: str) -> str:
+    return token[:-2] if token.endswith("'s") else token
+
+
+def _needs_name_playback_recheck(text: str) -> bool:
+    return any(_is_name_recheck_token(token) for token in _raw_lexical_tokens(text))
+
+
+def _has_only_name_transcript_mismatches(text: str, words: list[dict]) -> bool:
+    """Permit slow replay only when every normal-speed delta is a target name."""
+    expected = _lexical_tokens(text)
+    observed, _ = _transcript_tokens(words)
+    saw_name_delta = False
+    matcher = SequenceMatcher(a=expected, b=observed, autojunk=False)
+    for tag, expected_start, expected_end, observed_start, observed_end in (
+        matcher.get_opcodes()
+    ):
+        if tag == "equal":
+            continue
+        # Inserts and deletes may be audible extras, omissions, or repetitions.
+        # Never let slower ASR erase that normal-speed evidence.
+        if tag != "replace":
+            return False
+        expected_delta = expected[expected_start:expected_end]
+        observed_delta = tuple(observed[observed_start:observed_end])
+        if len(expected_delta) != 1 or not _is_name_recheck_token(expected_delta[0]):
+            return False
+        if len(observed_delta) > 1:
+            expected_name = _name_recheck_base(expected_delta[0])
+            if observed_delta not in ORPHEUS_NAME_RECHECK_SPLITS[expected_name]:
+                return False
+        saw_name_delta = True
+    return saw_name_delta
+
+
+async def _transcribe_orpheus_at_speed(
+    path: Path,
+    verification_dir: Path,
+    speed: float,
+    *,
+    emit: LogCallback,
+) -> tuple[list[dict], dict]:
+    """Re-transcribe the same waveform more slowly without changing pitch."""
+    from backend.pipeline import av_sync
+
+    verification_dir.mkdir(parents=True, exist_ok=True)
+    speed_label = f"{speed:g}x"
+    slowed_path = verification_dir / f"{path.stem}.atempo-{speed_label}.wav"
+    returncode, output = await stream_subprocess(
+        name=f"Orpheus name verification ({speed_label})",
+        command=[
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            path,
+            "-filter:a",
+            f"atempo={speed:g}",
+            "-c:a",
+            "pcm_s16le",
+            slowed_path,
+        ],
+        logger=logger,
+        log=emit,
+        cwd=config.PROJECT_ROOT,
+        timeout=120,
+        stall_timeout=60,
+    )
+    if returncode != 0:
+        return [], {
+            "passed": False,
+            "failure_reasons": [
+                f"ffmpeg atempo {speed_label} exited {returncode}: {output[-300:]}"
+            ],
+        }
+    return await av_sync.ensure_word_transcript(
+        slowed_path,
+        verification_dir / f"transcript-{speed_label}",
+        log=None,
+        minimum_words=1,
+    )
+
+
 async def _verify_orpheus_part(
     path: Path,
     text: str,
@@ -1234,6 +1358,62 @@ async def _verify_orpheus_part(
                 "Orpheus narration could not be transcribed after repetition trimming"
             )
         report = _orpheus_transcript_report(text, words)
+    if (
+        not report["verified"]
+        and _needs_name_playback_recheck(text)
+        and _has_only_name_transcript_mismatches(text, words)
+    ):
+        original_report = report
+        for speed in ORPHEUS_NAME_RECHECK_SPEEDS:
+            try:
+                slower_words, slower_transcription = await _transcribe_orpheus_at_speed(
+                    path,
+                    verification_dir,
+                    speed,
+                    emit=emit,
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve the strict original failure
+                emit(
+                    "Orpheus integrity: name verification at "
+                    f"{speed:g}x could not run ({type(exc).__name__}: {exc})"
+                )
+                continue
+            if not slower_words:
+                failures = "; ".join(
+                    slower_transcription.get("failure_reasons") or []
+                )
+                emit(
+                    "Orpheus integrity: name verification at "
+                    f"{speed:g}x produced no transcript"
+                    f"{': ' + failures if failures else ''}"
+                )
+                continue
+            slower_report = _orpheus_transcript_report(text, slower_words)
+            if not slower_report["verified"]:
+                emit(
+                    "Orpheus integrity: name verification at "
+                    f"{speed:g}x remained non-exact ("
+                    + "; ".join(slower_report["failure_reasons"])
+                    + ")"
+                )
+                continue
+            slower_report["verification_playback_speed"] = speed
+            slower_report["original_speed_failure_reasons"] = list(
+                original_report["failure_reasons"]
+            )
+            # The lexical evidence came from the slowed copy; map its complete
+            # end timestamp back onto the original WAV's time axis.
+            slower_report["speech_end_seconds"] = round(
+                float(slower_report["speech_end_seconds"]) * speed,
+                3,
+            )
+            slower_report["repeat_start_seconds"] = None
+            report = slower_report
+            emit(
+                "Orpheus integrity: exact name transcript recovered from the "
+                f"same waveform at {speed:g}x playback"
+            )
+            break
     if not report["verified"]:
         raise TtsIntegrityError(
             "Orpheus narration does not match its input utterance: "
