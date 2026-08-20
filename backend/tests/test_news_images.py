@@ -1,9 +1,12 @@
+import hashlib
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from PIL import Image
 
 from backend.pipeline import news_images, visual_plan
 
@@ -49,6 +52,77 @@ def extended_board() -> dict:
     return data
 
 
+def failure_board() -> dict:
+    return {
+        "title": "Bacteria, innovation, and Qwen Office",
+        "scenes": [
+            {
+                "id": "scene-02",
+                "duration": 8.0,
+                "text": (
+                    "DeepTech China reports that MIT researchers are exploring living bacteria "
+                    "as circuit boards. QbitAI reports that Perfect World's revenue rose."
+                ),
+                "keywords": ["bacteria", "boards", "revenue"],
+            },
+            {
+                "id": "scene-03",
+                "duration": 8.0,
+                "text": (
+                    "IEEE Spectrum has published an article with the IEEE Technology and "
+                    "Engineering Management Society about engineers winning leadership backing."
+                ),
+                "keywords": ["ieee", "engineering", "leadership"],
+            },
+            {
+                "id": "scene-04",
+                "duration": 8.0,
+                "text": (
+                    "The article, authored by Alexander Brem, editor in chief of IEEE Engineering "
+                    "Management Review and a professor at the University of Stuttgart, describes product ideas."
+                ),
+                "keywords": ["alexander", "brem", "product"],
+            },
+            {
+                "id": "scene-05",
+                "duration": 8.0,
+                "text": (
+                    "IEEE Spectrum notes that organizations including Google and 3M allocate work "
+                    "time for employee ideas, according to Brem's research."
+                ),
+                "keywords": ["employee", "ideas", "innovation"],
+            },
+            {
+                "id": "scene-07",
+                "duration": 8.0,
+                "text": (
+                    "QbitAI reports that Jefferies tested global AI agents, with results showing "
+                    "that Alibaba's Qwen Office ranked first ahead of Claude Cowork and Codex."
+                ),
+                "keywords": ["alibaba", "office", "agents"],
+            },
+            {
+                "id": "scene-09",
+                "duration": 8.0,
+                "text": (
+                    "QbitAI reports that Qwen Office alone scored above 90 in every dimension, "
+                    "including browser control and multimodal content generation."
+                ),
+                "keywords": ["qwen", "office", "browser"],
+            },
+            {
+                "id": "scene-10",
+                "duration": 8.0,
+                "text": (
+                    "The Jefferies report, as described by QbitAI, evaluated model performance and "
+                    "the Harness around each model. Qwen Office's Harness score ranked highest."
+                ),
+                "keywords": ["jefferies", "qwen", "harness"],
+            },
+        ],
+    }
+
+
 def _primary_plan() -> list[dict]:
     return [
         {
@@ -74,12 +148,18 @@ def _primary_plan() -> list[dict]:
     ]
 
 
-def _commons_candidate(scene_id: str, subject: str) -> dict:
+def _image_bytes(format_name: str = "JPEG") -> bytes:
+    payload = io.BytesIO()
+    Image.new("RGB", (800, 450), "#336699").save(payload, format=format_name)
+    return payload.getvalue()
+
+
+def _commons_candidate(scene_id: str, subject: str, kind: str = "event") -> dict:
     slug = scene_id.removeprefix("scene-")
     return {
         "provider": "Wikimedia Commons",
         "provider_id": "wikimedia",
-        "title": f"{subject} photograph",
+        "title": f"{subject} {'logo' if kind == 'logo' else 'photograph'}",
         "source_page_url": f"https://commons.example/source-{slug}",
         "download_url": f"https://upload.example/source-{slug}.jpg",
         "creator": "Test photographer",
@@ -87,11 +167,11 @@ def _commons_candidate(scene_id: str, subject: str) -> dict:
         "license_code": "CC-BY-SA-4.0",
         "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
         "attribution": "Test photographer",
-        "description": f"A photograph of {subject}",
+        "description": f"A {'logo' if kind == 'logo' else 'photograph'} of {subject}",
         "width": 1600,
         "height": 900,
         "mime_type": "image/jpeg",
-        "kind": "event",
+        "kind": kind,
     }
 
 
@@ -116,7 +196,7 @@ def _mock_acquisition_boundaries(
         scene_id = shot["scene_id"]
         if scene_id not in successful_scene_ids:
             return []
-        candidate = _commons_candidate(scene_id, shot["expected_subject"])
+        candidate = _commons_candidate(scene_id, shot["expected_subject"], str(shot.get("kind") or "event"))
         source_alias = (source_aliases or {}).get(scene_id)
         if source_alias:
             candidate["source_page_url"] = f"https://commons.example/{source_alias}"
@@ -124,9 +204,9 @@ def _mock_acquisition_boundaries(
         return [candidate]
 
     async def fake_download(_client, *, candidate: dict, destination: Path):
-        payload = (candidate["source_page_url"] * 40).encode("utf-8")
+        payload = _image_bytes()
         destination.write_bytes(payload)
-        return len(payload), f"sha256-{destination.stem}"
+        return len(payload), hashlib.sha256(payload).hexdigest()
 
     monkeypatch.setattr(news_images, "research_references", fake_research)
     monkeypatch.setattr(news_images, "search_wikimedia_images", fake_search)
@@ -222,6 +302,59 @@ async def test_partial_planner_rows_are_preserved_and_filled_from_unused_scenes(
     assert conversation_url == "https://chat.example/conversation"
 
 
+@pytest.mark.asyncio
+async def test_planner_timeout_uses_narrated_entities_and_unique_qwen_story_owners(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        news_images,
+        "run_opencli_with_retries",
+        AsyncMock(side_effect=TimeoutError("chatgpt planning timed out after 45s")),
+    )
+    data = failure_board()
+    hints = {scene["id"]: {"kicker": "AI AGENTS TESTED", "headline": "World Google and"} for scene in data["scenes"]}
+
+    plan, planner, conversation_url = await news_images.plan_news_images(
+        data,
+        eligible_scene_ids=[scene["id"] for scene in data["scenes"]],
+        count=7,
+        scene_hints=hints,
+    )
+
+    subjects = {shot["scene_id"]: shot["expected_subject"] for shot in plan}
+    assert planner == "deterministic-fallback"
+    assert conversation_url == ""
+    assert len(plan) == 7
+    assert subjects["scene-02"] == "Perfect World"
+    assert subjects["scene-04"] == "Alexander Brem"
+    assert subjects["scene-05"] == "Google"
+    assert subjects["scene-07"] == "Alibaba"
+    assert subjects["scene-09"] == "Qwen Office"
+    assert subjects["scene-10"] == "Jefferies"
+    assert len({news_images._subject_identity_key(shot) for shot in plan}) == 7
+    assert {shot["display_mode"] for shot in plan} == {"inline", "fullscreen"}
+    assert not {"World", "Google and", "AI AGENTS TESTED"} & set(subjects.values())
+
+
+def test_real_failure_story_entities_keep_possessives_and_strip_caption_residue():
+    entities = {
+        scene["id"]: news_images._entity_candidates(
+            scene,
+            {"kicker": "AI AGENTS TESTED", "headline": "World Google and"},
+        )
+        for scene in failure_board()["scenes"]
+    }
+
+    assert entities["scene-02"][:2] == ["Perfect World", "MIT"]
+    assert entities["scene-04"][0] == "Alexander Brem"
+    assert entities["scene-05"][:2] == ["Google", "3M"]
+    assert "Qwen Office" in entities["scene-07"]
+    assert entities["scene-09"][:2] == ["Qwen Office", "Qwen"]
+    assert entities["scene-10"][0] == "Qwen Office"
+    assert "Jefferies" in entities["scene-10"][:3]
+    assert all(not entity.endswith((" and", " of", " the")) for rows in entities.values() for entity in rows)
+
+
 def test_fallback_subject_ignores_only_generic_uppercase_keyword_kickers():
     scene = {
         "id": "scene-01",
@@ -268,6 +401,8 @@ def test_wikimedia_candidate_is_license_and_resolution_gated():
         "display_mode": "inline",
         "search_query": "NVIDIA logo",
         "expected_subject": "NVIDIA",
+        "_scene_text": "NVIDIA announced its Vera CPU.",
+        "_scene_keywords": ["nvidia", "vera", "cpu"],
     }
 
     candidate = news_images._candidate_from_page(page, shot)
@@ -279,6 +414,46 @@ def test_wikimedia_candidate_is_license_and_resolution_gated():
 
     page["imageinfo"][0]["extmetadata"]["LicenseShortName"]["value"] = "All rights reserved"
     assert news_images._candidate_from_page(page, shot) is None
+
+
+def test_three_way_grounding_rejects_world_aquatics_chemical_agents_and_google_loon():
+    world = news_images._grounding_evidence(
+        {"expected_subject": "Perfect World", "kind": "logo"},
+        {
+            "text": "Perfect World's semiannual revenue report was published.",
+            "keywords": [],
+        },
+        {
+            "title": "World Aquatics logo",
+            "description": "Logo of the international swimming federation",
+        },
+    )
+    chemical = news_images._grounding_evidence(
+        {"expected_subject": "AI AGENTS TESTED", "kind": "event"},
+        {"text": "Eight global AI agents were tested on office tasks.", "keywords": []},
+        {
+            "title": "Chemical and biological agents decontamination test",
+            "description": "A hazardous-site response simulation",
+        },
+    )
+    loon = news_images._grounding_evidence(
+        {"expected_subject": "Google", "kind": "event"},
+        {
+            "text": "Google allocates employee work time to develop ideas.",
+            "keywords": [],
+        },
+        {
+            "title": "Google Loon launch event",
+            "description": "A balloon launch in 2013",
+        },
+    )
+
+    assert world["grounding_passed"] is False
+    assert "perfect" not in world["grounding_distinctive_anchors"]
+    assert chemical["grounding_passed"] is False
+    assert chemical["grounding_distinctive_anchors"] == []
+    assert loon["grounding_passed"] is False
+    assert "only one organization" in loon["grounding_reason"]
 
 
 def test_logo_ranking_prefers_corporate_mark_over_product_logo():
@@ -330,7 +505,54 @@ def test_download_extension_uses_rasterized_commons_thumbnail_suffix():
     assert news_images._extension_for(candidate) == ".png"
 
 
-def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_wikimedia_429_honors_retry_after_and_retries(monkeypatch):
+    request = news_images.httpx.Request("GET", news_images.WIKIMEDIA_API)
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def get(self, _url, params):
+            del params
+            self.calls += 1
+            if self.calls == 1:
+                return news_images.httpx.Response(
+                    429,
+                    headers={"retry-after": "2"},
+                    request=request,
+                )
+            return news_images.httpx.Response(
+                200,
+                json={"query": {"pages": []}},
+                request=request,
+            )
+
+    client = FakeClient()
+    sleep = AsyncMock()
+    monkeypatch.setattr(news_images.asyncio, "sleep", sleep)
+
+    candidates = await news_images.search_wikimedia_images(
+        client,
+        shot={
+            "scene_id": "scene-01",
+            "search_query": "NVIDIA logo",
+            "expected_subject": "NVIDIA",
+            "kind": "logo",
+            "display_mode": "inline",
+            "_scene_text": "NVIDIA announced the Vera CPU.",
+            "_scene_keywords": ["nvidia"],
+        },
+    )
+
+    assert candidates == []
+    assert client.calls == 2
+    sleep.assert_awaited_once_with(2.0)
+
+
+def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(
+    tmp_path: Path,
+):
     data = board()
     plans = visual_plan.fallback_plan(data)
     asset_dir = tmp_path / "news_images"
@@ -351,6 +573,10 @@ def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(t
                 "license": "Public domain",
                 "source_page_url": "https://commons.example/nvidia",
                 "match_terms": ["nvidia"],
+                "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+                "grounding_passed": True,
+                "grounding_distinctive_anchors": ["nvidia"],
+                "grounding_reason": "test proof",
                 "references": [{"url": "https://news.example/nvidia"}],
             },
             {
@@ -365,6 +591,10 @@ def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(t
                 "license": "Public domain",
                 "source_page_url": "https://commons.example/falcon",
                 "match_terms": ["falcon", "spacex"],
+                "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+                "grounding_passed": True,
+                "grounding_distinctive_anchors": ["falcon", "spacex"],
+                "grounding_reason": "test proof",
                 "references": [],
             },
         ]
@@ -379,27 +609,121 @@ def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(t
     assert plans[1]["news_image_original_archetype"] == "topic"
 
 
-def test_cached_manifest_requires_same_storyboard_and_materialized_assets(tmp_path: Path):
+def test_cached_manifest_requires_same_storyboard_and_materialized_assets(
+    tmp_path: Path,
+):
     data = board()
     asset_dir = tmp_path / "news_images"
     asset_dir.mkdir()
-    (asset_dir / "image-01.png").write_bytes(b"image")
+    payload = _image_bytes("PNG")
+    (asset_dir / "image-01.png").write_bytes(payload)
+    storyboard_sha256 = news_images.storyboard_fingerprint(data)
+    contract_sha256 = news_images.acquisition_contract_fingerprint(
+        storyboard_sha256=storyboard_sha256,
+        requested_count=1,
+        target_count=1,
+        eligible_scene_ids=["scene-01", "scene-02"],
+        excluded_scene_ids=set(),
+    )
     manifest = {
         "manifest_version": news_images.MANIFEST_VERSION,
+        "query_semantics_version": news_images.QUERY_SEMANTICS_VERSION,
+        "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+        "cache_contract_sha256": contract_sha256,
         "status": "ready",
-        "storyboard_sha256": news_images.storyboard_fingerprint(data),
+        "storyboard_sha256": storyboard_sha256,
         "planned_image_count": 1,
         "placement_modes": {"inline": 1, "fullscreen": 0},
-        "images": [{"local_path": "news_images/image-01.png"}],
+        "images": [
+            {
+                "scene_id": "scene-01",
+                "source_page_url": "https://commons.example/nvidia",
+                "local_path": "news_images/image-01.png",
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+                "grounding_passed": True,
+                "grounding_distinctive_anchors": ["nvidia"],
+            }
+        ],
     }
     (asset_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-    assert news_images._cached_manifest(tmp_path, manifest["storyboard_sha256"]) == manifest
-    assert news_images._cached_manifest(tmp_path, "stale") is None
+    assert news_images._cached_manifest(tmp_path, manifest["storyboard_sha256"], contract_sha256) == manifest
+    assert news_images._cached_manifest(tmp_path, "stale", contract_sha256) is None
+    assert news_images._cached_manifest(tmp_path, storyboard_sha256, "stale") is None
 
     manifest["manifest_version"] = news_images.MANIFEST_VERSION - 1
     (asset_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    assert news_images._cached_manifest(tmp_path, manifest["storyboard_sha256"]) is None
+    assert news_images._cached_manifest(tmp_path, manifest["storyboard_sha256"], contract_sha256) is None
+
+
+def test_cached_manifest_rejects_duplicate_identity_stale_policy_and_bad_hash(
+    tmp_path: Path,
+):
+    data = board()
+    asset_dir = tmp_path / "news_images"
+    asset_dir.mkdir()
+    payload = _image_bytes("PNG")
+    for name in ("image-01.png", "image-02.png"):
+        (asset_dir / name).write_bytes(payload)
+    fingerprint = news_images.storyboard_fingerprint(data)
+    contract = news_images.acquisition_contract_fingerprint(
+        storyboard_sha256=fingerprint,
+        requested_count=2,
+        target_count=2,
+        eligible_scene_ids=["scene-01", "scene-02"],
+        excluded_scene_ids=set(),
+    )
+
+    def image(index: int, scene_id: str, source: str, anchor: str) -> dict:
+        return {
+            "scene_id": scene_id,
+            "source_page_url": source,
+            "local_path": f"news_images/image-{index:02d}.png",
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+            "grounding_passed": True,
+            "grounding_distinctive_anchors": [anchor],
+        }
+
+    manifest = {
+        "manifest_version": news_images.MANIFEST_VERSION,
+        "query_semantics_version": news_images.QUERY_SEMANTICS_VERSION,
+        "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+        "cache_contract_sha256": contract,
+        "status": "ready",
+        "storyboard_sha256": fingerprint,
+        "planned_image_count": 2,
+        "placement_modes": {"inline": 1, "fullscreen": 1},
+        "images": [
+            image(1, "scene-01", "https://commons.example/nvidia", "nvidia"),
+            image(2, "scene-02", "https://commons.example/spacex", "spacex"),
+        ],
+    }
+
+    def write() -> None:
+        (asset_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    write()
+    assert news_images._cached_manifest(tmp_path, fingerprint, contract) == manifest
+
+    manifest["images"][1]["source_page_url"] = manifest["images"][0]["source_page_url"]
+    write()
+    assert news_images._cached_manifest(tmp_path, fingerprint, contract) is None
+    manifest["images"][1]["source_page_url"] = "https://commons.example/spacex"
+    manifest["images"][1]["scene_id"] = "scene-01"
+    write()
+    assert news_images._cached_manifest(tmp_path, fingerprint, contract) is None
+    manifest["images"][1]["scene_id"] = "scene-02"
+    manifest["query_semantics_version"] -= 1
+    write()
+    assert news_images._cached_manifest(tmp_path, fingerprint, contract) is None
+    manifest["query_semantics_version"] = news_images.QUERY_SEMANTICS_VERSION
+    manifest["images"][1]["sha256"] = "0" * 64
+    write()
+    assert news_images._cached_manifest(tmp_path, fingerprint, contract) is None
 
 
 def test_wikimedia_queries_broaden_without_dropping_the_scene_subject():
@@ -414,6 +738,107 @@ def test_wikimedia_queries_broaden_without_dropping_the_scene_subject():
 
     assert variants[0] == "NVIDIA VERA logo"
     assert "NVIDIA logo" in variants
+
+
+@pytest.mark.asyncio
+async def test_failed_primary_uses_alternate_entity_query_for_the_same_scene(
+    tmp_path: Path,
+    monkeypatch,
+):
+    data = {"title": "Vera", "scenes": [board()["scenes"][0]]}
+    monkeypatch.setattr(
+        news_images,
+        "plan_news_images",
+        AsyncMock(return_value=([_primary_plan()[0]], "mock-planner", "")),
+    )
+    monkeypatch.setattr(
+        news_images,
+        "research_references",
+        AsyncMock(return_value=([], "mock-reference-search")),
+    )
+    attempts: list[tuple[str, str]] = []
+
+    async def fake_search(_client, *, shot: dict, limit: int = 30) -> list[dict]:
+        del limit
+        attempts.append((shot["scene_id"], shot["expected_subject"]))
+        if shot["expected_subject"] != "Vera CPU":
+            return []
+        return [_commons_candidate("scene-01", "Vera CPU", "logo")]
+
+    async def fake_download(_client, *, candidate: dict, destination: Path):
+        payload = _image_bytes()
+        destination.write_bytes(payload)
+        return len(payload), hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr(news_images, "search_wikimedia_images", fake_search)
+    monkeypatch.setattr(news_images, "_download_candidate", fake_download)
+
+    manifest = await news_images.acquire_news_images(data, tmp_path, count=1)
+
+    assert manifest["status"] == "ready"
+    assert attempts[0] == ("scene-01", "NVIDIA")
+    assert ("scene-01", "Vera CPU") in attempts
+    assert manifest["images"][0]["scene_id"] == "scene-01"
+    assert manifest["images"][0]["expected_subject"] == "Vera CPU"
+    assert manifest["images"][0]["candidate_role"] == "reserve"
+
+
+@pytest.mark.asyncio
+async def test_seven_scene_fallback_reaches_seven_unique_images_with_mode_mix(
+    tmp_path: Path,
+    monkeypatch,
+):
+    data = failure_board()
+    fallback = news_images._fallback_plan(data["scenes"], 7)
+    monkeypatch.setattr(
+        news_images,
+        "plan_news_images",
+        AsyncMock(return_value=(fallback, "deterministic-fallback", "")),
+    )
+    monkeypatch.setattr(
+        news_images,
+        "research_references",
+        AsyncMock(return_value=([], "mock-reference-search")),
+    )
+
+    async def fake_search(_client, *, shot: dict, limit: int = 30) -> list[dict]:
+        del limit
+        identity = news_images._subject_identity_key(shot)
+        candidate = _commons_candidate(shot["scene_id"], shot["expected_subject"], shot["kind"])
+        # Every Qwen query intentionally resolves to one Commons page. The
+        # allocator must leave only the scarce scene-09 on that identity.
+        source_slug = "shared-qwen" if identity == "qwen" else identity
+        candidate["source_page_url"] = f"https://commons.example/{source_slug}"
+        candidate["download_url"] = f"https://upload.example/{source_slug}.jpg"
+        return [candidate]
+
+    async def fake_download(_client, *, candidate: dict, destination: Path):
+        payload = _image_bytes()
+        destination.write_bytes(payload)
+        return len(payload), hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr(news_images, "search_wikimedia_images", fake_search)
+    monkeypatch.setattr(news_images, "_download_candidate", fake_download)
+    old_asset = tmp_path / "news_images" / "image-99.jpg"
+    old_asset.parent.mkdir(parents=True)
+    old_asset.write_bytes(b"stale partial asset")
+    keep = old_asset.parent / "operator-note.txt"
+    keep.write_text("keep", encoding="utf-8")
+
+    manifest = await news_images.acquire_news_images(data, tmp_path, count=7)
+
+    assert manifest["status"] == "ready"
+    assert len(manifest["images"]) == 7
+    assert len({image["scene_id"] for image in manifest["images"]}) == 7
+    assert len({image["source_page_url"] for image in manifest["images"]}) == 7
+    assert manifest["placement_modes"]["inline"] > 0
+    assert manifest["placement_modes"]["fullscreen"] > 0
+    subjects = {image["scene_id"]: image["expected_subject"] for image in manifest["images"]}
+    assert subjects["scene-07"] == "Alibaba"
+    assert subjects["scene-09"] == "Qwen Office"
+    assert subjects["scene-10"] == "Jefferies"
+    assert not old_asset.exists()
+    assert keep.read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.asyncio
@@ -435,7 +860,7 @@ async def test_acquisition_uses_reserves_continuous_names_and_stops_at_target(
 
     assert manifest["status"] == "ready"
     assert manifest["primary_query_count"] == 2
-    assert manifest["reserve_query_count"] == 2
+    assert manifest["reserve_query_count"] >= 2
     assert [image["scene_id"] for image in manifest["images"]] == [
         "scene-01",
         "scene-03",
@@ -452,14 +877,22 @@ async def test_acquisition_uses_reserves_continuous_names_and_stops_at_target(
         "fullscreen",
     ]
     assert manifest["placement_modes"] == {"inline": 1, "fullscreen": 1}
-    queries_by_scene = {
-        query["scene_id"]: query for query in manifest["queries"]
+    selected_queries = {
+        image["scene_id"]: next(
+            query
+            for query in manifest["queries"]
+            if query["scene_id"] == image["scene_id"] and query["expected_subject"] == image["expected_subject"]
+        )
+        for image in manifest["images"]
     }
-    assert queries_by_scene["scene-01"]["planned_display_mode"] == "inline"
-    assert queries_by_scene["scene-01"]["display_mode"] == "inline"
-    assert queries_by_scene["scene-03"]["planned_display_mode"] == "inline"
-    assert queries_by_scene["scene-03"]["display_mode"] == "fullscreen"
-    assert researched == ["scene-01", "scene-02", "scene-03"]
+    assert selected_queries["scene-01"]["planned_display_mode"] == "inline"
+    assert selected_queries["scene-01"]["display_mode"] == "inline"
+    assert selected_queries["scene-03"]["candidate_role"] == "reserve"
+    assert selected_queries["scene-03"]["planned_display_mode"] == "inline"
+    assert selected_queries["scene-03"]["display_mode"] == "fullscreen"
+    assert researched[:2] == ["scene-01", "scene-02"]
+    assert researched.count("scene-02") >= 2
+    assert researched[-1] == "scene-03"
     assert "scene-04" not in researched
 
 
@@ -476,10 +909,10 @@ async def test_acquisition_tries_next_candidate_after_download_failure(
     research = AsyncMock(return_value=([], "mock-reference-search"))
     monkeypatch.setattr(news_images, "research_references", research)
 
-    failed = _commons_candidate("scene-01", "NVIDIA")
+    failed = _commons_candidate("scene-01", "NVIDIA", "logo")
     failed["source_page_url"] = "https://commons.example/a-download-fails"
     failed["download_url"] = "https://upload.example/a-download-fails.jpg"
-    succeeds = _commons_candidate("scene-01", "NVIDIA")
+    succeeds = _commons_candidate("scene-01", "NVIDIA", "logo")
     succeeds["source_page_url"] = "https://commons.example/b-download-succeeds"
     succeeds["download_url"] = "https://upload.example/b-download-succeeds.jpg"
 
@@ -494,9 +927,9 @@ async def test_acquisition_tries_next_candidate_after_download_failure(
         attempts.append(source)
         if source == failed["source_page_url"]:
             raise RuntimeError("mock download failure")
-        payload = b"licensed test image" * 100
+        payload = _image_bytes()
         destination.write_bytes(payload)
-        return len(payload), "sha256-success"
+        return len(payload), hashlib.sha256(payload).hexdigest()
 
     monkeypatch.setattr(news_images, "search_wikimedia_images", fake_search)
     monkeypatch.setattr(news_images, "_download_candidate", fake_download)
@@ -513,8 +946,7 @@ async def test_acquisition_tries_next_candidate_after_download_failure(
     assert manifest["images"][0]["id"] == "image-01"
     assert research.await_count == 1
     assert any(
-        error["stage"] == "download"
-        and error["source_page_url"] == failed["source_page_url"]
+        error["stage"] == "download" and error["source_page_url"] == failed["source_page_url"]
         for error in manifest["errors"]
     )
 
@@ -536,8 +968,21 @@ async def test_acquisition_remains_partial_after_all_reserves_are_exhausted(
     assert manifest["planned_image_count"] == 2
     assert len(manifest["images"]) == 1
     assert manifest["images"][0]["id"] == "image-01"
-    assert researched == ["scene-01", "scene-02", "scene-03", "scene-04"]
-    assert news_images._cached_manifest(
-        tmp_path,
-        news_images.storyboard_fingerprint(extended_board()),
-    ) is None
+    assert set(researched) == {"scene-01", "scene-02", "scene-03", "scene-04"}
+    assert researched.count("scene-02") >= 2
+    fingerprint = news_images.storyboard_fingerprint(extended_board())
+    contract = news_images.acquisition_contract_fingerprint(
+        storyboard_sha256=fingerprint,
+        requested_count=2,
+        target_count=2,
+        eligible_scene_ids=["scene-01", "scene-02", "scene-03", "scene-04"],
+        excluded_scene_ids=set(),
+    )
+    assert (
+        news_images._cached_manifest(
+            tmp_path,
+            fingerprint,
+            contract,
+        )
+        is None
+    )

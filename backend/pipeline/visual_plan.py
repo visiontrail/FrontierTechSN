@@ -566,15 +566,27 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
             )
         elif plan.get("news_image"):
             match_terms = plan.get("news_image_match_terms") or []
+            distinctive_anchors = plan.get("news_image_grounding_distinctive_anchors") or []
             source_scene_id = str(plan.get("news_image_source_scene_id") or "")
             exact_scene = source_scene_id == scene["id"]
             open_license = bool(str(plan.get("news_image_license") or "").strip())
-            grounded = grounded and exact_scene and bool(match_terms) and open_license
+            policy_current = (
+                int(plan.get("news_image_grounding_policy_version") or 0) >= 2
+                and plan.get("news_image_grounding_passed") is True
+            )
+            grounded = (
+                grounded
+                and exact_scene
+                and bool(match_terms)
+                and bool(distinctive_anchors)
+                and set(distinctive_anchors).issubset(set(match_terms))
+                and policy_current
+                and open_license
+            )
             reason = (
-                "licensed news image matched the exact narrated scene on "
-                + ", ".join(match_terms)
+                "licensed news image passed the current three-way grounding policy on " + ", ".join(distinctive_anchors)
                 if grounded
-                else "news image lacked an exact scene, subject, or license anchor"
+                else "news image lacked a current exact-scene grounding proof or license anchor"
             )
         elif plan.get("archetype") == "footage":
             match_terms = plan.get("footage_match_terms") or []

@@ -392,6 +392,9 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
             "news_image": True,
             "news_image_source_scene_id": "scene-01",
             "news_image_match_terms": ["nvidia"],
+            "news_image_grounding_policy_version": 2,
+            "news_image_grounding_passed": True,
+            "news_image_grounding_distinctive_anchors": ["nvidia"],
             "news_image_license": "Public domain",
         }
     )
@@ -400,6 +403,25 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
 
     assert report["passed"] is True
     assert "licensed news image" in report["scenes"][0]["reason"]
+
+
+def test_visual_grounding_report_rejects_legacy_news_image_without_policy_proof():
+    data = board(1)
+    data["scenes"][0]["text"] = "NVIDIA announced the Vera CPU."
+    plans = visual_plan.fallback_plan(data)
+    plans[0].update(
+        {
+            "news_image": True,
+            "news_image_source_scene_id": "scene-01",
+            "news_image_match_terms": ["nvidia"],
+            "news_image_license": "Public domain",
+        }
+    )
+
+    report = visual_plan.visual_grounding_report(plans, data)
+
+    assert report["passed"] is False
+    assert "current exact-scene grounding proof" in report["scenes"][0]["reason"]
 
 
 def test_outro_plan_is_spine_owned():
