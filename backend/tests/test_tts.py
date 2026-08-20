@@ -184,6 +184,14 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tts._orpheus_prompt_text("Already complete!"), "Already complete!")
         self.assertEqual(tts._orpheus_prompt_text("A complete clause,"), "A complete clause.")
 
+    def test_orpheus_prompt_articulates_qbitai_publication_name(self):
+        text = "QbitAI reports the result"
+
+        self.assertEqual(
+            tts._orpheus_prompt_text(text),
+            "Q-bit A-I reports the result.",
+        )
+
     def test_orpheus_prompt_articulates_failed_opening_months_inflection(self):
         text = (
             "Months of obsessive engineering, intelligence gathering, training, "

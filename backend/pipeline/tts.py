@@ -881,6 +881,14 @@ def _orpheus_request_token_budget(text: str, maximum: int) -> int:
 def _orpheus_prompt_text(text: str) -> str:
     """Give every short LM request an explicit speech termination boundary."""
     stripped = text.rstrip()
+    # The speech LM can parse the CamelCase publication name as "two-bit AI".
+    # Expose the intended letter and word boundaries only in the provider
+    # prompt; verification still requires Whisper to recover QbitAI/Qubit AI.
+    stripped = re.sub(
+        r"(?<![\w-])QbitAI(?![\w-])",
+        "Q-bit A-I",
+        stripped,
+    )
     # Orpheus repeatedly realizes the opening phrase "Months of" as singular
     # "Month of". Expose the final plural morpheme to its tokenizer; the
     # canonical script remains unchanged and ASR must still recover "months".
