@@ -55,6 +55,9 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 MAX_PLAUSIBLE_SPEECH_WPM = 320
 LEXICAL_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?|[\u3400-\u9fff]")
+DECIMAL_LITERAL_RE = re.compile(r"(\d+)\.(\d+)")
+DECIMAL_INTEGER_WORD_RE = re.compile(r"\s*(\d+)\s*")
+DECIMAL_FRACTION_WORD_RE = re.compile(r"\s*\.(\d+)[.,;:!?]?\s*")
 NUMBER_WORDS = {
     "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
     "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
@@ -128,6 +131,7 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("skunk", "works"): "skunkworks",
     ("3", "m"): "3m",
     ("multi", "modal"): "multimodal",
+    ("a", "p", "i"): "api",
 }
 NUMBER_SCALES = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
 DANGLING_CHUNK_WORDS = {
@@ -181,7 +185,13 @@ def _spoken_word_count(text: str) -> int:
 def _raw_lexical_tokens(text: str) -> list[str]:
     """Normalize individual spellings without collapsing cross-word phrases."""
     normalized: list[str] = []
-    for token in LEXICAL_TOKEN_RE.findall(_strip_speaker_labels(text)):
+    lexical_text = DECIMAL_LITERAL_RE.sub(
+        lambda match: (
+            f" decimalnumber{match.group(1)}point{match.group(2)} "
+        ),
+        _strip_speaker_labels(text),
+    )
+    for token in LEXICAL_TOKEN_RE.findall(lexical_text):
         value = token.replace("’", "'").casefold()
         # Whisper commonly renders spoken "percent" as the punctuation symbol
         # "%", which is not a lexical token. Ignore the unit on both sides;
@@ -196,7 +206,11 @@ def _raw_lexical_tokens(text: str) -> list[str]:
 def _lexical_tokens(text: str) -> list[str]:
     normalized = _raw_lexical_tokens(text)
     return _canonicalize_calendar_date_tokens(
-        _canonicalize_number_tokens(_canonicalize_acoustic_phrase_tokens(normalized))
+        _canonicalize_number_tokens(
+            _canonicalize_decimal_tokens(
+                _canonicalize_acoustic_phrase_tokens(normalized)
+            )
+        )
     )
 
 
@@ -219,15 +233,74 @@ def _canonicalize_acoustic_phrase_tokens(tokens: list[str]) -> list[str]:
     result: list[str] = []
     index = 0
     while index < len(tokens):
-        pair = tuple(tokens[index:index + 2])
-        canonical = ACOUSTIC_PHRASE_EQUIVALENTS.get(pair)
-        if canonical is not None:
-            result.append(canonical)
-            index += 2
+        for width in (3, 2):
+            phrase = tuple(tokens[index:index + width])
+            canonical = ACOUSTIC_PHRASE_EQUIVALENTS.get(phrase)
+            if canonical is not None:
+                result.append(canonical)
+                index += width
+                break
+        else:
+            result.append(tokens[index])
+            index += 1
+            continue
+        continue
+    return result
+
+
+def _canonicalize_decimal_tokens(tokens: list[str]) -> list[str]:
+    """Collapse a spoken point and its fractional digits into one exact token."""
+    result: list[str] = []
+    index = 0
+    while index < len(tokens):
+        if (
+            tokens[index].isdigit()
+            and index + 2 < len(tokens)
+            and tokens[index + 1] == "point"
+            and tokens[index + 2].isdigit()
+        ):
+            fraction_end = index + 3
+            while fraction_end < len(tokens) and tokens[fraction_end].isdigit():
+                fraction_end += 1
+            result.append(
+                "decimalnumber"
+                f"{tokens[index]}point{''.join(tokens[index + 2:fraction_end])}"
+            )
+            index = fraction_end
             continue
         result.append(tokens[index])
         index += 1
     return result
+
+
+def _canonicalize_decimal_transcript_tokens(
+    tokens: list[str], word_indexes: list[int]
+) -> tuple[list[str], list[int]]:
+    """Canonicalize spoken decimals while retaining their true onset word."""
+    result: list[str] = []
+    result_indexes: list[int] = []
+    index = 0
+    while index < len(tokens):
+        if (
+            tokens[index].isdigit()
+            and index + 2 < len(tokens)
+            and tokens[index + 1] == "point"
+            and tokens[index + 2].isdigit()
+        ):
+            fraction_end = index + 3
+            while fraction_end < len(tokens) and tokens[fraction_end].isdigit():
+                fraction_end += 1
+            result.append(
+                "decimalnumber"
+                f"{tokens[index]}point{''.join(tokens[index + 2:fraction_end])}"
+            )
+            result_indexes.append(word_indexes[index])
+            index = fraction_end
+            continue
+        result.append(tokens[index])
+        result_indexes.append(word_indexes[index])
+        index += 1
+    return result, result_indexes
 
 
 def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
@@ -328,10 +401,29 @@ def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
 def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
     tokens: list[str] = []
     word_indexes: list[int] = []
-    for index, word in enumerate(words):
-        for token in _raw_lexical_tokens(str(word.get("text") or "")):
+    index = 0
+    while index < len(words):
+        word_text = str(words[index].get("text") or "")
+        integer_match = DECIMAL_INTEGER_WORD_RE.fullmatch(word_text)
+        fraction_match = (
+            DECIMAL_FRACTION_WORD_RE.fullmatch(
+                str(words[index + 1].get("text") or "")
+            )
+            if integer_match is not None and index + 1 < len(words)
+            else None
+        )
+        if integer_match is not None and fraction_match is not None:
+            tokens.append(
+                "decimalnumber"
+                f"{integer_match.group(1)}point{fraction_match.group(1)}"
+            )
+            word_indexes.append(index)
+            index += 2
+            continue
+        for token in _raw_lexical_tokens(word_text):
             tokens.append(token)
             word_indexes.append(index)
+        index += 1
     # A provider-only pronunciation hint may lead Whisper to retain the
     # morpheme boundary. The pair is acoustically and lexically identical to
     # the canonical word; a different second morpheme remains a hard failure.
@@ -339,12 +431,17 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
     acoustic_indexes: list[int] = []
     cursor = 0
     while cursor < len(tokens):
-        phrase = tuple(tokens[cursor:cursor + 2])
-        canonical_phrase = ACOUSTIC_PHRASE_EQUIVALENTS.get(phrase)
-        if canonical_phrase is not None:
-            acoustic_tokens.append(canonical_phrase)
-            acoustic_indexes.append(word_indexes[cursor])
-            cursor += 2
+        matched_phrase = False
+        for width in (3, 2):
+            phrase = tuple(tokens[cursor:cursor + width])
+            canonical_phrase = ACOUSTIC_PHRASE_EQUIVALENTS.get(phrase)
+            if canonical_phrase is not None:
+                acoustic_tokens.append(canonical_phrase)
+                acoustic_indexes.append(word_indexes[cursor])
+                cursor += width
+                matched_phrase = True
+                break
+        if matched_phrase:
             continue
         if (
             tokens[cursor] == "dis"
@@ -360,7 +457,12 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
         cursor += 1
     tokens = acoustic_tokens
     word_indexes = acoustic_indexes
-    canonical = _canonicalize_calendar_date_tokens(_canonicalize_number_tokens(tokens))
+    tokens, word_indexes = _canonicalize_decimal_transcript_tokens(
+        tokens, word_indexes
+    )
+    canonical = _canonicalize_calendar_date_tokens(
+        _canonicalize_number_tokens(tokens)
+    )
     if len(canonical) == len(tokens):
         return canonical, word_indexes
     # Canonical number collapsing is used only for lexical comparison. Timing

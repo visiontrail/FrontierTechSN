@@ -1332,6 +1332,92 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report("office")["verified"])
         self.assertFalse(report("officers")["verified"])
 
+    def test_orpheus_transcript_normalizes_spoken_decimal_and_api_initialism(self):
+        expected = "Qwen 3.8 Max API pricing reported"
+
+        def report(observed: str) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        spoken = report("Qwen three point eight Max A P I pricing reported")
+        numeric = report("Qwen 3.8 Max API pricing reported")
+
+        self.assertTrue(spoken["verified"])
+        self.assertTrue(numeric["verified"])
+        self.assertEqual(spoken["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report("Qwen three eight Max A P I pricing reported")["verified"])
+        self.assertFalse(report("Qwen three point eight Max A I pricing reported")["verified"])
+
+    def test_orpheus_transcript_normalizes_each_spoken_decimal_digit(self):
+        expected = "revenue of 2.751 billion yuan"
+        observed = "revenue of two point seven five one billion yuan".split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
+    def test_orpheus_transcript_normalizes_decimal_split_across_whisper_words(self):
+        expected = "revenue of 2.751 billion yuan"
+        observed = ["revenue", "of", "2", ".751", "billion", "yuan"]
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
+    def test_orpheus_transcript_normalizes_split_decimal_before_terminal_period(self):
+        expected = "value 2.751."
+
+        def report(observed: list[str]) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report(["value", "2", ".751."])["verified"])
+        self.assertFalse(report(["value", "2", "751"])["verified"])
+
+    def test_orpheus_transcript_does_not_merge_following_number_into_decimal(self):
+        expected = "Values 3.8, 5 reported"
+        observed = "Values 3.85 reported".split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertFalse(report["verified"])
+        self.assertLess(report["exact_asr_word_coverage"], 1.0)
+
+    def test_orpheus_decimal_repetition_retains_true_second_onset(self):
+        expected = "Value 3.85 now."
+        observed = (
+            "Value three point eight five now "
+            "Value three point eight five now"
+        ).split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertEqual(report["repeat_start_seconds"], 1.2)
+
     def test_orpheus_transcript_normalizes_whisper_eunuch_bias(self):
         expected = "The eunuch system, not interested."
         observed = "The Unix system not interested".split()
