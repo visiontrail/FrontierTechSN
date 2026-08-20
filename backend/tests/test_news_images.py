@@ -921,6 +921,26 @@ def test_cached_asset_validates_svg_without_bytes_casefold_or_late_doctype(
     assert news_images._cached_asset_is_intact(tmp_path, record) is False
 
 
+@pytest.mark.asyncio
+async def test_acquisition_rejects_symlinked_asset_directory_without_touching_external_files(
+    tmp_path: Path,
+):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    victim = external / "image-01.jpg"
+    victim.write_bytes(b"operator-owned external file")
+    (task_dir / "news_images").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        await news_images.acquire_news_images(board(), task_dir, count=1)
+
+    assert victim.read_bytes() == b"operator-owned external file"
+    assert not (external / "manifest.json").exists()
+    assert news_images._generated_asset_path(task_dir, "news_images/image-01.jpg") is None
+
+
 def test_cached_manifest_rejects_duplicate_identity_stale_policy_and_bad_hash(
     tmp_path: Path,
 ):

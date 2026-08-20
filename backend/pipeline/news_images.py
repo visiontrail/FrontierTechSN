@@ -457,13 +457,24 @@ def _write_manifest(task_dir: Path, manifest: dict) -> None:
     temporary.replace(path)
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    absolute = path.absolute()
+    return any(component.is_symlink() for component in (absolute, *absolute.parents))
+
+
 def _generated_asset_path(task_dir: Path, local_path: object) -> Path | None:
     relative = str(local_path or "").replace("\\", "/")
     if not GENERATED_ASSET_RE.fullmatch(relative):
         return None
-    root = (task_dir / "news_images").resolve()
-    candidate = task_dir / relative
-    if candidate.parent.resolve() != root or candidate.is_symlink():
+    absolute_task_dir = task_dir.absolute()
+    root = absolute_task_dir / "news_images"
+    if _path_has_symlink_component(absolute_task_dir) or _path_has_symlink_component(root):
+        return None
+    expected_resolved_root = absolute_task_dir.resolve() / "news_images"
+    if root.resolve() != expected_resolved_root:
+        return None
+    candidate = absolute_task_dir / relative
+    if candidate.parent != root or candidate.is_symlink():
         return None
     return candidate
 
@@ -1695,6 +1706,8 @@ async def acquire_news_images(
     log: LogCallback | None = None,
 ) -> dict:
     """Research, acquire, and ledger still images for exact narrated scenes."""
+    if _path_has_symlink_component(task_dir) or _path_has_symlink_component(task_dir / "news_images"):
+        raise ValueError("News image task and asset directories must not traverse symbolic links")
     task_dir.mkdir(parents=True, exist_ok=True)
     image_dir = task_dir / "news_images"
     image_dir.mkdir(parents=True, exist_ok=True)
