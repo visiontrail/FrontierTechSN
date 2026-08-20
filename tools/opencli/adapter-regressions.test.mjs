@@ -90,6 +90,9 @@ function videoUploadPage({ native = 'success', cdp = false, clear = false, busyR
   if (cdp) {
     page.cdp = async (method, params = {}) => {
       actions.push(['cdp', method, params])
+      if (cdp === 'error' && method === 'Runtime.evaluate') {
+        throw new Error('CDP method not permitted: Runtime.evaluate')
+      }
       if (method === 'Runtime.evaluate') return { result: { objectId: 'live-file-input' } }
       if (method === 'DOM.setFileInputFiles' && !clear) attachments += 1
       return {}
@@ -172,10 +175,34 @@ test('Gemini video fails closed with substep and input state when the UI clears 
       assert.match(error.message, /"selector":"\[data-opencli-video-upload-target=/)
       assert.match(error.message, /"inputFiles":\[\[\]\]/)
       assert.match(error.message, /"clearedIdleSamples":2/)
+      assert.doesNotMatch(error.message, /OPENCLI_CAPABILITY_UNAVAILABLE/)
       return true
     },
   )
   assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
+})
+
+test('Gemini video reports a stable upload capability code only after every path is blocked', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({ native: 'error', cdp: 'error', clear: true })
+
+  await assert.rejects(
+    uploadFrame(page, frame, 1, { attachmentTimeoutMs: 1000, clearedIdleLimit: 2 }),
+    (error) => {
+      assert.match(
+        error.message,
+        /OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD/,
+      )
+      assert.match(error.message, /"method":"DataTransfer"/)
+      assert.match(error.message, /"method":"page\.setFileInput"/)
+      assert.match(error.message, /-32000|Not allowed/i)
+      assert.match(error.message, /CDP method not permitted: Runtime\.evaluate/)
+      assert.match(error.message, /"attachments":0/)
+      assert.match(error.message, /"inputFiles":\[\[\]\]/)
+      return true
+    },
+  )
+  assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
 })
 
 test('Gemini video uploads first and last keyframes sequentially with cumulative attachment counts', async (t) => {

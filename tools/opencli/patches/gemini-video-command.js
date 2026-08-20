@@ -7,6 +7,7 @@ import { sendGeminiMessage } from './utils.js';
 
 const GEMINI_DOMAIN = 'gemini.google.com';
 const GEMINI_VIDEOS_URL = 'https://gemini.google.com/videos';
+const VIDEO_UPLOAD_CAPABILITY_CODE = 'OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD';
 
 function unwrap(value) {
     if (value && typeof value === 'object' && !Array.isArray(value) && 'session' in value) {
@@ -137,8 +138,29 @@ export async function setFileInputViaCdp(page, filePaths, selector) {
 }
 
 function uploadFailure(expectedCount, substep, diagnostic) {
+    const nativeErrors = Array.isArray(diagnostic?.nativeErrors) ? diagnostic.nativeErrors : [];
+    const nativeDenied = nativeErrors.some(error =>
+        error?.method === 'page.setFileInput'
+        && /-32000|not allowed/i.test(String(error?.error || ''))
+    );
+    const directCdpDenied = nativeErrors.some(error =>
+        error?.method === 'DOM.setFileInputFiles'
+        && /CDP method not permitted[\s\S]*Runtime\.evaluate/i.test(String(error?.error || ''))
+    );
+    const inputFiles = diagnostic?.state?.inputFiles;
+    const syntheticCleared = diagnostic?.method === 'DataTransfer'
+        && Number(diagnostic?.state?.attachments || 0) === 0
+        && Array.isArray(inputFiles)
+        && inputFiles.length > 0
+        && inputFiles.every(files => Array.isArray(files) && files.length === 0);
+    const capabilityCode = substep === 'wait_for_attachment'
+        && nativeDenied
+        && directCdpDenied
+        && syntheticCleared
+        ? `${VIDEO_UPLOAD_CAPABILITY_CODE}: `
+        : '';
     return new CommandExecutionError(
-        `Gemini keyframe ${expectedCount} upload failed at ${substep}: ${JSON.stringify(diagnostic)}`
+        `${capabilityCode}Gemini keyframe ${expectedCount} upload failed at ${substep}: ${JSON.stringify(diagnostic)}`
     );
 }
 

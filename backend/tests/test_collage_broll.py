@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from PIL import Image, ImageDraw
 
 from backend.pipeline import collage_broll
@@ -79,12 +80,68 @@ def test_opencli_collage_operation_retries_until_success(monkeypatch):
 
     result = asyncio.run(
         collage_broll._run_opencli_retry(
-            ["chatgpt", "image", "prompt"], timeout=10, label="test still"
+            ["gemini", "video", "prompt"],
+            timeout=10,
+            label="test video",
+            non_retryable=collage_broll._is_gemini_video_upload_capability_failure,
         )
     )
 
     assert result == "ready"
     assert calls == 3
+
+
+def _blocked_gemini_video_upload_error() -> collage_broll.OpenCLIError:
+    return collage_broll.OpenCLIError(
+        'Gemini keyframe 1 upload failed at wait_for_attachment: '
+        '{"method":"DataTransfer","nativeErrors":['
+        '{"method":"page.setFileInput","error":"{\\"code\\":-32000,'
+        '\\"message\\":\\"Not allowed\\"}"},'
+        '{"method":"DOM.setFileInputFiles","error":'
+        '"CDP method not permitted: Runtime.evaluate"}],'
+        '"state":{"attachments":0,"busy":false,"inputFiles":[[]]}}'
+    )
+
+
+def test_opencli_collage_operation_does_not_retry_stable_upload_capability_failure(
+    monkeypatch,
+):
+    run = AsyncMock(side_effect=_blocked_gemini_video_upload_error())
+    sleep = AsyncMock()
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 10)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", sleep)
+
+    with pytest.raises(
+        collage_broll.GeminiVideoUploadCapabilityError,
+        match=collage_broll.GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE,
+    ):
+        asyncio.run(
+            collage_broll._run_opencli_retry(
+                ["gemini", "video", "prompt"],
+                timeout=10,
+                label="Gemini collage video",
+                non_retryable=collage_broll._is_gemini_video_upload_capability_failure,
+            )
+        )
+
+    assert run.await_count == 1
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "browser busy",
+        'page.setFileInput failed: {"code":-32000,"message":"Not allowed"}',
+        "CDP method not permitted: Runtime.evaluate",
+        '{"method":"DataTransfer","state":{"attachments":0,"inputFiles":[[]]}}',
+    ],
+)
+def test_upload_capability_classifier_requires_the_complete_failure_signature(message):
+    assert not collage_broll._is_gemini_video_upload_capability_failure(
+        collage_broll.OpenCLIError(message)
+    )
 
 
 def test_agent_selects_beats_from_the_full_timeline():
@@ -293,6 +350,85 @@ def test_generate_falls_back_locally_when_web_video_fails(tmp_path: Path):
     saved = json.loads((tmp_path / "collage_broll" / "manifest.json").read_text())
     assert saved["errors"] == []
     assert "quota exhausted" in saved["items"][1]["generation_warnings"][0]
+
+
+def test_generate_reuses_nonretryable_upload_capability_failure_for_later_scenes(
+    tmp_path: Path,
+):
+    specs = [
+        collage_broll._fallback_spec(scene, index)
+        for index, scene in enumerate(_board(3)["scenes"])
+    ]
+    still = tmp_path / "source.png"
+    still.write_bytes(b"png")
+
+    async def frames(_source, item_dir, _color, _frame):
+        frame_dir = item_dir / "frames"
+        frame_dir.mkdir(parents=True)
+        first = frame_dir / "first-frame.png"
+        last = frame_dir / "last-frame.png"
+        first.write_bytes(b"first")
+        last.write_bytes(b"last")
+        return first, last
+
+    async def local_video(_first, _last, item_dir, _frame, _target_duration):
+        raw = item_dir / "video" / "local-paper-assembly.mp4"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes(b"local")
+        return raw
+
+    async def normalize(_raw, item_dir, _frame, target_duration):
+        final = collage_broll._final_clip_path(item_dir, target_duration)
+        final.write_bytes(b"final")
+        return final
+
+    async def sheet(_video, item_dir, _frame, _target_duration):
+        output = item_dir / "video" / "contact-sheet.jpg"
+        output.write_bytes(b"sheet")
+        return output
+
+    capability_error = collage_broll.GeminiVideoUploadCapabilityError(
+        f"Gemini collage video cannot run "
+        f"({collage_broll.GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE})"
+    )
+    generate_video = AsyncMock(side_effect=capability_error)
+    animate_local = AsyncMock(side_effect=local_video)
+    with (
+        patch.object(collage_broll, "plan_specs", AsyncMock(return_value=specs)),
+        patch.object(
+            collage_broll,
+            "_generate_still",
+            AsyncMock(return_value=(still, "https://chatgpt.com/c/test")),
+        ),
+        patch.object(collage_broll, "_prepare_frames", frames),
+        patch.object(collage_broll, "_generate_video", generate_video),
+        patch.object(collage_broll, "_animate_still_locally", animate_local),
+        patch.object(collage_broll, "_normalize_video", normalize),
+        patch.object(
+            collage_broll, "probe_video", AsyncMock(return_value={"passed": True})
+        ),
+        patch.object(collage_broll, "_contact_sheet", sheet),
+    ):
+        manifest = asyncio.run(
+            collage_broll.generate_collage_broll(
+                _board(3), tmp_path, count=3, force_opening=False, frame=LANDSCAPE
+            )
+        )
+
+    assert manifest["status"] == "ready"
+    assert manifest["ready_count"] == 3
+    assert generate_video.await_count == 1
+    assert animate_local.await_count == 3
+    assert {
+        item["video_provider"] for item in manifest["items"]
+    } == {"deterministic_local_paper_assembly"}
+    assert manifest["gemini_video_upload_capability"] == {
+        "status": "unavailable",
+        "error_code": collage_broll.GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE,
+        "detected_at_scene_id": "scene-01",
+    }
+    assert "skipped web generation" in manifest["items"][1]["generation_warnings"][0]
+    assert "skipped web generation" in manifest["items"][2]["generation_warnings"][0]
 
 
 def test_generate_falls_back_locally_when_web_still_fails(tmp_path: Path):

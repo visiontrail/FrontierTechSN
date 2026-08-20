@@ -31,6 +31,13 @@ MOTION_SAMPLE_FPS = 4
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _COLORS = ("#D96B35", "#D2A928", "#315F4C", "#594080", "#188C85", "#B73D3D")
+GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE = (
+    "OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD"
+)
+
+
+class GeminiVideoUploadCapabilityError(OpenCLIError):
+    """This browser session cannot put local keyframes into Gemini Video."""
 
 
 def _seconds(value: Any, fallback: float = 0.0) -> float:
@@ -309,9 +316,13 @@ async def _media_command(args: Sequence[str], *, timeout: int) -> None:
 
 
 async def _run_opencli_retry(
-    args: list[str], *, timeout: int, label: str
+    args: list[str],
+    *,
+    timeout: int,
+    label: str,
+    non_retryable: Callable[[Exception], bool] | None = None,
 ):
-    """Give every browser-backed collage operation ten independent chances."""
+    """Retry transient browser failures, stopping on a proven capability gap."""
     last_error: Exception | None = None
     maximum_attempts = max(1, int(config.OPENCLI_MAX_ATTEMPTS))
     for attempt in range(1, maximum_attempts + 1):
@@ -327,11 +338,43 @@ async def _run_opencli_retry(
                 maximum_attempts,
                 exc,
             )
+            if non_retryable and non_retryable(exc):
+                raise GeminiVideoUploadCapabilityError(
+                    f"{label} cannot run in this browser session "
+                    f"({GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE}): {exc}"
+                ) from exc
             if attempt < maximum_attempts:
                 await asyncio.sleep(min(45, 3 * 2 ** (attempt - 1)))
     raise OpenCLIError(
         f"{label} exhausted {maximum_attempts} OpenCLI attempts: {last_error}"
     ) from last_error
+
+
+def _is_gemini_video_upload_capability_failure(error: Exception) -> bool:
+    """Recognize the complete, stable Browser Bridge upload failure signature.
+
+    One blocked mechanism is not enough: a transient DOM change can break an
+    individual path. This only becomes non-retryable after native injection is
+    denied, the extension allowlist blocks direct CDP evaluation, and Gemini
+    clears the synthetic fallback without creating an attachment.
+    """
+    message = " ".join(str(error).split()).lower()
+    if GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE.lower() in message:
+        return True
+    return all(
+        token in message
+        for token in (
+            "page.setfileinput",
+            "-32000",
+            "not allowed",
+            "dom.setfileinputfiles",
+            "cdp method not permitted",
+            "runtime.evaluate",
+            '"method":"datatransfer"',
+            '"attachments":0',
+            '"inputfiles":[[]]',
+        )
+    )
 
 
 async def _generate_still(prompt: str, item_dir: Path) -> tuple[Path, str]:
@@ -671,6 +714,7 @@ async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, 
         ],
         timeout=timeout + 120,
         label="Gemini collage video",
+        non_retryable=_is_gemini_video_upload_capability_failure,
     )
     if not raw.is_file() or raw.stat().st_size < 1024:
         raise OpenCLIError("Gemini Web Create Video produced no downloaded MP4")
@@ -850,6 +894,11 @@ async def generate_collage_broll(
         "planner": "claude_agent_sdk",
         "still_provider": "chatgpt_web_via_opencli",
         "video_provider": "gemini_web_create_video_via_opencli",
+        "gemini_video_upload_capability": {
+            "status": "unknown",
+            "error_code": None,
+            "detected_at_scene_id": None,
+        },
         "gemini_api_key_used": False,
         "orientation": frame.orientation,
         "aspect_ratio": frame.aspect_ratio,
@@ -915,6 +964,7 @@ async def generate_collage_broll(
     _write_json(specs_path, specs)
     manifest["status"] = "generating"
     _write_json(manifest_path, manifest)
+    gemini_video_upload_unavailable = False
 
     for index, spec in enumerate(specs, start=1):
         scene_id = spec["scene_id"]
@@ -1011,11 +1061,11 @@ async def generate_collage_broll(
                 f"Collage B-roll {index}/{len(specs)}: animating {scene_id} once for "
                 f"{target_duration:.3f}s in Gemini Web Create Video",
             )
-            try:
-                raw, gemini_url = await _generate_video(motion_prompt, first, last, item_dir, frame)
-                item["video_provider"] = "gemini_web_create_video_via_opencli"
-            except Exception as exc:  # noqa: BLE001 - local animation preserves requested count
-                warning = f"Web video unavailable ({exc}); used deterministic local paper assembly"
+            if gemini_video_upload_unavailable:
+                warning = (
+                    "Gemini video upload capability unavailable for this compose; "
+                    "skipped web generation and used deterministic local paper assembly"
+                )
                 item["generation_warnings"].append(warning)
                 _log(log, f"Collage B-roll {index}/{len(specs)}: {warning}")
                 raw = await _animate_still_locally(
@@ -1023,6 +1073,34 @@ async def generate_collage_broll(
                 )
                 gemini_url = ""
                 item["video_provider"] = "deterministic_local_paper_assembly"
+            else:
+                try:
+                    raw, gemini_url = await _generate_video(
+                        motion_prompt, first, last, item_dir, frame
+                    )
+                    item["video_provider"] = "gemini_web_create_video_via_opencli"
+                    manifest["gemini_video_upload_capability"]["status"] = "available"
+                except Exception as exc:  # noqa: BLE001 - local animation preserves requested count
+                    if isinstance(exc, GeminiVideoUploadCapabilityError):
+                        gemini_video_upload_unavailable = True
+                        manifest["gemini_video_upload_capability"].update(
+                            {
+                                "status": "unavailable",
+                                "error_code": GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE,
+                                "detected_at_scene_id": scene_id,
+                            }
+                        )
+                    warning = (
+                        f"Web video unavailable ({exc}); "
+                        "used deterministic local paper assembly"
+                    )
+                    item["generation_warnings"].append(warning)
+                    _log(log, f"Collage B-roll {index}/{len(specs)}: {warning}")
+                    raw = await _animate_still_locally(
+                        first, last, item_dir, frame, target_duration
+                    )
+                    gemini_url = ""
+                    item["video_provider"] = "deterministic_local_paper_assembly"
             final = await _normalize_video(raw, item_dir, frame, target_duration)
             qa = await probe_video(final, frame, target_duration)
             if not qa["passed"]:
