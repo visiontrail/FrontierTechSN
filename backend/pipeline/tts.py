@@ -92,6 +92,10 @@ ACOUSTIC_EQUIVALENTS = {
     # Singular and plural possessive spellings of "World" have the same
     # spoken form; Whisper cannot recover which apostrophe the script used.
     "worlds": "world's",
+    # Whisper may spell the German surname Brem as the identically pronounced
+    # surname Brehm. The silent ``h`` carries no acoustic evidence; other
+    # nearby spellings (for example "Bream") remain distinct.
+    "brehm": "brem",
     # Whisper consistently labels the rare spoken word "eunuch" as the
     # familiar two-syllable proper noun "Unix", including at 0.8x speed.
     "unix": "eunuch",

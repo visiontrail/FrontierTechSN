@@ -1193,6 +1193,30 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["transcript_words"], 12)
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
 
+    def test_orpheus_transcript_normalizes_brem_silent_h_spelling_only(self):
+        expected = (
+            "The article, authored by Alexander Brem, editor in chief of "
+            "IEEE Engineering"
+        )
+
+        def report(name: str) -> dict:
+            observed = (
+                f"The article authored by Alexander {name} editor in chief of "
+                "IEEE Engineering"
+            ).split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        accepted = report("Brehm")
+
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report("Bream")["verified"])
+        self.assertFalse(report("")["verified"])
+
     def test_orpheus_transcript_normalizes_whisper_eunuch_bias(self):
         expected = "The eunuch system, not interested."
         observed = "The Unix system not interested".split()
