@@ -899,6 +899,14 @@ def _orpheus_prompt_text(text: str) -> str:
         "Q-bit A-I",
         stripped,
     )
+    # A generated continuation beginning with this third-person verb lost its
+    # final /s/. Expose that morpheme only to the provider tokenizer;
+    # the canonical transcript must still contain the exact word "describes".
+    stripped = re.sub(
+        r"^(\s*[Dd]escribe)s\b",
+        r"\1-s",
+        stripped,
+    )
     # Orpheus repeatedly realizes the opening phrase "Months of" as singular
     # "Month of". Expose the final plural morpheme to its tokenizer; the
     # canonical script remains unchanged and ASR must still recover "months".

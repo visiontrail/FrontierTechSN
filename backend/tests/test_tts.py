@@ -192,6 +192,14 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             "Q-bit A-I reports the result.",
         )
 
+    def test_orpheus_prompt_articulates_leading_describes_inflection(self):
+        text = "describes situations where employees have promising ideas"
+
+        self.assertEqual(
+            tts._orpheus_prompt_text(text),
+            "describe-s situations where employees have promising ideas.",
+        )
+
     def test_orpheus_prompt_articulates_failed_opening_months_inflection(self):
         text = (
             "Months of obsessive engineering, intelligence gathering, training, "
