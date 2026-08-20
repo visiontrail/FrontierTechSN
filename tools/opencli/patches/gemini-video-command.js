@@ -112,47 +112,42 @@ async function selectAspectRatio(page, aspect) {
     }
 }
 
-async function setFileInputViaCdp(page, filePaths) {
+export async function setFileInputViaCdp(page, filePaths, selector) {
     if (typeof page.cdp !== 'function') return false;
     await page.cdp('DOM.enable', {}).catch(() => undefined);
 
     // Gemini can leave more than one hidden Filedata input in the document.
-    // Resolve the live input from JavaScript and address its runtime object
-    // directly; a document-level querySelector node id can point at a stale
-    // input even though DOM.setFileInputFiles reports success.
-    const evaluated = unwrap(await page.cdp('Runtime.evaluate', {
-        expression: `(() => {
-          const roots = [document.querySelector('input-container'), document].filter(Boolean);
-          for (const root of roots) {
-            const inputs = Array.from(root.querySelectorAll('input[name="Filedata"], input[type="file"]'));
-            const live = inputs.find(input => !input.disabled && input.isConnected);
-            if (live) return live;
-          }
-          return null;
-        })()`,
-        objectGroup: 'opencli-gemini-video-upload',
-        returnByValue: false,
-    }));
-    const objectId = String(evaluated?.result?.objectId || '');
-    if (!objectId) return false;
-    await page.cdp('DOM.setFileInputFiles', { objectId, files: filePaths });
-
-    const fileCount = Number(unwrap(await page.evaluate(`(() => {
-      const roots = [document.querySelector('input-container'), document].filter(Boolean);
-      for (const root of roots) {
-        const inputs = Array.from(root.querySelectorAll('input[name="Filedata"], input[type="file"]'));
-        const live = inputs.find(input => !input.disabled && input.isConnected && input.files?.length);
-        if (live) return live.files.length;
-      }
-      return 0;
-    })()`))) || 0;
-    await page.cdp('Runtime.releaseObjectGroup', {
-        objectGroup: 'opencli-gemini-video-upload',
-    }).catch(() => undefined);
-    return fileCount >= filePaths.length;
+    // Address the exact input marked immediately after the trusted picker
+    // click. A document-level query can otherwise resolve a stale input even
+    // though DOM.setFileInputFiles itself reports success.
+    const objectGroup = 'opencli-gemini-video-upload';
+    try {
+        const evaluated = unwrap(await page.cdp('Runtime.evaluate', {
+            expression: `document.querySelector(${JSON.stringify(selector)})`,
+            objectGroup,
+            returnByValue: false,
+        }));
+        const objectId = String(evaluated?.result?.objectId || '');
+        if (!objectId) return false;
+        await page.cdp('DOM.setFileInputFiles', { objectId, files: filePaths });
+        return true;
+    } finally {
+        await page.cdp('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined);
+    }
 }
 
-async function uploadFrame(page, filePath, expectedCount) {
+function uploadFailure(expectedCount, substep, diagnostic) {
+    return new CommandExecutionError(
+        `Gemini keyframe ${expectedCount} upload failed at ${substep}: ${JSON.stringify(diagnostic)}`
+    );
+}
+
+export async function uploadFrame(
+    page,
+    filePath,
+    expectedCount,
+    { attachmentTimeoutMs = 120000, clearedIdleLimit = 8 } = {},
+) {
     const fileName = path.basename(filePath);
     const payload = {
         base64: fs.readFileSync(filePath).toString('base64'),
@@ -161,21 +156,27 @@ async function uploadFrame(page, filePath, expectedCount) {
     };
     const attachmentState = async () => unwrap(await page.evaluate(`(() => {
       const root = document.querySelector('input-container') || document;
-      const attachments = root.querySelectorAll('gem-media-attachment').length;
-      const busyNodes = Array.from(root.querySelectorAll('uploader-file-preview [role="progressbar"], gem-media-attachment [role="progressbar"]'));
-      const inputs = Array.from(root.querySelectorAll('input[name="Filedata"], input[type="file"]'));
+      // Gemini can portal the processed keyframe outside input-container.
+      // Count globally, while retaining the composer-local count in failure
+      // diagnostics so a future DOM move is immediately distinguishable from
+      // a provider-side processing delay.
+      const attachments = document.querySelectorAll('gem-media-attachment').length;
+      const attachmentsInComposer = root.querySelectorAll('gem-media-attachment').length;
+      const busyNodes = Array.from(document.querySelectorAll(
+        'uploader-file-preview [role="progressbar"], gem-media-attachment [role="progressbar"]'
+      ));
+      const inputs = Array.from(document.querySelectorAll('input[name="Filedata"], input[type="file"]'));
       return {
         attachments,
+        attachmentsInComposer,
         busy: busyNodes.length > 0,
         busyCount: busyNodes.length,
         inputFiles: inputs.map(input => Array.from(input.files || []).map(file => ({ name: file.name, size: file.size, type: file.type }))),
         textTail: String(root.innerText || '').trim().slice(-600),
       };
     })()`));
-    // Chrome's extension debugger can reject DOM.setFileInputFiles with
-    // "Not allowed". Gemini does accept a DataTransfer-backed File when the
-    // live input is created by a real click first, which is also the exact
-    // sequence used by the generic Browser CLI in the verified manual probe.
+
+    const marker = `opencli-video-upload-${expectedCount}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let clickError = null;
     try {
         await page.click('button[aria-label="File upload"]');
@@ -183,43 +184,172 @@ async function uploadFrame(page, filePath, expectedCount) {
     } catch (error) {
         clickError = error;
     }
-    const fallback = unwrap(await page.evaluate(`(() => {
-          const inputs = Array.from(document.querySelectorAll('input[name="Filedata"], input[type="file"]'));
-          const input = inputs.reverse().find(candidate => !candidate.disabled && candidate.isConnected) || inputs.at(0);
-          if (!input) return { ok: false, reason: 'Filedata input disappeared' };
-          const transfer = new DataTransfer();
-          const item = ${JSON.stringify(payload)};
-          const binary = atob(item.base64);
-          const bytes = new Uint8Array(binary.length);
-          for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-          transfer.items.add(new File([bytes], item.fileName, { type: item.mimeType }));
-          input.files = transfer.files;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          return { ok: true, bytes: bytes.length, inputCount: inputs.length };
-    })()`));
-    if (!fallback?.ok) {
-        throw new CommandExecutionError(
-            `Gemini keyframe upload failed: ${String(fallback?.reason || clickError?.message || clickError || 'unknown error')}`
-        );
+
+    let selected;
+    try {
+        selected = unwrap(await page.evaluate(`(() => {
+          const marker = ${JSON.stringify(marker)};
+          const roots = [document.querySelector('input-container'), document].filter(Boolean);
+          const inputs = [];
+          for (const root of roots) {
+            for (const input of root.querySelectorAll('input[name="Filedata"], input[type="file"]')) {
+              if (!inputs.includes(input)) inputs.push(input);
+            }
+          }
+          const candidates = inputs.filter(input => !input.disabled && input.isConnected);
+          const input = candidates.at(-1);
+          const summarize = (candidate, index) => ({
+            index,
+            name: candidate.name || '',
+            type: candidate.type || '',
+            accept: candidate.accept || '',
+            disabled: !!candidate.disabled,
+            connected: !!candidate.isConnected,
+            files: Array.from(candidate.files || []).map(file => ({
+              name: file.name, size: file.size, type: file.type,
+            })),
+          });
+          if (!input) {
+            return { ok: false, inputs: inputs.map(summarize) };
+          }
+          input.setAttribute('data-opencli-video-upload-target', marker);
+          return {
+            ok: true,
+            selector: '[data-opencli-video-upload-target="' + marker + '"]',
+            selected: summarize(input, inputs.indexOf(input)),
+            inputCount: inputs.length,
+          };
+        })()`));
+    } catch (error) {
+        throw uploadFailure(expectedCount, 'discover_live_input', {
+            fileName,
+            clickError: String(clickError?.message || clickError || ''),
+            error: String(error?.message || error),
+        });
     }
-    // A visible completed attachment is the pre-submit contract for each
-    // ordered keyframe.
-    const deadline = Date.now() + 120000;
-    while (Date.now() < deadline) {
-        await page.wait(1);
-        const state = await attachmentState();
-        if (Number(state?.attachments || 0) >= expectedCount && !state?.busy) return;
+    if (!selected?.ok || !selected?.selector) {
+        throw uploadFailure(expectedCount, 'discover_live_input', {
+            fileName,
+            clickError: String(clickError?.message || clickError || ''),
+            inputState: selected || null,
+        });
     }
-    const finalState = await attachmentState();
-    throw new CommandExecutionError(
-        `Gemini Create Video did not retain and finish processing keyframe ${expectedCount}: ${JSON.stringify(finalState)}`
-    );
+
+    const nativeErrors = [];
+    let method = '';
+    try {
+        // Prefer the Browser Bridge's native file-input action. It delegates to
+        // Chrome's file-input machinery and remains observable by Gemini even
+        // when synthetic DataTransfer change events are ignored.
+        if (typeof page.setFileInput === 'function') {
+            try {
+                await page.setFileInput([filePath], selected.selector);
+                method = 'page.setFileInput';
+            } catch (error) {
+                nativeErrors.push({ method: 'page.setFileInput', error: String(error?.message || error) });
+            }
+        }
+        if (!method && typeof page.cdp === 'function') {
+            try {
+                if (await setFileInputViaCdp(page, [filePath], selected.selector)) {
+                    method = 'DOM.setFileInputFiles';
+                } else {
+                    nativeErrors.push({ method: 'DOM.setFileInputFiles', error: 'marked input was not found' });
+                }
+            } catch (error) {
+                nativeErrors.push({ method: 'DOM.setFileInputFiles', error: String(error?.message || error) });
+            }
+        }
+
+        // Compatibility fallback for older Browser Bridge builds. It is used
+        // only when neither trusted/native path could inject the file; a native
+        // injection that Gemini later clears must fail closed instead of being
+        // disguised by a second upload mechanism.
+        if (!method) {
+            let fallback;
+            try {
+                fallback = unwrap(await page.evaluate(`(() => {
+                  const input = document.querySelector(${JSON.stringify(selected.selector)});
+                  if (!input || input.disabled || !input.isConnected) {
+                    return { ok: false, reason: 'marked Filedata input disappeared' };
+                  }
+                  const transfer = new DataTransfer();
+                  const item = ${JSON.stringify(payload)};
+                  const binary = atob(item.base64);
+                  const bytes = new Uint8Array(binary.length);
+                  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+                  transfer.items.add(new File([bytes], item.fileName, { type: item.mimeType }));
+                  const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files');
+                  if (!descriptor?.set) return { ok: false, reason: 'native files setter unavailable' };
+                  descriptor.set.call(input, transfer.files);
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                  input.dispatchEvent(new Event('change', { bubbles: true }));
+                  return { ok: true, bytes: bytes.length, fileCount: input.files?.length || 0 };
+                })()`));
+            } catch (error) {
+                fallback = { ok: false, reason: String(error?.message || error) };
+            }
+            if (!fallback?.ok || Number(fallback.fileCount || 0) < 1) {
+                throw uploadFailure(expectedCount, 'data_transfer_fallback', {
+                    fileName,
+                    selector: selected.selector,
+                    selectedInput: selected.selected,
+                    nativeErrors,
+                    fallback: fallback || null,
+                });
+            }
+            method = 'DataTransfer';
+        }
+
+        // A visible completed attachment is the pre-submit contract for each
+        // ordered keyframe. Fail early when Gemini clears an otherwise idle
+        // input repeatedly without ever creating the attachment preview.
+        const deadline = Date.now() + Math.max(0, attachmentTimeoutMs);
+        let state = null;
+        let clearedIdleSamples = 0;
+        do {
+            if (attachmentTimeoutMs > 0) await page.wait(1);
+            try {
+                state = await attachmentState();
+            } catch (error) {
+                throw uploadFailure(expectedCount, 'read_attachment_state', {
+                    fileName,
+                    method,
+                    selector: selected.selector,
+                    selectedInput: selected.selected,
+                    nativeErrors,
+                    error: String(error?.message || error),
+                });
+            }
+            if (Number(state?.attachments || 0) >= expectedCount && !state?.busy) {
+                return { method, expectedCount, state };
+            }
+            const inputsEmpty = Array.isArray(state?.inputFiles)
+                && state.inputFiles.every(files => Array.isArray(files) && files.length === 0);
+            if (Number(state?.attachments || 0) < expectedCount && !state?.busy && inputsEmpty) {
+                clearedIdleSamples += 1;
+            } else {
+                clearedIdleSamples = 0;
+            }
+            if (clearedIdleSamples >= Math.max(1, clearedIdleLimit)) break;
+        } while (Date.now() < deadline);
+        throw uploadFailure(expectedCount, 'wait_for_attachment', {
+            fileName,
+            method,
+            selector: selected.selector,
+            selectedInput: selected.selected,
+            nativeErrors,
+            clearedIdleSamples,
+            state,
+        });
+    } finally {
+        await page.evaluate(`document.querySelector(${JSON.stringify(selected.selector)})?.removeAttribute('data-opencli-video-upload-target')`).catch(() => undefined);
+    }
 }
 
-async function uploadFrames(page, filePaths) {
+export async function uploadFrames(page, filePaths, options) {
     for (let index = 0; index < filePaths.length; index += 1) {
-        await uploadFrame(page, filePaths[index], index + 1);
+        await uploadFrame(page, filePaths[index], index + 1, options);
     }
 }
 

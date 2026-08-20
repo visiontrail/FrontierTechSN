@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { selectChatGPTModel } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
@@ -6,6 +9,187 @@ import {
   sendGeminiMessage,
   waitForGeminiResponse,
 } from './node_modules/@jackwener/opencli/clis/gemini/utils.js'
+import {
+  uploadFrame,
+  uploadFrames,
+} from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+function videoFrameFixture(t, names = ['first-frame.png']) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'opencli-video-upload-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  return names.map((name, index) => {
+    const file = path.join(directory, name)
+    fs.writeFileSync(file, Buffer.from(`frame-${index + 1}`))
+    return file
+  })
+}
+
+function videoUploadPage({ native = 'success', cdp = false, clear = false, busyReads = 0 } = {}) {
+  const actions = []
+  let attachments = 0
+  let remainingBusyReads = busyReads
+  let selector = ''
+  const page = {
+    actions,
+    async click(value) {
+      actions.push(['click', value])
+    },
+    async wait(value) {
+      actions.push(['wait', value])
+    },
+    async evaluate(script) {
+      if (script.includes("input.setAttribute('data-opencli-video-upload-target'")) {
+        const match = script.match(/const marker = ("(?:[^"\\]|\\.)*")/)
+        const marker = match ? JSON.parse(match[1]) : 'missing-marker'
+        selector = `[data-opencli-video-upload-target="${marker}"]`
+        return {
+          ok: true,
+          selector,
+          selected: {
+            index: 0,
+            name: 'Filedata',
+            type: 'file',
+            accept: 'image/*',
+            disabled: false,
+            connected: true,
+            files: [],
+          },
+          inputCount: 1,
+        }
+      }
+      if (script.includes("document.querySelectorAll('gem-media-attachment').length")) {
+        const busy = remainingBusyReads > 0
+        if (remainingBusyReads > 0) remainingBusyReads -= 1
+        return {
+          attachments,
+          busy,
+          busyCount: busy ? 1 : 0,
+          inputFiles: clear || attachments === 0 ? [[]] : [[{ name: 'frame.png' }]],
+          textTail: 'Videos Flash Landscape (16:9)',
+        }
+      }
+      if (script.includes('const transfer = new DataTransfer()')) {
+        actions.push(['DataTransfer', selector])
+        if (!clear) attachments += 1
+        return { ok: true, bytes: 7, fileCount: 1 }
+      }
+      if (script.includes("removeAttribute('data-opencli-video-upload-target')")) {
+        actions.push(['cleanup', selector])
+        return true
+      }
+      throw new Error(`Unexpected Gemini video upload script: ${String(script).slice(0, 120)}`)
+    },
+  }
+  if (native) {
+    page.setFileInput = async (files, target) => {
+      actions.push(['setFileInput', files, target])
+      if (native === 'error') throw new Error('Not allowed')
+      if (!clear) attachments += 1
+    }
+  }
+  if (cdp) {
+    page.cdp = async (method, params = {}) => {
+      actions.push(['cdp', method, params])
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'live-file-input' } }
+      if (method === 'DOM.setFileInputFiles' && !clear) attachments += 1
+      return {}
+    }
+  }
+  return page
+}
+
+test('Gemini video uploads a live keyframe through the native file-input path and waits for idle', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({ native: 'success', busyReads: 1 })
+
+  const result = await uploadFrame(page, frame, 1, {
+    attachmentTimeoutMs: 1000,
+    clearedIdleLimit: 2,
+  })
+
+  assert.equal(result.method, 'page.setFileInput')
+  assert.equal(result.state.attachments, 1)
+  assert.equal(result.state.busy, false)
+  const native = page.actions.find(([action]) => action === 'setFileInput')
+  assert.deepEqual(native[1], [frame])
+  assert.match(native[2], /^\[data-opencli-video-upload-target=/)
+  assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
+  assert.ok(page.actions.filter(([action, value]) => action === 'wait' && value === 1).length >= 2)
+})
+
+test('Gemini video uses direct CDP file injection when the native page helper is unavailable', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({ native: null, cdp: true })
+
+  const result = await uploadFrame(page, frame, 1, { attachmentTimeoutMs: 1000 })
+
+  assert.equal(result.method, 'DOM.setFileInputFiles')
+  const injection = page.actions.find(
+    ([action, method]) => action === 'cdp' && method === 'DOM.setFileInputFiles',
+  )
+  assert.deepEqual(injection[2].files, [frame])
+  assert.equal(injection[2].objectId, 'live-file-input')
+  assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
+})
+
+test('Gemini video continues from a rejected native action to direct CDP injection', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({ native: 'error', cdp: true })
+
+  const result = await uploadFrame(page, frame, 1, { attachmentTimeoutMs: 1000 })
+
+  assert.equal(result.method, 'DOM.setFileInputFiles')
+  assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
+  assert.equal(
+    page.actions.filter(
+      ([action, method]) => action === 'cdp' && method === 'DOM.setFileInputFiles',
+    ).length,
+    1,
+  )
+  assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
+})
+
+test('Gemini video falls back to DataTransfer only when native injection fails', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({ native: 'error' })
+
+  const result = await uploadFrame(page, frame, 1, { attachmentTimeoutMs: 1000 })
+
+  assert.equal(result.method, 'DataTransfer')
+  assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
+  assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
+})
+
+test('Gemini video fails closed with substep and input state when the UI clears a native upload', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({ native: 'success', clear: true })
+
+  await assert.rejects(
+    uploadFrame(page, frame, 1, { attachmentTimeoutMs: 1000, clearedIdleLimit: 2 }),
+    (error) => {
+      assert.match(error.message, /keyframe 1 upload failed at wait_for_attachment/)
+      assert.match(error.message, /"method":"page\.setFileInput"/)
+      assert.match(error.message, /"selector":"\[data-opencli-video-upload-target=/)
+      assert.match(error.message, /"inputFiles":\[\[\]\]/)
+      assert.match(error.message, /"clearedIdleSamples":2/)
+      return true
+    },
+  )
+  assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
+})
+
+test('Gemini video uploads first and last keyframes sequentially with cumulative attachment counts', async (t) => {
+  const frames = videoFrameFixture(t, ['first-frame.png', 'last-frame.jpg'])
+  const page = videoUploadPage({ native: 'success' })
+
+  await uploadFrames(page, frames, { attachmentTimeoutMs: 1000 })
+
+  const uploads = page.actions.filter(([action]) => action === 'setFileInput')
+  assert.deepEqual(uploads.map(([, files]) => files[0]), frames)
+  assert.notEqual(uploads[0][2], uploads[1][2])
+  assert.equal(page.actions.filter(([action]) => action === 'click').length, 2)
+  assert.equal(page.actions.filter(([action]) => action === 'cleanup').length, 2)
+})
 
 test('Gemini clicks a discovered semantic send button instead of pressing Enter', async () => {
   const actions = []
