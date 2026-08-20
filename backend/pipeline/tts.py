@@ -71,6 +71,14 @@ ORPHEUS_NAME_RECHECK_SPLITS = {
         ("qian", "wen"),
     },
 }
+# Provider pronunciation hints can make Whisper retain a name's exact spoken
+# syllable boundary.  Unlike the broader recheck spellings above, these pairs
+# are accepted only when alignment proves that they replace the corresponding
+# canonical source name at that position.
+ORPHEUS_NAME_ACOUSTIC_SPLITS = {
+    "qwen": {("q", "when")},
+    "qianwen": {("qian", "wen")},
+}
 MAX_PLAUSIBLE_SPEECH_WPM = 320
 LEXICAL_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?|[\u3400-\u9fff]")
 DECIMAL_LITERAL_RE = re.compile(r"(\d+)\.(\d+)")
@@ -1163,6 +1171,11 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     """
     expected = _lexical_tokens(text)
     observed, observed_word_indexes = _transcript_tokens(words)
+    observed, observed_word_indexes = _collapse_expected_name_splits(
+        expected,
+        observed,
+        observed_word_indexes,
+    )
     matcher = SequenceMatcher(a=expected, b=observed, autojunk=False)
     pairs: list[tuple[int, int]] = []
     for block in matcher.get_matching_blocks():
@@ -1216,6 +1229,47 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         ),
         "failure_reasons": failures,
     }
+
+
+def _collapse_expected_name_splits(
+    expected: list[str],
+    observed: list[str],
+    observed_word_indexes: list[int],
+) -> tuple[list[str], list[int]]:
+    """Collapse only proven split spellings aligned to a canonical source name."""
+    replacements: dict[int, tuple[int, str]] = {}
+    matcher = SequenceMatcher(a=expected, b=observed, autojunk=False)
+    for tag, expected_start, expected_end, observed_start, observed_end in (
+        matcher.get_opcodes()
+    ):
+        if tag != "replace" or expected_end - expected_start != 1:
+            continue
+        expected_name = _name_recheck_base(expected[expected_start])
+        accepted_splits = ORPHEUS_NAME_ACOUSTIC_SPLITS.get(expected_name)
+        if accepted_splits is None:
+            continue
+        observed_delta = tuple(observed[observed_start:observed_end])
+        if observed_delta in accepted_splits:
+            replacements[observed_start] = (observed_end, expected[expected_start])
+
+    if not replacements:
+        return observed, observed_word_indexes
+
+    collapsed: list[str] = []
+    collapsed_word_indexes: list[int] = []
+    cursor = 0
+    while cursor < len(observed):
+        replacement = replacements.get(cursor)
+        if replacement is None:
+            collapsed.append(observed[cursor])
+            collapsed_word_indexes.append(observed_word_indexes[cursor])
+            cursor += 1
+            continue
+        end, canonical = replacement
+        collapsed.append(canonical)
+        collapsed_word_indexes.append(observed_word_indexes[cursor])
+        cursor = end
+    return collapsed, collapsed_word_indexes
 
 
 def _trim_pcm_wav(path: Path, end_seconds: float) -> None:

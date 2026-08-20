@@ -1249,6 +1249,52 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(tts._has_only_name_transcript_mismatches(expected, observed))
 
+    def test_orpheus_transcript_accepts_expected_name_pronunciation_splits(self):
+        expected = "with results showing that Alibaba's Qwen Office, known in Chinese as Qianwen"
+        observed = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(
+                "with results showing that Alibaba's Q when Office known in Chinese as Qian Wen".split()
+            )
+        ]
+
+        report = tts._orpheus_transcript_report(expected, observed)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["matched_exact_words"], 12)
+        self.assertEqual(report["transcript_words"], 12)
+        self.assertEqual(report["transcript_word_ratio"], 1.0)
+
+    def test_orpheus_name_split_alignment_rejects_extra_or_wrong_name_syllables(self):
+        expected = "Alibaba's Qwen Office known in Chinese as Qianwen"
+
+        def report(text: str) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        self.assertFalse(
+            report("Alibaba's Q when really Office known in Chinese as Qian Wen")[
+                "verified"
+            ]
+        )
+        self.assertFalse(
+            report("Alibaba's Q when Office known in Chinese as Qian Wong")[
+                "verified"
+            ]
+        )
+
+    def test_orpheus_name_split_alignment_is_not_a_global_phrase_alias(self):
+        expected = "The variable Q when tested works"
+        observed = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate("The variable Qwen tested works".split())
+        ]
+
+        self.assertFalse(tts._orpheus_transcript_report(expected, observed)["verified"])
+
     def test_orpheus_name_recheck_rejects_adjacent_extra_or_missing_name(self):
         expected = "Qwen Office ranked first."
 
