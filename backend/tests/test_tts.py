@@ -1286,6 +1286,24 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             )["verified"]
         )
 
+    def test_orpheus_transcript_normalizes_role_roll_homophone_only(self):
+        expected = "role in the relevant product line."
+
+        def report(opening: str) -> dict:
+            observed = f"{opening} in the relevant product line".split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        accepted = report("Roll")
+
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report("roil")["verified"])
+        self.assertFalse(report("")["verified"])
+
     def test_orpheus_transcript_normalizes_whisper_eunuch_bias(self):
         expected = "The eunuch system, not interested."
         observed = "The Unix system not interested".split()

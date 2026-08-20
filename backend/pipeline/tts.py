@@ -97,6 +97,10 @@ ACOUSTIC_EQUIVALENTS = {
     # nearby spellings (for example "Bream") remain distinct.
     "brehm": "brem",
     "brehm's": "brem's",
+    # The noun "role" and "roll" are exact homophones. A live Orpheus sample
+    # contained every requested word and both utterance edges while Whisper
+    # selected the latter spelling; nearby words such as "roil" remain errors.
+    "roll": "role",
     # Whisper consistently labels the rare spoken word "eunuch" as the
     # familiar two-syllable proper noun "Unix", including at 0.8x speed.
     "unix": "eunuch",
