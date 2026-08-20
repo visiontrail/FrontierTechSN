@@ -26,10 +26,19 @@ function videoFrameFixture(t, names = ['first-frame.png']) {
   })
 }
 
-function videoUploadPage({ native = 'success', cdp = false, clear = false, busyReads = 0 } = {}) {
+function videoUploadPage({
+  native = 'success',
+  cdp = false,
+  clear = false,
+  busyReads = 0,
+  inputReadyAfterReads = 0,
+  documentHasFocus = true,
+  uploadBusy = false,
+} = {}) {
   const actions = []
   let attachments = 0
   let remainingBusyReads = busyReads
+  const discoveryReads = new Map()
   let selector = ''
   const page = {
     actions,
@@ -47,6 +56,28 @@ function videoUploadPage({ native = 'success', cdp = false, clear = false, busyR
       if (script.includes("input.setAttribute('data-opencli-video-upload-target'")) {
         const match = script.match(/const marker = ("(?:[^"\\]|\\.)*")/)
         const marker = match ? JSON.parse(match[1]) : 'missing-marker'
+        const expectedMatch = marker.match(/^opencli-video-upload-(\d+)-/)
+        const expectedCount = Number(expectedMatch?.[1] || 1)
+        const reads = (discoveryReads.get(expectedCount) || 0) + 1
+        discoveryReads.set(expectedCount, reads)
+        actions.push(['discoverInput', reads, expectedCount])
+        const requiredReads = Array.isArray(inputReadyAfterReads)
+          ? Number(inputReadyAfterReads[expectedCount - 1] || 0)
+          : inputReadyAfterReads
+        if (reads <= requiredReads) {
+          return {
+            ok: false,
+            inputs: [],
+            documentHasFocus,
+            busy: uploadBusy,
+            busyCount: uploadBusy ? 1 : 0,
+            button: {
+              connected: true,
+              disabled: false,
+              visible: true,
+            },
+          }
+        }
         selector = `[data-opencli-video-upload-target="${marker}"]`
         return {
           ok: true,
@@ -124,6 +155,69 @@ test('Gemini video uploads a live keyframe through the native file-input path an
   assert.match(native[2], /^\[data-opencli-video-upload-target=/)
   assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
   assert.ok(page.actions.filter(([action, value]) => action === 'wait' && value === 1).length >= 2)
+})
+
+test('Gemini video waits for a delayed live file input without opening a second chooser', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({ native: 'success', inputReadyAfterReads: 3 })
+
+  const result = await uploadFrame(page, frame, 1, {
+    attachmentTimeoutMs: 1000,
+    inputReadyTimeoutMs: 5000,
+    inputPollIntervalMs: 1000,
+    inputReopenAfterMs: 4000,
+  })
+
+  assert.equal(result.method, 'page.setFileInput')
+  assert.equal(page.actions.filter(([action]) => action === 'discoverInput').length, 4)
+  assert.equal(page.actions.filter(([action]) => action === 'click').length, 1)
+})
+
+test('Gemini video retries the upload control at most once when hydration never creates an input', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({
+    native: 'success',
+    inputReadyAfterReads: Number.POSITIVE_INFINITY,
+  })
+
+  await assert.rejects(
+    uploadFrame(page, frame, 1, {
+      inputReadyTimeoutMs: 4000,
+      inputPollIntervalMs: 1000,
+      inputReopenAfterMs: 2000,
+    }),
+    (error) => {
+      assert.match(error.message, /keyframe 1 upload failed at discover_live_input/)
+      assert.match(error.message, /"pollAttempts":4/)
+      assert.match(error.message, /"reopened":true/)
+      assert.match(error.message, /"reason":"hydration_retry","ok":true/)
+      assert.match(error.message, /"inputs":\[\]/)
+      return true
+    },
+  )
+
+  assert.equal(page.actions.filter(([action]) => action === 'discoverInput').length, 4)
+  assert.equal(page.actions.filter(([action]) => action === 'click').length, 2)
+})
+
+test('Gemini video never re-clicks while a native chooser may hold page focus', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({
+    native: 'success',
+    inputReadyAfterReads: Number.POSITIVE_INFINITY,
+    documentHasFocus: false,
+  })
+
+  await assert.rejects(
+    uploadFrame(page, frame, 1, {
+      inputReadyTimeoutMs: 3000,
+      inputPollIntervalMs: 1000,
+      inputReopenAfterMs: 1000,
+    }),
+    /keyframe 1 upload failed at discover_live_input/,
+  )
+
+  assert.equal(page.actions.filter(([action]) => action === 'click').length, 1)
 })
 
 test('Gemini video uses direct CDP file injection when the native page helper is unavailable', async (t) => {
@@ -211,17 +305,28 @@ test('Gemini video reports a stable upload capability code only after every path
   assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
 })
 
-test('Gemini video uploads first and last keyframes sequentially with cumulative attachment counts', async (t) => {
+test('Gemini video independently waits for first and delayed last keyframes in order', async (t) => {
   const frames = videoFrameFixture(t, ['first-frame.png', 'last-frame.jpg'])
-  const page = videoUploadPage({ native: 'success' })
+  const page = videoUploadPage({ native: 'success', inputReadyAfterReads: [0, 2] })
 
-  await uploadFrames(page, frames, { attachmentTimeoutMs: 1000 })
+  await uploadFrames(page, frames, {
+    attachmentTimeoutMs: 1000,
+    inputReadyTimeoutMs: 4000,
+    inputPollIntervalMs: 1000,
+    inputReopenAfterMs: 3000,
+  })
 
   const uploads = page.actions.filter(([action]) => action === 'setFileInput')
   assert.deepEqual(uploads.map(([, files]) => files[0]), frames)
   assert.notEqual(uploads[0][2], uploads[1][2])
   assert.equal(page.actions.filter(([action]) => action === 'click').length, 2)
   assert.equal(page.actions.filter(([action]) => action === 'cleanup').length, 2)
+  assert.deepEqual(
+    page.actions
+      .filter(([action, , expectedCount]) => action === 'discoverInput' && expectedCount === 2)
+      .map(([, reads]) => reads),
+    [1, 2, 3],
+  )
 })
 
 test('Gemini video submitted-state page script compiles and executes after template expansion', async () => {

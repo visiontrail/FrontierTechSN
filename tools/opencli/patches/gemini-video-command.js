@@ -168,7 +168,13 @@ export async function uploadFrame(
     page,
     filePath,
     expectedCount,
-    { attachmentTimeoutMs = 120000, clearedIdleLimit = 8 } = {},
+    {
+        attachmentTimeoutMs = 120000,
+        clearedIdleLimit = 8,
+        inputReadyTimeoutMs = 15000,
+        inputPollIntervalMs = 500,
+        inputReopenAfterMs = 6000,
+    } = {},
 ) {
     const fileName = path.basename(filePath);
     const payload = {
@@ -199,17 +205,36 @@ export async function uploadFrame(
     })()`));
 
     const marker = `opencli-video-upload-${expectedCount}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    let clickError = null;
-    try {
-        await page.click('button[aria-label="File upload"]');
-        await page.wait(1.5);
-    } catch (error) {
-        clickError = error;
-    }
+    const clickAttempts = [];
+    const clickUpload = async (reason) => {
+        try {
+            await page.click('button[aria-label="File upload"]');
+            clickAttempts.push({ reason, ok: true, error: '' });
+        } catch (error) {
+            clickAttempts.push({
+                reason,
+                ok: false,
+                error: String(error?.message || error),
+            });
+        }
+    };
+    await clickUpload('initial');
 
-    let selected;
-    try {
-        selected = unwrap(await page.evaluate(`(() => {
+    const pollIntervalMs = Math.max(50, Number(inputPollIntervalMs) || 500);
+    const pollAttempts = Math.max(
+        1,
+        Math.ceil(Math.max(0, Number(inputReadyTimeoutMs) || 0) / pollIntervalMs),
+    );
+    const reopenAfterPoll = Math.max(
+        1,
+        Math.ceil(Math.max(0, Number(inputReopenAfterMs) || 0) / pollIntervalMs),
+    );
+    let selected = null;
+    let reopened = false;
+    for (let pollAttempt = 1; pollAttempt <= pollAttempts; pollAttempt += 1) {
+        await page.wait(pollIntervalMs / 1000);
+        try {
+            selected = unwrap(await page.evaluate(`(() => {
           const marker = ${JSON.stringify(marker)};
           const roots = [document.querySelector('input-container'), document].filter(Boolean);
           const inputs = [];
@@ -231,8 +256,27 @@ export async function uploadFrame(
               name: file.name, size: file.size, type: file.type,
             })),
           });
+          const uploadButton = document.querySelector('button[aria-label="File upload"]');
+          const buttonRect = uploadButton?.getBoundingClientRect();
+          const buttonStyle = uploadButton ? getComputedStyle(uploadButton) : null;
+          const busyNodes = document.querySelectorAll(
+            'uploader-file-preview [role="progressbar"], gem-media-attachment [role="progressbar"], mat-progress-spinner'
+          );
+          const button = uploadButton ? {
+            connected: !!uploadButton.isConnected,
+            disabled: !!uploadButton.disabled || uploadButton.getAttribute('aria-disabled') === 'true',
+            visible: !!buttonRect && buttonRect.width > 0 && buttonRect.height > 0
+              && buttonStyle?.display !== 'none' && buttonStyle?.visibility !== 'hidden',
+          } : null;
           if (!input) {
-            return { ok: false, inputs: inputs.map(summarize) };
+            return {
+              ok: false,
+              inputs: inputs.map(summarize),
+              documentHasFocus: document.hasFocus(),
+              busy: busyNodes.length > 0,
+              busyCount: busyNodes.length,
+              button,
+            };
           }
           input.setAttribute('data-opencli-video-upload-target', marker);
           return {
@@ -241,18 +285,44 @@ export async function uploadFrame(
             selected: summarize(input, inputs.indexOf(input)),
             inputCount: inputs.length,
           };
-        })()`));
-    } catch (error) {
-        throw uploadFailure(expectedCount, 'discover_live_input', {
-            fileName,
-            clickError: String(clickError?.message || clickError || ''),
-            error: String(error?.message || error),
-        });
+            })()`));
+        } catch (error) {
+            throw uploadFailure(expectedCount, 'discover_live_input', {
+                fileName,
+                pollAttempt,
+                pollAttempts,
+                clickAttempts,
+                error: String(error?.message || error),
+            });
+        }
+        if (selected?.ok && selected?.selector) break;
+
+        // A native chooser normally takes focus away from the document. Never
+        // click again in that state: doing so can stack a second chooser. One
+        // retry is allowed only after hydration had ample time and the page is
+        // still focused with an idle, visible, enabled upload control.
+        const buttonReady = selected?.button?.connected
+            && selected?.button?.visible
+            && !selected?.button?.disabled;
+        if (
+            !reopened
+            && pollAttempt >= reopenAfterPoll
+            && selected?.documentHasFocus === true
+            && !selected?.busy
+            && buttonReady
+        ) {
+            reopened = true;
+            await clickUpload('hydration_retry');
+        }
     }
     if (!selected?.ok || !selected?.selector) {
         throw uploadFailure(expectedCount, 'discover_live_input', {
             fileName,
-            clickError: String(clickError?.message || clickError || ''),
+            pollAttempts,
+            pollIntervalMs,
+            inputReadyTimeoutMs,
+            reopened,
+            clickAttempts,
             inputState: selected || null,
         });
     }
