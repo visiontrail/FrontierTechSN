@@ -205,6 +205,54 @@ export async function uploadFrame(
     })()`));
 
     const marker = `opencli-video-upload-${expectedCount}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cleanupUploadMarkers = async () => {
+        await page.evaluate(`(() => {
+          const marker = ${JSON.stringify(marker)};
+          for (const input of document.querySelectorAll('input[name="Filedata"], input[type="file"]')) {
+            if (input.getAttribute('data-opencli-video-upload-baseline') === marker) {
+              input.removeAttribute('data-opencli-video-upload-baseline');
+            }
+            if (input.getAttribute('data-opencli-video-upload-target') === marker) {
+              input.removeAttribute('data-opencli-video-upload-target');
+            }
+          }
+          return true;
+        })()`).catch(() => undefined);
+    };
+    let baselineState;
+    try {
+        baselineState = unwrap(await page.evaluate(`(() => {
+          const marker = ${JSON.stringify(marker)};
+          const inputs = Array.from(document.querySelectorAll(
+            'input[name="Filedata"], input[type="file"]'
+          ));
+          const summarize = (input, index) => ({
+            index,
+            name: input.name || '',
+            type: input.type || '',
+            disabled: !!input.disabled,
+            connected: !!input.isConnected,
+            files: Array.from(input.files || []).map(file => ({
+              name: file.name, size: file.size, type: file.type,
+            })),
+          });
+          for (const input of inputs) {
+            if (!input.disabled && input.isConnected) {
+              input.setAttribute('data-opencli-video-upload-baseline', marker);
+            }
+          }
+          return {
+            attachments: document.querySelectorAll('gem-media-attachment').length,
+            inputs: inputs.map(summarize),
+          };
+        })()`));
+    } catch (error) {
+        await cleanupUploadMarkers();
+        throw uploadFailure(expectedCount, 'snapshot_live_inputs', {
+            fileName,
+            error: String(error?.message || error),
+        });
+    }
     const clickAttempts = [];
     const clickUpload = async (reason) => {
         try {
@@ -244,7 +292,10 @@ export async function uploadFrame(
             }
           }
           const candidates = inputs.filter(input => !input.disabled && input.isConnected);
-          const input = candidates.at(-1);
+          const freshCandidates = candidates.filter(input =>
+            input.getAttribute('data-opencli-video-upload-baseline') !== marker
+          );
+          const input = freshCandidates.at(-1);
           const summarize = (candidate, index) => ({
             index,
             name: candidate.name || '',
@@ -276,6 +327,8 @@ export async function uploadFrame(
               busy: busyNodes.length > 0,
               busyCount: busyNodes.length,
               button,
+              baselineInputCount: candidates.length - freshCandidates.length,
+              freshInputCount: freshCandidates.length,
             };
           }
           input.setAttribute('data-opencli-video-upload-target', marker);
@@ -284,13 +337,18 @@ export async function uploadFrame(
             selector: '[data-opencli-video-upload-target="' + marker + '"]',
             selected: summarize(input, inputs.indexOf(input)),
             inputCount: inputs.length,
+            baselineInputCount: candidates.length - freshCandidates.length,
+            freshInputCount: freshCandidates.length,
+            inputOrigin: 'new_after_click',
           };
             })()`));
         } catch (error) {
+            await cleanupUploadMarkers();
             throw uploadFailure(expectedCount, 'discover_live_input', {
                 fileName,
                 pollAttempt,
                 pollAttempts,
+                baselineState,
                 clickAttempts,
                 error: String(error?.message || error),
             });
@@ -307,6 +365,7 @@ export async function uploadFrame(
         if (
             !reopened
             && pollAttempt >= reopenAfterPoll
+            && clickAttempts[0]?.ok === false
             && selected?.documentHasFocus === true
             && !selected?.busy
             && buttonReady
@@ -316,12 +375,14 @@ export async function uploadFrame(
         }
     }
     if (!selected?.ok || !selected?.selector) {
+        await cleanupUploadMarkers();
         throw uploadFailure(expectedCount, 'discover_live_input', {
             fileName,
             pollAttempts,
             pollIntervalMs,
             inputReadyTimeoutMs,
             reopened,
+            baselineState,
             clickAttempts,
             inputState: selected || null,
         });
@@ -435,7 +496,7 @@ export async function uploadFrame(
             state,
         });
     } finally {
-        await page.evaluate(`document.querySelector(${JSON.stringify(selected.selector)})?.removeAttribute('data-opencli-video-upload-target')`).catch(() => undefined);
+        await cleanupUploadMarkers();
     }
 }
 

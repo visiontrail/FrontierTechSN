@@ -34,16 +34,24 @@ function videoUploadPage({
   inputReadyAfterReads = 0,
   documentHasFocus = true,
   uploadBusy = false,
+  initialClickErrors = 0,
 } = {}) {
   const actions = []
   let attachments = 0
   let remainingBusyReads = busyReads
   const discoveryReads = new Map()
+  let uploadClickAttempts = 0
   let selector = ''
   const page = {
     actions,
     async click(value) {
       actions.push(['click', value])
+      if (value === 'button[aria-label="File upload"]') {
+        uploadClickAttempts += 1
+        if (uploadClickAttempts <= initialClickErrors) {
+          throw new Error('upload button was not ready')
+        }
+      }
     },
     async wait(value) {
       actions.push(['wait', value])
@@ -53,6 +61,9 @@ function videoUploadPage({
       // only validates this test/module and misses template-literal unescaping
       // that can corrupt a regex before Runtime.evaluate sees it.
       new vm.Script(script)
+      if (script.includes("input.setAttribute('data-opencli-video-upload-baseline'")) {
+        return { attachments, inputs: [] }
+      }
       if (script.includes("input.setAttribute('data-opencli-video-upload-target'")) {
         const match = script.match(/const marker = ("(?:[^"\\]|\\.)*")/)
         const marker = match ? JSON.parse(match[1]) : 'missing-marker'
@@ -138,6 +149,125 @@ function videoUploadPage({
   return page
 }
 
+function vmUploadDomPage({ initialInputs = [], newInputDelays = [0] } = {}) {
+  const actions = []
+  const inputs = []
+  const pendingInputs = []
+  const selectedInputIds = []
+  let attachmentCount = 0
+  let uploadClicks = 0
+  let inputSerial = 0
+
+  const addInput = (name, prefix = 'input') => {
+    const attributes = new Map()
+    const input = {
+      id: `${prefix}-${++inputSerial}`,
+      name,
+      type: 'file',
+      accept: 'image/*',
+      disabled: false,
+      isConnected: true,
+      files: [],
+      getAttribute(key) {
+        return attributes.has(key) ? attributes.get(key) : null
+      },
+      setAttribute(key, value) {
+        attributes.set(key, String(value))
+      },
+      removeAttribute(key) {
+        attributes.delete(key)
+      },
+    }
+    inputs.push(input)
+    return input
+  }
+  for (const name of initialInputs) addInput(name, 'old')
+
+  const uploadButton = {
+    disabled: false,
+    isConnected: true,
+    getAttribute(key) {
+      return key === 'aria-disabled' ? 'false' : null
+    },
+    getBoundingClientRect() {
+      return { width: 120, height: 36 }
+    },
+  }
+  const queryInputs = () => inputs.filter((input) => input.isConnected)
+  const querySelectorAll = (selector) => {
+    if (selector.includes('input[name="Filedata"]') || selector.includes('input[type="file"]')) {
+      return queryInputs()
+    }
+    if (selector === 'gem-media-attachment') {
+      return Array.from({ length: attachmentCount }, () => ({}))
+    }
+    if (selector.includes('progressbar') || selector.includes('mat-progress-spinner')) return []
+    return []
+  }
+  const inputContainer = {
+    innerText: 'Videos Flash Landscape (16:9)',
+    querySelectorAll,
+  }
+  const document = {
+    querySelector(selector) {
+      if (selector === 'input-container') return inputContainer
+      if (selector === 'button[aria-label="File upload"]') return uploadButton
+      const target = selector.match(/^\[data-opencli-video-upload-target="([^"]+)"\]$/)
+      if (target) {
+        return queryInputs().find(
+          (input) => input.getAttribute('data-opencli-video-upload-target') === target[1],
+        ) || null
+      }
+      return null
+    },
+    querySelectorAll,
+    hasFocus() {
+      return true
+    },
+  }
+  const context = {
+    document,
+    getComputedStyle() {
+      return { display: 'block', visibility: 'visible' }
+    },
+  }
+
+  return {
+    actions,
+    inputs,
+    selectedInputIds,
+    async click(selector) {
+      actions.push(['click', selector])
+      uploadClicks += 1
+      const delay = Number(newInputDelays[uploadClicks - 1] ?? 0)
+      if (delay <= 0) addInput('Filedata', `new-frame-${uploadClicks}`)
+      else pendingInputs.push({ remaining: delay, frame: uploadClicks })
+    },
+    async wait(seconds) {
+      actions.push(['wait', seconds])
+      for (const pending of pendingInputs) pending.remaining -= 1
+      for (let index = pendingInputs.length - 1; index >= 0; index -= 1) {
+        const pending = pendingInputs[index]
+        if (pending.remaining <= 0) {
+          addInput('Filedata', `new-frame-${pending.frame}`)
+          pendingInputs.splice(index, 1)
+        }
+      }
+    },
+    async evaluate(script) {
+      return vm.runInNewContext(script, context)
+    },
+    async setFileInput(files, selector) {
+      const input = document.querySelector(selector)
+      if (!input) throw new Error(`target input not found: ${selector}`)
+      selectedInputIds.push(input.id)
+      actions.push(['setFileInput', files, selector, input.id])
+      attachmentCount += 1
+      input.files = []
+    },
+  }
+}
+
 test('Gemini video uploads a live keyframe through the native file-input path and waits for idle', async (t) => {
   const [frame] = videoFrameFixture(t)
   const page = videoUploadPage({ native: 'success', busyReads: 1 })
@@ -173,7 +303,53 @@ test('Gemini video waits for a delayed live file input without opening a second 
   assert.equal(page.actions.filter(([action]) => action === 'click').length, 1)
 })
 
-test('Gemini video retries the upload control at most once when hydration never creates an input', async (t) => {
+test('Gemini video inner discovery ignores an old generic input until delayed Filedata exists', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = vmUploadDomPage({ initialInputs: ['GenericUpload'], newInputDelays: [2] })
+
+  await uploadFrame(page, frame, 1, {
+    attachmentTimeoutMs: 1000,
+    inputReadyTimeoutMs: 3000,
+    inputPollIntervalMs: 500,
+  })
+
+  assert.equal(page.selectedInputIds.length, 1)
+  assert.match(page.selectedInputIds[0], /^new-frame-1-/)
+  assert.doesNotMatch(page.selectedInputIds[0], /^old-/)
+})
+
+test('Gemini video inner discovery ignores stale Filedata until a new input hydrates', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = vmUploadDomPage({ initialInputs: ['Filedata'], newInputDelays: [2] })
+
+  await uploadFrame(page, frame, 1, {
+    attachmentTimeoutMs: 1000,
+    inputReadyTimeoutMs: 3000,
+    inputPollIntervalMs: 500,
+  })
+
+  assert.equal(page.selectedInputIds.length, 1)
+  assert.match(page.selectedInputIds[0], /^new-frame-1-/)
+  assert.doesNotMatch(page.selectedInputIds[0], /^old-/)
+})
+
+test('Gemini video inner discovery selects distinct new inputs for ordered frames', async (t) => {
+  const frames = videoFrameFixture(t, ['first-frame.png', 'last-frame.jpg'])
+  const page = vmUploadDomPage({ newInputDelays: [0, 2] })
+
+  await uploadFrames(page, frames, {
+    attachmentTimeoutMs: 1000,
+    inputReadyTimeoutMs: 3000,
+    inputPollIntervalMs: 500,
+  })
+
+  assert.equal(page.selectedInputIds.length, 2)
+  assert.match(page.selectedInputIds[0], /^new-frame-1-/)
+  assert.match(page.selectedInputIds[1], /^new-frame-2-/)
+  assert.notEqual(page.selectedInputIds[0], page.selectedInputIds[1])
+})
+
+test('Gemini video fails bounded without re-clicking after a successful initial click', async (t) => {
   const [frame] = videoFrameFixture(t)
   const page = videoUploadPage({
     native: 'success',
@@ -189,14 +365,39 @@ test('Gemini video retries the upload control at most once when hydration never 
     (error) => {
       assert.match(error.message, /keyframe 1 upload failed at discover_live_input/)
       assert.match(error.message, /"pollAttempts":4/)
-      assert.match(error.message, /"reopened":true/)
-      assert.match(error.message, /"reason":"hydration_retry","ok":true/)
+      assert.match(error.message, /"reopened":false/)
+      assert.match(error.message, /"reason":"initial","ok":true/)
       assert.match(error.message, /"inputs":\[\]/)
       return true
     },
   )
 
   assert.equal(page.actions.filter(([action]) => action === 'discoverInput').length, 4)
+  assert.equal(page.actions.filter(([action]) => action === 'click').length, 1)
+})
+
+test('Gemini video retries once only when the initial upload click throws', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({
+    native: 'success',
+    inputReadyAfterReads: Number.POSITIVE_INFINITY,
+    initialClickErrors: 1,
+  })
+
+  await assert.rejects(
+    uploadFrame(page, frame, 1, {
+      inputReadyTimeoutMs: 3000,
+      inputPollIntervalMs: 1000,
+      inputReopenAfterMs: 1000,
+    }),
+    (error) => {
+      assert.match(error.message, /"reopened":true/)
+      assert.match(error.message, /"reason":"initial","ok":false/)
+      assert.match(error.message, /"reason":"hydration_retry","ok":true/)
+      return true
+    },
+  )
+
   assert.equal(page.actions.filter(([action]) => action === 'click').length, 2)
 })
 
