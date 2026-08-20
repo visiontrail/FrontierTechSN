@@ -53,8 +53,15 @@ VIBEVOICE_PRONUNCIATIONS = (
 ORPHEUS_EDGE_ANCHOR_WORDS = 3
 ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
+# Increment whenever acoustic acceptance semantics change.  Cached WAVs with
+# older sidecars must pass the current local verifier before they are reused.
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 1
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
+ORPHEUS_NAME_RECHECK_SPELLINGS = {
+    "qwen": {"qwin"},
+    "qianwen": set(),
+}
 ORPHEUS_NAME_RECHECK_SPLITS = {
     "qwen": {
         ("q", "when"),
@@ -1298,17 +1305,27 @@ def _collapse_expected_name_splits(
     ):
         if tag != "replace" or expected_end - expected_start != 1:
             continue
-        expected_name = _name_recheck_base(expected[expected_start])
+        expected_token = expected[expected_start]
+        expected_name = _name_recheck_base(expected_token)
         accepted_splits = ORPHEUS_NAME_ACOUSTIC_SPLITS.get(expected_name)
         if accepted_splits is None:
             continue
         observed_delta = tuple(observed[observed_start:observed_end])
+        if not observed_delta:
+            continue
+        observed_possessive = observed_delta[-1].endswith("'s")
+        if expected_token.endswith("'s") != observed_possessive:
+            continue
+        observed_split = (
+            *observed_delta[:-1],
+            _name_recheck_base(observed_delta[-1]),
+        )
         contributing_indexes = observed_word_indexes[observed_start:observed_end]
         if (
-            observed_delta in accepted_splits
+            observed_split in accepted_splits
             and _word_indexes_are_contiguous(contributing_indexes)
         ):
-            replacements[observed_start] = (observed_end, expected[expected_start])
+            replacements[observed_start] = (observed_end, expected_token)
 
     if not replacements:
         return observed, observed_word_indexes
@@ -1373,9 +1390,24 @@ def _has_only_name_transcript_mismatches(text: str, words: list[dict]) -> bool:
         observed_delta = tuple(observed[observed_start:observed_end])
         if len(expected_delta) != 1 or not _is_name_recheck_token(expected_delta[0]):
             return False
-        if len(observed_delta) > 1:
-            expected_name = _name_recheck_base(expected_delta[0])
-            if observed_delta not in ORPHEUS_NAME_RECHECK_SPLITS[expected_name]:
+        expected_token = expected_delta[0]
+        expected_name = _name_recheck_base(expected_token)
+        if len(observed_delta) == 1:
+            observed_token = observed_delta[0]
+            if expected_token.endswith("'s") != observed_token.endswith("'s"):
+                return False
+            observed_name = _name_recheck_base(observed_token)
+            if observed_name not in ORPHEUS_NAME_RECHECK_SPELLINGS[expected_name]:
+                return False
+        else:
+            observed_possessive = observed_delta[-1].endswith("'s")
+            if expected_token.endswith("'s") != observed_possessive:
+                return False
+            observed_split = (
+                *observed_delta[:-1],
+                _name_recheck_base(observed_delta[-1]),
+            )
+            if observed_split not in ORPHEUS_NAME_RECHECK_SPLITS[expected_name]:
                 return False
         saw_name_delta = True
     return saw_name_delta
@@ -1552,11 +1584,25 @@ def _load_cached_orpheus_part(path: Path, text: str) -> dict | None:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(metadata, dict):
+        return None
     if metadata.get("text_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest():
         return None
     if metadata.get("speed_percent") != config.ORPHEUS_TTS_SPEED_PERCENT:
         return None
-    if not (metadata.get("integrity") or {}).get("verified"):
+    verifier_version = metadata.get("integrity_verifier_version")
+    if (
+        isinstance(verifier_version, bool)
+        or not isinstance(verifier_version, int)
+        or verifier_version != ORPHEUS_INTEGRITY_VERIFIER_VERSION
+    ):
+        return None
+    integrity = metadata.get("integrity")
+    if (
+        not isinstance(integrity, dict)
+        or not integrity.get("verified")
+        or integrity.get("method") == "duration_only_preview"
+    ):
         return None
     try:
         info = _read_pcm_wav(path)
@@ -1581,6 +1627,7 @@ def _write_orpheus_part_metadata(
         "job_id": job_id,
         "request_token_budget": request_token_budget,
         "speed_percent": config.ORPHEUS_TTS_SPEED_PERCENT,
+        "integrity_verifier_version": ORPHEUS_INTEGRITY_VERIFIER_VERSION,
         "wav": asdict(_read_pcm_wav(path)),
         "integrity": integrity,
     }

@@ -1078,7 +1078,7 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(process.await_count, 1)
         self.assertIn("atempo=0.8", process.await_args.kwargs["command"])
 
-    async def test_orpheus_name_recheck_remains_fail_closed_at_all_speeds(self):
+    async def test_orpheus_name_recheck_rejects_unsupported_single_token(self):
         expected = "Alibaba's Qwen Office."
 
         def words(text: str) -> list[dict]:
@@ -1090,11 +1090,7 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         wrong = words("Alibaba's Khan Office")
         with tempfile.TemporaryDirectory() as temp_dir:
             transcriber = AsyncMock(
-                side_effect=[
-                    (wrong, {"passed": True}),
-                    (wrong, {"passed": True}),
-                    (wrong, {"passed": True}),
-                ]
+                return_value=(wrong, {"passed": True})
             )
             process = AsyncMock(return_value=(0, ""))
             with (
@@ -1112,8 +1108,8 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
                         emit=lambda _message: None,
                     )
 
-        self.assertEqual(transcriber.await_count, 3)
-        self.assertEqual(process.await_count, 2)
+        self.assertEqual(transcriber.await_count, 1)
+        process.assert_not_awaited()
 
     async def test_orpheus_name_recheck_tries_second_slow_speed(self):
         expected = "Alibaba's Qwen Office."
@@ -1249,6 +1245,55 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(tts._has_only_name_transcript_mismatches(expected, observed))
 
+    def test_orpheus_name_recheck_accepts_evidenced_qwin_spelling(self):
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        self.assertTrue(
+            tts._has_only_name_transcript_mismatches(
+                "Qwen Office ranked first", words("Qwin Office ranked first")
+            )
+        )
+        self.assertTrue(
+            tts._has_only_name_transcript_mismatches(
+                "Qwen's Office ranked first", words("Qwin's Office ranked first")
+            )
+        )
+        self.assertTrue(
+            tts._has_only_name_transcript_mismatches(
+                "Qwen's Office ranked first", words("Q Win's Office ranked first")
+            )
+        )
+
+    def test_orpheus_name_recheck_rejects_unsupported_single_token_spellings(self):
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        cases = (
+            ("Qwen Office ranked first", "Khan Office ranked first"),
+            ("Qwen Office ranked first", "Banana Office ranked first"),
+            ("Qwen Office ranked first", "Tianwen Office ranked first"),
+            ("Qianwen Office ranked first", "Chanmen Office ranked first"),
+            ("Qwen's Office ranked first", "Khan's Office ranked first"),
+            ("Qwen's Office ranked first", "Banana's Office ranked first"),
+            ("Qwen Office ranked first", "Qwin's Office ranked first"),
+            ("Qwen's Office ranked first", "Qwin Office ranked first"),
+            ("Qwen's Office ranked first", "Q Win Office ranked first"),
+        )
+        for expected, observed in cases:
+            with self.subTest(expected=expected, observed=observed):
+                self.assertFalse(
+                    tts._has_only_name_transcript_mismatches(
+                        expected, words(observed)
+                    )
+                )
+
     def test_orpheus_transcript_accepts_expected_name_pronunciation_splits(self):
         expected = "with results showing that Alibaba's Qwen Office, known in Chinese as Qianwen"
         observed = [
@@ -1264,6 +1309,39 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["matched_exact_words"], 12)
         self.assertEqual(report["transcript_words"], 12)
         self.assertEqual(report["transcript_word_ratio"], 1.0)
+
+    def test_orpheus_name_split_requires_matching_possessive(self):
+        def report(expected: str, observed: str) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(
+            report(
+                "Qwen's report ranked first",
+                "Q when's report ranked first",
+            )["verified"]
+        )
+        self.assertTrue(
+            report(
+                "Qianwen's report ranked first",
+                "Qian Wen's report ranked first",
+            )["verified"]
+        )
+        self.assertFalse(
+            report(
+                "Qwen's report ranked first",
+                "Q when report ranked first",
+            )["verified"]
+        )
+        self.assertFalse(
+            report(
+                "Qwen report ranked first",
+                "Q when's report ranked first",
+            )["verified"]
+        )
 
     def test_orpheus_name_split_alignment_rejects_extra_or_wrong_name_syllables(self):
         expected = "Alibaba's Qwen Office known in Chinese as Qianwen"
@@ -2069,6 +2147,129 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(tts._load_cached_orpheus_part(path, text))
             with patch.object(config, "ORPHEUS_TTS_SPEED_PERCENT", 140):
                 self.assertIsNone(tts._load_cached_orpheus_part(path, text))
+
+    def test_orpheus_cache_requires_current_integrity_verifier_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "part.wav"
+            write_wav(path)
+            text = "A fully verified utterance."
+            metadata = tts._write_orpheus_part_metadata(
+                path,
+                text,
+                job_id="job-1",
+                request_token_budget=512,
+                integrity=self.verified_report(None, text, None),
+            )
+            metadata_path = tts._part_metadata_path(path)
+
+            self.assertEqual(
+                metadata["integrity_verifier_version"],
+                tts.ORPHEUS_INTEGRITY_VERIFIER_VERSION,
+            )
+            for stale_version in (
+                None,
+                tts.ORPHEUS_INTEGRITY_VERIFIER_VERSION - 1,
+                True,
+            ):
+                with self.subTest(stale_version=stale_version):
+                    stale = dict(metadata)
+                    if stale_version is None:
+                        stale.pop("integrity_verifier_version")
+                    else:
+                        stale["integrity_verifier_version"] = stale_version
+                    metadata_path.write_text(json.dumps(stale), encoding="utf-8")
+                    self.assertIsNone(tts._load_cached_orpheus_part(path, text))
+
+    def test_orpheus_cache_rejects_duration_only_preview_sidecar(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "preview.wav"
+            write_wav(path)
+            text = "A duration-only voice preview."
+            metadata = tts._write_orpheus_part_metadata(
+                path,
+                text,
+                job_id="preview-job",
+                request_token_budget=512,
+                integrity={
+                    "verified": True,
+                    "method": "duration_only_preview",
+                    "expected_words": 4,
+                },
+            )
+
+            self.assertEqual(
+                metadata["integrity_verifier_version"],
+                tts.ORPHEUS_INTEGRITY_VERIFIER_VERSION,
+            )
+            self.assertIsNone(tts._load_cached_orpheus_part(path, text))
+
+    def test_orpheus_cache_rejects_non_object_sidecar(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "part.wav"
+            write_wav(path)
+            text = "A malformed cache sidecar."
+            tts._part_metadata_path(path).write_text("[]", encoding="utf-8")
+
+            self.assertIsNone(tts._load_cached_orpheus_part(path, text))
+
+    async def test_orpheus_old_verifier_sidecar_revalidates_wav_without_post(self):
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(500)
+
+        original_client = httpx.AsyncClient
+
+        def client_factory(**kwargs):
+            return original_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = root / "script.txt"
+            script.write_text("Speaker 1: Revalidate this existing waveform.")
+            output_dir = root / "audio"
+            output_dir.mkdir()
+            text = "Revalidate this existing waveform."
+            path = output_dir / "tts_input_generated.wav"
+            write_wav(path)
+            metadata = tts._write_orpheus_part_metadata(
+                path,
+                text,
+                job_id="old-job",
+                request_token_budget=512,
+                integrity=self.verified_report(None, text, None),
+            )
+            metadata.pop("integrity_verifier_version")
+            tts._part_metadata_path(path).write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+            verifier = AsyncMock(side_effect=self.verified_report)
+
+            with (
+                patch.object(config, "ORPHEUS_TTS_API_KEY", "test-secret"),
+                patch.object(tts.httpx, "AsyncClient", client_factory),
+                patch.object(tts, "_verify_orpheus_part", verifier),
+            ):
+                result = await tts.generate_tts(
+                    str(script), str(output_dir), ["tara"], "orpheus-en"
+                )
+
+            refreshed = json.loads(tts._part_metadata_path(path).read_text())
+
+        self.assertEqual(Path(result), path.resolve())
+        self.assertEqual(requests, [])
+        verifier.assert_awaited_once_with(
+            path.resolve(),
+            text,
+            output_dir.resolve() / "verification" / "tts_input",
+            emit=unittest.mock.ANY,
+        )
+        self.assertEqual(refreshed["job_id"], "recovered-local-output")
+        self.assertEqual(
+            refreshed["integrity_verifier_version"],
+            tts.ORPHEUS_INTEGRITY_VERIFIER_VERSION,
+        )
 
     async def test_orpheus_recovers_downloaded_wav_without_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
