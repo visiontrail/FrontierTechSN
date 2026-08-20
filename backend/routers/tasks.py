@@ -327,6 +327,25 @@ async def regenerate_task(task_id: str):
     return await db.get_task(task_id)
 
 
+@router.post("/{task_id}/resume-tts", response_model=TaskResponse)
+async def resume_task_tts(task_id: str):
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task.status != TaskStatus.FAILED:
+        raise HTTPException(409, "Task must be failed before TTS can be resumed")
+
+    out_dir = Path(task.output_dir) if task.output_dir else app_config.OUTPUTS_DIR / task_id
+    script_path = Path(task.script_path) if task.script_path else out_dir / "script.txt"
+    if not script_path.is_file():
+        raise HTTPException(400, "No script available to resume TTS from")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / ".resume_tts").write_text("", encoding="utf-8")
+    await db.update_task(task_id, status=TaskStatus.QUEUED.value, error_message=None)
+    return await db.get_task(task_id)
+
+
 @router.post("/{task_id}/resume-review", response_model=TaskResponse)
 async def resume_daily_review(task_id: str):
     task = await db.get_task(task_id)

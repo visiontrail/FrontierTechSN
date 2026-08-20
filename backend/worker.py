@@ -12,6 +12,7 @@ from backend.pipeline.orchestrator import (
     run_pipeline,
     run_daily_review_resume,
     run_regenerate,
+    run_tts_resume,
     run_compose,
     run_footage_acquisition,
 )
@@ -20,6 +21,8 @@ from backend.publishing import run_auto_publish_pipeline
 # A queued task carrying this marker file in its output dir should re-run only
 # the TTS stage (from an edited script) rather than the full pipeline.
 REGEN_MARKER = ".regenerate"
+# Resume only TTS from a persisted script, preserving title and thumbnail.
+TTS_RESUME_MARKER = ".resume_tts"
 # This marker resumes a reviewed task from the compose stage only.
 RENDER_MARKER = ".render"
 # Retry only the footage scout. The marker stores the stable status to restore
@@ -90,10 +93,12 @@ async def _worker_loop():
                 _active_task_ids.add(task.id)
                 _active_log_queues.setdefault(task.id, set())
                 regen_marker = config.OUTPUTS_DIR / task.id / REGEN_MARKER
+                tts_resume_marker = config.OUTPUTS_DIR / task.id / TTS_RESUME_MARKER
                 render_marker = config.OUTPUTS_DIR / task.id / RENDER_MARKER
                 footage_marker = config.OUTPUTS_DIR / task.id / FOOTAGE_MARKER
                 review_resume_marker = config.OUTPUTS_DIR / task.id / REVIEW_RESUME_MARKER
                 regenerate = regen_marker.exists()
+                tts_resume = tts_resume_marker.exists()
                 render = render_marker.exists()
                 footage = footage_marker.exists()
                 review_resume = review_resume_marker.exists()
@@ -111,6 +116,7 @@ async def _worker_loop():
                     review_resume_marker.unlink()
                 mode = (
                     " [resume-review]" if review_resume
+                    else " [resume-tts]" if tts_resume
                     else " [regenerate]" if regenerate
                     else " [render]" if render
                     else " [footage]" if footage
@@ -122,6 +128,23 @@ async def _worker_loop():
                 try:
                     if review_resume:
                         await run_daily_review_resume(
+                            task,
+                            log=lambda message: publish_task_log(task.id, message),
+                        )
+                    elif tts_resume:
+                        # Persist the claimed recovery mode before removing its
+                        # marker. If the process dies first, the queued task
+                        # retains the marker and cannot fall through to the full
+                        # pipeline on restart. If it dies afterwards, startup
+                        # resets the in-progress TTS status to FAILED so the
+                        # explicit resume endpoint can be used again.
+                        await update_task(
+                            task.id,
+                            status=TaskStatus.TTS.value,
+                            error_message=None,
+                        )
+                        tts_resume_marker.unlink(missing_ok=True)
+                        await run_tts_resume(
                             task,
                             log=lambda message: publish_task_log(task.id, message),
                         )
