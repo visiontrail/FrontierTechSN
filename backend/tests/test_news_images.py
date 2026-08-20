@@ -150,10 +150,14 @@ def _primary_plan() -> list[dict]:
     ]
 
 
-def _image_bytes(format_name: str = "JPEG", seed: str = "default") -> bytes:
+def _image_bytes(
+    format_name: str = "JPEG",
+    seed: str = "default",
+    size: tuple[int, int] = (800, 450),
+) -> bytes:
     payload = io.BytesIO()
     color = tuple(hashlib.sha256(seed.encode("utf-8")).digest()[:3])
-    Image.new("RGB", (800, 450), color).save(payload, format=format_name)
+    Image.new("RGB", size, color).save(payload, format=format_name)
     return payload.getvalue()
 
 
@@ -937,6 +941,22 @@ def test_cached_asset_rejects_tiny_and_decompression_bomb_rasters(tmp_path: Path
     asset_dir.mkdir()
     path = asset_dir / "image-01.png"
 
+    wordmark = _image_bytes("PNG", "wordmark", size=(656, 120))
+    path.write_bytes(wordmark)
+    wordmark_record = {
+        "local_path": "news_images/image-01.png",
+        "bytes": len(wordmark),
+        "sha256": hashlib.sha256(wordmark).hexdigest(),
+    }
+    assert news_images._cached_asset_is_intact(
+        tmp_path,
+        {**wordmark_record, "kind": "logo"},
+    ) is True
+    assert news_images._cached_asset_is_intact(
+        tmp_path,
+        {**wordmark_record, "kind": "event"},
+    ) is False
+
     tiny = io.BytesIO()
     Image.new("RGB", (1, 1), "red").save(tiny, format="PNG")
     tiny_payload = tiny.getvalue()
@@ -1203,7 +1223,7 @@ async def test_failed_primary_uses_alternate_entity_query_for_the_same_scene(
         return [_commons_candidate("scene-01", "Vera CPU", "logo")]
 
     async def fake_download(_client, *, candidate: dict, destination: Path):
-        payload = _image_bytes(seed=candidate["source_page_url"])
+        payload = _image_bytes(seed=candidate["source_page_url"], size=(656, 120))
         destination.write_bytes(payload)
         return len(payload), hashlib.sha256(payload).hexdigest()
 
