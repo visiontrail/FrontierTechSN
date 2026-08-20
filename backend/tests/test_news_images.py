@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from backend.pipeline import news_images, visual_plan
 
@@ -164,6 +164,20 @@ def _image_bytes(
         fill=accent,
     )
     image.save(payload, format=format_name)
+    return payload.getvalue()
+
+
+def _transparent_wordmark_bytes() -> bytes:
+    payload = io.BytesIO()
+    image = Image.new("RGBA", (656, 120), (0, 0, 0, 0))
+    ImageDraw.Draw(image).text(
+        (20, 18),
+        "FRONTIER AI",
+        font=ImageFont.load_default(size=72),
+        fill=(15, 75, 210, 255),
+        stroke_width=1,
+    )
+    image.save(payload, format="PNG")
     return payload.getvalue()
 
 
@@ -1060,11 +1074,60 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
         almost_uniform.save(one_alpha_exception, format="PNG")
         assert_payload(one_alpha_exception.getvalue(), kind="event", expected=False)
 
-    logo = Image.new("RGBA", (656, 120), (0, 0, 0, 0))
-    ImageDraw.Draw(logo).rectangle((80, 30, 575, 89), fill=(15, 75, 210, 255))
-    transparent_logo = io.BytesIO()
-    logo.save(transparent_logo, format="PNG")
-    assert_payload(transparent_logo.getvalue(), kind="logo", expected=True)
+    solid_patch = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    ImageDraw.Draw(solid_patch).rectangle((370, 195, 429, 254), fill=(20, 80, 220, 255))
+    patch = io.BytesIO()
+    solid_patch.save(patch, format="PNG")
+    assert_payload(patch.getvalue(), kind="logo", expected=False)
+
+    for transparent_strip in ((0, 0, 7, 449), (0, 0, 799, 7)):
+        almost_blank = Image.new("RGBA", (800, 450), (255, 255, 255, 255))
+        ImageDraw.Draw(almost_blank).rectangle(transparent_strip, fill=(255, 255, 255, 0))
+        stripped = io.BytesIO()
+        almost_blank.save(stripped, format="PNG")
+        assert_payload(stripped.getvalue(), kind="logo", expected=False)
+
+    transparent_garbage = Image.new("RGBA", (800, 450), (255, 0, 0, 0))
+    garbage_draw = ImageDraw.Draw(transparent_garbage)
+    for x in range(0, 800, 40):
+        garbage_draw.rectangle((x, 0, x + 19, 449), fill=(0, 255, x % 255, 0))
+    garbage_draw.rectangle((370, 195, 429, 254), fill=(20, 80, 220, 255))
+    garbage = io.BytesIO()
+    transparent_garbage.save(garbage, format="PNG")
+    assert_payload(garbage.getvalue(), kind="logo", expected=False)
+
+    alpha_checkerboard = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    checkerboard_draw = ImageDraw.Draw(alpha_checkerboard)
+    for y in range(0, 450, 40):
+        for x in range(0, 800, 40):
+            if (x // 40 + y // 40) % 2 == 0:
+                checkerboard_draw.rectangle((x, y, x + 39, y + 39), fill=(20, 80, 220, 255))
+    checkerboard = io.BytesIO()
+    alpha_checkerboard.save(checkerboard, format="PNG")
+    assert_payload(checkerboard.getvalue(), kind="event", expected=False)
+
+    assert_payload(_transparent_wordmark_bytes(), kind="logo", expected=True)
+
+    colorful_cutout = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    cutout_draw = ImageDraw.Draw(colorful_cutout)
+    cutout_draw.rectangle((150, 75, 399, 374), fill=(20, 80, 220, 255))
+    cutout_draw.rectangle((400, 75, 649, 374), fill=(240, 160, 20, 255))
+    cutout = io.BytesIO()
+    colorful_cutout.save(cutout, format="PNG")
+    assert_payload(cutout.getvalue(), kind="event", expected=True)
+
+    palette_logo = Image.new("P", (656, 120), 0)
+    palette_logo.putpalette([0, 0, 0, 15, 75, 210] + [0, 0, 0] * 254)
+    ImageDraw.Draw(palette_logo).text(
+        (20, 18),
+        "FRONTIER AI",
+        font=ImageFont.load_default(size=72),
+        fill=1,
+        stroke_width=1,
+    )
+    palette_wordmark = io.BytesIO()
+    palette_logo.save(palette_wordmark, format="PNG", transparency=0)
+    assert_payload(palette_wordmark.getvalue(), kind="logo", expected=True)
 
     assert_payload(
         _image_bytes("JPEG", "ordinary-photo"),
@@ -1076,6 +1139,82 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     blank = io.BytesIO()
     Image.new("RGB", (800, 450), "white").save(blank, format="PNG")
     assert_payload(blank.getvalue(), kind="event", expected=False)
+
+
+def test_raster_content_gate_survives_cache_attach_and_visual_pipeline(tmp_path: Path):
+    data = {"title": "NVIDIA", "scenes": [board()["scenes"][0]]}
+    storyboard_sha256 = news_images.storyboard_fingerprint(data)
+    contract_sha256 = news_images.acquisition_contract_fingerprint(
+        storyboard_sha256=storyboard_sha256,
+        requested_count=1,
+        target_count=1,
+        eligible_scene_ids=["scene-01"],
+        excluded_scene_ids=set(),
+    )
+
+    def encoded(image: Image.Image) -> bytes:
+        payload = io.BytesIO()
+        image.save(payload, format="PNG")
+        return payload.getvalue()
+
+    white_strip = Image.new("RGBA", (800, 450), (255, 255, 255, 255))
+    ImageDraw.Draw(white_strip).rectangle((0, 0, 7, 449), fill=(255, 255, 255, 0))
+    solid_block = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    ImageDraw.Draw(solid_block).rectangle((370, 195, 429, 254), fill=(20, 80, 220, 255))
+    cases = [
+        ("wordmark", _transparent_wordmark_bytes(), True),
+        ("white-strip", encoded(white_strip), False),
+        ("solid-block", encoded(solid_block), False),
+    ]
+
+    for name, payload, expected in cases:
+        task_dir = tmp_path / name
+        asset_dir = task_dir / "news_images"
+        asset_dir.mkdir(parents=True)
+        (asset_dir / "image-01.png").write_bytes(payload)
+        image = _grounded_image_record(
+            data["scenes"][0],
+            local_path="news_images/image-01.png",
+            payload=payload,
+            source=f"https://commons.example/{name}",
+            subject="NVIDIA",
+            kind="logo",
+            mode="inline",
+        )
+        manifest = {
+            "manifest_version": news_images.MANIFEST_VERSION,
+            "query_semantics_version": news_images.QUERY_SEMANTICS_VERSION,
+            "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+            "cache_contract_sha256": contract_sha256,
+            "status": "ready",
+            "storyboard_sha256": storyboard_sha256,
+            "requested_image_count": 1,
+            "eligible_scene_count": 1,
+            "eligible_scene_ids": ["scene-01"],
+            "excluded_scene_ids": [],
+            "planned_image_count": 1,
+            "license_policy": "open_only",
+            "placement_modes": {"inline": 1, "fullscreen": 0},
+            "images": [image],
+        }
+        (asset_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        cached = _cached_news_manifest(
+            task_dir,
+            data,
+            storyboard_sha256,
+            contract_sha256,
+            requested_count=1,
+        )
+        assert (cached is not None) is expected, name
+
+        plans = visual_plan.fallback_plan(data)
+        summary = news_images.attach_news_images(plans, data, manifest, task_dir)
+        assert summary["attached"] == int(expected), name
+        assert bool(plans[0].get("news_image")) is expected, name
+        report = visual_plan.visual_grounding_report(plans, data)
+        assert report["passed"] is True, name
+        assert ("licensed news image" in report["scenes"][0]["reason"]) is expected, name
 
 
 @pytest.mark.parametrize(

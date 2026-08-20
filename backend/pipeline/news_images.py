@@ -23,7 +23,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageChops, UnidentifiedImageError
 
 from backend import config
 from backend.pipeline.opencli import (
@@ -41,6 +41,10 @@ MANIFEST_VERSION = 10
 QUERY_SEMANTICS_VERSION = 3
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 NEWS_IMAGE_MAX_PIXELS = 40_000_000
+ALPHA_FOREGROUND_THRESHOLD = 64
+LOGO_SHAPE_ANALYSIS_MAX_DIMENSION = 512
+LOGO_SHAPE_MAX_BBOX_FILL = 0.95
+LOGO_SHAPE_MIN_EDGE_COMPLEXITY = 6.0
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
     "image/png",
@@ -559,34 +563,98 @@ def _owned_generated_asset_path(task_dir: Path, image: dict) -> Path | None:
     return path if digest.hexdigest() == expected_sha256 else None
 
 
-def _raster_has_visible_content(decoded: Image.Image) -> bool:
+def _rgb_has_visible_content(
+    decoded: Image.Image,
+    *,
+    mask: Image.Image | None,
+    pixel_count: int,
+    minimum_detail: int,
+) -> bool:
+    rgb = decoded.convert("RGB")
+    for channel in rgb.split():
+        histogram = channel.histogram(mask)
+        occupied = [value for value, count in enumerate(histogram) if count]
+        if not occupied or occupied[-1] - occupied[0] < 8:
+            continue
+        dominant = max(range(256), key=histogram.__getitem__)
+        near_dominant = sum(histogram[max(0, dominant - 2) : min(256, dominant + 3)])
+        if pixel_count - near_dominant >= minimum_detail:
+            return True
+    return False
+
+
+def _alpha_mask_has_distinctive_shape(mask: Image.Image, visible_pixels: int) -> bool:
+    """Separate a real monochrome mark from a solid block, strip, or blank canvas."""
+    bbox = mask.getbbox()
+    if bbox is None:
+        return False
+    bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+    if not bbox_area or visible_pixels / bbox_area >= LOGO_SHAPE_MAX_BBOX_FILL:
+        return False
+
+    sample = mask.copy()
+    sample.thumbnail(
+        (LOGO_SHAPE_ANALYSIS_MAX_DIMENSION, LOGO_SHAPE_ANALYSIS_MAX_DIMENSION),
+        Image.Resampling.NEAREST,
+    )
+    width, height = sample.size
+    sample_visible = sample.histogram()[255]
+    if not sample_visible:
+        return False
+    transitions = 0
+    if width > 1:
+        transitions += ImageChops.difference(
+            sample.crop((1, 0, width, height)),
+            sample.crop((0, 0, width - 1, height)),
+        ).histogram()[255]
+    if height > 1:
+        transitions += ImageChops.difference(
+            sample.crop((0, 1, width, height)),
+            sample.crop((0, 0, width, height - 1)),
+        ).histogram()[255]
+    return (
+        transitions / math.sqrt(sample_visible)
+        >= LOGO_SHAPE_MIN_EDGE_COMPLEXITY
+    )
+
+
+def _raster_has_visible_content(decoded: Image.Image, *, kind: str = "event") -> bool:
+    """Reject empty rasters while ignoring arbitrary RGB stored under transparency."""
     width, height = decoded.size
     total = width * height
-    minimum_visible = max(1024, math.ceil(total * 0.01))
+    minimum_detail = max(1024, math.ceil(total * 0.01))
     alpha = None
     if "A" in decoded.getbands():
         alpha = decoded.getchannel("A")
     elif decoded.mode == "P" and "transparency" in decoded.info:
         alpha = decoded.convert("RGBA").getchannel("A")
     if alpha is not None:
-        histogram = alpha.histogram()
-        strong_visible = sum(histogram[64:])
-        if strong_visible < minimum_visible:
+        mask = alpha.point(
+            lambda value: 255 if value >= ALPHA_FOREGROUND_THRESHOLD else 0
+        )
+        strong_visible = mask.histogram()[255]
+        minimum_foreground = (
+            max(256, math.ceil(total * 0.001))
+            if kind == "logo"
+            else minimum_detail
+        )
+        if strong_visible < minimum_foreground:
             return False
-        if total - strong_visible >= minimum_visible:
+        if _rgb_has_visible_content(
+            decoded,
+            mask=mask,
+            pixel_count=strong_visible,
+            minimum_detail=minimum_detail,
+        ):
             return True
+        return kind == "logo" and _alpha_mask_has_distinctive_shape(mask, strong_visible)
 
-    rgb = decoded.convert("RGB")
-    for channel in rgb.split():
-        histogram = channel.histogram()
-        occupied = [value for value, count in enumerate(histogram) if count]
-        if not occupied or occupied[-1] - occupied[0] < 8:
-            continue
-        dominant = max(range(256), key=histogram.__getitem__)
-        near_dominant = sum(histogram[max(0, dominant - 2) : min(256, dominant + 3)])
-        if total - near_dominant >= minimum_visible:
-            return True
-    return False
+    return _rgb_has_visible_content(
+        decoded,
+        mask=None,
+        pixel_count=total,
+        minimum_detail=minimum_detail,
+    )
 
 
 def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
@@ -626,7 +694,10 @@ def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
             elif width < 640 or height < 360:
                 return False
             decoded.load()
-            if not _raster_has_visible_content(decoded):
+            if not _raster_has_visible_content(
+                decoded,
+                kind=str(image.get("kind") or "event"),
+            ):
                 return False
     except (Image.DecompressionBombError, OSError, SyntaxError, UnidentifiedImageError, ValueError):
         return False
