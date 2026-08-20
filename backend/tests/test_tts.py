@@ -1238,6 +1238,17 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(tts._has_only_name_transcript_mismatches(expected, observed))
 
+    def test_orpheus_name_recheck_accepts_observed_q_when_and_qian_wen_splits(self):
+        expected = "Alibaba's Qwen Office, known in Chinese as Qianwen."
+        observed = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(
+                "Alibaba's Q when Office known in Chinese as Qian Wen".split()
+            )
+        ]
+
+        self.assertTrue(tts._has_only_name_transcript_mismatches(expected, observed))
+
     def test_orpheus_name_recheck_rejects_adjacent_extra_or_missing_name(self):
         expected = "Qwen Office ranked first."
 

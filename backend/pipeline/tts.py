@@ -57,6 +57,7 @@ ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPLITS = {
     "qwen": {
+        ("q", "when"),
         ("q", "wen"),
         ("q", "win"),
         ("cue", "wen"),
