@@ -44,7 +44,9 @@ NEWS_IMAGE_MAX_PIXELS = 40_000_000
 ALPHA_FOREGROUND_THRESHOLD = 64
 LOGO_SHAPE_ANALYSIS_MAX_DIMENSION = 512
 LOGO_SHAPE_MAX_BBOX_FILL = 0.95
-LOGO_SHAPE_MIN_EDGE_COMPLEXITY = 6.0
+LOGO_SHAPE_MIN_BBOX_AREA = 0.05
+LOGO_SHAPE_MIN_AXIS_EDGE_COMPLEXITY = 3.0
+LOGO_SHAPE_MIN_AXIS_PATTERNS = 8
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
     "image/png",
@@ -563,12 +565,68 @@ def _owned_generated_asset_path(task_dir: Path, image: dict) -> Path | None:
     return path if digest.hexdigest() == expected_sha256 else None
 
 
+def _mask_bbox_ratios(mask: Image.Image) -> tuple[float, float, float]:
+    bbox = mask.getbbox()
+    if bbox is None:
+        return 0.0, 0.0, 0.0
+    width, height = mask.size
+    bbox_width = bbox[2] - bbox[0]
+    bbox_height = bbox[3] - bbox[1]
+    return (
+        bbox_width / width,
+        bbox_height / height,
+        (bbox_width * bbox_height) / (width * height),
+    )
+
+
+def _mask_tile_profile(
+    mask: Image.Image,
+    pixel_count: int,
+    *,
+    divisions: int,
+) -> tuple[int, set[int], set[int]]:
+    width, height = mask.size
+    minimum_tile_pixels = max(4, math.ceil(pixel_count * 0.01))
+    occupied = 0
+    occupied_rows: set[int] = set()
+    occupied_columns: set[int] = set()
+    for row in range(divisions):
+        top = height * row // divisions
+        bottom = height * (row + 1) // divisions
+        for column in range(divisions):
+            left = width * column // divisions
+            right = width * (column + 1) // divisions
+            tile_pixels = mask.crop((left, top, right, bottom)).histogram()[255]
+            if tile_pixels < minimum_tile_pixels:
+                continue
+            occupied += 1
+            occupied_rows.add(row)
+            occupied_columns.add(column)
+    return occupied, occupied_rows, occupied_columns
+
+
+def _rgb_detail_is_distributed(
+    detail_mask: Image.Image,
+    detail_pixels: int,
+    *,
+    kind: str,
+) -> bool:
+    bbox_width, bbox_height, bbox_area = _mask_bbox_ratios(detail_mask)
+    if kind == "logo":
+        if bbox_area < LOGO_SHAPE_MIN_BBOX_AREA:
+            return False
+    elif bbox_width < 0.2 or bbox_height < 0.2:
+        return False
+    occupied, _, _ = _mask_tile_profile(detail_mask, detail_pixels, divisions=2)
+    return occupied >= 2
+
+
 def _rgb_has_visible_content(
     decoded: Image.Image,
     *,
     mask: Image.Image | None,
-    pixel_count: int,
     minimum_detail: int,
+    kind: str,
 ) -> bool:
     rgb = decoded.convert("RGB")
     for channel in rgb.split():
@@ -577,8 +635,17 @@ def _rgb_has_visible_content(
         if not occupied or occupied[-1] - occupied[0] < 8:
             continue
         dominant = max(range(256), key=histogram.__getitem__)
-        near_dominant = sum(histogram[max(0, dominant - 2) : min(256, dominant + 3)])
-        if pixel_count - near_dominant >= minimum_detail:
+        detail_mask = channel.point(
+            lambda value: 0 if dominant - 2 <= value <= dominant + 2 else 255
+        )
+        if mask is not None:
+            detail_mask = ImageChops.multiply(detail_mask, mask)
+        detail_pixels = detail_mask.histogram()[255]
+        if detail_pixels >= minimum_detail and _rgb_detail_is_distributed(
+            detail_mask,
+            detail_pixels,
+            kind=kind,
+        ):
             return True
     return False
 
@@ -589,7 +656,19 @@ def _alpha_mask_has_distinctive_shape(mask: Image.Image, visible_pixels: int) ->
     if bbox is None:
         return False
     bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-    if not bbox_area or visible_pixels / bbox_area >= LOGO_SHAPE_MAX_BBOX_FILL:
+    _, _, bbox_area_ratio = _mask_bbox_ratios(mask)
+    if (
+        not bbox_area
+        or bbox_area_ratio < LOGO_SHAPE_MIN_BBOX_AREA
+        or visible_pixels / bbox_area >= LOGO_SHAPE_MAX_BBOX_FILL
+    ):
+        return False
+    _, occupied_rows, occupied_columns = _mask_tile_profile(
+        mask,
+        visible_pixels,
+        divisions=3,
+    )
+    if len(occupied_rows) < 2 or len(occupied_columns) < 2:
         return False
 
     sample = mask.copy()
@@ -601,20 +680,35 @@ def _alpha_mask_has_distinctive_shape(mask: Image.Image, visible_pixels: int) ->
     sample_visible = sample.histogram()[255]
     if not sample_visible:
         return False
-    transitions = 0
+    horizontal_transitions = 0
     if width > 1:
-        transitions += ImageChops.difference(
+        horizontal_transitions = ImageChops.difference(
             sample.crop((1, 0, width, height)),
             sample.crop((0, 0, width - 1, height)),
         ).histogram()[255]
+    vertical_transitions = 0
     if height > 1:
-        transitions += ImageChops.difference(
+        vertical_transitions = ImageChops.difference(
             sample.crop((0, 1, width, height)),
             sample.crop((0, 0, width, height - 1)),
         ).histogram()[255]
+    scale = math.sqrt(sample_visible)
+    if (
+        horizontal_transitions / scale < LOGO_SHAPE_MIN_AXIS_EDGE_COMPLEXITY
+        or vertical_transitions / scale < LOGO_SHAPE_MIN_AXIS_EDGE_COMPLEXITY
+    ):
+        return False
+    row_patterns = {
+        sample.crop((0, row, width, row + 1)).tobytes()
+        for row in range(height)
+    }
+    column_patterns = {
+        sample.crop((column, 0, column + 1, height)).tobytes()
+        for column in range(width)
+    }
     return (
-        transitions / math.sqrt(sample_visible)
-        >= LOGO_SHAPE_MIN_EDGE_COMPLEXITY
+        len(row_patterns) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
+        and len(column_patterns) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
     )
 
 
@@ -640,11 +734,18 @@ def _raster_has_visible_content(decoded: Image.Image, *, kind: str = "event") ->
         )
         if strong_visible < minimum_foreground:
             return False
+        bbox_width, bbox_height, _ = _mask_bbox_ratios(mask)
+        if kind != "logo" and (
+            strong_visible / total < 0.05
+            or bbox_width < 0.2
+            or bbox_height < 0.2
+        ):
+            return False
         if _rgb_has_visible_content(
             decoded,
             mask=mask,
-            pixel_count=strong_visible,
             minimum_detail=minimum_detail,
+            kind=kind,
         ):
             return True
         return kind == "logo" and _alpha_mask_has_distinctive_shape(mask, strong_visible)
@@ -652,8 +753,8 @@ def _raster_has_visible_content(decoded: Image.Image, *, kind: str = "event") ->
     return _rgb_has_visible_content(
         decoded,
         mask=None,
-        pixel_count=total,
         minimum_detail=minimum_detail,
+        kind=kind,
     )
 
 

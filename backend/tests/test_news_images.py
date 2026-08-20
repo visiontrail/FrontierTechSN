@@ -167,13 +167,18 @@ def _image_bytes(
     return payload.getvalue()
 
 
-def _transparent_wordmark_bytes() -> bytes:
+def _transparent_wordmark_bytes(
+    text: str = "FRONTIER AI",
+    *,
+    size: tuple[int, int] = (656, 120),
+    font_size: int = 72,
+) -> bytes:
     payload = io.BytesIO()
-    image = Image.new("RGBA", (656, 120), (0, 0, 0, 0))
+    image = Image.new("RGBA", size, (0, 0, 0, 0))
     ImageDraw.Draw(image).text(
-        (20, 18),
-        "FRONTIER AI",
-        font=ImageFont.load_default(size=72),
+        (20, max(0, (size[1] - font_size) // 2)),
+        text,
+        font=ImageFont.load_default(size=font_size),
         fill=(15, 75, 210, 255),
         stroke_width=1,
     )
@@ -1096,6 +1101,52 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     transparent_garbage.save(garbage, format="PNG")
     assert_payload(garbage.getvalue(), kind="logo", expected=False)
 
+    gradient_patch = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    gradient_draw = ImageDraw.Draw(gradient_patch)
+    for x in range(61):
+        gradient_draw.line(
+            (370 + x, 195, 370 + x, 255),
+            fill=(x * 4, 80, 240 - x * 3, 255),
+        )
+    gradient = io.BytesIO()
+    gradient_patch.save(gradient, format="PNG")
+    assert_payload(gradient.getvalue(), kind="event", expected=False)
+    assert_payload(gradient.getvalue(), kind="logo", expected=False)
+
+    noise_patch = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    for y in range(195, 256):
+        for x in range(370, 431):
+            noise_patch.putpixel(
+                (x, y),
+                (
+                    (x * 17 + y * 31) % 256,
+                    (x * 29 + y * 13) % 256,
+                    (x * 7 + y * 43) % 256,
+                    255,
+                ),
+            )
+    noise = io.BytesIO()
+    noise_patch.save(noise, format="PNG")
+    assert_payload(noise.getvalue(), kind="event", expected=False)
+    assert_payload(noise.getvalue(), kind="logo", expected=False)
+
+    two_blocks = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    blocks_draw = ImageDraw.Draw(two_blocks)
+    blocks_draw.rectangle((100, 100, 159, 159), fill=(20, 80, 220, 255))
+    blocks_draw.rectangle((640, 290, 699, 349), fill=(20, 80, 220, 255))
+    blocks = io.BytesIO()
+    two_blocks.save(blocks, format="PNG")
+    assert_payload(blocks.getvalue(), kind="logo", expected=False)
+
+    grooved_block = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    grooved_draw = ImageDraw.Draw(grooved_block)
+    grooved_draw.rectangle((200, 150, 599, 299), fill=(20, 80, 220, 255))
+    for x in range(218, 599, 20):
+        grooved_draw.rectangle((x, 150, x + 1, 299), fill=(0, 0, 0, 0))
+    grooved = io.BytesIO()
+    grooved_block.save(grooved, format="PNG")
+    assert_payload(grooved.getvalue(), kind="logo", expected=False)
+
     alpha_checkerboard = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
     checkerboard_draw = ImageDraw.Draw(alpha_checkerboard)
     for y in range(0, 450, 40):
@@ -1106,7 +1157,16 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     alpha_checkerboard.save(checkerboard, format="PNG")
     assert_payload(checkerboard.getvalue(), kind="event", expected=False)
 
-    assert_payload(_transparent_wordmark_bytes(), kind="logo", expected=True)
+    for text, size in (
+        ("NVIDIA", (656, 120)),
+        ("ALIBABA GROUP", (800, 160)),
+        ("WORLD AQUATICS", (900, 180)),
+    ):
+        assert_payload(
+            _transparent_wordmark_bytes(text, size=size),
+            kind="logo",
+            expected=True,
+        )
 
     colorful_cutout = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
     cutout_draw = ImageDraw.Draw(colorful_cutout)
@@ -1161,10 +1221,39 @@ def test_raster_content_gate_survives_cache_attach_and_visual_pipeline(tmp_path:
     ImageDraw.Draw(white_strip).rectangle((0, 0, 7, 449), fill=(255, 255, 255, 0))
     solid_block = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
     ImageDraw.Draw(solid_block).rectangle((370, 195, 429, 254), fill=(20, 80, 220, 255))
+    gradient_patch = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    gradient_draw = ImageDraw.Draw(gradient_patch)
+    for x in range(61):
+        gradient_draw.line(
+            (370 + x, 195, 370 + x, 255),
+            fill=(x * 4, 80, 240 - x * 3, 255),
+        )
+    two_blocks = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    blocks_draw = ImageDraw.Draw(two_blocks)
+    blocks_draw.rectangle((100, 100, 159, 159), fill=(20, 80, 220, 255))
+    blocks_draw.rectangle((640, 290, 699, 349), fill=(20, 80, 220, 255))
+    grooved_block = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    grooved_draw = ImageDraw.Draw(grooved_block)
+    grooved_draw.rectangle((200, 150, 599, 299), fill=(20, 80, 220, 255))
+    for x in range(218, 599, 20):
+        grooved_draw.rectangle((x, 150, x + 1, 299), fill=(0, 0, 0, 0))
     cases = [
-        ("wordmark", _transparent_wordmark_bytes(), True),
+        ("nvidia-wordmark", _transparent_wordmark_bytes("NVIDIA"), True),
+        (
+            "alibaba-wordmark",
+            _transparent_wordmark_bytes("ALIBABA GROUP", size=(800, 160)),
+            True,
+        ),
+        (
+            "world-aquatics-wordmark",
+            _transparent_wordmark_bytes("WORLD AQUATICS", size=(900, 180)),
+            True,
+        ),
         ("white-strip", encoded(white_strip), False),
         ("solid-block", encoded(solid_block), False),
+        ("gradient-patch", encoded(gradient_patch), False),
+        ("two-blocks", encoded(two_blocks), False),
+        ("grooved-block", encoded(grooved_block), False),
     ]
 
     for name, payload, expected in cases:
