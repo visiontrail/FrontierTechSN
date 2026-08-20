@@ -100,6 +100,10 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     # CamelCase publication names are a single lexical source token, while
     # Whisper emits their acoustically identical component words.
     ("deep", "tech"): "deeptech",
+    ("qbit", "ai"): "qbitai",
+    ("qubit", "ai"): "qbitai",
+    # Hyphenation is not audible; Whisper may split the source compound.
+    ("semi", "annual"): "semiannual",
 }
 NUMBER_SCALES = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
 DANGLING_CHUNK_WORDS = {
