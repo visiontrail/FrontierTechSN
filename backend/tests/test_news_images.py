@@ -225,6 +225,54 @@ def _periodic_color_pattern_bytes(pattern: str, levels: int) -> bytes:
     return payload.getvalue()
 
 
+def _sparse_alpha_points_bytes(count: int) -> bytes:
+    image = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    for index in range(count):
+        offset = index * 7_919 % (800 * 450)
+        image.putpixel((offset % 800, offset // 800), (20, 80, 220, 255))
+    payload = io.BytesIO()
+    image.save(payload, format="PNG")
+    return payload.getvalue()
+
+
+def _simple_geometric_logo_bytes(shape: str, *, colorful: bool = False) -> bytes:
+    image = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    colors = (
+        [(20, 80, 220, 255)] * 4
+        if not colorful
+        else [
+            (20, 80, 220, 255),
+            (240, 160, 20, 255),
+            (30, 170, 110, 255),
+            (170, 50, 190, 255),
+        ]
+    )
+    if shape == "circle":
+        draw.ellipse((220, 45, 579, 404), fill=colors[0])
+    elif shape == "triangle":
+        draw.polygon(((400, 40), (150, 409), (649, 409)), fill=colors[0])
+    elif shape == "diamond":
+        draw.polygon(((400, 35), (659, 225), (400, 414), (140, 225)), fill=colors[0])
+    elif shape == "four-squares":
+        for box, color in zip(
+            (
+                (190, 60, 339, 209),
+                (460, 60, 609, 209),
+                (190, 240, 339, 389),
+                (460, 240, 609, 389),
+            ),
+            colors,
+            strict=True,
+        ):
+            draw.rectangle(box, fill=color)
+    else:
+        raise ValueError(f"unsupported test logo shape: {shape}")
+    payload = io.BytesIO()
+    image.save(payload, format="PNG")
+    return payload.getvalue()
+
+
 def _commons_candidate(scene_id: str, subject: str, kind: str = "event") -> dict:
     slug = scene_id.removeprefix("scene-")
     return {
@@ -1223,6 +1271,13 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     assert_payload(islands.getvalue(), kind="event", expected=False)
     assert_payload(islands.getvalue(), kind="logo", expected=False)
 
+    for sparse_count in (3_000, 9_000):
+        assert_payload(
+            _sparse_alpha_points_bytes(sparse_count),
+            kind="logo",
+            expected=False,
+        )
+
     two_blocks = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
     blocks_draw = ImageDraw.Draw(two_blocks)
     blocks_draw.rectangle((100, 100, 159, 159), fill=(20, 80, 220, 255))
@@ -1280,6 +1335,19 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     ):
         assert_payload(
             _transparent_wordmark_bytes(text, size=size),
+            kind="logo",
+            expected=True,
+        )
+
+    for shape, colorful in (
+        ("circle", False),
+        ("triangle", False),
+        ("diamond", False),
+        ("four-squares", False),
+        ("four-squares", True),
+    ):
+        assert_payload(
+            _simple_geometric_logo_bytes(shape, colorful=colorful),
             kind="logo",
             expected=True,
         )
@@ -1407,6 +1475,22 @@ def test_raster_content_gate_survives_cache_attach_and_visual_pipeline(tmp_path:
             ".png",
             True,
         ),
+        *[
+            (
+                f"simple-{shape}{'-colorful' if colorful else ''}",
+                _simple_geometric_logo_bytes(shape, colorful=colorful),
+                "logo",
+                ".png",
+                True,
+            )
+            for shape, colorful in (
+                ("circle", False),
+                ("triangle", False),
+                ("diamond", False),
+                ("four-squares", False),
+                ("four-squares", True),
+            )
+        ],
         ("duotone-cutout", encoded(duotone_cutout), "event", ".png", True),
         ("ordinary-photo", _image_bytes("JPEG", "pipeline-photo"), "event", ".jpg", True),
         ("white-strip", encoded(white_strip), "logo", ".png", False),
@@ -1417,6 +1501,8 @@ def test_raster_content_gate_survives_cache_attach_and_visual_pipeline(tmp_path:
         ("opaque-gradient-edge", encoded(opaque_edge), "logo", ".png", False),
         ("transparent-gradient-edge", encoded(transparent_edge), "logo", ".png", False),
         ("noise-islands", encoded(noise_islands), "logo", ".png", False),
+        ("sparse-3000", _sparse_alpha_points_bytes(3_000), "logo", ".png", False),
+        ("sparse-9000", _sparse_alpha_points_bytes(9_000), "logo", ".png", False),
         ("diagonal-line", encoded(diagonal), "logo", ".png", False),
         ("striped-pattern", encoded(striped), "logo", ".png", False),
         *[

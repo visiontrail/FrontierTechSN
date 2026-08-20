@@ -45,6 +45,8 @@ ALPHA_FOREGROUND_THRESHOLD = 64
 LOGO_SHAPE_ANALYSIS_MAX_DIMENSION = 512
 LOGO_SHAPE_MAX_BBOX_FILL = 0.95
 LOGO_SHAPE_MIN_BBOX_AREA = 0.05
+LOGO_SHAPE_MIN_BBOX_FILL = 0.2
+LOGO_SHAPE_MIN_FOREGROUND_COVERAGE = 0.05
 LOGO_SHAPE_MIN_AXIS_EDGE_COMPLEXITY = 3.0
 LOGO_SHAPE_MIN_AXIS_PATTERNS = 8
 LOGO_SHAPE_MIN_AXIS_PROJECTIONS = 8
@@ -761,10 +763,13 @@ def _alpha_mask_has_distinctive_shape(mask: Image.Image, visible_pixels: int) ->
         return False
     bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
     _, _, bbox_area_ratio = _mask_bbox_ratios(mask)
+    foreground_coverage = visible_pixels / (mask.width * mask.height)
+    bbox_fill = visible_pixels / bbox_area if bbox_area else 1.0
     if (
         not bbox_area
         or bbox_area_ratio < LOGO_SHAPE_MIN_BBOX_AREA
-        or visible_pixels / bbox_area >= LOGO_SHAPE_MAX_BBOX_FILL
+        or foreground_coverage < LOGO_SHAPE_MIN_FOREGROUND_COVERAGE
+        or bbox_fill >= LOGO_SHAPE_MAX_BBOX_FILL
     ):
         return False
     _, occupied_rows, occupied_columns = _mask_tile_profile(
@@ -774,6 +779,17 @@ def _alpha_mask_has_distinctive_shape(mask: Image.Image, visible_pixels: int) ->
     )
     if len(occupied_rows) < 2 or len(occupied_columns) < 2:
         return False
+
+    simple_tiles, _, _ = _mask_tile_profile(
+        mask,
+        visible_pixels,
+        divisions=2,
+    )
+    simple_geometry = (
+        bbox_fill >= LOGO_SHAPE_MIN_BBOX_FILL
+        and simple_tiles == 4
+        and _binary_mask_has_few_runs(mask, maximum_runs=4)
+    )
 
     sample = mask.copy()
     sample.thumbnail(
@@ -797,11 +813,10 @@ def _alpha_mask_has_distinctive_shape(mask: Image.Image, visible_pixels: int) ->
             sample.crop((0, 0, width, height - 1)),
         ).histogram()[255]
     scale = math.sqrt(sample_visible)
-    if (
+    complex_edges = not (
         horizontal_transitions / scale < LOGO_SHAPE_MIN_AXIS_EDGE_COMPLEXITY
         or vertical_transitions / scale < LOGO_SHAPE_MIN_AXIS_EDGE_COMPLEXITY
-    ):
-        return False
+    )
     row_slices = [
         sample.crop((0, row, width, row + 1)).tobytes()
         for row in range(height)
@@ -810,14 +825,16 @@ def _alpha_mask_has_distinctive_shape(mask: Image.Image, visible_pixels: int) ->
         sample.crop((column, 0, column + 1, height)).tobytes()
         for column in range(width)
     ]
-    return (
-        len(set(row_slices)) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
+    complex_geometry = (
+        complex_edges
+        and len(set(row_slices)) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
         and len(set(column_slices)) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
         and len({row.count(255) for row in row_slices})
         >= LOGO_SHAPE_MIN_AXIS_PROJECTIONS
         and len({column.count(255) for column in column_slices})
         >= LOGO_SHAPE_MIN_AXIS_PROJECTIONS
     )
+    return simple_geometry or complex_geometry
 
 
 def _raster_has_visible_content(decoded: Image.Image, *, kind: str = "event") -> bool:
