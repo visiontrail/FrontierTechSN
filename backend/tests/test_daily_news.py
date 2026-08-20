@@ -480,6 +480,9 @@ def test_story_review_uses_gemini_primary_without_touching_chatgpt():
     assert review._REVIEW_REQUEST_RE.search(args[2])
     assert "\n" not in args[2]
     assert command.await_args.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 60
+    assert command.await_args.kwargs["site_session_namespace"].startswith(
+        "frontiertechsn-review-"
+    )
 
 
 def test_gemini_late_recovery_accepts_only_its_owned_turn():
@@ -515,6 +518,12 @@ def test_gemini_late_recovery_accepts_only_its_owned_turn():
     assert provider == "gemini"
     assert "[GEMINI RECOVERY]" in raw
     assert not any(call.args[0][0] == "chatgpt" for call in command_mock.await_args_list)
+    assert len(
+        {
+            call.kwargs["site_session_namespace"]
+            for call in command_mock.await_args_list
+        }
+    ) == 1
 
 
 def test_unowned_gemini_greeting_is_rejected_before_fresh_retry():
@@ -555,6 +564,41 @@ def test_unowned_gemini_greeting_is_rejected_before_fresh_retry():
         if call.args[0][:2] == ["gemini", "ask"]
     ]
     assert all(args[args.index("--new") + 1] == "true" for args in gemini_calls)
+
+
+def test_gemini_late_recovery_polls_before_resubmitting_the_owned_request():
+    owned_prompt = ""
+    gemini_asks = 0
+    gemini_reads = 0
+
+    async def command(args, **kwargs):
+        nonlocal owned_prompt, gemini_asks, gemini_reads
+        if args[:2] == ["gemini", "ask"]:
+            gemini_asks += 1
+            owned_prompt = args[2]
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"response":"[NO RESPONSE]"}]',
+                "",
+            )
+        if args[:2] == ["gemini", "read"]:
+            gemini_reads += 1
+            turns = [{"Role": "User", "Text": owned_prompt}]
+            if gemini_reads == 3:
+                turns.append({"Role": "Assistant", "Text": "1P2P"})
+            return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
+        raise AssertionError(args)
+
+    with patch.object(review, "run_opencli", AsyncMock(side_effect=command)):
+        payload, _, _, provider = asyncio.run(
+            review._web_story_review("audit", story_numbers=[1, 2], log=None)
+        )
+
+    assert payload["approved"] is True
+    assert provider == "gemini"
+    assert gemini_asks == 1
+    assert gemini_reads == 3
 
 
 def test_story_review_falls_back_to_fresh_chatgpt_after_gemini_exhaustion():
@@ -608,6 +652,52 @@ def test_story_review_falls_back_to_fresh_chatgpt_after_gemini_exhaustion():
     assert all(args[0] == "gemini" for args in calls[:first_chatgpt])
     chatgpt_ask = next(args for args in calls if args[:2] == ["chatgpt", "ask"])
     assert chatgpt_ask[chatgpt_ask.index("--new") + 1] == "true"
+
+
+def test_chatgpt_fallback_retries_transient_model_picker_failure():
+    model_attempts = 0
+    messages: list[str] = []
+
+    async def command(args, **kwargs):
+        nonlocal model_attempts
+        if args[:2] == ["gemini", "ask"]:
+            return OpenCLIResult(tuple(args), 0, '[{"response":"[NO RESPONSE]"}]', "")
+        if args[:2] == ["gemini", "read"]:
+            return OpenCLIResult(tuple(args), 0, "[]", "")
+        if args[:2] == ["chatgpt", "model"]:
+            model_attempts += 1
+            if model_attempts == 1:
+                raise OpenCLIError("ChatGPT model picker was still hydrating")
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"Status":"Success","Model":"Medium"}]',
+                "",
+            )
+        if args[:2] == ["chatgpt", "ask"]:
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"response":"1P2P","conversationUrl":"https://chatgpt.com/c/retry"}]',
+                "",
+            )
+        raise AssertionError(args)
+
+    with patch.object(review, "run_opencli", AsyncMock(side_effect=command)):
+        payload, raw, url, provider = asyncio.run(
+            review._web_story_review(
+                "audit",
+                story_numbers=[1, 2],
+                log=messages.append,
+            )
+        )
+
+    assert payload["approved"] is True
+    assert provider == "chatgpt"
+    assert url.endswith("/retry")
+    assert model_attempts == 2
+    assert "[CHATGPT MODEL ERROR 1/2]" in raw
+    assert any("model selection attempt 1/2 failed" in message for message in messages)
 
 
 def test_chatgpt_fallback_recovers_the_target_conversation_after_route_drift():
@@ -756,5 +846,8 @@ def test_review_report_records_gemini_primary_and_chatgpt_fallback(
 
     assert result.report["fallback_used"] is fallback_used
     assert reviewer_fragment in result.report["reviewer"]
+    assert web_review.await_args.kwargs["site_session_namespace"].startswith(
+        "frontiertechsn-review-"
+    )
     assert (tmp_path / "review" / "story-review-prompt-1-group-1.txt").exists()
     assert (tmp_path / "review" / "story-review-response-1-group-1.txt").exists()

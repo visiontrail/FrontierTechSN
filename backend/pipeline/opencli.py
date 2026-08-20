@@ -36,7 +36,7 @@ class OpenCLIResult:
     stderr: str
 
 
-def _environment() -> dict[str, str]:
+def _environment(*, site_session_namespace: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
     path_parts = [
         str(config.PROJECT_ROOT / ".venv" / "bin"),
@@ -46,7 +46,9 @@ def _environment() -> dict[str, str]:
     env["PATH"] = os.pathsep.join(part for part in path_parts if part)
     env.setdefault("OPENCLI_BROWSER_CONNECT_TIMEOUT", "20")
     env.setdefault("OPENCLI_BROWSER_COMMAND_TIMEOUT", str(config.OPENCLI_TIMEOUT))
-    env["OPENCLI_SITE_SESSION_NAMESPACE"] = config.OPENCLI_SITE_SESSION_NAMESPACE
+    env["OPENCLI_SITE_SESSION_NAMESPACE"] = (
+        site_session_namespace or config.OPENCLI_SITE_SESSION_NAMESPACE
+    )
     if config.OPENCLI_PROFILE:
         env["OPENCLI_PROFILE"] = config.OPENCLI_PROFILE
     return env
@@ -57,6 +59,7 @@ async def run_opencli(
     *,
     timeout: int | None = None,
     check: bool = True,
+    site_session_namespace: str | None = None,
 ) -> OpenCLIResult:
     binary = Path(config.OPENCLI_BIN)
     if not binary.is_file():
@@ -66,7 +69,7 @@ async def run_opencli(
         )
 
     command = [str(binary), *[str(arg) for arg in args]]
-    env = _environment()
+    env = _environment(site_session_namespace=site_session_namespace)
     if is_rate_limited_command(args):
         # Pace before starting the subprocess so the provider-command timeout
         # measures the web operation, not time intentionally spent in queue.

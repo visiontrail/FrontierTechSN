@@ -30,6 +30,16 @@ class OpenCLISessionIsolationTests(unittest.TestCase):
 
         self.assertEqual(env["OPENCLI_SITE_SESSION_NAMESPACE"], "frontiertechsn")
 
+    def test_one_review_can_isolate_and_reuse_its_own_persistent_tab(self):
+        env = opencli_module._environment(
+            site_session_namespace="frontiertechsn-review-request"
+        )
+
+        self.assertEqual(
+            env["OPENCLI_SITE_SESSION_NAMESPACE"],
+            "frontiertechsn-review-request",
+        )
+
     def test_installed_runtime_contains_the_postinstall_namespace_patch(self):
         runtime = (
             config.PROJECT_ROOT

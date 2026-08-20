@@ -160,15 +160,13 @@ utils = replaceOnce(
       }`,
   'Gemini native submit coordinates',
 )
-utils = replaceOnce(
-  utils,
-  `    const submitAction = await page.evaluate(submitComposerScript());
+const upstreamGeminiSubmitAction = `    const submitAction = await page.evaluate(submitComposerScript());
     if (submitAction === 'button') {
         await page.wait(1);
         return 'button';
     }
-    if (page.nativeKeyPress) {`,
-  `    const submitAction = await page.evaluate(submitComposerScript());
+    if (page.nativeKeyPress) {`
+const legacyGeminiSubmitAction = `    const submitAction = await page.evaluate(submitComposerScript());
     if (process?.env?.OPENCLI_GEMINI_SUBMIT_DEBUG) {
         console.error(\`[gemini/submit] action=\${JSON.stringify(submitAction)}\`);
     }
@@ -199,8 +197,148 @@ utils = replaceOnce(
         })()\`);
         await page.pressKey('Enter');
     }
-    else if (page.nativeKeyPress) {`,
-  'Gemini resilient submit action',
+    else if (page.nativeKeyPress) {`
+const currentGeminiSubmitAction = `    const submitAction = await page.evaluate(submitComposerScript());
+    if (process?.env?.OPENCLI_GEMINI_SUBMIT_DEBUG) {
+        console.error(\`[gemini/submit] action=\${JSON.stringify(submitAction)}\`);
+    }
+    const waitForComposerClear = async () => {
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+            await page.wait(0.25);
+            const state = await page.evaluate(composerHasTextScript());
+            if (!state?.hasText)
+                return true;
+        }
+        return false;
+    };
+    if (submitAction?.action === 'button') {
+        const hasSemanticSubmit = /send|submit|发送|提交/i.test(String(submitAction.label || ''));
+        if (hasSemanticSubmit && typeof page.click === 'function') {
+            try {
+                await page.click('button[aria-label="Send message"], button[aria-label="发送消息"], button[aria-label="提交"]');
+                if (await waitForComposerClear())
+                    return 'button';
+                throw new CommandExecutionError('Gemini did not accept the composer submission');
+            }
+            catch (error) {
+                if (error instanceof CommandExecutionError)
+                    throw error;
+                if (await waitForComposerClear())
+                    return 'button';
+                await page.click('[data-opencli-gemini-submit="1"]');
+                if (await waitForComposerClear())
+                    return 'button';
+                throw new CommandExecutionError('Gemini did not accept the composer submission');
+            }
+        }
+    }
+    if (typeof page.pressKey === 'function') {
+        await page.evaluate(\`(() => {
+            const composer = document.querySelector('[data-opencli-gemini-composer="1"]');
+            if (composer instanceof HTMLElement) composer.focus();
+        })()\`);
+        await page.pressKey('Enter');
+    }
+    else if (page.nativeKeyPress) {`
+if (utils.includes(legacyGeminiSubmitAction)) {
+  utils = utils.replace(legacyGeminiSubmitAction, currentGeminiSubmitAction)
+} else if (!utils.includes(currentGeminiSubmitAction)) {
+  utils = replaceOnce(
+    utils,
+    upstreamGeminiSubmitAction,
+    currentGeminiSubmitAction,
+    'Gemini resilient submit action',
+  )
+}
+utils = replaceOnce(
+  utils,
+  `    let hasText = false;
+    if (page.nativeType) {`,
+  `    let hasText = false;
+    if (typeof page.fillText === 'function') {
+        try {
+            const filled = await page.fillText('[contenteditable="true"][aria-label*="Gemini"]', text);
+            hasText = filled?.verified === true && filled?.actual === text;
+        }
+        catch { }
+    }
+    if (!hasText && page.nativeType) {`,
+  'Gemini verified composer fill',
+)
+utils = replaceWithinFunction(
+  utils,
+  'export async function sendGeminiMessage(page, text) {',
+  'function normalizeGeminiExportUrls(value) {',
+  `    await page.wait(1);
+    return 'enter';`,
+  `    if (!await waitForComposerClear()) {
+        throw new CommandExecutionError('Gemini did not accept the composer submission');
+    }
+    return 'enter';`,
+  'Gemini submit postcondition',
+)
+utils = replaceOnce(
+  utils,
+  '          && line.length <= 4000',
+  '          && line.length <= 12000',
+  'Gemini transcript line ceiling',
+)
+utils = replaceOnce(
+  utils,
+  `        '[class*="response-text"]',`,
+  `        '[class*="response-text"]',
+        'user-query',
+        'model-response',`,
+  'Gemini current structured turn elements',
+)
+utils = replaceOnce(
+  utils,
+  `          el.getAttribute('class'),
+        ].filter(Boolean).join(' ').toLowerCase();`,
+  `          el.getAttribute('class'),
+          el.tagName,
+        ].filter(Boolean).join(' ').toLowerCase();`,
+  'Gemini current structured turn roles',
+)
+utils = replaceOnce(
+  utils,
+  `    const pickFallbackGeminiTranscriptReply = (current) => current.transcriptLines
+        .filter((line) => !baseline.snapshot.transcriptLines.includes(line))
+        .map((line) => extractGeminiTranscriptLineCandidate(line, promptText))
+        .filter(Boolean)
+        .join('\\n')
+        .trim();`,
+  `    const ownershipMarker = promptText.match(/REVIEW_REQUEST_ID:[0-9a-f]{32}/i)?.[0] || '';
+    const pickFallbackGeminiTranscriptReply = (current) => {
+        let candidateLines = current.transcriptLines
+            .filter((line) => !baseline.snapshot.transcriptLines.includes(line));
+        if (ownershipMarker) {
+            let anchorIndex = -1;
+            for (let index = current.transcriptLines.length - 1; index >= 0; index -= 1) {
+                if (current.transcriptLines[index].toLowerCase().includes(ownershipMarker.toLowerCase())) {
+                    anchorIndex = index;
+                    break;
+                }
+            }
+            if (anchorIndex < 0)
+                return '';
+            candidateLines = current.transcriptLines.slice(anchorIndex);
+            const nextRequestIndex = candidateLines.slice(1).findIndex((line) =>
+                /REVIEW_REQUEST_ID:[0-9a-f]{32}/i.test(line)
+            );
+            if (nextRequestIndex >= 0)
+                candidateLines = candidateLines.slice(0, nextRequestIndex + 1);
+            const prompt = promptText.trim();
+            const promptOffset = candidateLines[0]?.indexOf(prompt) ?? -1;
+            candidateLines[0] = promptOffset >= 0 ? candidateLines[0].slice(promptOffset) : '';
+        }
+        return candidateLines
+            .map((line) => extractGeminiTranscriptLineCandidate(line, promptText))
+            .filter((line) => line && !/^(?:you|gemini) said:?$/i.test(line))
+            .join('\\n')
+            .trim();
+    };`,
+  'Gemini owned early transcript reply',
 )
 utils = replaceOnce(
   utils,
@@ -267,27 +405,48 @@ models = replaceOnce(
 fs.writeFileSync(modelsPath, models)
 
 let chatgptUtils = fs.readFileSync(chatgptUtilsPath, 'utf8')
+chatgptUtils = replaceOnce(
+  chatgptUtils,
+  "        label: 'Balanced',",
+  "        label: 'Medium',",
+  'ChatGPT current medium label',
+)
 const modelSignature = 'export async function selectChatGPTModel(page, model) {'
 const toolSignature = 'export async function getCurrentChatGPTTool(page) {'
-if (!chatgptUtils.includes("'chatgpt intelligence slider'")) {
+const upstreamChatgptModelRoute = [
+  '    if (!currentUrl.startsWith(`${CHATGPT_URL}/new`)) {',
+  "        await page.goto(`${CHATGPT_URL}/new`, { waitUntil: 'none' });",
+  '        await page.wait(2);',
+  '    }',
+].join('\n')
+const legacyChatgptModelRoute = [
+  '    if (currentUrl !== CHATGPT_URL && currentUrl !== `${CHATGPT_URL}/`) {',
+  "        await page.goto(`${CHATGPT_URL}/`, { waitUntil: 'none' });",
+  '        await page.wait(2);',
+  '    }',
+].join('\n')
+const currentChatgptModelRoute = [
+  '    if (currentUrl !== CHATGPT_URL && currentUrl !== `${CHATGPT_URL}/`) {',
+  "        await page.goto(`${CHATGPT_URL}/`, { waitUntil: 'load', settleMs: 2500 });",
+  '        await page.wait(1);',
+  '    }',
+].join('\n')
+if (chatgptUtils.includes(legacyChatgptModelRoute)) {
+  chatgptUtils = chatgptUtils.replace(
+    legacyChatgptModelRoute,
+    currentChatgptModelRoute,
+  )
+} else if (!chatgptUtils.includes(currentChatgptModelRoute)) {
   chatgptUtils = replaceWithinFunction(
     chatgptUtils,
     modelSignature,
     toolSignature,
-  [
-    '    if (!currentUrl.startsWith(`${CHATGPT_URL}/new`)) {',
-    "        await page.goto(`${CHATGPT_URL}/new`, { waitUntil: 'none' });",
-    '        await page.wait(2);',
-    '    }',
-  ].join('\n'),
-  [
-    '    if (currentUrl !== CHATGPT_URL && currentUrl !== `${CHATGPT_URL}/`) {',
-    "        await page.goto(`${CHATGPT_URL}/`, { waitUntil: 'none' });",
-    '        await page.wait(2);',
-    '    }',
-  ].join('\n'),
-  'ChatGPT current new-chat route',
-)
+    upstreamChatgptModelRoute,
+    currentChatgptModelRoute,
+    'ChatGPT current new-chat route',
+  )
+}
+if (!chatgptUtils.includes("'chatgpt intelligence slider readiness'")) {
 chatgptUtils = replaceWithinFunction(
   chatgptUtils,
   modelSignature,
@@ -303,11 +462,38 @@ chatgptUtils = replaceWithinFunction(
   chatgptUtils,
   modelSignature,
   toolSignature,
-  `    await page.nativeClick(Number(menuButton.x), Number(menuButton.y));
+  `        const labels = \${JSON.stringify(Object.values(CHATGPT_MODEL_TARGETS).flatMap((entry) => entry.labels))};
+        const menuButtonSelectors = [`,
+  `        const labels = \${JSON.stringify(Object.values(CHATGPT_MODEL_TARGETS).flatMap((entry) => entry.labels))};
+        const composer = document.querySelector('[data-opencli-chatgpt-composer="1"]');
+        const form = composer?.closest('form')
+            || Array.from(document.querySelectorAll('form')).find((node) => node instanceof HTMLElement && isVisible(node));
+        const menuButtonSelectors = [`,
+  'ChatGPT composer-scoped model trigger root',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  `        let button = Array.from(document.querySelectorAll('form button')).find((node) =>
+            isVisible(node) && labels.some((label) => textMatchesLabel(node.textContent, label))
+        );
+        if (!button) {
+            button = menuButtonSelectors
+                .map((selector) => document.querySelector(selector))`,
+  `        let button = Array.from(form?.querySelectorAll('button') || []).find((node) =>
+            isVisible(node) && labels.some((label) => textMatchesLabel(node.textContent, label))
+        );
+        if (!button && form) {
+            button = menuButtonSelectors
+                .map((selector) => form.querySelector(selector))`,
+  'ChatGPT composer-scoped model trigger lookup',
+)
+const upstreamChatgptSliderAction = `    await page.nativeClick(Number(menuButton.x), Number(menuButton.y));
     await page.wait(0.5);
 
-    let optionCenter = null;`,
-  `    await page.nativeClick(Number(menuButton.x), Number(menuButton.y));
+    let optionCenter = null;`
+const legacyChatgptSliderAction = `    await page.nativeClick(Number(menuButton.x), Number(menuButton.y));
     await page.wait(0.5);
     let pickerOpen = Boolean(unwrapEvaluateResult(await page.evaluate(\`(() => {
         return Boolean(document.querySelector('[data-testid="composer-intelligence-picker-content"] [role="slider"]'));
@@ -363,9 +549,151 @@ chatgptUtils = replaceWithinFunction(
         return { Status: 'Success', Model: target.label };
     }
 
-    let optionCenter = null;`,
-    'ChatGPT five-level intelligence slider',
-  )
+    let optionCenter = null;`
+const currentChatgptSliderAction = `    const readPickerState = async () => requireObjectEvaluateResult(
+        unwrapEvaluateResult(await page.evaluate(\`(() => {
+            const isVisible = (el) => {
+                if (!(el instanceof HTMLElement)) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                    && rect.width > 0 && rect.height > 0;
+            };
+            const trigger = document.querySelector('[data-opencli-chatgpt-model-trigger="1"]');
+            const controlledId = trigger?.getAttribute('aria-controls') || '';
+            const controlled = controlledId ? document.getElementById(controlledId) : null;
+            const content = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
+            const labels = (\${JSON.stringify(target.optionLabels || target.labels || [])})
+                .map((value) => String(value || '').toLowerCase());
+            const candidates = [
+                content,
+                controlled,
+                ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"]')).filter(isVisible),
+            ].filter((node, index, all) => node instanceof HTMLElement
+                && isVisible(node) && all.indexOf(node) === index);
+            const root = candidates.find((node) => {
+                if (node === content || node === controlled) return true;
+                const text = String(node.textContent || '').toLowerCase();
+                return labels.some((label) => label && text.includes(label));
+            }) || null;
+            const slider = root?.querySelector('[role="slider"], input[type="range"]')
+                || document.querySelector('[data-model-reasoning-effort-slider] [role="slider"]');
+            const optionSelector = '[role="menuitemradio"], [role="option"], [role="menuitem"], button';
+            const hasTargetOption = root ? Array.from(root.querySelectorAll(optionSelector)).some((node) => {
+                if (!isVisible(node)) return false;
+                const text = [
+                    node.textContent,
+                    node.getAttribute('aria-label'),
+                    node.getAttribute('aria-valuetext'),
+                    node.getAttribute('title'),
+                ].map((value) => String(value || '').toLowerCase()).join(' ');
+                return labels.some((label) => label && text.includes(label));
+            }) : false;
+            return {
+                ready: slider instanceof HTMLElement || hasTargetOption,
+                expanded: trigger?.getAttribute('aria-expanded') === 'true' || root instanceof HTMLElement,
+                contentFound: content instanceof HTMLElement && isVisible(content),
+            };
+        })()\`)),
+        'chatgpt intelligence slider readiness',
+    );
+
+    let pickerState = await readPickerState();
+    if (!pickerState.ready && !pickerState.expanded) {
+        await page.nativeClick(Number(menuButton.x), Number(menuButton.y));
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+            await page.wait(attempt === 0 ? 0.5 : 0.4);
+            pickerState = await readPickerState();
+            if (pickerState.ready) break;
+        }
+    }
+    if (!pickerState.ready && !pickerState.expanded) {
+        await page.evaluate(\`(() => {
+            const trigger = document.querySelector('[data-opencli-chatgpt-model-trigger="1"]');
+            if (trigger instanceof HTMLElement) trigger.focus();
+        })()\`);
+        if (typeof page.nativeKeyPress === 'function') await page.nativeKeyPress('Enter');
+        else if (typeof page.pressKey === 'function') await page.pressKey('Enter');
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            await page.wait(0.5);
+            pickerState = await readPickerState();
+            if (pickerState.ready) break;
+        }
+    }
+
+    const sliderState = requireObjectEvaluateResult(unwrapEvaluateResult(await page.evaluate(\`(() => {
+        const isVisible = (el) => {
+            if (!(el instanceof HTMLElement)) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden'
+                && rect.width > 0 && rect.height > 0;
+        };
+        const trigger = document.querySelector('[data-opencli-chatgpt-model-trigger="1"]');
+        const controlledId = trigger?.getAttribute('aria-controls') || '';
+        const controlled = controlledId ? document.getElementById(controlledId) : null;
+        const content = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
+        const roots = [
+            content,
+            controlled,
+            ...Array.from(document.querySelectorAll('[role="menu"], [role="listbox"]')),
+        ].filter((node, index, all) => node instanceof HTMLElement
+            && isVisible(node) && all.indexOf(node) === index);
+        const slider = roots
+            .map((root) => root.querySelector('[role="slider"], input[type="range"]'))
+            .find((node) => node instanceof HTMLElement)
+            || document.querySelector('[data-model-reasoning-effort-slider] [role="slider"]');
+        if (!(slider instanceof HTMLElement)) return { found: false };
+        const current = Number(slider.getAttribute('aria-valuenow') || slider.value);
+        const minimum = Number(slider.getAttribute('aria-valuemin') || slider.min);
+        const maximum = Number(slider.getAttribute('aria-valuemax') || slider.max);
+        const keyboardTarget = slider.closest('[role="menuitem"][aria-keyshortcuts]') || slider;
+        keyboardTarget.focus();
+        return { found: true, current, minimum, maximum };
+    })()\`)), 'chatgpt intelligence slider');
+    if (sliderState.found) {
+        const targetValue = Number(target.intelligenceOrder);
+        if (!Number.isInteger(targetValue)
+            || !Number.isInteger(sliderState.current)
+            || !Number.isFinite(sliderState.minimum)
+            || !Number.isFinite(sliderState.maximum)
+            || targetValue < sliderState.minimum
+            || targetValue > sliderState.maximum) {
+            throw new CommandExecutionError(\`ChatGPT did not expose a usable \${target.label} slider position.\`);
+        }
+        if (typeof page.pressKey !== 'function') {
+            throw new CommandExecutionError('ChatGPT intelligence slider requires browser key support.');
+        }
+        const key = targetValue < sliderState.current ? 'ArrowLeft' : 'ArrowRight';
+        for (let index = 0; index < Math.abs(targetValue - sliderState.current); index += 1) {
+            await page.pressKey(key);
+            await page.wait(0.15);
+        }
+        let afterSlider = { model: null };
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+            await page.wait(0.4);
+            afterSlider = await getCurrentChatGPTModel(page);
+            if (afterSlider.model === target.key) break;
+        }
+        if (afterSlider.model !== target.key) {
+            throw new CommandExecutionError(\`ChatGPT model did not switch to \${target.label}.\`);
+        }
+        await page.pressKey('Escape').catch(() => undefined);
+        return { Status: 'Success', Model: target.label };
+    }
+
+    let optionCenter = null;`
+const chatgptSliderSource = chatgptUtils.includes(legacyChatgptSliderAction)
+  ? legacyChatgptSliderAction
+  : upstreamChatgptSliderAction
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  chatgptSliderSource,
+  currentChatgptSliderAction,
+  'ChatGPT five-level intelligence slider readiness',
+)
 }
 fs.writeFileSync(chatgptUtilsPath, chatgptUtils)
 

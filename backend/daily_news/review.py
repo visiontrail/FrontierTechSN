@@ -404,6 +404,7 @@ async def _web_story_review(
     *,
     story_number: int | None = None,
     story_numbers: list[int] | None = None,
+    site_session_namespace: str | None = None,
     log: LogCallback | None,
 ) -> tuple[dict[str, Any], str, str, str]:
     if (story_number is None) == (story_numbers is None):
@@ -418,6 +419,9 @@ async def _web_story_review(
 
     timeout = config.DAILY_NEWS_WEB_REVIEW_TIMEOUT
     request_id = uuid4().hex
+    review_session_namespace = site_session_namespace or (
+        f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{request_id}"
+    )
     browser_prompt = " ".join(prompt.split())
     owned_prompt = (
         f"REVIEW_REQUEST_ID:{request_id}. This marker identifies the browser turn; "
@@ -456,18 +460,31 @@ async def _web_story_review(
                 "json",
             ]
         )
-        read_result = await run_opencli(
-            command,
-            timeout=timeout + 15 if conversation_url else 30,
-        )
-        messages = _rows(first_json(read_result.stdout))
-        assistant_text = _assistant_for_review_request(messages, request_id)
-        if not assistant_text:
-            raise ValueError(
-                f"{provider} recovery page did not contain a response owned by this request"
-            )
-        raw_attempts.append(f"[{provider.upper()} RECOVERY]\n{assistant_text}")
-        return parse_response(assistant_text), assistant_text
+        recovery_attempts = 3 if provider == "gemini" else 1
+        last_error: Exception | None = None
+        for _ in range(recovery_attempts):
+            try:
+                read_result = await run_opencli(
+                    command,
+                    timeout=timeout + 15 if conversation_url else 30,
+                    site_session_namespace=review_session_namespace,
+                )
+                messages = _rows(first_json(read_result.stdout))
+                assistant_text = _assistant_for_review_request(messages, request_id)
+                if not assistant_text:
+                    raise ValueError(
+                        f"{provider} recovery page did not contain a response "
+                        "owned by this request"
+                    )
+                payload = parse_response(assistant_text)
+                raw_attempts.append(
+                    f"[{provider.upper()} RECOVERY]\n{assistant_text}"
+                )
+                return payload, assistant_text
+            except Exception as exc:  # noqa: BLE001 - bounded late-response poll
+                last_error = exc
+        assert last_error is not None
+        raise last_error
 
     gemini_error: Exception | None = None
     gemini_attempts = 2
@@ -487,8 +504,8 @@ async def _web_story_review(
                     "--timeout",
                     str(timeout),
                     "--window",
-                    # Gemini's current composer requires the adapter's trusted
-                    # keyboard path, so the isolated project tab is foregrounded.
+                    # Keep each owned review session in a fresh foreground tab;
+                    # stale persistent tabs can receive input without submitting it.
                     "foreground",
                     "--site-session",
                     "persistent",
@@ -502,6 +519,7 @@ async def _web_story_review(
                 gemini_args,
                 # Model discovery happens before Gemini's answer timeout.
                 timeout=timeout + 60,
+                site_session_namespace=review_session_namespace,
             )
             rows = _rows(first_json(result.stdout))
             response = next(
@@ -564,31 +582,43 @@ async def _web_story_review(
         )
 
     chatgpt_error: Exception | None = None
-    try:
-        await run_opencli(
-            [
-                "chatgpt",
-                "model",
-                config.DAILY_NEWS_CHATGPT_REVIEW_MODEL,
-                "--window",
-                "background",
-                "--site-session",
-                "persistent",
-                "--keep-tab",
-                "true",
-                "-f",
-                "json",
-            ],
-            timeout=60,
-        )
-        if log:
-            log(
-                "ChatGPT fallback review model: "
-                f"{config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}"
+    chatgpt_model_attempts = 2
+    for model_attempt in range(1, chatgpt_model_attempts + 1):
+        try:
+            await run_opencli(
+                [
+                    "chatgpt",
+                    "model",
+                    config.DAILY_NEWS_CHATGPT_REVIEW_MODEL,
+                    "--window",
+                    "background",
+                    "--site-session",
+                    "persistent",
+                    "--keep-tab",
+                    "true",
+                    "-f",
+                    "json",
+                ],
+                timeout=60,
+                site_session_namespace=review_session_namespace,
             )
-    except Exception as exc:  # noqa: BLE001 - fail closed on unknown fallback model
-        chatgpt_error = exc
-        raw_attempts.append(f"[CHATGPT MODEL ERROR]\n{exc}")
+            chatgpt_error = None
+            if log:
+                log(
+                    "ChatGPT fallback review model: "
+                    f"{config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}"
+                )
+            break
+        except Exception as exc:  # noqa: BLE001 - fail closed after bounded retry
+            chatgpt_error = exc
+            raw_attempts.append(
+                f"[CHATGPT MODEL ERROR {model_attempt}/{chatgpt_model_attempts}]\n{exc}"
+            )
+            if model_attempt < chatgpt_model_attempts and log:
+                log(
+                    "ChatGPT fallback model selection attempt "
+                    f"{model_attempt}/{chatgpt_model_attempts} failed; retrying: {exc}"
+                )
 
     conversation_url = ""
     if chatgpt_error is None:
@@ -612,7 +642,11 @@ async def _web_story_review(
                 "-f",
                 "json",
             ]
-            result = await run_opencli(chatgpt_args, timeout=timeout + 20)
+            result = await run_opencli(
+                chatgpt_args,
+                timeout=timeout + 20,
+                site_session_namespace=review_session_namespace,
+            )
             rows = _rows(first_json(result.stdout))
             response = next(
                 (_field(row, "response") for row in rows if _field(row, "response")),
@@ -690,6 +724,9 @@ async def review_daily_script(
     attempts: list[dict[str, Any]] = []
     candidate = script
     max_cycles = 5
+    review_session_namespace = (
+        f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{uuid4().hex}"
+    )
     for cycle in range(1, max_cycles + 1):
         # Each two-story group owns a fresh Gemini turn. A failed primary turn
         # gets a fresh ChatGPT fallback instead of reusing mutable active-page state.
@@ -716,6 +753,7 @@ async def review_daily_script(
             group_payload, raw, conversation_url, provider = await _web_story_review(
                 prompt,
                 story_numbers=story_numbers,
+                site_session_namespace=review_session_namespace,
                 log=log,
             )
             (review_dir / f"story-review-response-{cycle}-group-{group_index}.txt").write_text(
