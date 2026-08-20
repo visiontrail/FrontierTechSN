@@ -333,6 +333,31 @@ test('Gemini video inner discovery ignores stale Filedata until a new input hydr
   assert.doesNotMatch(page.selectedInputIds[0], /^old-/)
 })
 
+test('Gemini video cleans baseline and target markers when discovery wait rejects', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = vmUploadDomPage({ initialInputs: ['Filedata'], newInputDelays: [2] })
+  page.wait = async () => {
+    throw new Error('browser bridge navigation interrupted wait')
+  }
+
+  await assert.rejects(
+    uploadFrame(page, frame, 1, {
+      inputReadyTimeoutMs: 3000,
+      inputPollIntervalMs: 500,
+    }),
+    (error) => {
+      assert.match(error.message, /keyframe 1 upload failed at discover_live_input/)
+      assert.match(error.message, /browser bridge navigation interrupted wait/)
+      return true
+    },
+  )
+
+  for (const input of page.inputs) {
+    assert.equal(input.getAttribute('data-opencli-video-upload-baseline'), null)
+    assert.equal(input.getAttribute('data-opencli-video-upload-target'), null)
+  }
+})
+
 test('Gemini video inner discovery selects distinct new inputs for ordered frames', async (t) => {
   const frames = videoFrameFixture(t, ['first-frame.png', 'last-frame.jpg'])
   const page = vmUploadDomPage({ newInputDelays: [0, 2] })

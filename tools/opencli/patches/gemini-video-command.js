@@ -280,8 +280,8 @@ export async function uploadFrame(
     let selected = null;
     let reopened = false;
     for (let pollAttempt = 1; pollAttempt <= pollAttempts; pollAttempt += 1) {
-        await page.wait(pollIntervalMs / 1000);
         try {
+            await page.wait(pollIntervalMs / 1000);
             selected = unwrap(await page.evaluate(`(() => {
           const marker = ${JSON.stringify(marker)};
           const roots = [document.querySelector('input-container'), document].filter(Boolean);
