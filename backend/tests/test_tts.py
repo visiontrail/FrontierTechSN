@@ -1090,6 +1090,27 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report["verified"])
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
 
+    def test_orpheus_transcript_normalizes_deeptech_publication_name(self):
+        expected = (
+            "DeepTech China reports that researchers at MIT are exploring "
+            "whether living bacteria"
+        )
+        observed = (
+            "Deep Tech China reports that researchers at MIT are exploring "
+            "whether living bacteria"
+        ).split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["expected_words"], 12)
+        self.assertEqual(report["transcript_words"], 12)
+        self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
     def test_orpheus_transcript_normalizes_whisper_eunuch_bias(self):
         expected = "The eunuch system, not interested."
         observed = "The Unix system not interested".split()

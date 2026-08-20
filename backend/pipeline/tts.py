@@ -97,6 +97,9 @@ ACOUSTIC_EQUIVALENTS = {
 ACOUSTIC_PHRASE_EQUIVALENTS = {
     # Whisper may spell the phrasal verb as the identically pronounced noun.
     ("break", "through"): "breakthrough",
+    # CamelCase publication names are a single lexical source token, while
+    # Whisper emits their acoustically identical component words.
+    ("deep", "tech"): "deeptech",
 }
 NUMBER_SCALES = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
 DANGLING_CHUNK_WORDS = {
