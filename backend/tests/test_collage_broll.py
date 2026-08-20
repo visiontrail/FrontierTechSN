@@ -103,6 +103,15 @@ def _blocked_gemini_video_upload_error() -> collage_broll.OpenCLIError:
     )
 
 
+def _stuck_gemini_video_input_error(signature: str) -> collage_broll.OpenCLIError:
+    return collage_broll.OpenCLIError(
+        f"{collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE}: "
+        "Gemini keyframe 1 upload failed at discover_live_input: "
+        f'{{"errorCode":"{collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE}",'
+        f'"stuckSignature":"{signature}"}}'
+    )
+
+
 def test_opencli_collage_operation_does_not_retry_stable_upload_capability_failure(
     monkeypatch,
 ):
@@ -127,6 +136,76 @@ def test_opencli_collage_operation_does_not_retry_stable_upload_capability_failu
 
     assert run.await_count == 1
     sleep.assert_not_awaited()
+
+
+def test_opencli_stops_after_two_identical_input_hydration_failures(monkeypatch):
+    signature = "keyframe=1;attachments=0;busy=1;inputs=0;click=ok;button=ready;focus=1"
+    run = AsyncMock(
+        side_effect=[
+            _stuck_gemini_video_input_error(signature),
+            _stuck_gemini_video_input_error(signature),
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 10)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", sleep)
+
+    with pytest.raises(collage_broll.GeminiVideoUploadCapabilityError) as raised:
+        asyncio.run(
+            collage_broll._run_opencli_retry(
+                ["gemini", "video", "prompt"],
+                timeout=10,
+                label="Gemini collage video",
+                non_retryable=collage_broll._is_gemini_video_upload_capability_failure,
+                repeated_failure_signature=(
+                    collage_broll._gemini_video_input_hydration_stuck_signature
+                ),
+                repeated_failure_threshold=2,
+            )
+        )
+
+    assert raised.value.error_code == (
+        collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE
+    )
+    assert run.await_count == 2
+    assert sleep.await_count == 1
+
+
+def test_opencli_does_not_combine_nonconsecutive_or_different_stuck_states(
+    monkeypatch,
+):
+    first = "keyframe=1;attachments=0;busy=1;inputs=0;click=ok;button=ready;focus=1"
+    different = "keyframe=2;attachments=1;busy=1;inputs=0;click=ok;button=ready;focus=1"
+    run = AsyncMock(
+        side_effect=[
+            _stuck_gemini_video_input_error(first),
+            _stuck_gemini_video_input_error(different),
+            _stuck_gemini_video_input_error(first),
+            "ready",
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 4)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", sleep)
+
+    result = asyncio.run(
+        collage_broll._run_opencli_retry(
+            ["gemini", "video", "prompt"],
+            timeout=10,
+            label="Gemini collage video",
+            non_retryable=collage_broll._is_gemini_video_upload_capability_failure,
+            repeated_failure_signature=(
+                collage_broll._gemini_video_input_hydration_stuck_signature
+            ),
+            repeated_failure_threshold=2,
+        )
+    )
+
+    assert result == "ready"
+    assert run.await_count == 4
+    assert sleep.await_count == 3
 
 
 @pytest.mark.parametrize(
@@ -389,7 +468,8 @@ def test_generate_reuses_nonretryable_upload_capability_failure_for_later_scenes
 
     capability_error = collage_broll.GeminiVideoUploadCapabilityError(
         f"Gemini collage video cannot run "
-        f"({collage_broll.GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE})"
+        f"({collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE})",
+        error_code=collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE,
     )
     generate_video = AsyncMock(side_effect=capability_error)
     animate_local = AsyncMock(side_effect=local_video)
@@ -424,7 +504,7 @@ def test_generate_reuses_nonretryable_upload_capability_failure_for_later_scenes
     } == {"deterministic_local_paper_assembly"}
     assert manifest["gemini_video_upload_capability"] == {
         "status": "unavailable",
-        "error_code": collage_broll.GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE,
+        "error_code": collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE,
         "detected_at_scene_id": "scene-01",
     }
     assert "skipped web generation" in manifest["items"][1]["generation_warnings"][0]

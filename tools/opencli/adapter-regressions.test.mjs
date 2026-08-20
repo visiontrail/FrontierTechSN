@@ -82,6 +82,8 @@ function videoUploadPage({
             documentHasFocus,
             busy: uploadBusy,
             busyCount: uploadBusy ? 1 : 0,
+            baselineInputCount: 0,
+            freshInputCount: 0,
             button: {
               connected: true,
               disabled: false,
@@ -393,11 +395,43 @@ test('Gemini video fails bounded without re-clicking after a successful initial 
       assert.match(error.message, /"reopened":false/)
       assert.match(error.message, /"reason":"initial","ok":true/)
       assert.match(error.message, /"inputs":\[\]/)
+      assert.doesNotMatch(error.message, /GEMINI_VIDEO_UPLOAD_INPUT_HYDRATION_STUCK/)
       return true
     },
   )
 
   assert.equal(page.actions.filter(([action]) => action === 'discoverInput').length, 4)
+  assert.equal(page.actions.filter(([action]) => action === 'click').length, 1)
+})
+
+test('Gemini video emits a stable fingerprint for exhausted busy input hydration', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = videoUploadPage({
+    native: 'success',
+    inputReadyAfterReads: Number.POSITIVE_INFINITY,
+    uploadBusy: true,
+  })
+
+  await assert.rejects(
+    uploadFrame(page, frame, 1, {
+      inputReadyTimeoutMs: 3000,
+      inputPollIntervalMs: 1000,
+    }),
+    (error) => {
+      assert.match(
+        error.message,
+        /OPENCLI_CAPABILITY_DEGRADED:GEMINI_VIDEO_UPLOAD_INPUT_HYDRATION_STUCK/,
+      )
+      assert.match(
+        error.message,
+        /"stuckSignature":"keyframe=1;attachments=0;busy=1;inputs=0;click=ok;button=ready;focus=1"/,
+      )
+      assert.match(error.message, /"busy":true/)
+      assert.match(error.message, /"freshInputCount":0/)
+      return true
+    },
+  )
+
   assert.equal(page.actions.filter(([action]) => action === 'click').length, 1)
 })
 

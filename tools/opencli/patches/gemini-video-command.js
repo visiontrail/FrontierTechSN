@@ -8,6 +8,7 @@ import { sendGeminiMessage } from './utils.js';
 const GEMINI_DOMAIN = 'gemini.google.com';
 const GEMINI_VIDEOS_URL = 'https://gemini.google.com/videos';
 const VIDEO_UPLOAD_CAPABILITY_CODE = 'OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD';
+const VIDEO_INPUT_HYDRATION_STUCK_CODE = 'OPENCLI_CAPABILITY_DEGRADED:GEMINI_VIDEO_UPLOAD_INPUT_HYDRATION_STUCK';
 
 function unwrap(value) {
     if (value && typeof value === 'object' && !Array.isArray(value) && 'session' in value) {
@@ -153,14 +154,52 @@ function uploadFailure(expectedCount, substep, diagnostic) {
         && Array.isArray(inputFiles)
         && inputFiles.length > 0
         && inputFiles.every(files => Array.isArray(files) && files.length === 0);
-    const capabilityCode = substep === 'wait_for_attachment'
+    const uploadCapabilityUnavailable = substep === 'wait_for_attachment'
         && nativeDenied
         && directCdpDenied
-        && syntheticCleared
-        ? `${VIDEO_UPLOAD_CAPABILITY_CODE}: `
+        && syntheticCleared;
+    const clickAttempts = Array.isArray(diagnostic?.clickAttempts) ? diagnostic.clickAttempts : [];
+    const inputState = diagnostic?.inputState;
+    const clickSucceeded = clickAttempts.length === 1
+        && clickAttempts[0]?.reason === 'initial'
+        && clickAttempts[0]?.ok === true;
+    const buttonReady = inputState?.button?.connected
+        && inputState?.button?.visible
+        && !inputState?.button?.disabled;
+    const hydrationStuck = substep === 'discover_live_input'
+        && diagnostic?.exhausted === true
+        && clickSucceeded
+        && inputState?.busy === true
+        && inputState?.documentHasFocus === true
+        && buttonReady
+        && Number(inputState?.freshInputCount || 0) === 0
+        && Array.isArray(inputState?.inputs)
+        && inputState.inputs.length === 0;
+    const stuckSignature = hydrationStuck
+        ? [
+            `keyframe=${expectedCount}`,
+            `attachments=${Number(diagnostic?.baselineState?.attachments || 0)}`,
+            'busy=1',
+            'inputs=0',
+            'click=ok',
+            'button=ready',
+            'focus=1',
+        ].join(';')
         : '';
+    const enrichedDiagnostic = hydrationStuck
+        ? {
+            ...diagnostic,
+            errorCode: VIDEO_INPUT_HYDRATION_STUCK_CODE,
+            stuckSignature,
+        }
+        : diagnostic;
+    const capabilityCode = uploadCapabilityUnavailable
+        ? `${VIDEO_UPLOAD_CAPABILITY_CODE}: `
+        : hydrationStuck
+            ? `${VIDEO_INPUT_HYDRATION_STUCK_CODE}: `
+            : '';
     return new CommandExecutionError(
-        `${capabilityCode}Gemini keyframe ${expectedCount} upload failed at ${substep}: ${JSON.stringify(diagnostic)}`
+        `${capabilityCode}Gemini keyframe ${expectedCount} upload failed at ${substep}: ${JSON.stringify(enrichedDiagnostic)}`
     );
 }
 
@@ -378,6 +417,7 @@ export async function uploadFrame(
         await cleanupUploadMarkers();
         throw uploadFailure(expectedCount, 'discover_live_input', {
             fileName,
+            exhausted: true,
             pollAttempts,
             pollIntervalMs,
             inputReadyTimeoutMs,

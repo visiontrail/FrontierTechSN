@@ -34,10 +34,17 @@ _COLORS = ("#D96B35", "#D2A928", "#315F4C", "#594080", "#188C85", "#B73D3D")
 GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE = (
     "OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD"
 )
+GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE = (
+    "OPENCLI_CAPABILITY_DEGRADED:GEMINI_VIDEO_UPLOAD_INPUT_HYDRATION_STUCK"
+)
 
 
 class GeminiVideoUploadCapabilityError(OpenCLIError):
     """This browser session cannot put local keyframes into Gemini Video."""
+
+    def __init__(self, message: str, *, error_code: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
 
 
 def _seconds(value: Any, fallback: float = 0.0) -> float:
@@ -321,9 +328,13 @@ async def _run_opencli_retry(
     timeout: int,
     label: str,
     non_retryable: Callable[[Exception], bool] | None = None,
+    repeated_failure_signature: Callable[[Exception], str | None] | None = None,
+    repeated_failure_threshold: int = 2,
 ):
     """Retry transient browser failures, stopping on a proven capability gap."""
     last_error: Exception | None = None
+    last_repeated_signature: str | None = None
+    repeated_failure_hits = 0
     maximum_attempts = max(1, int(config.OPENCLI_MAX_ATTEMPTS))
     for attempt in range(1, maximum_attempts + 1):
         try:
@@ -341,7 +352,30 @@ async def _run_opencli_retry(
             if non_retryable and non_retryable(exc):
                 raise GeminiVideoUploadCapabilityError(
                     f"{label} cannot run in this browser session "
-                    f"({GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE}): {exc}"
+                    f"({GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE}): {exc}",
+                    error_code=GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE,
+                ) from exc
+            repeated_signature = (
+                repeated_failure_signature(exc)
+                if repeated_failure_signature
+                else None
+            )
+            if repeated_signature:
+                if repeated_signature == last_repeated_signature:
+                    repeated_failure_hits += 1
+                else:
+                    last_repeated_signature = repeated_signature
+                    repeated_failure_hits = 1
+            else:
+                last_repeated_signature = None
+                repeated_failure_hits = 0
+            if repeated_failure_hits >= max(2, repeated_failure_threshold):
+                raise GeminiVideoUploadCapabilityError(
+                    f"{label} repeated the same upload hydration failure "
+                    f"{repeated_failure_hits} times "
+                    f"({GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE}; "
+                    f"signature={repeated_signature}): {exc}",
+                    error_code=GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE,
                 ) from exc
             if attempt < maximum_attempts:
                 await asyncio.sleep(min(45, 3 * 2 ** (attempt - 1)))
@@ -375,6 +409,17 @@ def _is_gemini_video_upload_capability_failure(error: Exception) -> bool:
             '"inputfiles":[[]]',
         )
     )
+
+
+def _gemini_video_input_hydration_stuck_signature(
+    error: Exception,
+) -> str | None:
+    """Return the adapter's canonical stuck-state fingerprint, if present."""
+    message = str(error)
+    if GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE not in message:
+        return None
+    match = re.search(r'"stuckSignature":"([^"]+)"', message)
+    return match.group(1) if match else None
 
 
 async def _generate_still(prompt: str, item_dir: Path) -> tuple[Path, str]:
@@ -715,6 +760,8 @@ async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, 
         timeout=timeout + 120,
         label="Gemini collage video",
         non_retryable=_is_gemini_video_upload_capability_failure,
+        repeated_failure_signature=_gemini_video_input_hydration_stuck_signature,
+        repeated_failure_threshold=2,
     )
     if not raw.is_file() or raw.stat().st_size < 1024:
         raise OpenCLIError("Gemini Web Create Video produced no downloaded MP4")
@@ -1086,7 +1133,7 @@ async def generate_collage_broll(
                         manifest["gemini_video_upload_capability"].update(
                             {
                                 "status": "unavailable",
-                                "error_code": GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE,
+                                "error_code": exc.error_code,
                                 "detected_at_scene_id": scene_id,
                             }
                         )
