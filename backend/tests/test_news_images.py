@@ -1,5 +1,9 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from backend.pipeline import news_images, visual_plan
 
@@ -22,6 +26,112 @@ def board() -> dict:
             },
         ],
     }
+
+
+def extended_board() -> dict:
+    data = board()
+    data["scenes"].extend(
+        [
+            {
+                "id": "scene-03",
+                "duration": 10.0,
+                "text": "MIT researchers demonstrated a new robotics system in Cambridge.",
+                "keywords": ["mit", "robotics", "cambridge"],
+            },
+            {
+                "id": "scene-04",
+                "duration": 7.0,
+                "text": "Apple introduced a new chip for its Mac product line.",
+                "keywords": ["apple", "chip", "mac"],
+            },
+        ]
+    )
+    return data
+
+
+def _primary_plan() -> list[dict]:
+    return [
+        {
+            "scene_id": "scene-01",
+            "search_query": "NVIDIA logo",
+            "news_query": "NVIDIA Vera CPU",
+            "expected_subject": "NVIDIA",
+            "kind": "logo",
+            "display_mode": "inline",
+            "purpose": "Show the company",
+            "caption": "NVIDIA",
+        },
+        {
+            "scene_id": "scene-02",
+            "search_query": "SpaceX Falcon 9 launch",
+            "news_query": "SpaceX Falcon 9",
+            "expected_subject": "SpaceX Falcon 9",
+            "kind": "event",
+            "display_mode": "fullscreen",
+            "purpose": "Show the launch",
+            "caption": "Falcon 9",
+        },
+    ]
+
+
+def _commons_candidate(scene_id: str, subject: str) -> dict:
+    slug = scene_id.removeprefix("scene-")
+    return {
+        "provider": "Wikimedia Commons",
+        "provider_id": "wikimedia",
+        "title": f"{subject} photograph",
+        "source_page_url": f"https://commons.example/source-{slug}",
+        "download_url": f"https://upload.example/source-{slug}.jpg",
+        "creator": "Test photographer",
+        "license": "CC BY-SA 4.0",
+        "license_code": "CC-BY-SA-4.0",
+        "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "attribution": "Test photographer",
+        "description": f"A photograph of {subject}",
+        "width": 1600,
+        "height": 900,
+        "mime_type": "image/jpeg",
+        "kind": "event",
+    }
+
+
+def _mock_acquisition_boundaries(
+    monkeypatch,
+    successful_scene_ids: set[str],
+    source_aliases: dict[str, str] | None = None,
+) -> list[str]:
+    researched: list[str] = []
+    monkeypatch.setattr(
+        news_images,
+        "plan_news_images",
+        AsyncMock(return_value=(_primary_plan(), "mock-planner", "")),
+    )
+
+    async def fake_research(shot: dict) -> tuple[list[dict], str]:
+        researched.append(shot["scene_id"])
+        return [], "mock-reference-search"
+
+    async def fake_search(_client, *, shot: dict, limit: int = 30) -> list[dict]:
+        del limit
+        scene_id = shot["scene_id"]
+        if scene_id not in successful_scene_ids:
+            return []
+        candidate = _commons_candidate(scene_id, shot["expected_subject"])
+        source_alias = (source_aliases or {}).get(scene_id)
+        if source_alias:
+            candidate["source_page_url"] = f"https://commons.example/{source_alias}"
+            candidate["download_url"] = f"https://upload.example/{source_alias}.jpg"
+        return [candidate]
+
+    async def fake_download(_client, *, candidate: dict, destination: Path):
+        payload = (candidate["source_page_url"] * 40).encode("utf-8")
+        destination.write_bytes(payload)
+        return len(payload), f"sha256-{destination.stem}"
+
+    monkeypatch.setattr(news_images, "research_references", fake_research)
+    monkeypatch.setattr(news_images, "search_wikimedia_images", fake_search)
+    monkeypatch.setattr(news_images, "_download_candidate", fake_download)
+    return researched
 
 
 def test_normalise_plan_requires_exact_scenes_and_both_modes():
@@ -55,6 +165,81 @@ def test_normalise_plan_requires_exact_scenes_and_both_modes():
 
     assert [item["scene_id"] for item in plan] == ["scene-01", "scene-02"]
     assert {item["display_mode"] for item in plan} == {"inline", "fullscreen"}
+
+
+@pytest.mark.asyncio
+async def test_partial_planner_rows_are_preserved_and_filled_from_unused_scenes(
+    monkeypatch,
+):
+    partial = {
+        "images": [
+            {
+                "scene_id": "scene-02",
+                "search_query": "SpaceX Falcon 9 launch",
+                "news_query": "SpaceX Falcon 9",
+                "expected_subject": "SpaceX Falcon 9",
+                "kind": "event",
+                "display_mode": "inline",
+                "purpose": "Planner-selected launch",
+                "caption": "Falcon 9",
+            }
+        ]
+    }
+    result = SimpleNamespace(
+        stdout=json.dumps(
+            [
+                {
+                    "Response": json.dumps(partial),
+                    "ConversationUrl": "https://chat.example/conversation",
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        news_images,
+        "run_opencli_with_retries",
+        AsyncMock(return_value=result),
+    )
+    data = extended_board()
+
+    plan, planner, conversation_url = await news_images.plan_news_images(
+        data,
+        eligible_scene_ids=["scene-01", "scene-02", "scene-03"],
+        count=3,
+    )
+
+    assert len(plan) == 3
+    assert plan[0]["scene_id"] == "scene-02"
+    assert plan[0]["purpose"] == "Planner-selected launch"
+    assert len({item["scene_id"] for item in plan}) == 3
+    assert {item["scene_id"] for item in plan} == {
+        "scene-01",
+        "scene-02",
+        "scene-03",
+    }
+    assert {item["display_mode"] for item in plan} == {"inline", "fullscreen"}
+    assert planner == "opencli:chatgpt-picture-editor+deterministic-fill"
+    assert conversation_url == "https://chat.example/conversation"
+
+
+def test_fallback_subject_ignores_only_generic_uppercase_keyword_kickers():
+    scene = {
+        "id": "scene-01",
+        "text": "MIT researchers are teaching a robot to adapt inside a laboratory.",
+        "keywords": ["mit", "robot", "laboratory"],
+    }
+
+    generic = news_images._fallback_subject(
+        scene,
+        {"kicker": "ROBOT", "headline": "MIT researchers train adaptable robots"},
+    )
+    acronym = news_images._fallback_subject(
+        scene,
+        {"kicker": "MIT", "headline": "Researchers train adaptable robots"},
+    )
+
+    assert generic == "MIT"
+    assert acronym == "MIT"
 
 
 def test_wikimedia_candidate_is_license_and_resolution_gated():
@@ -212,6 +397,10 @@ def test_cached_manifest_requires_same_storyboard_and_materialized_assets(tmp_pa
     assert news_images._cached_manifest(tmp_path, manifest["storyboard_sha256"]) == manifest
     assert news_images._cached_manifest(tmp_path, "stale") is None
 
+    manifest["manifest_version"] = news_images.MANIFEST_VERSION - 1
+    (asset_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert news_images._cached_manifest(tmp_path, manifest["storyboard_sha256"]) is None
+
 
 def test_wikimedia_queries_broaden_without_dropping_the_scene_subject():
     variants = news_images._wikimedia_query_variants(
@@ -225,3 +414,130 @@ def test_wikimedia_queries_broaden_without_dropping_the_scene_subject():
 
     assert variants[0] == "NVIDIA VERA logo"
     assert "NVIDIA logo" in variants
+
+
+@pytest.mark.asyncio
+async def test_acquisition_uses_reserves_continuous_names_and_stops_at_target(
+    tmp_path: Path,
+    monkeypatch,
+):
+    researched = _mock_acquisition_boundaries(
+        monkeypatch,
+        {"scene-01", "scene-02", "scene-03", "scene-04"},
+        {"scene-01": "shared-primary", "scene-02": "shared-primary"},
+    )
+
+    manifest = await news_images.acquire_news_images(
+        extended_board(),
+        tmp_path,
+        count=2,
+    )
+
+    assert manifest["status"] == "ready"
+    assert manifest["primary_query_count"] == 2
+    assert manifest["reserve_query_count"] == 2
+    assert [image["scene_id"] for image in manifest["images"]] == [
+        "scene-01",
+        "scene-03",
+    ]
+    assert [image["id"] for image in manifest["images"]] == ["image-01", "image-02"]
+    assert [image["local_path"] for image in manifest["images"]] == [
+        "news_images/image-01.jpg",
+        "news_images/image-02.jpg",
+    ]
+    assert len({image["scene_id"] for image in manifest["images"]}) == 2
+    assert len({image["source_page_url"] for image in manifest["images"]}) == 2
+    assert [image["display_mode"] for image in manifest["images"]] == [
+        "inline",
+        "fullscreen",
+    ]
+    assert manifest["placement_modes"] == {"inline": 1, "fullscreen": 1}
+    queries_by_scene = {
+        query["scene_id"]: query for query in manifest["queries"]
+    }
+    assert queries_by_scene["scene-01"]["planned_display_mode"] == "inline"
+    assert queries_by_scene["scene-01"]["display_mode"] == "inline"
+    assert queries_by_scene["scene-03"]["planned_display_mode"] == "inline"
+    assert queries_by_scene["scene-03"]["display_mode"] == "fullscreen"
+    assert researched == ["scene-01", "scene-02", "scene-03"]
+    assert "scene-04" not in researched
+
+
+@pytest.mark.asyncio
+async def test_acquisition_tries_next_candidate_after_download_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        news_images,
+        "plan_news_images",
+        AsyncMock(return_value=(_primary_plan(), "mock-planner", "")),
+    )
+    research = AsyncMock(return_value=([], "mock-reference-search"))
+    monkeypatch.setattr(news_images, "research_references", research)
+
+    failed = _commons_candidate("scene-01", "NVIDIA")
+    failed["source_page_url"] = "https://commons.example/a-download-fails"
+    failed["download_url"] = "https://upload.example/a-download-fails.jpg"
+    succeeds = _commons_candidate("scene-01", "NVIDIA")
+    succeeds["source_page_url"] = "https://commons.example/b-download-succeeds"
+    succeeds["download_url"] = "https://upload.example/b-download-succeeds.jpg"
+
+    async def fake_search(_client, *, shot: dict, limit: int = 30) -> list[dict]:
+        del limit
+        return [failed, succeeds] if shot["scene_id"] == "scene-01" else []
+
+    attempts: list[str] = []
+
+    async def fake_download(_client, *, candidate: dict, destination: Path):
+        source = candidate["source_page_url"]
+        attempts.append(source)
+        if source == failed["source_page_url"]:
+            raise RuntimeError("mock download failure")
+        payload = b"licensed test image" * 100
+        destination.write_bytes(payload)
+        return len(payload), "sha256-success"
+
+    monkeypatch.setattr(news_images, "search_wikimedia_images", fake_search)
+    monkeypatch.setattr(news_images, "_download_candidate", fake_download)
+
+    manifest = await news_images.acquire_news_images(
+        extended_board(),
+        tmp_path,
+        count=1,
+    )
+
+    assert manifest["status"] == "ready"
+    assert attempts == [failed["source_page_url"], succeeds["source_page_url"]]
+    assert manifest["images"][0]["source_page_url"] == succeeds["source_page_url"]
+    assert manifest["images"][0]["id"] == "image-01"
+    assert research.await_count == 1
+    assert any(
+        error["stage"] == "download"
+        and error["source_page_url"] == failed["source_page_url"]
+        for error in manifest["errors"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_acquisition_remains_partial_after_all_reserves_are_exhausted(
+    tmp_path: Path,
+    monkeypatch,
+):
+    researched = _mock_acquisition_boundaries(monkeypatch, {"scene-01"})
+
+    manifest = await news_images.acquire_news_images(
+        extended_board(),
+        tmp_path,
+        count=2,
+    )
+
+    assert manifest["status"] == "partial"
+    assert manifest["planned_image_count"] == 2
+    assert len(manifest["images"]) == 1
+    assert manifest["images"][0]["id"] == "image-01"
+    assert researched == ["scene-01", "scene-02", "scene-03", "scene-04"]
+    assert news_images._cached_manifest(
+        tmp_path,
+        news_images.storyboard_fingerprint(extended_board()),
+    ) is None

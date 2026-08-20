@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
-MANIFEST_VERSION = 7
+MANIFEST_VERSION = 8
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
     "image/png",
@@ -286,20 +286,54 @@ def _normalise_plan(
 
     if not output:
         raise ValueError("News image planner returned no usable scene assignments")
-    if len(output) >= 2:
-        modes = {item["display_mode"] for item in output}
-        if "inline" not in modes:
-            output[0]["display_mode"] = "inline"
-        if "fullscreen" not in modes:
-            output[-1]["display_mode"] = "fullscreen"
+    _ensure_placement_mode_mix(output)
     return output
+
+
+def _ensure_placement_mode_mix(rows: list[dict]) -> None:
+    """Keep every multi-image result usable by both supported compositions."""
+    if len(rows) < 2:
+        return
+    modes = {str(item.get("display_mode") or "") for item in rows}
+    if "inline" not in modes:
+        rows[0]["display_mode"] = "inline"
+    if "fullscreen" not in modes:
+        rows[-1]["display_mode"] = "fullscreen"
+
+
+def _placement_mode_counts(rows: list[dict]) -> dict[str, int]:
+    return {
+        mode: sum(1 for item in rows if item.get("display_mode") == mode)
+        for mode in ("inline", "fullscreen")
+    }
+
+
+def _is_generic_uppercase_keyword(value: object, scene: dict) -> bool:
+    """Detect a direction label such as ROBOT without discarding real acronyms."""
+    cleaned = " ".join(str(value or "").split())
+    tokens = WORD_RE.findall(cleaned)
+    terms = _terms(cleaned)
+    keyword_terms = {
+        term for keyword in scene.get("keywords") or [] for term in _terms(keyword)
+    }
+    if (
+        len(tokens) != 1
+        or len(terms) != 1
+        or cleaned != cleaned.upper()
+        or not terms.issubset(keyword_terms)
+    ):
+        return False
+    # A real acronym/name retained verbatim in the narration (MIT, NVIDIA) is
+    # useful. An upper-cased form of an otherwise lower/title-case keyword is
+    # only a generic visual-direction label and must not dominate the subject.
+    return tokens[0] not in WORD_RE.findall(str(scene.get("text") or ""))
 
 
 def _fallback_subject(scene: dict, hint: dict | None = None) -> str:
     hint = hint or {}
     text = str(scene.get("text") or "")
+    kicker = str(hint.get("kicker") or "")
     hint_fields = [
-        (12, str(hint.get("kicker") or "")),
         (10, str(hint.get("headline") or "")),
         *[
             (max(4, 8 - index), str(item))
@@ -307,6 +341,8 @@ def _fallback_subject(scene: dict, hint: dict | None = None) -> str:
         ],
         (6, str(hint.get("body") or "")),
     ]
+    if kicker and not _is_generic_uppercase_keyword(kicker, scene):
+        hint_fields.insert(0, (12, kicker))
     hint_text = " ".join(value for _, value in hint_fields)
     phrases: list[tuple[int, int, int, str]] = []
     source_phrases = {
@@ -388,9 +424,37 @@ def _fallback_plan(
                 "caption": subject,
             }
         )
-    if len(output) >= 2 and not any(item["display_mode"] == "fullscreen" for item in output):
-        output[-1]["display_mode"] = "fullscreen"
+    _ensure_placement_mode_mix(output)
     return output
+
+
+def _complete_plan(
+    plan: list[dict],
+    scenes: list[dict],
+    target: int,
+    scene_hints: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Preserve usable planned rows and deterministically fill unused scenes."""
+    scenes_by_id = {str(scene.get("id") or ""): scene for scene in scenes}
+    output: list[dict] = []
+    used: set[str] = set()
+    for row in plan:
+        scene_id = str(row.get("scene_id") or "")
+        if scene_id not in scenes_by_id or scene_id in used:
+            continue
+        output.append(dict(row))
+        used.add(scene_id)
+        if len(output) >= target:
+            break
+
+    remaining = [
+        scene for scene in scenes if str(scene.get("id") or "") not in used
+    ]
+    output.extend(
+        _fallback_plan(remaining, max(0, target - len(output)), scene_hints)
+    )
+    _ensure_placement_mode_mix(output)
+    return output[:target]
 
 
 def _planner_prompt(
@@ -468,11 +532,22 @@ async def plan_news_images(
             label="OpenCLI news-image planning",
         )
         response, conversation_url = _response_text(result.stdout)
-        plan = _normalise_plan(
+        planned = _normalise_plan(
             first_json(response), eligible_scene_ids=eligible_scene_ids, count=target
         )
-        _emit(log, f"News images: OpenCLI planned {len(plan)} exact scene assignment(s)")
-        return plan, "opencli:chatgpt-picture-editor", conversation_url
+        plan = _complete_plan(planned, scenes, target, scene_hints)
+        filled = len(plan) - len(planned)
+        if filled:
+            _emit(
+                log,
+                f"News images: OpenCLI planned {len(planned)}/{target} usable assignment(s); "
+                f"filled {filled} from unused eligible scenes",
+            )
+            planner = "opencli:chatgpt-picture-editor+deterministic-fill"
+        else:
+            _emit(log, f"News images: OpenCLI planned {len(plan)} exact scene assignment(s)")
+            planner = "opencli:chatgpt-picture-editor"
+        return plan, planner, conversation_url
     except Exception as exc:  # noqa: BLE001 - deterministic planning remains available
         _emit(log, f"News images: OpenCLI planning fallback ({exc})")
         return _fallback_plan(scenes, target, scene_hints), "deterministic-fallback", ""
@@ -785,30 +860,60 @@ async def acquire_news_images(
         scene_hints=scene_hints,
         log=log,
     )
+    scenes_by_id = {
+        str(scene.get("id") or ""): scene for scene in storyboard.get("scenes") or []
+    }
+    eligible_scenes = [
+        scenes_by_id[scene_id] for scene_id in eligible if scene_id in scenes_by_id
+    ]
+    plan = _complete_plan(plan, eligible_scenes, target, scene_hints)
+    primary_scene_ids = {shot["scene_id"] for shot in plan}
+    reserve_scenes = [
+        scene
+        for scene in eligible_scenes
+        if str(scene.get("id") or "") not in primary_scene_ids
+    ]
+    reserves = _fallback_plan(reserve_scenes, len(reserve_scenes), scene_hints)
+    candidate_plan = [
+        {
+            **shot,
+            "planned_display_mode": shot["display_mode"],
+        }
+        for shot in [*plan, *reserves]
+    ]
     manifest["planner"] = planner
     manifest["planner_conversation_url"] = conversation_url
-    manifest["queries"] = plan
+    manifest["queries"] = candidate_plan
+    manifest["primary_query_count"] = len(plan)
+    manifest["reserve_query_count"] = len(reserves)
     manifest["status"] = "searching"
     manifest["updated_at"] = _now()
     _write_manifest(task_dir, manifest)
+    _emit(
+        log,
+        f"News images: prepared {len(plan)} primary and {len(reserves)} reserve "
+        "scene assignment(s)",
+    )
 
     headers = {"User-Agent": config.FOOTAGE_USER_AGENT}
     used_sources: set[str] = set()
+    used_scene_ids: set[str] = set()
     async with httpx.AsyncClient(
         timeout=config.FOOTAGE_TIMEOUT,
         follow_redirects=True,
         headers=headers,
     ) as client:
-        for index, shot in enumerate(plan, start=1):
+        for index, shot in enumerate(candidate_plan, start=1):
+            if len(manifest["images"]) >= target:
+                break
             scene_id = shot["scene_id"]
-            scene = next(
-                scene
-                for scene in storyboard.get("scenes") or []
-                if str(scene.get("id") or "") == scene_id
-            )
+            if scene_id in used_scene_ids or scene_id not in scenes_by_id:
+                continue
+            scene = scenes_by_id[scene_id]
             _emit(
                 log,
-                f"News image {index}/{len(plan)}: researching {shot['expected_subject']} "
+                f"News image candidate {index}/{len(candidate_plan)}: researching "
+                f"{shot['expected_subject']} "
                 f"for {scene_id} ({shot['display_mode']})",
             )
             references: list[dict] = []
@@ -856,7 +961,10 @@ async def acquire_news_images(
 
             downloaded = None
             for candidate in candidates[:5]:
-                destination = image_dir / f"image-{index:02d}{_extension_for(candidate)}"
+                success_number = len(manifest["images"]) + 1
+                destination = image_dir / (
+                    f"image-{success_number:02d}{_extension_for(candidate)}"
+                )
                 try:
                     byte_size, sha256 = await _download_candidate(
                         client, candidate=candidate, destination=destination
@@ -888,7 +996,7 @@ async def acquire_news_images(
                     )
                     break
                 downloaded = {
-                    "id": f"image-{index:02d}",
+                    "id": f"image-{success_number:02d}",
                     **shot,
                     **candidate,
                     "reference_provider": reference_provider,
@@ -915,8 +1023,9 @@ async def acquire_news_images(
             if downloaded is None:
                 continue
             used_sources.add(downloaded["source_page_url"])
+            used_scene_ids.add(scene_id)
             manifest["images"].append(downloaded)
-            manifest["placement_modes"][downloaded["display_mode"]] += 1
+            manifest["placement_modes"] = _placement_mode_counts(manifest["images"])
             manifest["updated_at"] = _now()
             _write_manifest(task_dir, manifest)
             _emit(
@@ -926,6 +1035,15 @@ async def acquire_news_images(
             )
 
     acquired = len(manifest["images"])
+    _ensure_placement_mode_mix(manifest["images"])
+    manifest["placement_modes"] = _placement_mode_counts(manifest["images"])
+    final_modes = {
+        image["scene_id"]: image["display_mode"] for image in manifest["images"]
+    }
+    for query in manifest["queries"]:
+        scene_id = str(query.get("scene_id") or "")
+        if scene_id in final_modes:
+            query["display_mode"] = final_modes[scene_id]
     manifest["status"] = "ready" if acquired == target else ("partial" if acquired else "no_results")
     manifest["updated_at"] = _now()
     _write_manifest(task_dir, manifest)
