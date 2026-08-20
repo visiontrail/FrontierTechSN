@@ -982,6 +982,19 @@ def test_cached_asset_rejects_tiny_and_decompression_bomb_rasters(tmp_path: Path
         {**wordmark_record, "kind": "event"},
     ) is False
 
+    assert news_images.NEWS_IMAGE_MAX_PIXELS == 16_000_000
+    limit_payload = _image_bytes("PNG", "pixel-limit", size=(4_000, 4_000))
+    path.write_bytes(limit_payload)
+    assert news_images._cached_asset_is_intact(
+        tmp_path,
+        {
+            "local_path": "news_images/image-01.png",
+            "bytes": len(limit_payload),
+            "sha256": hashlib.sha256(limit_payload).hexdigest(),
+            "kind": "event",
+        },
+    ) is True
+
     tiny = io.BytesIO()
     Image.new("RGB", (1, 1), "red").save(tiny, format="PNG")
     tiny_payload = tiny.getvalue()
@@ -1113,6 +1126,29 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     assert_payload(gradient.getvalue(), kind="event", expected=False)
     assert_payload(gradient.getvalue(), kind="logo", expected=False)
 
+    opaque_edge = Image.new("RGBA", (800, 450), (255, 255, 255, 255))
+    opaque_edge_draw = ImageDraw.Draw(opaque_edge)
+    for x in range(40):
+        opaque_edge_draw.line(
+            (x, 0, x, 449),
+            fill=(x * 6, 80, 240 - x * 5, 255),
+        )
+    opaque_gradient_edge = io.BytesIO()
+    opaque_edge.save(opaque_gradient_edge, format="PNG")
+    assert_payload(opaque_gradient_edge.getvalue(), kind="logo", expected=False)
+
+    transparent_edge = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    transparent_edge_draw = ImageDraw.Draw(transparent_edge)
+    for x in range(41):
+        transparent_edge_draw.line(
+            (x, 0, x, 449),
+            fill=(x * 6, 80, 240 - x * 5, 255),
+        )
+    transparent_gradient_edge = io.BytesIO()
+    transparent_edge.save(transparent_gradient_edge, format="PNG")
+    assert_payload(transparent_gradient_edge.getvalue(), kind="event", expected=False)
+    assert_payload(transparent_gradient_edge.getvalue(), kind="logo", expected=False)
+
     noise_patch = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
     for y in range(195, 256):
         for x in range(370, 431):
@@ -1129,6 +1165,24 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     noise_patch.save(noise, format="PNG")
     assert_payload(noise.getvalue(), kind="event", expected=False)
     assert_payload(noise.getvalue(), kind="logo", expected=False)
+
+    noise_islands = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    for origin_x, origin_y in ((50, 50), (689, 339)):
+        for y in range(origin_y, origin_y + 61):
+            for x in range(origin_x, origin_x + 61):
+                noise_islands.putpixel(
+                    (x, y),
+                    (
+                        (x * 17 + y * 31) % 256,
+                        (x * 29 + y * 13) % 256,
+                        (x * 7 + y * 43) % 256,
+                        255,
+                    ),
+                )
+    islands = io.BytesIO()
+    noise_islands.save(islands, format="PNG")
+    assert_payload(islands.getvalue(), kind="event", expected=False)
+    assert_payload(islands.getvalue(), kind="logo", expected=False)
 
     two_blocks = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
     blocks_draw = ImageDraw.Draw(two_blocks)
@@ -1147,6 +1201,22 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     grooved_block.save(grooved, format="PNG")
     assert_payload(grooved.getvalue(), kind="logo", expected=False)
 
+    diagonal = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    ImageDraw.Draw(diagonal).line((0, 0, 799, 449), fill=(255, 255, 255, 255), width=3)
+    diagonal_line = io.BytesIO()
+    diagonal.save(diagonal_line, format="PNG")
+    assert_payload(diagonal_line.getvalue(), kind="logo", expected=False)
+
+    striped = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    striped_draw = ImageDraw.Draw(striped)
+    for index, x in enumerate(range(100, 700, 20)):
+        color = (20, 80, 220, 255) if index % 2 == 0 else (240, 160, 20, 255)
+        striped_draw.rectangle((x, 80, x + 9, 369), fill=color)
+    stripes = io.BytesIO()
+    striped.save(stripes, format="PNG")
+    assert_payload(stripes.getvalue(), kind="event", expected=False)
+    assert_payload(stripes.getvalue(), kind="logo", expected=False)
+
     alpha_checkerboard = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
     checkerboard_draw = ImageDraw.Draw(alpha_checkerboard)
     for y in range(0, 450, 40):
@@ -1156,6 +1226,7 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     checkerboard = io.BytesIO()
     alpha_checkerboard.save(checkerboard, format="PNG")
     assert_payload(checkerboard.getvalue(), kind="event", expected=False)
+    assert_payload(checkerboard.getvalue(), kind="logo", expected=False)
 
     for text, size in (
         ("NVIDIA", (656, 120)),
@@ -1237,6 +1308,40 @@ def test_raster_content_gate_survives_cache_attach_and_visual_pipeline(tmp_path:
     grooved_draw.rectangle((200, 150, 599, 299), fill=(20, 80, 220, 255))
     for x in range(218, 599, 20):
         grooved_draw.rectangle((x, 150, x + 1, 299), fill=(0, 0, 0, 0))
+    opaque_edge = Image.new("RGBA", (800, 450), (255, 255, 255, 255))
+    opaque_edge_draw = ImageDraw.Draw(opaque_edge)
+    for x in range(40):
+        opaque_edge_draw.line(
+            (x, 0, x, 449),
+            fill=(x * 6, 80, 240 - x * 5, 255),
+        )
+    transparent_edge = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    transparent_edge_draw = ImageDraw.Draw(transparent_edge)
+    for x in range(41):
+        transparent_edge_draw.line(
+            (x, 0, x, 449),
+            fill=(x * 6, 80, 240 - x * 5, 255),
+        )
+    noise_islands = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    for origin_x, origin_y in ((50, 50), (689, 339)):
+        for y in range(origin_y, origin_y + 61):
+            for x in range(origin_x, origin_x + 61):
+                noise_islands.putpixel(
+                    (x, y),
+                    (
+                        (x * 17 + y * 31) % 256,
+                        (x * 29 + y * 13) % 256,
+                        (x * 7 + y * 43) % 256,
+                        255,
+                    ),
+                )
+    diagonal = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    ImageDraw.Draw(diagonal).line((0, 0, 799, 449), fill=(255, 255, 255, 255), width=3)
+    striped = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    striped_draw = ImageDraw.Draw(striped)
+    for index, x in enumerate(range(100, 700, 20)):
+        color = (20, 80, 220, 255) if index % 2 == 0 else (240, 160, 20, 255)
+        striped_draw.rectangle((x, 80, x + 9, 369), fill=color)
     cases = [
         ("nvidia-wordmark", _transparent_wordmark_bytes("NVIDIA"), True),
         (
@@ -1254,6 +1359,11 @@ def test_raster_content_gate_survives_cache_attach_and_visual_pipeline(tmp_path:
         ("gradient-patch", encoded(gradient_patch), False),
         ("two-blocks", encoded(two_blocks), False),
         ("grooved-block", encoded(grooved_block), False),
+        ("opaque-gradient-edge", encoded(opaque_edge), False),
+        ("transparent-gradient-edge", encoded(transparent_edge), False),
+        ("noise-islands", encoded(noise_islands), False),
+        ("diagonal-line", encoded(diagonal), False),
+        ("striped-pattern", encoded(striped), False),
     ]
 
     for name, payload, expected in cases:

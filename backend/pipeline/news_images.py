@@ -40,13 +40,14 @@ WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 MANIFEST_VERSION = 10
 QUERY_SEMANTICS_VERSION = 3
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
-NEWS_IMAGE_MAX_PIXELS = 40_000_000
+NEWS_IMAGE_MAX_PIXELS = 16_000_000
 ALPHA_FOREGROUND_THRESHOLD = 64
 LOGO_SHAPE_ANALYSIS_MAX_DIMENSION = 512
 LOGO_SHAPE_MAX_BBOX_FILL = 0.95
 LOGO_SHAPE_MIN_BBOX_AREA = 0.05
 LOGO_SHAPE_MIN_AXIS_EDGE_COMPLEXITY = 3.0
 LOGO_SHAPE_MIN_AXIS_PATTERNS = 8
+LOGO_SHAPE_MIN_AXIS_PROJECTIONS = 8
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
     "image/png",
@@ -610,15 +611,43 @@ def _rgb_detail_is_distributed(
     detail_pixels: int,
     *,
     kind: str,
+    color_levels: int,
 ) -> bool:
     bbox_width, bbox_height, bbox_area = _mask_bbox_ratios(detail_mask)
+    bbox = detail_mask.getbbox()
+    if bbox is None:
+        return False
+    bbox_pixels = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+    bbox_fill = detail_pixels / bbox_pixels
+    if bbox_fill < 0.1:
+        return False
     if kind == "logo":
-        if bbox_area < LOGO_SHAPE_MIN_BBOX_AREA:
+        if (
+            bbox_area < LOGO_SHAPE_MIN_BBOX_AREA
+            or bbox_width < 0.2
+            or bbox_height < 0.2
+        ):
+            return False
+        _, occupied_rows, occupied_columns = _mask_tile_profile(
+            detail_mask,
+            detail_pixels,
+            divisions=3,
+        )
+        if len(occupied_rows) < 2 or len(occupied_columns) < 2:
             return False
     elif bbox_width < 0.2 or bbox_height < 0.2:
         return False
     occupied, _, _ = _mask_tile_profile(detail_mask, detail_pixels, divisions=2)
-    return occupied >= 2
+    if occupied < 2:
+        return False
+    return (
+        bbox_fill >= 0.8
+        or color_levels >= 16
+        or (
+            kind == "logo"
+            and _alpha_mask_has_distinctive_shape(detail_mask, detail_pixels)
+        )
+    )
 
 
 def _rgb_has_visible_content(
@@ -645,6 +674,7 @@ def _rgb_has_visible_content(
             detail_mask,
             detail_pixels,
             kind=kind,
+            color_levels=len(occupied),
         ):
             return True
     return False
@@ -698,17 +728,21 @@ def _alpha_mask_has_distinctive_shape(mask: Image.Image, visible_pixels: int) ->
         or vertical_transitions / scale < LOGO_SHAPE_MIN_AXIS_EDGE_COMPLEXITY
     ):
         return False
-    row_patterns = {
+    row_slices = [
         sample.crop((0, row, width, row + 1)).tobytes()
         for row in range(height)
-    }
-    column_patterns = {
+    ]
+    column_slices = [
         sample.crop((column, 0, column + 1, height)).tobytes()
         for column in range(width)
-    }
+    ]
     return (
-        len(row_patterns) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
-        and len(column_patterns) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
+        len(set(row_slices)) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
+        and len(set(column_slices)) >= LOGO_SHAPE_MIN_AXIS_PATTERNS
+        and len({row.count(255) for row in row_slices})
+        >= LOGO_SHAPE_MIN_AXIS_PROJECTIONS
+        and len({column.count(255) for column in column_slices})
+        >= LOGO_SHAPE_MIN_AXIS_PROJECTIONS
     )
 
 
@@ -741,7 +775,10 @@ def _raster_has_visible_content(decoded: Image.Image, *, kind: str = "event") ->
             or bbox_height < 0.2
         ):
             return False
-        if _rgb_has_visible_content(
+        rgb_foreground_is_large_enough = (
+            kind != "logo" or strong_visible / total >= 0.05
+        )
+        if rgb_foreground_is_large_enough and _rgb_has_visible_content(
             decoded,
             mask=mask,
             minimum_detail=minimum_detail,
