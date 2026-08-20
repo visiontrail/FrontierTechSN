@@ -77,6 +77,18 @@ OPENCLI_RETRY_BASE_SECONDS = float(os.getenv("OPENCLI_RETRY_BASE_SECONDS", "3"))
 OPENCLI_WEB_REQUEST_INTERVAL_SECONDS = int(
     os.getenv("OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "10")
 )
+# Daily-news claim review deliberately avoids ChatGPT Pro: the one-token audit
+# benefits from GPT-5.6 Sol Medium's latency/quality balance, not maximum
+# reasoning.  A failed or late ChatGPT turn falls back to Gemini Flash.
+DAILY_NEWS_CHATGPT_REVIEW_MODEL = os.getenv(
+    "DAILY_NEWS_CHATGPT_REVIEW_MODEL", "medium"
+).strip() or "medium"
+DAILY_NEWS_GEMINI_REVIEW_MODEL = os.getenv(
+    "DAILY_NEWS_GEMINI_REVIEW_MODEL", "3.7-flash"
+).strip() or "3.7-flash"
+DAILY_NEWS_WEB_REVIEW_TIMEOUT = int(
+    os.getenv("DAILY_NEWS_WEB_REVIEW_TIMEOUT", "45")
+)
 # OpenCode is the optional autonomous planner for account operations. It calls
 # the project-local OpenCLI wrapper through the account-operations skill; the
 # deterministic backend still owns image publishing and result persistence.

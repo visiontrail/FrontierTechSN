@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from collections.abc import Callable
@@ -343,7 +342,7 @@ async def _chatgpt_review(
     story_numbers: list[int] | None = None,
     reuse_current: bool = False,
     log: LogCallback | None,
-) -> tuple[dict[str, Any], str, str]:
+) -> tuple[dict[str, Any], str, str, str]:
     if (story_number is None) == (story_numbers is None):
         raise ValueError("exactly one of story_number or story_numbers is required")
     review_label = f"story {story_number}" if story_number is not None else f"stories {story_numbers}"
@@ -354,87 +353,229 @@ async def _chatgpt_review(
         assert story_number is not None
         return _single_line_payload(value, story_number)
 
-    timeout = 45
+    timeout = config.DAILY_NEWS_WEB_REVIEW_TIMEOUT
     browser_prompt = " ".join(prompt.split())
-    args = [
-            "chatgpt",
-            "ask",
-            browser_prompt,
-            "--new",
-            "false" if reuse_current else "true",
-            "--wait",
-            "true",
-            "--timeout",
-            str(timeout),
-            "--window",
-            "background",
-            "--site-session",
-            "persistent",
-            "--keep-tab",
-            "true",
-            "-f",
-            "json",
-        ]
-    last_error: Exception | None = None
+    chatgpt_args = [
+        "chatgpt",
+        "ask",
+        browser_prompt,
+        "--new",
+        "false" if reuse_current else "true",
+        "--wait",
+        "true",
+        "--timeout",
+        str(timeout),
+        "--window",
+        "background",
+        "--site-session",
+        "persistent",
+        "--keep-tab",
+        "true",
+        "-f",
+        "json",
+    ]
     raw_attempts: list[str] = []
-    for attempt in range(1, config.OPENCLI_MAX_ATTEMPTS + 1):
+
+    async def recover_current(provider: str) -> tuple[dict[str, Any], str] | None:
+        read_result = await run_opencli(
+            [
+                provider,
+                "read",
+                "--window",
+                "foreground" if provider == "gemini" else "background",
+                "--site-session",
+                "persistent",
+                "--keep-tab",
+                "true",
+                "-f",
+                "json",
+            ],
+            timeout=30,
+        )
+        messages = _rows(first_json(read_result.stdout))
+        assistant_text = next(
+            (
+                _field(row, "Text")
+                for row in reversed(messages)
+                if _field(row, "Role").casefold() == "assistant"
+                and _field(row, "Text")
+            ),
+            "",
+        )
+        if not assistant_text:
+            return None
+        raw_attempts.append(f"[{provider.upper()} RECOVERY]\n{assistant_text}")
+        return parse_response(assistant_text), assistant_text
+
+    chatgpt_error: Exception | None = None
+    if not reuse_current:
         try:
-            result = await run_opencli(args, timeout=timeout + 20)
+            await run_opencli(
+                [
+                    "chatgpt",
+                    "model",
+                    config.DAILY_NEWS_CHATGPT_REVIEW_MODEL,
+                    "--window",
+                    "background",
+                    "--site-session",
+                    "persistent",
+                    "--keep-tab",
+                    "true",
+                    "-f",
+                    "json",
+                ],
+                timeout=60,
+            )
+            if log:
+                log(
+                    "ChatGPT daily-news review model: "
+                    f"{config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}"
+                )
+        except Exception as exc:  # noqa: BLE001 - model setup failure triggers fallback
+            chatgpt_error = exc
+            if log:
+                log(f"ChatGPT {review_label} model selection failed: {exc}")
+
+    if chatgpt_error is None:
+        try:
+            result = await run_opencli(chatgpt_args, timeout=timeout + 20)
             rows = _rows(first_json(result.stdout))
             response = next((_field(row, "response") for row in rows if _field(row, "response")), "")
             conversation_url = next(
                 (_field(row, "conversationUrl") for row in rows if _field(row, "conversationUrl")), ""
             )
             if response:
-                raw_attempts.append(response)
+                raw_attempts.append(f"[CHATGPT]\n{response}")
                 payload = parse_response(response)
-                return payload, "\n\n--- RETRY ---\n\n".join(raw_attempts), conversation_url
+                return (
+                    payload,
+                    "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
+                    conversation_url,
+                    "chatgpt",
+                )
             raise ValueError("ChatGPT ask returned no assistant response")
-        except Exception as exc:  # noqa: BLE001 - semantic and browser failures both retry
-            last_error = exc
+        except Exception as exc:  # noqa: BLE001 - provider failure triggers fallback
+            chatgpt_error = exc
             # ChatGPT can finish a response and then show a temporary rate-limit
             # modal before the adapter captures the new conversation URL. Recover
             # the completed last assistant message instead of discarding that audit.
-            if isinstance(exc, ValueError) or "conversation URL" in str(exc) or "timed out" in str(exc):
-                try:
-                    read_result = await run_opencli(
-                        [
-                            "chatgpt", "read", "--window", "background",
-                            "--site-session", "persistent", "--keep-tab", "true", "-f", "json",
-                        ],
-                        timeout=30,
-                    )
-                    messages = _rows(first_json(read_result.stdout))
-                    assistant_text = next(
-                        (
-                            _field(row, "Text")
-                            for row in reversed(messages)
-                            if _field(row, "Role").casefold() == "assistant" and _field(row, "Text")
-                        ),
+            try:
+                recovered = await recover_current("chatgpt")
+                if recovered:
+                    payload, _ = recovered
+                    if log:
+                        log(f"Recovered completed ChatGPT {review_label} audit from the active page")
+                    return (
+                        payload,
+                        "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
                         "",
+                        "chatgpt",
                     )
-                    if assistant_text:
-                        raw_attempts.append(assistant_text)
-                        payload = parse_response(assistant_text)
-                        if log:
-                            log(f"Recovered completed ChatGPT {review_label} audit from the active page")
-                        return payload, "\n\n--- RETRY ---\n\n".join(raw_attempts), ""
-                except Exception:
-                    pass
+            except Exception:
+                pass
             if log:
                 log(
-                    f"ChatGPT {review_label} review attempt "
-                    f"{attempt}/{config.OPENCLI_MAX_ATTEMPTS} failed: {exc}"
+                    f"ChatGPT {review_label} review failed; falling back to "
+                    f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL}: {exc}"
                 )
-            if attempt < config.OPENCLI_MAX_ATTEMPTS:
-                delay = min(60.0, config.OPENCLI_RETRY_BASE_SECONDS * 2 ** (attempt - 1))
-                if "conversation URL" in str(exc):
-                    delay = max(30.0, delay)
-                await asyncio.sleep(delay)
+
+    gemini_error: Exception | None = None
+    gemini_attempts = 2
+    select_gemini_model = True
+    start_fresh_gemini = True
+    for gemini_attempt in range(1, gemini_attempts + 1):
+        try:
+            gemini_args = ["gemini", "ask", browser_prompt]
+            if select_gemini_model:
+                gemini_args.extend(
+                    ["--model", config.DAILY_NEWS_GEMINI_REVIEW_MODEL]
+                )
+            gemini_args.extend(
+                [
+                    "--new",
+                    "true" if start_fresh_gemini else "false",
+                    "--timeout",
+                    str(timeout),
+                    "--window",
+                    # Gemini's current composer rejects synthetic submission
+                    # in a background window. Foreground focus is required for
+                    # the adapter's trusted Enter key path.
+                    "foreground",
+                    "--site-session",
+                    "persistent",
+                    "--keep-tab",
+                    "true",
+                    "-f",
+                    "json",
+                ]
+            )
+            result = await run_opencli(
+                gemini_args,
+                # Gemini discovers and selects the requested web model before
+                # its own response timeout starts. Keep that UI setup outside
+                # the answer budget so a slow picker is not killed mid-submit.
+                timeout=timeout + 60,
+            )
+            rows = _rows(first_json(result.stdout))
+            response = next(
+                (_field(row, "response") for row in rows if _field(row, "response")),
+                "",
+            )
+            response = re.sub(r"^\s*💬\s*", "", response).strip()
+            raw_attempts.append(f"[GEMINI {gemini_attempt}]\n{response or '[EMPTY]'}")
+            if not response or "[NO RESPONSE]" in response:
+                raise ValueError("Gemini ask returned no completed assistant response")
+            payload = parse_response(response)
+            if log:
+                log(
+                    f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL} completed "
+                    f"{review_label} fallback"
+                )
+            return (
+                payload,
+                "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
+                "",
+                "gemini",
+            )
+        except Exception as exc:  # noqa: BLE001 - bounded provider fallback
+            gemini_error = exc
+            if "model picker button was not found" in str(exc).casefold():
+                select_gemini_model = False
+                start_fresh_gemini = False
+                if log:
+                    log(
+                        "Gemini model picker is not ready; the retry will reuse "
+                        "the now-loaded page and its current Flash model"
+                    )
+            try:
+                recovered = await recover_current("gemini")
+                if recovered:
+                    payload, _ = recovered
+                    if log:
+                        log(
+                            f"Recovered completed Gemini {review_label} fallback "
+                            "from the active page"
+                        )
+                    return (
+                        payload,
+                        "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
+                        "",
+                        "gemini",
+                    )
+            except Exception as recovery_exc:  # noqa: BLE001 - preserve failure
+                gemini_error = RuntimeError(
+                    f"ask failed ({exc}); active-page recovery failed ({recovery_exc})"
+                )
+            if gemini_attempt < gemini_attempts and log:
+                log(
+                    f"Gemini {review_label} fallback attempt {gemini_attempt}/"
+                    f"{gemini_attempts} failed; starting the bounded retry: {gemini_error}"
+                )
+
     raise RuntimeError(
-        f"ChatGPT {review_label} review failed after "
-        f"{config.OPENCLI_MAX_ATTEMPTS} attempts: {last_error}"
-    ) from last_error
+        f"ChatGPT {review_label} review failed ({chatgpt_error}); "
+        f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL} fallback failed ({gemini_error})"
+    ) from gemini_error
 
 
 async def review_daily_script(
@@ -459,7 +600,7 @@ async def review_daily_script(
         # A corrected script starts a new audit conversation. The three story
         # groups within that cycle reuse it, avoiding both stale tab leases and
         # ChatGPT's burst limit on one-new-chat-per-story workflows.
-        review_session_started = False
+        chatgpt_session_started = False
         contract = script_contract_report(
             candidate,
             dossier,
@@ -480,19 +621,20 @@ async def review_daily_script(
             (review_dir / f"chatgpt-prompt-{cycle}-group-{group_index}.txt").write_text(
                 prompt, encoding="utf-8"
             )
-            group_payload, raw, conversation_url = await _chatgpt_review(
+            group_payload, raw, conversation_url, provider = await _chatgpt_review(
                 prompt,
                 story_numbers=story_numbers,
-                reuse_current=review_session_started,
+                reuse_current=chatgpt_session_started,
                 log=log,
             )
-            review_session_started = True
+            chatgpt_session_started = chatgpt_session_started or provider == "chatgpt"
             (review_dir / f"chatgpt-response-{cycle}-group-{group_index}.txt").write_text(
                 raw, encoding="utf-8"
             )
             group_results.append({
                 "payload": group_payload,
                 "conversation_url": conversation_url,
+                "provider": provider,
             })
         issues = [
             issue
@@ -510,6 +652,15 @@ async def review_daily_script(
             for result in group_results
             if result["conversation_url"]
         )
+        providers = [result["provider"] for result in group_results]
+        chatgpt_level = config.DAILY_NEWS_CHATGPT_REVIEW_MODEL
+        gemini_model = config.DAILY_NEWS_GEMINI_REVIEW_MODEL
+        reviewer = (
+            f"ChatGPT Web ({chatgpt_level}) via project-local OpenCLI"
+            if set(providers) == {"chatgpt"}
+            else f"ChatGPT Web ({chatgpt_level}) with Gemini Web "
+            f"({gemini_model}) fallback via project-local OpenCLI"
+        )
         blocking = [
             issue
             for issue in payload.get("issues", [])
@@ -518,7 +669,8 @@ async def review_daily_script(
         approved = bool(payload.get("approved")) and not blocking
         attempt = {
             "cycle": cycle,
-            "reviewer": "ChatGPT Web via project-local OpenCLI",
+            "reviewer": reviewer,
+            "providers": providers,
             "conversation_url": conversation_url,
             "approved": approved,
             "confidence": payload.get("confidence"),
@@ -529,14 +681,17 @@ async def review_daily_script(
         attempts.append(attempt)
         if log:
             log(
-                f"ChatGPT accuracy review cycle {cycle}: "
+                f"Web accuracy review cycle {cycle}: "
                 f"{'approved' if approved else f'{len(blocking)} blocking issue(s)'}"
             )
         if approved:
             report = {
                 "passed": True,
                 "reviewed_at": datetime.now(timezone.utc).isoformat(),
-                "reviewer": "ChatGPT Web via project-local OpenCLI",
+                "reviewer": reviewer,
+                "fallback_used": any(
+                    "gemini" in prior.get("providers", []) for prior in attempts
+                ),
                 "attempts": attempts,
                 "final_contract": contract,
             }
@@ -567,12 +722,16 @@ async def review_daily_script(
     report = {
         "passed": False,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
-        "reviewer": "ChatGPT Web via project-local OpenCLI",
+        "reviewer": f"ChatGPT Web ({config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}) with "
+        f"Gemini Web ({config.DAILY_NEWS_GEMINI_REVIEW_MODEL}) fallback via project-local OpenCLI",
+        "fallback_used": any(
+            "gemini" in prior.get("providers", []) for prior in attempts
+        ),
         "attempts": attempts,
     }
     (review_dir / "fact_check_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     raise RuntimeError(
-        f"ChatGPT accuracy review did not approve the daily script after {max_cycles} correction cycles"
+        f"Web accuracy review did not approve the daily script after {max_cycles} correction cycles"
     )
