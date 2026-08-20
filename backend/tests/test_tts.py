@@ -1332,6 +1332,32 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report("office")["verified"])
         self.assertFalse(report("officers")["verified"])
 
+    def test_orpheus_transcript_normalizes_nikkei_spelling_in_publication_name(self):
+        expected = "Nikkei Asia reports that China is restricting exports"
+
+        def report(observed: str) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(
+            report("Nikkei Asia reports that China is restricting exports")["verified"]
+        )
+        self.assertTrue(
+            report("Nikke Asia reports that China is restricting exports")["verified"]
+        )
+        self.assertFalse(
+            report("Nike Asia reports that China is restricting exports")["verified"]
+        )
+        self.assertFalse(
+            report("Nikke Europe reports that China is restricting exports")["verified"]
+        )
+        self.assertFalse(
+            report("Nikke reports that China is restricting exports")["verified"]
+        )
+
     def test_orpheus_transcript_normalizes_spoken_decimal_and_api_initialism(self):
         expected = "Qwen 3.8 Max API pricing reported"
 

@@ -126,6 +126,12 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("deep", "tech"): "deeptech",
     ("qbit", "ai"): "qbitai",
     ("qubit", "ai"): "qbitai",
+    # A live Nikkei Asia utterance was transcribed as "Nikke" at normal
+    # speed but recovered the publication's spelling at both 0.8x and 0.7x.
+    # Scope the exact ASR spelling drift to the full publication name so an
+    # unrelated Nikke token remains distinct.
+    ("nikkei", "asia"): "nikkeiasia",
+    ("nikke", "asia"): "nikkeiasia",
     # Hyphenation is not audible; Whisper may split the source compound.
     ("semi", "annual"): "semiannual",
     ("skunk", "works"): "skunkworks",
