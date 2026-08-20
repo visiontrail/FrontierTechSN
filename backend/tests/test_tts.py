@@ -125,6 +125,32 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(" ".join(" ".join(chunks).split()), text)
 
+    def test_split_tts_text_rechecks_dangling_tail_after_moving_leading_of(self):
+        text = (
+            "Nikkei Asia reports that China is restricting or delaying exports "
+            "to Taiwan of germanium-based and quartz-based materials used in "
+            "fiber optics, photonics, and chip manufacturing."
+        )
+
+        chunks = tts._split_tts_text(text, max_words=12)
+
+        self.assertEqual(
+            chunks[:2],
+            [
+                "Nikkei Asia reports that China is restricting or delaying exports",
+                "to Taiwan of germanium-based and quartz-based materials used in "
+                "fiber optics, photonics, and chip manufacturing.",
+            ],
+        )
+        self.assertFalse(
+            any(
+                chunk.rstrip(".,!?;:\"'’”()[]{}").split()[-1].casefold()
+                in tts.DANGLING_CHUNK_WORDS
+                for chunk in chunks[:-1]
+            )
+        )
+        self.assertEqual(" ".join(" ".join(chunks).split()), text)
+
     def test_split_tts_text_does_not_start_chunk_with_attached_preposition(self):
         text = (
             "So what you have is a country that imported the aesthetics of "
@@ -197,7 +223,11 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             tts._orpheus_prompt_text(text),
-            "describe-s situations where employees have promising ideas.",
+            "describes. Situations where employees have promising ideas.",
+        )
+        self.assertEqual(
+            tts._orpheus_prompt_text("describes outcomes from the research"),
+            "describes outcomes from the research.",
         )
 
     def test_orpheus_prompt_articulates_failed_opening_months_inflection(self):
@@ -1224,6 +1254,37 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
         self.assertFalse(report("Bream")["verified"])
         self.assertFalse(report("")["verified"])
+
+    def test_orpheus_transcript_normalizes_exact_compound_spellings(self):
+        cases = (
+            ("Brem's research pays off.", "Brehm's research pays off."),
+            (
+                "including bootlegging and skunkworks projects",
+                "including bootlegging and Skunk Works projects",
+            ),
+            ("Google and 3M allocate work time", "Google and 3 M allocate work time"),
+            ("multimodal content generation", "multi modal content generation"),
+        )
+        for expected, observed in cases:
+            with self.subTest(expected=expected, observed=observed):
+                words = [
+                    {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                    for index, word in enumerate(observed.split())
+                ]
+                report = tts._orpheus_transcript_report(expected, words)
+                self.assertTrue(report["verified"])
+                self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
+        wrong_words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate("including bootlegging and skunk projects".split())
+        ]
+        self.assertFalse(
+            tts._orpheus_transcript_report(
+                "including bootlegging and skunkworks projects",
+                wrong_words,
+            )["verified"]
+        )
 
     def test_orpheus_transcript_normalizes_whisper_eunuch_bias(self):
         expected = "The eunuch system, not interested."

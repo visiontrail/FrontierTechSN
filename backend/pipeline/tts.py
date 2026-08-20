@@ -96,6 +96,7 @@ ACOUSTIC_EQUIVALENTS = {
     # surname Brehm. The silent ``h`` carries no acoustic evidence; other
     # nearby spellings (for example "Bream") remain distinct.
     "brehm": "brem",
+    "brehm's": "brem's",
     # Whisper consistently labels the rare spoken word "eunuch" as the
     # familiar two-syllable proper noun "Unix", including at 0.8x speed.
     "unix": "eunuch",
@@ -116,6 +117,9 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("qubit", "ai"): "qbitai",
     # Hyphenation is not audible; Whisper may split the source compound.
     ("semi", "annual"): "semiannual",
+    ("skunk", "works"): "skunkworks",
+    ("3", "m"): "3m",
+    ("multi", "modal"): "multimodal",
 }
 NUMBER_SCALES = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
 DANGLING_CHUNK_WORDS = {
@@ -626,6 +630,18 @@ def _split_tts_text(
                             in CHUNK_DETERMINERS
                         ):
                             take -= 1
+                        # Moving the phrase head can expose a preposition that
+                        # the first dangling-tail pass had not seen (for
+                        # example ``exports to | Taiwan of``). Re-run the same
+                        # invariant so no adjusted chunk ends in a known weak
+                        # function word.
+                        while (
+                            take > 1
+                            and take < len(words)
+                            and words[take - 1].strip(".,!?;:\"'’”()[]{}").casefold()
+                            in DANGLING_CHUNK_WORDS
+                        ):
+                            take -= 1
                     piece = " ".join(words[:take])
                     words = words[take:]
                     units.append(f"{speaker_label} {piece}".strip())
@@ -899,13 +915,15 @@ def _orpheus_prompt_text(text: str) -> str:
         "Q-bit A-I",
         stripped,
     )
-    # A generated continuation beginning with this third-person verb lost its
-    # final /s/. Expose that morpheme only to the provider tokenizer;
-    # the canonical transcript must still contain the exact word "describes".
+    # A generated continuation beginning with this third-person verb repeatedly
+    # lost its final /s/, including after a ``describe-s`` tokenizer hint. Give
+    # the exact observed transition an articulation pause; the canonical
+    # transcript must still contain the exact word "describes".
     stripped = re.sub(
-        r"^(\s*[Dd]escribe)s\b",
-        r"\1-s",
+        r"^(\s*[Dd]escribes)\s+(situations\b)",
+        lambda match: f"{match.group(1)}. {match.group(2).capitalize()}",
         stripped,
+        flags=re.IGNORECASE,
     )
     # Orpheus repeatedly realizes the opening phrase "Months of" as singular
     # "Month of". Expose the final plural morpheme to its tokenizer; the
