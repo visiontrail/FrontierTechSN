@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlsplit
+from xml.etree import ElementTree
 
 import httpx
 from PIL import Image, UnidentifiedImageError
@@ -37,8 +38,8 @@ logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
-MANIFEST_VERSION = 9
-QUERY_SEMANTICS_VERSION = 2
+MANIFEST_VERSION = 10
+QUERY_SEMANTICS_VERSION = 3
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
@@ -90,6 +91,16 @@ REPORTING_VERBS_RE = re.compile(
 BAD_PHOTO_MARKERS = ("logo", "icon", "map", "diagram", "chart", "flag")
 GENERIC_LOGO_TITLE_TERMS = frozenset(
     "black brand corporate english en icon logo mark png symbol transparent white wordmark svg".split()
+)
+IDENTITY_CONNECTORS = frozenset("and of the".split())
+IDENTITY_DECORATORS = frozenset(
+    "black brand chinese company corp corporate corporation english en event file financial group icon image "
+    "jpeg jpg logo mark official photo photograph png product public screenshot symbol transparent white "
+    "wordmark webp zh svg".split()
+)
+GENERATED_ASSET_RE = re.compile(
+    r"^news_images/image-[0-9]+\.(?:jpe?g|png|webp|svg)$",
+    flags=re.IGNORECASE,
 )
 
 
@@ -172,6 +183,76 @@ def _ordered_semantic_terms(value: object) -> list[str]:
     if "artificial intelligence" in str(value or "").casefold() and "ai" not in output:
         output.insert(0, "ai")
     return output
+
+
+def _identity_tokens(value: object) -> list[str]:
+    """Return ordered identity tokens without grammatical connectors.
+
+    Grounding must preserve otherwise-generic parts of proper names (``World``
+    in ``Perfect World`` and ``Office`` in ``Qwen Office``).  It therefore
+    deliberately does not use the broad query stopword lists.
+    """
+    output: list[str] = []
+    for raw in WORD_RE.findall(str(value or "").replace("-", " ").replace("–", " ")):
+        token = raw.casefold().strip("'’-")
+        if token.endswith(("'s", "’s")):
+            token = token[:-2]
+        if not token or token in IDENTITY_CONNECTORS:
+            continue
+        if token == "uni":
+            token = "university"
+        output.append(token)
+    return output
+
+
+def _contains_token_phrase(field_tokens: list[str], subject_tokens: list[str]) -> bool:
+    width = len(subject_tokens)
+    return bool(width) and any(
+        field_tokens[index : index + width] == subject_tokens
+        for index in range(len(field_tokens) - width + 1)
+    )
+
+
+def _meaningful_identity_tokens(field_tokens: list[str]) -> list[str]:
+    return [
+        token
+        for token in field_tokens
+        if token not in IDENTITY_DECORATORS
+        and not (len(token) == 4 and token.isdigit())
+        and (len(token) > 1 or any(char.isdigit() for char in token))
+    ]
+
+
+def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, list[str]] | None:
+    """Find the complete subject identity in one metadata field.
+
+    Combining title and description allowed a first name in one field and a
+    surname in another to masquerade as a full person match.  Multi-token
+    identities must now occur contiguously in one field.  Single-token brands
+    are accepted only when no second meaningful identity is present, so
+    ``Qwen`` cannot validate ``Qwen Audio`` and ``Google`` cannot validate
+    ``Google Loon``.
+    """
+    subject_tokens = _identity_tokens(shot.get("expected_subject"))
+    if not subject_tokens or subject_tokens == ["ai"]:
+        return None
+    kind = str(shot.get("kind") or "event")
+    for field_name in ("title", "description"):
+        value = str(candidate.get(field_name) or "")
+        field_tokens = _identity_tokens(value)
+        if not _contains_token_phrase(field_tokens, subject_tokens):
+            continue
+        if len(subject_tokens) == 1 and _meaningful_identity_tokens(field_tokens) != subject_tokens:
+            continue
+        if kind == "logo" and not ({"logo", "wordmark", "mark"} & set(field_tokens)):
+            continue
+        if kind != "logo" and ({"logo", "wordmark", "icon"} & set(field_tokens)) and not (
+            {"event", "photo", "photograph", "screenshot", "launch", "conference", "expo"}
+            & set(field_tokens)
+        ):
+            continue
+        return field_name, " ".join(field_tokens), subject_tokens
+    return None
 
 
 def _distinctive_terms(value: object) -> set[str]:
@@ -333,6 +414,7 @@ def acquisition_contract_fingerprint(
     target_count: int,
     eligible_scene_ids: list[str],
     excluded_scene_ids: set[str],
+    scene_hints: dict[str, dict] | None = None,
 ) -> str:
     """Bind cached assets to the exact selection and grounding contract."""
     payload = {
@@ -344,6 +426,10 @@ def acquisition_contract_fingerprint(
         "query_semantics_version": QUERY_SEMANTICS_VERSION,
         "grounding_policy_version": QUERY_SEMANTICS_VERSION,
         "license_policy": "open_only",
+        "scene_hints": {
+            scene_id: (scene_hints or {}).get(scene_id) or {}
+            for scene_id in eligible_scene_ids
+        },
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
@@ -371,13 +457,34 @@ def _write_manifest(task_dir: Path, manifest: dict) -> None:
     temporary.replace(path)
 
 
+def _generated_asset_path(task_dir: Path, local_path: object) -> Path | None:
+    relative = str(local_path or "").replace("\\", "/")
+    if not GENERATED_ASSET_RE.fullmatch(relative):
+        return None
+    root = (task_dir / "news_images").resolve()
+    candidate = task_dir / relative
+    if candidate.parent.resolve() != root or candidate.is_symlink():
+        return None
+    return candidate
+
+
 def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
-    local = task_dir / str(image.get("local_path") or "")
+    local = _generated_asset_path(task_dir, image.get("local_path"))
+    if local is None:
+        return False
     if not local.is_file() or not local.stat().st_size:
         return False
-    expected_bytes = int(image.get("bytes") or 0)
+    try:
+        expected_bytes = int(image.get("bytes") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
     expected_sha256 = str(image.get("sha256") or "")
-    if expected_bytes <= 0 or local.stat().st_size != expected_bytes or not expected_sha256:
+    if (
+        expected_bytes <= 0
+        or expected_bytes > config.NEWS_IMAGE_MAX_BYTES
+        or local.stat().st_size != expected_bytes
+        or not expected_sha256
+    ):
         return False
     digest = hashlib.sha256()
     try:
@@ -387,56 +494,147 @@ def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
         if digest.hexdigest() != expected_sha256:
             return False
         if local.suffix.casefold() == ".svg":
-            return b"<svg" in local.read_bytes()[:4096].casefold()
+            payload = local.read_bytes()
+            lowered = payload.lower()
+            if b"<!doctype" in lowered or b"<!entity" in lowered:
+                return False
+            root = ElementTree.fromstring(payload)
+            return root.tag.rsplit("}", 1)[-1].casefold() == "svg"
         with Image.open(local) as decoded:
             decoded.verify()
-    except (OSError, UnidentifiedImageError, ValueError):
+    except (ElementTree.ParseError, OSError, UnidentifiedImageError, ValueError):
         return False
     return True
+
+
+def image_grounding_is_valid(image: dict, scene: dict) -> bool:
+    """Recompute policy proof instead of trusting manifest booleans."""
+    if (
+        image.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
+        or image.get("grounding_passed") is not True
+        or not _is_open_license(str(image.get("license") or ""), str(image.get("license_code") or ""))
+    ):
+        return False
+    evidence = _grounding_evidence(image, scene, image)
+    return bool(
+        evidence["grounding_passed"]
+        and list(image.get("grounding_distinctive_anchors") or [])
+        == evidence["grounding_distinctive_anchors"]
+        and list(image.get("match_terms") or []) == evidence["grounding_distinctive_anchors"]
+        and str(image.get("grounding_identity_field") or "") == evidence["grounding_identity_field"]
+        and str(image.get("grounding_identity_phrase") or "") == evidence["grounding_identity_phrase"]
+        and list(image.get("grounding_identity_field_terms") or [])
+        == evidence["grounding_identity_field_terms"]
+    )
 
 
 def _cached_manifest(
     task_dir: Path,
     fingerprint: str,
     contract_sha256: str,
+    storyboard: dict | None = None,
+    *,
+    expected_requested_count: int | None = None,
+    expected_target: int | None = None,
+    expected_eligible_scene_ids: list[str] | None = None,
+    expected_excluded_scene_ids: set[str] | None = None,
 ) -> dict | None:
     manifest = read_manifest(task_dir)
     if (
-        not manifest
+        storyboard is None
+        or expected_requested_count is None
+        or expected_target is None
+        or expected_eligible_scene_ids is None
+        or expected_excluded_scene_ids is None
+        or not manifest
         or manifest.get("manifest_version") != MANIFEST_VERSION
         or manifest.get("storyboard_sha256") != fingerprint
         or manifest.get("query_semantics_version") != QUERY_SEMANTICS_VERSION
         or manifest.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
         or manifest.get("cache_contract_sha256") != contract_sha256
         or manifest.get("status") != "ready"
+        or manifest.get("license_policy") != "open_only"
     ):
         return None
+    if storyboard_fingerprint(storyboard) != fingerprint:
+        return None
     images = manifest.get("images") or []
-    planned = int(manifest.get("planned_image_count") or 0)
+    if not isinstance(images, list) or any(not isinstance(image, dict) for image in images):
+        return None
+    try:
+        planned = int(manifest.get("planned_image_count") or 0)
+        requested = int(manifest.get("requested_image_count") or 0)
+        eligible_count = int(manifest.get("eligible_scene_count") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if not images or len(images) != planned:
         return None
-    modes = manifest.get("placement_modes") or {}
-    if planned >= 2 and (not modes.get("inline") or not modes.get("fullscreen")):
+    modes = _placement_mode_counts(images)
+    if manifest.get("placement_modes") != modes:
         return None
+    if planned >= 2 and (not modes["inline"] or not modes["fullscreen"]):
+        return None
+    raw_eligible = manifest.get("eligible_scene_ids") or []
+    raw_excluded = manifest.get("excluded_scene_ids") or []
+    if not isinstance(raw_eligible, list) or not isinstance(raw_excluded, list):
+        return None
+    eligible = [str(item) for item in raw_eligible]
+    excluded = {str(item) for item in raw_excluded}
+    expected_eligible = [
+        str(scene.get("id") or "")
+        for scene in storyboard.get("scenes") or []
+        if str(scene.get("id") or "") and str(scene.get("id") or "") not in excluded
+    ]
+    if (
+        not eligible
+        or requested != expected_requested_count
+        or planned != expected_target
+        or eligible != expected_eligible_scene_ids
+        or excluded != {str(item) for item in expected_excluded_scene_ids}
+        or eligible != expected_eligible
+        or eligible_count != len(eligible)
+        or planned != min(max(0, requested), len(eligible))
+        or len(set(eligible)) != len(eligible)
+        or excluded & set(eligible)
+    ):
+        return None
+    scenes_by_id = {
+        str(scene.get("id") or ""): scene for scene in (storyboard or {}).get("scenes") or []
+    }
     seen_scenes: set[str] = set()
     seen_sources: set[str] = set()
+    seen_hashes: set[str] = set()
+    seen_paths: set[str] = set()
     for image in images:
         scene_id = str(image.get("scene_id") or "")
         source = str(image.get("source_page_url") or "")
+        digest = str(image.get("sha256") or "")
+        local_path = str(image.get("local_path") or "")
         anchors = image.get("grounding_distinctive_anchors") or []
         if (
             not scene_id
+            or scene_id not in eligible
+            or scene_id in excluded
             or scene_id in seen_scenes
             or not source
             or source in seen_sources
+            or not digest
+            or digest in seen_hashes
+            or not local_path
+            or local_path in seen_paths
             or image.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
             or image.get("grounding_passed") is not True
             or not anchors
             or not _cached_asset_is_intact(task_dir, image)
         ):
             return None
+        scene = scenes_by_id.get(scene_id)
+        if scene is None or not image_grounding_is_valid(image, scene):
+            return None
         seen_scenes.add(scene_id)
         seen_sources.add(source)
+        seen_hashes.add(digest)
+        seen_paths.add(local_path)
     return manifest
 
 
@@ -855,14 +1053,13 @@ def _complete_plan(
 def _shot_is_grounded_to_scene(shot: dict, scene: dict) -> bool:
     subject = _normalise_entity_phrase(shot.get("expected_subject"))
     subject_terms = _semantic_terms(subject)
-    scene_terms = _semantic_terms(
-        f"{scene.get('text', '')} {' '.join(str(item) for item in scene.get('keywords') or [])}"
-    )
+    identity_terms = _identity_tokens(subject)
+    scene_text = str(scene.get("text") or "")
     if (
         not subject_terms
         or not _distinctive_terms(subject)
-        or not subject_terms.issubset(scene_terms)
-        or subject.casefold() in _source_entity_keys(str(scene.get("text") or ""))
+        or not _contains_token_phrase(_identity_tokens(scene_text), identity_terms)
+        or subject.casefold() in _source_entity_keys(scene_text)
     ):
         return False
     return True
@@ -1061,48 +1258,48 @@ async def research_references(shot: dict) -> tuple[list[dict], str]:
 
 
 def _grounding_evidence(shot: dict, scene: dict, candidate: dict) -> dict:
-    """Require one distinctive identity anchor across shot, scene, and file metadata."""
-    subject_terms = _semantic_terms(shot.get("expected_subject"))
+    """Require the complete subject identity in narration and one candidate field."""
+    subject_terms = _identity_tokens(shot.get("expected_subject"))
+    scene_text = str(scene.get("text") or "")
     scene_terms = _semantic_terms(
         f"{scene.get('text', '')} {' '.join(str(item) for item in scene.get('keywords') or [])}"
     )
     candidate_terms = _semantic_terms(
         f"{candidate.get('title', '')} {candidate.get('description', '')} {candidate.get('attribution', '')}"
     )
-    distinctive_subject = subject_terms - GENERIC_QUERY_TERMS
-    anchors = sorted(distinctive_subject & scene_terms & candidate_terms)
-    strong_anchors = [anchor for anchor in anchors if anchor != "ai"]
-    kind = str(shot.get("kind") or "event")
-    passed = bool(strong_anchors)
-    reason = "distinctive subject identity matched shot, narration, and candidate metadata"
+    scene_has_identity = bool(subject_terms) and _contains_token_phrase(
+        _identity_tokens(scene_text), subject_terms
+    )
+    candidate_match = _candidate_identity_match(shot, candidate)
+    strong_subject_terms = [
+        term for term in subject_terms if term != "ai" and term not in GENERIC_QUERY_TERMS
+    ]
+    passed = True
+    reason = "complete subject identity matched narration and one candidate metadata field"
+    if not subject_terms or not strong_subject_terms:
+        passed = False
+        reason = "shot subject had no usable complete identity"
+    elif not scene_has_identity:
+        passed = False
+        reason = "shot subject was not a contiguous identity in the narrated scene"
+    elif candidate_match is None:
+        passed = False
+        reason = "candidate did not contain the complete identity in one metadata field"
 
-    if not distinctive_subject:
-        passed = False
-        reason = "shot subject had no distinctive identity term"
-    elif not distinctive_subject.issubset(scene_terms):
-        passed = False
-        reason = "shot subject was not fully anchored in the narrated scene"
-    elif not strong_anchors:
-        passed = False
-        reason = "candidate shared only generic or weak AI terminology"
-    elif kind in {"event", "product", "object"} and len(strong_anchors) < 2:
-        # A company name alone does not prove that an event photo depicts the
-        # event in this story (for example Google Loon for employee innovation).
-        passed = False
-        reason = "event or object candidate matched only one organization name"
-    elif kind == "person" and len(strong_anchors) < 2:
-        passed = False
-        reason = "person candidate did not match a full narrated name"
-    elif kind == "logo" and "logo" not in candidate_terms:
-        passed = False
-        reason = "logo query returned metadata that did not identify a logo"
+    identity_field = candidate_match[0] if candidate_match else ""
+    identity_phrase = " ".join(subject_terms) if candidate_match else ""
+    identity_field_terms = candidate_match[1].split() if candidate_match else []
+    anchors = list(subject_terms) if passed else []
 
     return {
         "grounding_policy_version": QUERY_SEMANTICS_VERSION,
         "grounding_passed": passed,
-        "grounding_distinctive_anchors": strong_anchors,
+        "grounding_distinctive_anchors": anchors,
         "grounding_reason": reason,
-        "grounding_subject_terms": sorted(subject_terms),
+        "grounding_identity_field": identity_field,
+        "grounding_identity_phrase": identity_phrase,
+        "grounding_identity_field_terms": identity_field_terms,
+        "grounding_subject_terms": subject_terms,
         "grounding_scene_terms": sorted(scene_terms),
         "grounding_candidate_terms": sorted(candidate_terms),
     }
@@ -1305,6 +1502,189 @@ async def _download_candidate(
     return written, digest.hexdigest()
 
 
+def _public_value(value: object) -> object:
+    """Strip internal context and secret-shaped keys before persistence."""
+    if isinstance(value, dict):
+        output: dict = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            folded = key.casefold()
+            if key.startswith("_") or any(
+                marker in folded
+                for marker in ("api_key", "apikey", "authorization", "cookie", "password", "secret", "token")
+            ):
+                continue
+            output[key] = _public_value(item)
+        return output
+    if isinstance(value, list):
+        return [_public_value(item) for item in value]
+    return value
+
+
+def _maximum_source_matching(
+    candidate_pools: dict[str, list[dict]],
+    scene_order: list[str],
+    *,
+    excluded_sources: set[str] | None = None,
+    source_hashes: dict[str, str] | None = None,
+) -> dict[str, dict]:
+    """Return a deterministic maximum-cardinality scene/source assignment."""
+    excluded = excluded_sources or set()
+    priority = {scene_id: index for index, scene_id in enumerate(scene_order)}
+    usable = {
+        scene_id: [
+            candidate
+            for candidate in candidate_pools.get(scene_id, [])
+            if str(candidate.get("source_page_url") or "") not in excluded
+        ]
+        for scene_id in scene_order
+    }
+    hashes = source_hashes or {}
+    resource_to_scene: dict[str, str] = {}
+    scene_to_candidate: dict[str, dict] = {}
+
+    def augment(scene_id: str, visited_sources: set[str]) -> bool:
+        for candidate in usable.get(scene_id, []):
+            source = str(candidate.get("source_page_url") or "")
+            resource = f"sha256:{hashes[source]}" if source in hashes else f"source:{source}"
+            if not source or resource in visited_sources:
+                continue
+            visited_sources.add(resource)
+            owner = resource_to_scene.get(resource)
+            if owner is None or augment(owner, visited_sources):
+                resource_to_scene[resource] = scene_id
+                scene_to_candidate[scene_id] = candidate
+                return True
+        return False
+
+    # Scarce scenes enter first. Within an equal-size pool, earlier requested
+    # scenes keep the contested source while later scenes look for alternates.
+    for scene_id in sorted(
+        scene_order,
+        key=lambda item: (len(usable.get(item, [])), priority[item]),
+    ):
+        if usable.get(scene_id):
+            augment(scene_id, set())
+    return scene_to_candidate
+
+
+def _conflict_component_scenes(
+    candidate_pools: dict[str, list[dict]],
+    matching: dict[str, dict],
+    desired_scenes: list[str],
+    *,
+    source_hashes: dict[str, str] | None = None,
+) -> set[str]:
+    """Find scenes connected to an unmatched desired scene by shared sources."""
+    hashes = source_hashes or {}
+    resource_scenes: dict[str, set[str]] = {}
+    for scene_id, candidates in candidate_pools.items():
+        for candidate in candidates:
+            source = str(candidate.get("source_page_url") or "")
+            if source:
+                resource = f"sha256:{hashes[source]}" if source in hashes else f"source:{source}"
+                resource_scenes.setdefault(resource, set()).add(scene_id)
+    pending = [scene_id for scene_id in desired_scenes if scene_id not in matching]
+    connected = set(pending)
+    while pending:
+        scene_id = pending.pop()
+        for candidate in candidate_pools.get(scene_id, []):
+            source = str(candidate.get("source_page_url") or "")
+            resource = f"sha256:{hashes[source]}" if source in hashes else f"source:{source}"
+            for neighbour in resource_scenes.get(resource, set()):
+                if neighbour not in connected:
+                    connected.add(neighbour)
+                    pending.append(neighbour)
+    return connected
+
+
+async def _discover_shot_candidates(
+    client: httpx.AsyncClient,
+    *,
+    shot: dict,
+    scene: dict,
+    manifest: dict,
+    position: int,
+    total: int,
+    log: LogCallback | None,
+) -> list[dict]:
+    scene_id = str(shot.get("scene_id") or "")
+    if not _shot_is_grounded_to_scene(shot, scene):
+        manifest["errors"].append(
+            {
+                "scene_id": scene_id,
+                "stage": "query_grounding",
+                "message": "Image query subject was not a distinctive narrated entity",
+            }
+        )
+        return []
+    _emit(
+        log,
+        f"News image candidate {position}/{total}: researching "
+        f"{shot['expected_subject']} for {scene_id} ({shot['display_mode']})",
+    )
+    references: list[dict] = []
+    reference_provider = ""
+    try:
+        references, reference_provider = await research_references(shot)
+    except Exception as exc:  # noqa: BLE001 - Commons remains usable
+        manifest["errors"].append(
+            {
+                "scene_id": scene_id,
+                "stage": "opencli_search",
+                "message": str(exc),
+            }
+        )
+
+    candidates_by_source: dict[str, dict] = {}
+    try:
+        for query in _wikimedia_query_variants(shot, scene):
+            lookup = {
+                **shot,
+                "search_query": query,
+                "_scene_text": scene.get("text") or "",
+                "_scene_keywords": scene.get("keywords") or [],
+            }
+            for raw_candidate in await search_wikimedia_images(client, shot=lookup):
+                evidence = _grounding_evidence(shot, scene, raw_candidate)
+                if not evidence["grounding_passed"]:
+                    continue
+                source = str(raw_candidate.get("source_page_url") or "")
+                if not source:
+                    continue
+                candidate = {
+                    **dict(_public_value(raw_candidate)),
+                    **dict(_public_value(shot)),
+                    **evidence,
+                    "reference_provider": reference_provider,
+                    "references": _public_value(references),
+                    "resolved_search_query": query,
+                }
+                candidates_by_source.setdefault(source, candidate)
+            if len(candidates_by_source) >= 8:
+                break
+    except Exception as exc:  # noqa: BLE001 - record exact failed scene
+        manifest["errors"].append(
+            {
+                "scene_id": scene_id,
+                "stage": "wikimedia_search",
+                "message": str(exc),
+            }
+        )
+        return []
+    return sorted(
+        candidates_by_source.values(),
+        key=lambda candidate: _candidate_rank(candidate, shot),
+    )
+
+
+def _next_asset_destination(image_dir: Path, start: int, extension: str) -> tuple[int, Path]:
+    serial = max(1, start)
+    while any((image_dir / f"image-{serial:02d}{suffix}").exists() for suffix in (".jpg", ".jpeg", ".png", ".webp", ".svg")):
+        serial += 1
+    return serial, image_dir / f"image-{serial:02d}{extension}"
+
+
 async def acquire_news_images(
     storyboard: dict,
     task_dir: Path,
@@ -1332,8 +1712,19 @@ async def acquire_news_images(
         target_count=target,
         eligible_scene_ids=eligible,
         excluded_scene_ids=excluded,
+        scene_hints=scene_hints,
     )
-    cached = _cached_manifest(task_dir, fingerprint, contract_sha256)
+    previous_manifest = read_manifest(task_dir)
+    cached = _cached_manifest(
+        task_dir,
+        fingerprint,
+        contract_sha256,
+        storyboard,
+        expected_requested_count=count,
+        expected_target=target,
+        expected_eligible_scene_ids=eligible,
+        expected_excluded_scene_ids=excluded,
+    )
     if cached:
         _emit(
             log,
@@ -1341,12 +1732,12 @@ async def acquire_news_images(
         )
         return cached
 
-    # A partial/no-result retry starts a new manifest. Remove only this stage's
-    # explicitly named generated files so stale images can neither be attached
-    # nor mistaken for the new sequential inventory.
-    for orphan in image_dir.glob("image-*"):
-        if orphan.is_file():
-            orphan.unlink()
+    # A retry removes only generated paths explicitly owned by the preceding
+    # manifest.  A broad image-* glob could delete an operator's source image.
+    for stale_image in (previous_manifest or {}).get("images") or []:
+        stale_path = _generated_asset_path(task_dir, stale_image.get("local_path"))
+        if stale_path is not None and stale_path.is_file():
+            stale_path.unlink()
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -1395,11 +1786,15 @@ async def acquire_news_images(
     plan = _prepare_primary_plan(plan, eligible_scenes, target, scene_hints)
     reserves = _reserve_plan(plan, eligible_scenes, scene_hints)
     candidate_plan = [
-        {
-            **shot,
-            "planned_display_mode": shot["display_mode"],
-            "candidate_role": "primary" if index < len(plan) else "reserve",
-        }
+        dict(
+            _public_value(
+                {
+                    **shot,
+                    "planned_display_mode": shot["display_mode"],
+                    "candidate_role": "primary" if index < len(plan) else "reserve",
+                }
+            )
+        )
         for index, shot in enumerate([*plan, *reserves])
     ]
     manifest["planner"] = planner
@@ -1416,114 +1811,124 @@ async def acquire_news_images(
     )
 
     headers = {"User-Agent": config.FOOTAGE_USER_AGENT}
-    used_sources: set[str] = set()
-    used_scene_ids: set[str] = set()
+    candidate_pools: dict[str, list[dict]] = {scene_id: [] for scene_id in eligible}
+    primary_rows = list(enumerate(candidate_plan[: len(plan)], start=1))
+    reserve_rows = list(enumerate(candidate_plan[len(plan) :], start=len(plan) + 1))
+    priority_scenes = list(
+        dict.fromkeys(
+            [str(shot.get("scene_id") or "") for shot in plan]
+            + eligible
+        )
+    )
+    failed_sources: set[str] = set()
+    source_hashes: dict[str, str] = {}
+
     async with httpx.AsyncClient(
         timeout=config.FOOTAGE_TIMEOUT,
         follow_redirects=True,
         headers=headers,
     ) as client:
-        for index, shot in enumerate(candidate_plan, start=1):
-            if len(manifest["images"]) >= target:
-                break
-            scene_id = shot["scene_id"]
-            if scene_id in used_scene_ids or scene_id not in scenes_by_id:
-                continue
-            scene = scenes_by_id[scene_id]
-            if not _shot_is_grounded_to_scene(shot, scene):
-                manifest["errors"].append(
-                    {
-                        "scene_id": scene_id,
-                        "stage": "query_grounding",
-                        "message": "Image query subject was not a distinctive narrated entity",
-                    }
-                )
-                continue
-            _emit(
-                log,
-                f"News image candidate {index}/{len(candidate_plan)}: researching "
-                f"{shot['expected_subject']} "
-                f"for {scene_id} ({shot['display_mode']})",
+
+        async def discover(position: int, shot: dict) -> None:
+            scene_id = str(shot.get("scene_id") or "")
+            scene = scenes_by_id.get(scene_id)
+            if scene is None:
+                return
+            discovered = await _discover_shot_candidates(
+                client,
+                shot=shot,
+                scene=scene,
+                manifest=manifest,
+                position=position,
+                total=len(candidate_plan),
+                log=log,
             )
-            references: list[dict] = []
-            reference_provider = ""
-            try:
-                references, reference_provider = await research_references(shot)
-            except Exception as exc:  # noqa: BLE001 - Commons remains usable
-                manifest["errors"].append(
-                    {
-                        "scene_id": scene_id,
-                        "stage": "opencli_search",
-                        "message": str(exc),
-                    }
+            existing = {
+                str(candidate.get("source_page_url") or "")
+                for candidate in candidate_pools[scene_id]
+            }
+            candidate_pools[scene_id].extend(
+                candidate
+                for candidate in discovered
+                if str(candidate.get("source_page_url") or "") not in existing
+            )
+
+        # Candidate discovery is separate from selection.  All primaries are
+        # visible to the matcher before any source URL can be claimed.
+        for position, shot in primary_rows:
+            await discover(position, shot)
+
+        while not manifest["images"]:
+            matching = _maximum_source_matching(
+                candidate_pools,
+                priority_scenes,
+                excluded_sources=failed_sources,
+                source_hashes=source_hashes,
+            )
+
+            while len(matching) < target and reserve_rows:
+                desired = priority_scenes[:target]
+                connected = _conflict_component_scenes(
+                    candidate_pools,
+                    matching,
+                    desired,
+                    source_hashes=source_hashes,
+                )
+                next_index = next(
+                    (
+                        index
+                        for index, (_position, shot) in enumerate(reserve_rows)
+                        if str(shot.get("scene_id") or "") in connected
+                    ),
+                    0,
+                )
+                position, reserve_shot = reserve_rows.pop(next_index)
+                await discover(position, reserve_shot)
+                matching = _maximum_source_matching(
+                    candidate_pools,
+                    priority_scenes,
+                    excluded_sources=failed_sources,
+                    source_hashes=source_hashes,
                 )
 
-            try:
-                candidates_by_source: dict[str, dict] = {}
-                for query in _wikimedia_query_variants(shot, scene):
-                    lookup = {
-                        **shot,
-                        "search_query": query,
-                        "_scene_text": scene.get("text") or "",
-                        "_scene_keywords": scene.get("keywords") or [],
-                    }
-                    for candidate in await search_wikimedia_images(client, shot=lookup):
-                        evidence = _grounding_evidence(shot, scene, candidate)
-                        if not evidence["grounding_passed"]:
-                            continue
-                        candidate = {
-                            **candidate,
-                            **evidence,
-                            "resolved_search_query": query,
-                        }
-                        candidates_by_source.setdefault(candidate["source_page_url"], candidate)
-                    if len(candidates_by_source) >= 8:
-                        break
-                candidates = sorted(
-                    candidates_by_source.values(),
-                    key=lambda candidate: _candidate_rank(candidate, shot),
-                )
-            except Exception as exc:  # noqa: BLE001 - record exact failed scene
-                manifest["errors"].append(
-                    {
-                        "scene_id": scene_id,
-                        "stage": "wikimedia_search",
-                        "message": str(exc),
-                    }
-                )
-                continue
+            if not matching:
+                break
+            selected_scene_ids = [
+                scene_id for scene_id in priority_scenes if scene_id in matching
+            ][:target]
+            staged: list[dict] = []
+            batch_failed = False
+            duplicate_hash = False
 
-            candidates = [candidate for candidate in candidates if candidate["source_page_url"] not in used_sources]
-            if not candidates:
-                manifest["errors"].append(
-                    {
-                        "scene_id": scene_id,
-                        "stage": "selection",
-                        "message": (
-                            "No unique image passed distinctive three-way subject, license, and resolution gates"
-                        ),
-                    }
+            for scene_id in selected_scene_ids:
+                candidate = matching[scene_id]
+                source = str(candidate.get("source_page_url") or "")
+                success_number, destination = _next_asset_destination(
+                    image_dir,
+                    len(staged) + 1,
+                    _extension_for(candidate),
                 )
-                continue
-
-            downloaded = None
-            for candidate in candidates[:5]:
-                success_number = len(manifest["images"]) + 1
-                destination = image_dir / (f"image-{success_number:02d}{_extension_for(candidate)}")
                 try:
-                    byte_size, sha256 = await _download_candidate(client, candidate=candidate, destination=destination)
-                except Exception as exc:  # noqa: BLE001 - try the next ranked source
-                    if destination.exists():
-                        destination.unlink()
+                    byte_size, sha256 = await _download_candidate(
+                        client,
+                        candidate=candidate,
+                        destination=destination,
+                    )
+                except Exception as exc:  # noqa: BLE001 - discard batch and rematch globally
+                    destination.unlink(missing_ok=True)
+                    failed_sources.add(source)
                     manifest["errors"].append(
                         {
                             "scene_id": scene_id,
                             "stage": "download",
-                            "source_page_url": candidate["source_page_url"],
+                            "source_page_url": source,
                             "message": str(exc),
                         }
                     )
-                    continue
+                    batch_failed = True
+                    break
+
+                source_hashes[source] = sha256
                 asset_record = {
                     "local_path": destination.relative_to(task_dir).as_posix(),
                     "bytes": byte_size,
@@ -1531,52 +1936,99 @@ async def acquire_news_images(
                 }
                 if not _cached_asset_is_intact(task_dir, asset_record):
                     destination.unlink(missing_ok=True)
+                    failed_sources.add(source)
                     manifest["errors"].append(
                         {
                             "scene_id": scene_id,
                             "stage": "decode",
+                            "source_page_url": source,
                             "message": "Downloaded image failed byte, hash, or decoder verification",
                         }
                     )
-                    continue
-                match_terms = candidate["grounding_distinctive_anchors"]
-                downloaded = {
-                    "id": f"image-{success_number:02d}",
-                    **shot,
-                    **candidate,
-                    "reference_provider": reference_provider,
-                    "references": references,
-                    "resolved_search_query": candidate.get("resolved_search_query") or shot["search_query"],
-                    "source_mime_type": candidate.get("mime_type"),
-                    "mime_type": {
-                        ".jpg": "image/jpeg",
-                        ".jpeg": "image/jpeg",
-                        ".png": "image/png",
-                        ".webp": "image/webp",
-                        ".svg": "image/svg+xml",
-                    }.get(destination.suffix.lower(), "application/octet-stream"),
-                    "match_terms": match_terms,
-                    "bytes": byte_size,
-                    "sha256": sha256,
-                    "local_path": destination.relative_to(task_dir).as_posix(),
-                    "fit": "contain" if shot["kind"] == "logo" else "cover",
-                    "status": "downloaded",
-                }
-                break
+                    batch_failed = True
+                    break
+                if sha256 in {image["sha256"] for image in staged}:
+                    destination.unlink(missing_ok=True)
+                    manifest["errors"].append(
+                        {
+                            "scene_id": scene_id,
+                            "stage": "duplicate_content",
+                            "source_page_url": source,
+                            "message": "Downloaded bytes duplicate another candidate in the assignment",
+                        }
+                    )
+                    batch_failed = True
+                    duplicate_hash = True
+                    break
 
-            if downloaded is None:
+                match_terms = list(candidate["grounding_distinctive_anchors"])
+                downloaded = dict(
+                    _public_value(
+                        {
+                            "id": f"image-{success_number:02d}",
+                            **candidate,
+                            "resolved_search_query": candidate.get("resolved_search_query")
+                            or candidate.get("search_query"),
+                            "source_mime_type": candidate.get("mime_type"),
+                            "mime_type": {
+                                ".jpg": "image/jpeg",
+                                ".jpeg": "image/jpeg",
+                                ".png": "image/png",
+                                ".webp": "image/webp",
+                                ".svg": "image/svg+xml",
+                            }.get(destination.suffix.lower(), "application/octet-stream"),
+                            "match_terms": match_terms,
+                            "bytes": byte_size,
+                            "sha256": sha256,
+                            "local_path": destination.relative_to(task_dir).as_posix(),
+                            "fit": "contain" if candidate["kind"] == "logo" else "cover",
+                            "status": "downloaded",
+                        }
+                    )
+                )
+                if not image_grounding_is_valid(downloaded, scenes_by_id[scene_id]):
+                    destination.unlink(missing_ok=True)
+                    failed_sources.add(source)
+                    manifest["errors"].append(
+                        {
+                            "scene_id": scene_id,
+                            "stage": "grounding",
+                            "source_page_url": source,
+                            "message": "Selected image failed the persisted grounding contract",
+                        }
+                    )
+                    batch_failed = True
+                    break
+                staged.append(downloaded)
+
+            if batch_failed:
+                for image in staged:
+                    stale = _generated_asset_path(task_dir, image.get("local_path"))
+                    if stale is not None:
+                        stale.unlink(missing_ok=True)
+                # A duplicate teaches the matcher that two URLs are one
+                # content resource. No source is blacklisted; the next
+                # augmenting path may move the flexible scene instead.
+                if duplicate_hash:
+                    continue
                 continue
-            used_sources.add(downloaded["source_page_url"])
-            used_scene_ids.add(scene_id)
-            manifest["images"].append(downloaded)
-            manifest["placement_modes"] = _placement_mode_counts(manifest["images"])
-            manifest["updated_at"] = _now()
-            _write_manifest(task_dir, manifest)
-            _emit(
-                log,
-                f"News image acquired for {scene_id}: {downloaded['title']} "
-                f"({downloaded['license']}, {downloaded['display_mode']})",
-            )
+
+            manifest["images"] = staged
+            for downloaded in staged:
+                _emit(
+                    log,
+                    f"News image acquired for {downloaded['scene_id']}: {downloaded['title']} "
+                    f"({downloaded['license']}, {downloaded['display_mode']})",
+                )
+            break
+
+    if len(manifest["images"]) < target:
+        manifest["errors"].append(
+            {
+                "stage": "selection",
+                "message": "No unique scene/source/content assignment satisfied the grounding contract",
+            }
+        )
 
     acquired = len(manifest["images"])
     _ensure_placement_mode_mix(manifest["images"])
@@ -1612,31 +2064,107 @@ def attach_news_images(
     task_dir: Path,
 ) -> dict:
     """Attach exact-scene images without displacing existing moving B-roll."""
+    if (
+        not manifest
+        or manifest.get("status") != "ready"
+        or manifest.get("manifest_version") != MANIFEST_VERSION
+        or manifest.get("query_semantics_version") != QUERY_SEMANTICS_VERSION
+        or manifest.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
+        or manifest.get("storyboard_sha256") != storyboard_fingerprint(storyboard)
+        or manifest.get("license_policy") != "open_only"
+    ):
+        return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
+    images = manifest.get("images") or []
+    raw_eligible = manifest.get("eligible_scene_ids") or []
+    raw_excluded = manifest.get("excluded_scene_ids") or []
+    if (
+        not isinstance(images, list)
+        or any(not isinstance(image, dict) for image in images)
+        or not isinstance(raw_eligible, list)
+        or not isinstance(raw_excluded, list)
+    ):
+        return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
+    try:
+        requested = int(manifest.get("requested_image_count") or 0)
+        planned = int(manifest.get("planned_image_count") or 0)
+        eligible_count = int(manifest.get("eligible_scene_count") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
+    eligible = [str(item) for item in raw_eligible]
+    excluded = {str(item) for item in raw_excluded}
+    expected_eligible = [
+        str(scene.get("id") or "")
+        for scene in storyboard.get("scenes") or []
+        if str(scene.get("id") or "") and str(scene.get("id") or "") not in excluded
+    ]
+    inventory_modes = _placement_mode_counts(images)
+    if (
+        not images
+        or eligible != expected_eligible
+        or eligible_count != len(eligible)
+        or planned != min(max(0, requested), len(eligible))
+        or len(images) != planned
+        or manifest.get("placement_modes") != inventory_modes
+        or (planned >= 2 and (not inventory_modes["inline"] or not inventory_modes["fullscreen"]))
+    ):
+        return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
     by_id = {str(plan.get("id") or ""): plan for plan in plans}
-    scene_ids = {str(scene.get("id") or "") for scene in storyboard.get("scenes") or []}
+    scenes_by_id = {
+        str(scene.get("id") or ""): scene for scene in storyboard.get("scenes") or []
+    }
     attached = 0
     modes = {"inline": 0, "fullscreen": 0}
     attached_scenes: set[str] = set()
     attached_sources: set[str] = set()
-    for image in (manifest or {}).get("images") or []:
+    attached_hashes: set[str] = set()
+    inventory_scenes: set[str] = set()
+    inventory_sources: set[str] = set()
+    inventory_hashes: set[str] = set()
+    inventory_paths: set[str] = set()
+    for image in images:
         scene_id = str(image.get("scene_id") or "")
         source_page_url = str(image.get("source_page_url") or "")
+        digest = str(image.get("sha256") or "")
+        local_path = str(image.get("local_path") or "")
+        scene = scenes_by_id.get(scene_id)
+        if (
+            scene is None
+            or scene_id not in eligible
+            or scene_id in inventory_scenes
+            or not source_page_url
+            or source_page_url in inventory_sources
+            or not digest
+            or digest in inventory_hashes
+            or not local_path
+            or local_path in inventory_paths
+            or not image_grounding_is_valid(image, scene)
+            or not _cached_asset_is_intact(task_dir, image)
+        ):
+            return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
+        inventory_scenes.add(scene_id)
+        inventory_sources.add(source_page_url)
+        inventory_hashes.add(digest)
+        inventory_paths.add(local_path)
+
+    for image in images:
+        scene_id = str(image.get("scene_id") or "")
+        source_page_url = str(image.get("source_page_url") or "")
+        digest = str(image.get("sha256") or "")
         plan = by_id.get(scene_id)
-        if not plan or scene_id not in scene_ids:
+        scene = scenes_by_id.get(scene_id)
+        if not plan or scene is None:
             continue
         if (
             scene_id in attached_scenes
             or not source_page_url
             or source_page_url in attached_sources
-            or image.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
-            or image.get("grounding_passed") is not True
-            or not image.get("grounding_distinctive_anchors")
+            or not digest
+            or digest in attached_hashes
+            or not image_grounding_is_valid(image, scene)
+            or not _cached_asset_is_intact(task_dir, image)
         ):
             continue
         if plan.get("collage_broll") or plan.get("archetype") == "footage":
-            continue
-        local = task_dir / str(image.get("local_path") or "")
-        if not local.is_file():
             continue
         mode = str(image.get("display_mode") or "inline")
         if mode not in PLAN_MODES:
@@ -1661,7 +2189,15 @@ def attach_news_images(
                 "news_image_grounding_passed": image.get("grounding_passed") is True,
                 "news_image_grounding_distinctive_anchors": image.get("grounding_distinctive_anchors") or [],
                 "news_image_grounding_reason": image.get("grounding_reason") or "",
+                "news_image_grounding_identity_field": image.get("grounding_identity_field") or "",
+                "news_image_grounding_identity_phrase": image.get("grounding_identity_phrase") or "",
+                "news_image_grounding_identity_field_terms": image.get("grounding_identity_field_terms") or [],
+                "news_image_grounding_subject_terms": image.get("grounding_subject_terms") or [],
+                "news_image_title": image.get("title") or "",
+                "news_image_description": image.get("description") or "",
                 "news_image_license": image.get("license") or "",
+                "news_image_license_code": image.get("license_code") or "",
+                "news_image_sha256": digest,
                 "news_image_reference_count": len(image.get("references") or []),
             }
         )
@@ -1671,5 +2207,6 @@ def attach_news_images(
         attached += 1
         attached_scenes.add(scene_id)
         attached_sources.add(source_page_url)
+        attached_hashes.add(digest)
         modes[mode] += 1
     return {"attached": attached, "placement_modes": modes}

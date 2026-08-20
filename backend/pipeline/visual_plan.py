@@ -21,7 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from backend import config
-from backend.pipeline import scene_kit
+from backend.pipeline import news_images, scene_kit
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -569,22 +569,29 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
             distinctive_anchors = plan.get("news_image_grounding_distinctive_anchors") or []
             source_scene_id = str(plan.get("news_image_source_scene_id") or "")
             exact_scene = source_scene_id == scene["id"]
-            open_license = bool(str(plan.get("news_image_license") or "").strip())
-            policy_current = (
-                int(plan.get("news_image_grounding_policy_version") or 0) >= 2
-                and plan.get("news_image_grounding_passed") is True
-            )
+            proof = {
+                "expected_subject": plan.get("news_image_expected_subject") or "",
+                "kind": plan.get("news_image_kind") or "event",
+                "title": plan.get("news_image_title") or "",
+                "description": plan.get("news_image_description") or "",
+                "license": plan.get("news_image_license") or "",
+                "license_code": plan.get("news_image_license_code") or "",
+                "match_terms": match_terms,
+                "grounding_policy_version": plan.get("news_image_grounding_policy_version"),
+                "grounding_passed": plan.get("news_image_grounding_passed") is True,
+                "grounding_distinctive_anchors": distinctive_anchors,
+                "grounding_identity_field": plan.get("news_image_grounding_identity_field") or "",
+                "grounding_identity_phrase": plan.get("news_image_grounding_identity_phrase") or "",
+                "grounding_identity_field_terms": plan.get("news_image_grounding_identity_field_terms") or [],
+            }
             grounded = (
                 grounded
                 and exact_scene
-                and bool(match_terms)
-                and bool(distinctive_anchors)
-                and set(distinctive_anchors).issubset(set(match_terms))
-                and policy_current
-                and open_license
+                and news_images.image_grounding_is_valid(proof, scene)
             )
             reason = (
-                "licensed news image passed the current three-way grounding policy on " + ", ".join(distinctive_anchors)
+                "licensed news image passed the current complete-identity grounding policy on "
+                + ", ".join(distinctive_anchors)
                 if grounded
                 else "news image lacked a current exact-scene grounding proof or license anchor"
             )

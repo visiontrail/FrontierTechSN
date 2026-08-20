@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from backend.pipeline import digester, scene_kit, visual_plan
+from backend.pipeline import digester, news_images, scene_kit, visual_plan
 
 
 def board(n: int = 3) -> dict:
@@ -387,15 +387,28 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
     data = board(1)
     data["scenes"][0]["text"] = "NVIDIA announced the Vera CPU."
     plans = visual_plan.fallback_plan(data)
+    evidence = news_images._grounding_evidence(
+        {"expected_subject": "NVIDIA", "kind": "logo"},
+        data["scenes"][0],
+        {"title": "NVIDIA logo", "description": "Official NVIDIA logo"},
+    )
     plans[0].update(
         {
             "news_image": True,
             "news_image_source_scene_id": "scene-01",
-            "news_image_match_terms": ["nvidia"],
-            "news_image_grounding_policy_version": 2,
+            "news_image_expected_subject": "NVIDIA",
+            "news_image_kind": "logo",
+            "news_image_title": "NVIDIA logo",
+            "news_image_description": "Official NVIDIA logo",
+            "news_image_match_terms": evidence["grounding_distinctive_anchors"],
+            "news_image_grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
             "news_image_grounding_passed": True,
-            "news_image_grounding_distinctive_anchors": ["nvidia"],
+            "news_image_grounding_distinctive_anchors": evidence["grounding_distinctive_anchors"],
+            "news_image_grounding_identity_field": evidence["grounding_identity_field"],
+            "news_image_grounding_identity_phrase": evidence["grounding_identity_phrase"],
+            "news_image_grounding_identity_field_terms": evidence["grounding_identity_field_terms"],
             "news_image_license": "Public domain",
+            "news_image_license_code": "Public domain",
         }
     )
 
@@ -403,6 +416,54 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
 
     assert report["passed"] is True
     assert "licensed news image" in report["scenes"][0]["reason"]
+
+
+def _verified_news_plan() -> tuple[dict, list[dict]]:
+    data = board(1)
+    data["scenes"][0]["text"] = "NVIDIA announced the Vera CPU."
+    plans = visual_plan.fallback_plan(data)
+    evidence = news_images._grounding_evidence(
+        {"expected_subject": "NVIDIA", "kind": "logo"},
+        data["scenes"][0],
+        {"title": "NVIDIA logo", "description": "Official NVIDIA logo"},
+    )
+    plans[0].update(
+        {
+            "news_image": True,
+            "news_image_source_scene_id": "scene-01",
+            "news_image_expected_subject": "NVIDIA",
+            "news_image_kind": "logo",
+            "news_image_title": "NVIDIA logo",
+            "news_image_description": "Official NVIDIA logo",
+            "news_image_match_terms": evidence["grounding_distinctive_anchors"],
+            "news_image_grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+            "news_image_grounding_passed": True,
+            "news_image_grounding_distinctive_anchors": evidence["grounding_distinctive_anchors"],
+            "news_image_grounding_identity_field": evidence["grounding_identity_field"],
+            "news_image_grounding_identity_phrase": evidence["grounding_identity_phrase"],
+            "news_image_grounding_identity_field_terms": evidence["grounding_identity_field_terms"],
+            "news_image_license": "Public domain",
+            "news_image_license_code": "Public domain",
+        }
+    )
+    return data, plans
+
+
+def test_visual_grounding_report_recomputes_news_image_policy_and_license():
+    mutations = [
+        {"news_image_grounding_policy_version": 999},
+        {"news_image_license": "All rights reserved", "news_image_license_code": "copyright"},
+        {"news_image_match_terms": ["bogus"]},
+        {"news_image_grounding_identity_phrase": "bogus"},
+        {"news_image_title": "Google logo"},
+        {"news_image_source_scene_id": "scene-99"},
+    ]
+
+    for mutation in mutations:
+        data, plans = _verified_news_plan()
+        plans[0].update(mutation)
+        report = visual_plan.visual_grounding_report(plans, data)
+        assert report["passed"] is False, mutation
 
 
 def test_visual_grounding_report_rejects_legacy_news_image_without_policy_proof():
