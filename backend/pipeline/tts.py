@@ -82,6 +82,7 @@ ORPHEUS_NAME_ACOUSTIC_SPLITS = {
 MAX_PLAUSIBLE_SPEECH_WPM = 320
 LEXICAL_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?|[\u3400-\u9fff]")
 DECIMAL_LITERAL_RE = re.compile(r"(\d+)\.(\d+)")
+CURRENCY_AMOUNT_RE = re.compile(r"\$([0-9]+(?:\.\d+)?)")
 DECIMAL_INTEGER_WORD_RE = re.compile(r"\s*(\d+)\s*")
 DECIMAL_FRACTION_WORD_RE = re.compile(r"\s*\.(\d+)[.,;:!?]?\s*")
 NUMBER_WORDS = {
@@ -145,6 +146,12 @@ ACOUSTIC_EQUIVALENTS = {
     "sorsese": "scorsese",
 }
 ACOUSTIC_PHRASE_EQUIVALENTS = {
+    # The investment-bank name is acoustically ambiguous with two common
+    # surname spellings in Whisper.  Scope the equivalence to the complete
+    # report attribution so unrelated people named Jeffreys remain distinct.
+    ("the", "jefferies", "report"): "thejefferiesreport",
+    ("the", "jeffreys", "report"): "thejefferiesreport",
+    ("the", "jeffries", "report"): "thejefferiesreport",
     # Whisper may spell the phrasal verb as the identically pronounced noun.
     ("break", "through"): "breakthrough",
     # CamelCase publication names are a single lexical source token, while
@@ -221,19 +228,38 @@ def _spoken_word_count(text: str) -> int:
 def _raw_lexical_tokens(text: str) -> list[str]:
     """Normalize individual spellings without collapsing cross-word phrases."""
     normalized: list[str] = []
+    lexical_text = _strip_speaker_labels(text)
+    lexical_text = CURRENCY_AMOUNT_RE.sub(
+        lambda match: (
+            f" {match.group(1)} "
+            + (
+                "dollar"
+                if re.fullmatch(r"1(?:\.0+)?", match.group(1))
+                else "dollars"
+            )
+            + " "
+        ),
+        lexical_text,
+    )
+    lexical_text = lexical_text.replace("$", " dollar ")
+    for symbol, spoken in (
+        ("&", "and"),
+        ("+", "plus"),
+        ("=", "equals"),
+        ("@", "at"),
+        ("#", "hashsymbol"),
+        ("°", "degrees"),
+    ):
+        lexical_text = lexical_text.replace(symbol, f" {spoken} ")
+    lexical_text = lexical_text.replace("%", " percent ")
     lexical_text = DECIMAL_LITERAL_RE.sub(
         lambda match: (
             f" decimalnumber{match.group(1)}point{match.group(2)} "
         ),
-        _strip_speaker_labels(text),
+        lexical_text,
     )
     for token in LEXICAL_TOKEN_RE.findall(lexical_text):
         value = token.replace("’", "'").casefold()
-        # Whisper commonly renders spoken "percent" as the punctuation symbol
-        # "%", which is not a lexical token. Ignore the unit on both sides;
-        # the adjacent normalized number remains the acoustic anchor.
-        if value == "percent":
-            continue
         value = ACOUSTIC_EQUIVALENTS.get(value, value)
         normalized.append(ORDINAL_DIGITS.get(value, NUMBER_WORDS.get(value, value)))
     return normalized
@@ -339,13 +365,18 @@ def _canonicalize_decimal_transcript_tokens(
     return result, result_indexes
 
 
-def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
-    """Collapse acoustically identical written/spoken English number forms."""
+def _canonicalize_number_tokens_with_indexes(
+    tokens: list[str], word_indexes: list[int]
+) -> tuple[list[str], list[int]]:
+    """Collapse number forms while preserving the first contributing word."""
+    if len(tokens) != len(word_indexes):
+        raise ValueError("Number tokens and word indexes must have equal length")
     # Whisper writes spoken years as one numeric token ("1895"), while the
     # script commonly spells them as "eighteen ninety-five". First collapse a
     # tens+ones pair, then combine two two-digit year halves. Also support the
     # conventional "nineteen oh five" pronunciation.
     simple: list[str] = []
+    simple_indexes: list[int] = []
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -358,13 +389,17 @@ def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
             and 1 <= int(tokens[index + 1]) <= 9
         ):
             simple.append(str(int(token) + int(tokens[index + 1])))
+            simple_indexes.append(word_indexes[index])
             index += 2
             continue
         simple.append(token)
+        simple_indexes.append(word_indexes[index])
         index += 1
     tokens = simple
+    word_indexes = simple_indexes
 
     result: list[str] = []
+    result_indexes: list[int] = []
     index = 0
     while index < len(tokens):
         if (
@@ -375,6 +410,7 @@ def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
             and len(tokens[index + 1]) == 2
         ):
             result.append(str(int(tokens[index]) * 100 + int(tokens[index + 1])))
+            result_indexes.append(word_indexes[index])
             index += 2
             continue
         if (
@@ -386,6 +422,7 @@ def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
             and 1 <= int(tokens[index + 2]) <= 9
         ):
             result.append(str(int(tokens[index]) * 100 + int(tokens[index + 2])))
+            result_indexes.append(word_indexes[index])
             index += 3
             continue
         if (
@@ -395,6 +432,7 @@ def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
             and tokens[index + 1].isdigit()
         ):
             result.append(tokens[index] + tokens[index + 1])
+            result_indexes.append(word_indexes[index])
             index += 2
             continue
         if (
@@ -417,6 +455,7 @@ def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
             current = 1
         else:
             result.append(tokens[index])
+            result_indexes.append(word_indexes[index])
             index += 1
             continue
         if tokens[start] == "a":
@@ -431,7 +470,25 @@ def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
             current = current * scale if scale >= 1_000 else current + scale
             index += 1
         result.append(str(current))
-    return result
+        result_indexes.append(word_indexes[start])
+    return result, result_indexes
+
+
+def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
+    """Collapse acoustically identical written/spoken English number forms."""
+    canonical, _ = _canonicalize_number_tokens_with_indexes(
+        tokens,
+        list(range(len(tokens))),
+    )
+    return canonical
+
+
+def _word_indexes_are_contiguous(word_indexes: list[int]) -> bool:
+    """Allow multiple tokens from one word or consecutive ASR words only."""
+    return bool(word_indexes) and all(
+        following - current in (0, 1)
+        for current, following in zip(word_indexes, word_indexes[1:])
+    )
 
 
 def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
@@ -471,7 +528,11 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
         for width in (3, 2):
             phrase = tuple(tokens[cursor:cursor + width])
             canonical_phrase = ACOUSTIC_PHRASE_EQUIVALENTS.get(phrase)
-            if canonical_phrase is not None:
+            phrase_indexes = word_indexes[cursor:cursor + width]
+            if (
+                canonical_phrase is not None
+                and _word_indexes_are_contiguous(phrase_indexes)
+            ):
                 acoustic_tokens.append(canonical_phrase)
                 acoustic_indexes.append(word_indexes[cursor])
                 cursor += width
@@ -483,6 +544,7 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
             tokens[cursor] == "dis"
             and cursor + 1 < len(tokens)
             and tokens[cursor + 1] == "proportionate"
+            and _word_indexes_are_contiguous(word_indexes[cursor:cursor + 2])
         ):
             acoustic_tokens.append("disproportionate")
             acoustic_indexes.append(word_indexes[cursor])
@@ -496,19 +558,11 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
     tokens, word_indexes = _canonicalize_decimal_transcript_tokens(
         tokens, word_indexes
     )
-    canonical = _canonicalize_calendar_date_tokens(
-        _canonicalize_number_tokens(tokens)
+    canonical, canonical_indexes = _canonicalize_number_tokens_with_indexes(
+        tokens,
+        word_indexes,
     )
-    if len(canonical) == len(tokens):
-        return canonical, word_indexes
-    # Canonical number collapsing is used only for lexical comparison. Timing
-    # indexes remain conservative at the first contributing Whisper word.
-    canonical_indexes: list[int] = []
-    cursor = 0
-    for token in canonical:
-        canonical_indexes.append(word_indexes[min(cursor, len(word_indexes) - 1)])
-        cursor += 2 if token.isdigit() and cursor + 1 < len(tokens) else 1
-    return canonical, canonical_indexes
+    return _canonicalize_calendar_date_tokens(canonical), canonical_indexes
 
 
 def _subsequence_starts(haystack: list[str], needle: list[str]) -> list[int]:
@@ -1249,7 +1303,11 @@ def _collapse_expected_name_splits(
         if accepted_splits is None:
             continue
         observed_delta = tuple(observed[observed_start:observed_end])
-        if observed_delta in accepted_splits:
+        contributing_indexes = observed_word_indexes[observed_start:observed_end]
+        if (
+            observed_delta in accepted_splits
+            and _word_indexes_are_contiguous(contributing_indexes)
+        ):
             replacements[observed_start] = (observed_end, expected[expected_start])
 
     if not replacements:

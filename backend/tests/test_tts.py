@@ -1295,6 +1295,116 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(tts._orpheus_transcript_report(expected, observed)["verified"])
 
+    def test_orpheus_transcript_accepts_contextual_jefferies_spelling(self):
+        expected = "The Jefferies report, as described by QbitAI, broke agent capability into model"
+        observed = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(
+                "The Jeffreys report as described by Qubit AI broke agent capability into model".split()
+            )
+        ]
+
+        report = tts._orpheus_transcript_report(expected, observed)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["matched_exact_words"], report["expected_words"])
+        self.assertEqual(report["transcript_word_ratio"], 1.0)
+
+    def test_orpheus_jefferies_report_equivalence_remains_context_limited(self):
+        def report(expected: str, observed: str) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        self.assertFalse(report("A Jefferies note", "A Jeffreys note")["verified"])
+        self.assertFalse(
+            report("The Jefferies report arrived", "The Jeffers report arrived")[
+                "verified"
+            ]
+        )
+        self.assertFalse(
+            report(
+                "The Jefferies report arrived",
+                "The Jeffreys annual report arrived",
+            )["verified"]
+        )
+        self.assertFalse(report("Q bit AI works", "QbitAI works")["verified"])
+
+    def test_orpheus_transcript_preserves_percent_as_a_completeness_token(self):
+        def verified(expected: str, observed: str) -> bool:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return bool(tts._orpheus_transcript_report(expected, words)["verified"])
+
+        self.assertTrue(verified("Growth reached 90 percent", "Growth reached 90%"))
+        self.assertTrue(verified("Growth reached 90%", "Growth reached 90 percent"))
+        self.assertFalse(verified("Growth reached 90", "Growth reached 90 percent"))
+        self.assertFalse(verified("Growth reached 90 percent", "Growth reached 90"))
+
+    def test_orpheus_name_collapses_do_not_hide_an_extra_percent(self):
+        expected = "The Jefferies report described QbitAI"
+
+        def verified(observed: str) -> bool:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return bool(tts._orpheus_transcript_report(expected, words)["verified"])
+
+        self.assertFalse(verified("The percent Jeffreys report described Qubit AI"))
+        self.assertFalse(verified("The Jeffreys report described Qubit percent AI"))
+
+    def test_orpheus_name_collapses_do_not_hide_spoken_symbols(self):
+        expected = "The Jefferies report described QbitAI"
+
+        def verified(raw_words: list[str]) -> bool:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(raw_words)
+            ]
+            return bool(tts._orpheus_transcript_report(expected, words)["verified"])
+
+        self.assertFalse(
+            verified(["The", "&", "Jeffreys", "report", "described", "Qubit", "AI"])
+        )
+        self.assertFalse(
+            verified(["The", "Jeffreys", "report", "described", "Qubit", "&AI"])
+        )
+        self.assertFalse(
+            verified(["The", "Jeffreys", "report", "described", "Q-bit-AI"])
+        )
+
+    def test_orpheus_transcript_preserves_spoken_currency_units(self):
+        def verified(expected: str, raw_words: list[str]) -> bool:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(raw_words)
+            ]
+            return bool(tts._orpheus_transcript_report(expected, words)["verified"])
+
+        self.assertTrue(verified("It cost $5", ["It", "cost", "$5"]))
+        self.assertTrue(verified("It cost 5 dollars", ["It", "cost", "$5"]))
+        self.assertFalse(verified("It cost 5", ["It", "cost", "$5"]))
+
+    def test_transcript_number_indexes_preserve_later_name_provenance(self):
+        raw_words = "twenty twenty six Q bit AI works".split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(raw_words)
+        ]
+
+        tokens, indexes = tts._transcript_tokens(words)
+
+        self.assertEqual(tokens, ["2026", "q", "bit", "ai", "works"])
+        self.assertEqual(indexes, [0, 3, 4, 5, 6])
+        self.assertFalse(
+            tts._orpheus_transcript_report("2026 QbitAI works", words)["verified"]
+        )
+
     def test_orpheus_name_recheck_rejects_adjacent_extra_or_missing_name(self):
         expected = "Qwen Office ranked first."
 
