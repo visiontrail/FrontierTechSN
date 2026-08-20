@@ -606,12 +606,81 @@ def _mask_tile_profile(
     return occupied, occupied_rows, occupied_columns
 
 
+def _binary_mask_has_few_runs(mask: Image.Image, *, maximum_runs: int = 4) -> bool:
+    bbox = mask.getbbox()
+    if bbox is None:
+        return False
+    sample = mask.crop(bbox)
+    sample.thumbnail((256, 256), Image.Resampling.NEAREST)
+    width, height = sample.size
+
+    def run_count(values: bytes) -> int:
+        runs = 0
+        inside = False
+        for value in values:
+            visible = value >= 128
+            if visible and not inside:
+                runs += 1
+            inside = visible
+        return runs
+
+    row_runs = [
+        run_count(sample.crop((0, row, width, row + 1)).tobytes())
+        for row in range(height)
+    ]
+    column_runs = [
+        run_count(sample.crop((column, 0, column + 1, height)).tobytes())
+        for column in range(width)
+    ]
+    return max(row_runs, default=0) <= maximum_runs and max(
+        column_runs,
+        default=0,
+    ) <= maximum_runs
+
+
+def _channel_has_diverse_spatial_profiles(
+    channel: Image.Image,
+    visible_mask: Image.Image | None,
+) -> bool:
+    field = (
+        channel.copy()
+        if visible_mask is None
+        else ImageChops.multiply(channel, visible_mask)
+    )
+    if visible_mask is not None:
+        bbox = visible_mask.getbbox()
+        if bbox is None:
+            return False
+        field = field.crop(bbox)
+    field.thumbnail((256, 256), Image.Resampling.BOX)
+    width, height = field.size
+    row_slices = [
+        field.crop((0, row, width, row + 1)).tobytes()
+        for row in range(height)
+    ]
+    column_slices = [
+        field.crop((column, 0, column + 1, height)).tobytes()
+        for column in range(width)
+    ]
+    minimum_row_diversity = max(8, math.ceil(height * 0.25))
+    minimum_column_diversity = max(8, math.ceil(width * 0.25))
+    return (
+        len(set(row_slices)) >= minimum_row_diversity
+        and len(set(column_slices)) >= minimum_column_diversity
+        and len({sum(row) for row in row_slices}) >= minimum_row_diversity
+        and len({sum(column) for column in column_slices})
+        >= minimum_column_diversity
+    )
+
+
 def _rgb_detail_is_distributed(
     detail_mask: Image.Image,
     detail_pixels: int,
     *,
     kind: str,
     color_levels: int,
+    channel: Image.Image,
+    visible_mask: Image.Image | None,
 ) -> bool:
     bbox_width, bbox_height, bbox_area = _mask_bbox_ratios(detail_mask)
     bbox = detail_mask.getbbox()
@@ -640,13 +709,16 @@ def _rgb_detail_is_distributed(
     occupied, _, _ = _mask_tile_profile(detail_mask, detail_pixels, divisions=2)
     if occupied < 2:
         return False
-    return (
-        bbox_fill >= 0.8
-        or color_levels >= 16
-        or (
+    if color_levels <= 4:
+        return (
+            bbox_fill >= 0.8 and _binary_mask_has_few_runs(detail_mask)
+        ) or (
             kind == "logo"
             and _alpha_mask_has_distinctive_shape(detail_mask, detail_pixels)
         )
+    return color_levels >= 16 and _channel_has_diverse_spatial_profiles(
+        channel,
+        visible_mask,
     )
 
 
@@ -658,7 +730,7 @@ def _rgb_has_visible_content(
     kind: str,
 ) -> bool:
     rgb = decoded.convert("RGB")
-    for channel in rgb.split():
+    for channel in (*rgb.split(), rgb.convert("L")):
         histogram = channel.histogram(mask)
         occupied = [value for value, count in enumerate(histogram) if count]
         if not occupied or occupied[-1] - occupied[0] < 8:
@@ -675,6 +747,8 @@ def _rgb_has_visible_content(
             detail_pixels,
             kind=kind,
             color_levels=len(occupied),
+            channel=channel,
+            visible_mask=mask,
         ):
             return True
     return False

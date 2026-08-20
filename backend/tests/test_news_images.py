@@ -159,10 +159,23 @@ def _image_bytes(
     color = tuple(hashlib.sha256(seed.encode("utf-8")).digest()[:3])
     image = Image.new("RGB", size, color)
     accent = (255, 255, 255) if sum(color) < 384 else (0, 0, 0)
-    ImageDraw.Draw(image).rectangle(
+    draw = ImageDraw.Draw(image)
+    draw.rectangle(
         (size[0] // 4, size[1] // 4, 3 * size[0] // 4, 3 * size[1] // 4),
         fill=accent,
     )
+    if format_name.upper() in {"JPEG", "JPG"}:
+        line_width = max(2, min(size) // 96)
+        for index in range(24):
+            detail_color = tuple(
+                hashlib.sha256(f"{seed}:{index}".encode("utf-8")).digest()[:3]
+            )
+            start_x = -size[0] + index * size[0] // 12
+            draw.line(
+                (start_x, 0, start_x + size[0], size[1]),
+                fill=detail_color,
+                width=line_width,
+            )
     image.save(payload, format=format_name)
     return payload.getvalue()
 
@@ -182,6 +195,32 @@ def _transparent_wordmark_bytes(
         fill=(15, 75, 210, 255),
         stroke_width=1,
     )
+    image.save(payload, format="PNG")
+    return payload.getvalue()
+
+
+def _periodic_color_pattern_bytes(pattern: str, levels: int) -> bytes:
+    image = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    colors = [
+        (
+            (index * 37 + 20) % 256,
+            (index * 67 + 80) % 256,
+            (index * 97 + 140) % 256,
+            255,
+        )
+        for index in range(levels)
+    ]
+    for y in range(100, 350, 5):
+        for x in range(250, 550, 5):
+            if pattern == "vertical":
+                color_index = (x - 250) // 5
+            elif pattern == "horizontal":
+                color_index = (y - 100) // 5
+            else:
+                color_index = (x - 250) // 5 + (y - 100) // 5
+            draw.rectangle((x, y, x + 4, y + 4), fill=colors[color_index % levels])
+    payload = io.BytesIO()
     image.save(payload, format="PNG")
     return payload.getvalue()
 
@@ -1217,6 +1256,12 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     assert_payload(stripes.getvalue(), kind="event", expected=False)
     assert_payload(stripes.getvalue(), kind="logo", expected=False)
 
+    for pattern in ("vertical", "horizontal", "checker"):
+        for levels in (8, 16, 32):
+            periodic = _periodic_color_pattern_bytes(pattern, levels)
+            assert_payload(periodic, kind="event", expected=False)
+            assert_payload(periodic, kind="logo", expected=False)
+
     alpha_checkerboard = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
     checkerboard_draw = ImageDraw.Draw(alpha_checkerboard)
     for y in range(0, 450, 40):
@@ -1342,42 +1387,64 @@ def test_raster_content_gate_survives_cache_attach_and_visual_pipeline(tmp_path:
     for index, x in enumerate(range(100, 700, 20)):
         color = (20, 80, 220, 255) if index % 2 == 0 else (240, 160, 20, 255)
         striped_draw.rectangle((x, 80, x + 9, 369), fill=color)
+    duotone_cutout = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    duotone_draw = ImageDraw.Draw(duotone_cutout)
+    duotone_draw.rectangle((150, 75, 399, 374), fill=(20, 80, 220, 255))
+    duotone_draw.rectangle((400, 75, 649, 374), fill=(240, 160, 20, 255))
     cases = [
-        ("nvidia-wordmark", _transparent_wordmark_bytes("NVIDIA"), True),
+        ("nvidia-wordmark", _transparent_wordmark_bytes("NVIDIA"), "logo", ".png", True),
         (
             "alibaba-wordmark",
             _transparent_wordmark_bytes("ALIBABA GROUP", size=(800, 160)),
+            "logo",
+            ".png",
             True,
         ),
         (
             "world-aquatics-wordmark",
             _transparent_wordmark_bytes("WORLD AQUATICS", size=(900, 180)),
+            "logo",
+            ".png",
             True,
         ),
-        ("white-strip", encoded(white_strip), False),
-        ("solid-block", encoded(solid_block), False),
-        ("gradient-patch", encoded(gradient_patch), False),
-        ("two-blocks", encoded(two_blocks), False),
-        ("grooved-block", encoded(grooved_block), False),
-        ("opaque-gradient-edge", encoded(opaque_edge), False),
-        ("transparent-gradient-edge", encoded(transparent_edge), False),
-        ("noise-islands", encoded(noise_islands), False),
-        ("diagonal-line", encoded(diagonal), False),
-        ("striped-pattern", encoded(striped), False),
+        ("duotone-cutout", encoded(duotone_cutout), "event", ".png", True),
+        ("ordinary-photo", _image_bytes("JPEG", "pipeline-photo"), "event", ".jpg", True),
+        ("white-strip", encoded(white_strip), "logo", ".png", False),
+        ("solid-block", encoded(solid_block), "logo", ".png", False),
+        ("gradient-patch", encoded(gradient_patch), "logo", ".png", False),
+        ("two-blocks", encoded(two_blocks), "logo", ".png", False),
+        ("grooved-block", encoded(grooved_block), "logo", ".png", False),
+        ("opaque-gradient-edge", encoded(opaque_edge), "logo", ".png", False),
+        ("transparent-gradient-edge", encoded(transparent_edge), "logo", ".png", False),
+        ("noise-islands", encoded(noise_islands), "logo", ".png", False),
+        ("diagonal-line", encoded(diagonal), "logo", ".png", False),
+        ("striped-pattern", encoded(striped), "logo", ".png", False),
+        *[
+            (
+                f"periodic-{pattern}-{levels}-{kind}",
+                _periodic_color_pattern_bytes(pattern, levels),
+                kind,
+                ".png",
+                False,
+            )
+            for pattern in ("vertical", "horizontal", "checker")
+            for levels in (8, 16, 32)
+            for kind in ("event", "logo")
+        ],
     ]
 
-    for name, payload, expected in cases:
+    for name, payload, kind, suffix, expected in cases:
         task_dir = tmp_path / name
         asset_dir = task_dir / "news_images"
         asset_dir.mkdir(parents=True)
-        (asset_dir / "image-01.png").write_bytes(payload)
+        (asset_dir / f"image-01{suffix}").write_bytes(payload)
         image = _grounded_image_record(
             data["scenes"][0],
-            local_path="news_images/image-01.png",
+            local_path=f"news_images/image-01{suffix}",
             payload=payload,
             source=f"https://commons.example/{name}",
             subject="NVIDIA",
-            kind="logo",
+            kind=kind,
             mode="inline",
         )
         manifest = {
