@@ -162,7 +162,8 @@ def _spoken_word_count(text: str) -> int:
     return len(_strip_speaker_labels(text).split())
 
 
-def _lexical_tokens(text: str) -> list[str]:
+def _raw_lexical_tokens(text: str) -> list[str]:
+    """Normalize individual spellings without collapsing cross-word phrases."""
     normalized: list[str] = []
     for token in LEXICAL_TOKEN_RE.findall(_strip_speaker_labels(text)):
         value = token.replace("’", "'").casefold()
@@ -173,6 +174,11 @@ def _lexical_tokens(text: str) -> list[str]:
             continue
         value = ACOUSTIC_EQUIVALENTS.get(value, value)
         normalized.append(ORDINAL_DIGITS.get(value, NUMBER_WORDS.get(value, value)))
+    return normalized
+
+
+def _lexical_tokens(text: str) -> list[str]:
+    normalized = _raw_lexical_tokens(text)
     return _canonicalize_calendar_date_tokens(
         _canonicalize_number_tokens(_canonicalize_acoustic_phrase_tokens(normalized))
     )
@@ -307,7 +313,7 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
     tokens: list[str] = []
     word_indexes: list[int] = []
     for index, word in enumerate(words):
-        for token in _lexical_tokens(str(word.get("text") or "")):
+        for token in _raw_lexical_tokens(str(word.get("text") or "")):
             tokens.append(token)
             word_indexes.append(index)
     # A provider-only pronunciation hint may lead Whisper to retain the

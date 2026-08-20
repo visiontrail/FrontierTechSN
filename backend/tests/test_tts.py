@@ -1239,6 +1239,38 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report["verified"])
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
 
+    def test_orpheus_transcript_normalizes_scale_across_whisper_words(self):
+        expected = "Loss attributable to shareholders of 118 million yuan."
+        observed = "Loss attributable to shareholders of 118 million yuan".split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["expected_words"], 7)
+        self.assertEqual(report["transcript_words"], 7)
+        self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
+        missing_scale = [word for word in words if word["text"] != "million"]
+        wrong_number = [
+            {**word, "text": "119" if word["text"] == "118" else word["text"]}
+            for word in words
+        ]
+        repeated_scale = words[:6] + [{**words[6], "text": "million"}] + words[6:]
+
+        self.assertFalse(
+            tts._orpheus_transcript_report(expected, missing_scale)["verified"]
+        )
+        self.assertFalse(
+            tts._orpheus_transcript_report(expected, wrong_number)["verified"]
+        )
+        self.assertFalse(
+            tts._orpheus_transcript_report(expected, repeated_scale)["verified"]
+        )
+
     def test_orpheus_transcript_normalizes_spelled_thousands(self):
         expected = (
             "three thousand nautical miles across open ocean without anyone noticing. "
