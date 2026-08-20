@@ -84,6 +84,9 @@ ACOUSTIC_EQUIVALENTS = {
     # spelling. Canonicalize only that exact homophone; missing, repeated, and
     # merely similar words must still fail the 100% utterance gate.
     "you're": "your",
+    # Singular and plural possessive spellings of "World" have the same
+    # spoken form; Whisper cannot recover which apostrophe the script used.
+    "worlds": "world's",
     # Whisper consistently labels the rare spoken word "eunuch" as the
     # familiar two-syllable proper noun "Unix", including at 0.8x speed.
     "unix": "eunuch",
