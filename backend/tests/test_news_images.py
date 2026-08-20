@@ -1,6 +1,8 @@
 import hashlib
 import io
 import json
+import struct
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -476,8 +478,16 @@ def test_wikimedia_candidate_is_license_and_resolution_gated():
 
     assert candidate is not None
     assert candidate["download_url"].endswith("logo.png")
+    assert candidate["mime_type"] == "image/png"
     assert candidate["license"] == "Public domain"
     assert news_images._extension_for(candidate) == ".png"
+
+    page["imageinfo"][0].pop("thumbmime")
+    page["imageinfo"][0].pop("thumburl")
+    assert news_images._candidate_from_page(page, shot) is None
+
+    page["imageinfo"][0]["thumbmime"] = "image/png"
+    page["imageinfo"][0]["thumburl"] = "https://upload.wikimedia.org/logo.png"
 
     page["imageinfo"][0]["extmetadata"]["LicenseShortName"]["value"] = "All rights reserved"
     assert news_images._candidate_from_page(page, shot) is None
@@ -774,10 +784,12 @@ def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(
     [
         ({"status": "partial"}, {}),
         ({"grounding_policy_version": 999}, {}),
+        ({"requested_image_count": 1.9}, {}),
         ({}, {"sha256": "0" * 64}),
         ({}, {"license": "All rights reserved", "license_code": "copyright"}),
         ({}, {"title": "Google logo"}),
         ({}, {"match_terms": ["bogus"]}),
+        ({}, {"display_mode": "sideways"}),
         ({}, {"local_path": "news_images/../outside.png"}),
     ],
 )
@@ -893,32 +905,83 @@ def test_cached_manifest_requires_same_storyboard_and_materialized_assets(
     )
 
 
-def test_cached_asset_validates_svg_without_bytes_casefold_or_late_doctype(
+def test_cached_asset_rejects_all_raw_svg_encodings_and_active_content(
     tmp_path: Path,
 ):
     asset_dir = tmp_path / "news_images"
     asset_dir.mkdir()
     path = asset_dir / "image-01.svg"
-    valid = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>'
-    path.write_bytes(valid)
-    record = {
-        "local_path": "news_images/image-01.svg",
-        "bytes": len(valid),
-        "sha256": hashlib.sha256(valid).hexdigest(),
-    }
+    payloads = [
+        b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(1)</script></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg"><image href="https://attacker.example/x"/></svg>',
+        (
+            '<?xml version="1.0" encoding="UTF-16"?>'
+            '<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+            '<svg xmlns="http://www.w3.org/2000/svg">&xxe;</svg>'
+        ).encode("utf-16"),
+    ]
 
-    assert news_images._cached_asset_is_intact(tmp_path, record) is True
+    for payload in payloads:
+        path.write_bytes(payload)
+        record = {
+            "local_path": "news_images/image-01.svg",
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        assert news_images._cached_asset_is_intact(tmp_path, record) is False
 
-    malicious = (
-        b"<!--"
-        + b"x" * 5000
-        + b"--><!DOCTYPE svg [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]>"
-        + b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+
+def test_cached_asset_rejects_tiny_and_decompression_bomb_rasters(tmp_path: Path):
+    asset_dir = tmp_path / "news_images"
+    asset_dir.mkdir()
+    path = asset_dir / "image-01.png"
+
+    tiny = io.BytesIO()
+    Image.new("RGB", (1, 1), "red").save(tiny, format="PNG")
+    tiny_payload = tiny.getvalue()
+    path.write_bytes(tiny_payload)
+    assert (
+        news_images._cached_asset_is_intact(
+            tmp_path,
+            {
+                "local_path": "news_images/image-01.png",
+                "bytes": len(tiny_payload),
+                "sha256": hashlib.sha256(tiny_payload).hexdigest(),
+                "kind": "logo",
+            },
+        )
+        is False
     )
-    path.write_bytes(malicious)
-    record["bytes"] = len(malicious)
-    record["sha256"] = hashlib.sha256(malicious).hexdigest()
-    assert news_images._cached_asset_is_intact(tmp_path, record) is False
+
+    ihdr = struct.pack(">IIBBBBB", 20_000, 20_000, 8, 2, 0, 0, 0)
+    bomb = (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", len(ihdr))
+        + b"IHDR"
+        + ihdr
+        + struct.pack(">I", zlib.crc32(b"IHDR" + ihdr) & 0xFFFFFFFF)
+        + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    path.write_bytes(bomb)
+    assert (
+        news_images._cached_asset_is_intact(
+            tmp_path,
+            {
+                "local_path": "news_images/image-01.png",
+                "bytes": len(bomb),
+                "sha256": hashlib.sha256(bomb).hexdigest(),
+                "kind": "event",
+            },
+        )
+        is False
+    )
+
+
+def test_license_gate_rejects_mixed_or_proprietary_markers():
+    assert news_images._is_open_license("CC BY-SA 4.0") is True
+    assert news_images._is_open_license("All rights reserved; CC BY", "copyright") is False
+    assert news_images._is_open_license("Proprietary", "CC-BY") is False
 
 
 @pytest.mark.asyncio
@@ -1044,9 +1107,19 @@ def test_cached_manifest_rejects_duplicate_identity_stale_policy_and_bad_hash(
     assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
 
     forged = json.loads(json.dumps(baseline))
+    forged["images"][0]["display_mode"] = "sideways"
+    write(forged)
+    assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
+
+    forged = json.loads(json.dumps(baseline))
     forged["planned_image_count"] = 1
     forged["images"] = forged["images"][:1]
     forged["placement_modes"] = {"inline": 1, "fullscreen": 0}
+    write(forged)
+    assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
+
+    forged = json.loads(json.dumps(baseline))
+    forged["requested_image_count"] = 2.9
     write(forged)
     assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
 
@@ -1418,13 +1491,30 @@ async def test_seven_scene_fallback_reaches_seven_unique_images_with_mode_mix(
     monkeypatch.setattr(news_images, "_download_candidate", fake_download)
     old_asset = tmp_path / "news_images" / "image-99.jpg"
     old_asset.parent.mkdir(parents=True)
-    old_asset.write_bytes(b"stale partial asset")
+    stale_payload = b"stale partial asset"
+    old_asset.write_bytes(stale_payload)
+    replacement_victim = old_asset.parent / "image-88.jpg"
+    replacement_victim.write_bytes(b"operator replacement")
+    previous_pipeline_payload = b"previous pipeline bytes"
     (old_asset.parent / "manifest.json").write_text(
         json.dumps(
             {
+                "manifest_version": 8,
                 "status": "partial",
+                "storyboard_sha256": news_images.storyboard_fingerprint(data),
                 "images": [
-                    {"local_path": "news_images/image-99.jpg"},
+                    {
+                        "id": "image-99",
+                        "local_path": "news_images/image-99.jpg",
+                        "bytes": len(stale_payload),
+                        "sha256": hashlib.sha256(stale_payload).hexdigest(),
+                    },
+                    {
+                        "id": "image-88",
+                        "local_path": "news_images/image-88.jpg",
+                        "bytes": len(previous_pipeline_payload),
+                        "sha256": hashlib.sha256(previous_pipeline_payload).hexdigest(),
+                    },
                     {"local_path": "news_images/image-operator-original.jpg"},
                     {"local_path": "news_images/../../outside.jpg"},
                 ],
@@ -1452,6 +1542,7 @@ async def test_seven_scene_fallback_reaches_seven_unique_images_with_mode_mix(
     assert subjects["scene-09"] == "Qwen Office"
     assert subjects["scene-10"] == "Jefferies"
     assert not old_asset.exists()
+    assert replacement_victim.read_bytes() == b"operator replacement"
     assert operator_image.read_bytes() == b"operator source"
     assert unowned_generated.read_bytes() == b"unowned source"
     assert keep.read_text(encoding="utf-8") == "keep"

@@ -21,7 +21,6 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlsplit
-from xml.etree import ElementTree
 
 import httpx
 from PIL import Image, UnidentifiedImageError
@@ -41,11 +40,11 @@ WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 MANIFEST_VERSION = 10
 QUERY_SEMANTICS_VERSION = 3
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
+NEWS_IMAGE_MAX_PIXELS = 40_000_000
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
     "image/png",
     "image/webp",
-    "image/svg+xml",
 }
 OPEN_LICENSE_MARKERS = (
     "public domain",
@@ -55,7 +54,15 @@ OPEN_LICENSE_MARKERS = (
     "cc by-sa",
     "cc-by-sa",
 )
-UNSAFE_LICENSE_MARKERS = ("noncommercial", "no derivatives", "-nc", "-nd")
+UNSAFE_LICENSE_MARKERS = (
+    "all rights reserved",
+    "copyright",
+    "noncommercial",
+    "no derivatives",
+    "proprietary",
+    "-nc",
+    "-nd",
+)
 PLAN_KINDS = {"logo", "event", "person", "place", "product", "object"}
 PLAN_MODES = {"inline", "fullscreen"}
 TAG_RE = re.compile(r"<[^>]+>")
@@ -479,11 +486,35 @@ def _generated_asset_path(task_dir: Path, local_path: object) -> Path | None:
     return candidate
 
 
+def _owned_generated_asset_path(task_dir: Path, image: dict) -> Path | None:
+    """Return a stale asset only when its manifest ownership proof still matches."""
+    path = _generated_asset_path(task_dir, image.get("local_path"))
+    if path is None or not path.is_file() or str(image.get("id") or "") != path.stem:
+        return None
+    try:
+        expected_bytes = int(image.get("bytes") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    expected_sha256 = str(image.get("sha256") or "")
+    if expected_bytes <= 0 or path.stat().st_size != expected_bytes or not expected_sha256:
+        return None
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return path if digest.hexdigest() == expected_sha256 else None
+
+
 def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
     local = _generated_asset_path(task_dir, image.get("local_path"))
     if local is None:
         return False
     if not local.is_file() or not local.stat().st_size:
+        return False
+    if local.suffix.casefold() == ".svg":
         return False
     try:
         expected_bytes = int(image.get("bytes") or 0)
@@ -504,16 +535,17 @@ def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
                 digest.update(chunk)
         if digest.hexdigest() != expected_sha256:
             return False
-        if local.suffix.casefold() == ".svg":
-            payload = local.read_bytes()
-            lowered = payload.lower()
-            if b"<!doctype" in lowered or b"<!entity" in lowered:
-                return False
-            root = ElementTree.fromstring(payload)
-            return root.tag.rsplit("}", 1)[-1].casefold() == "svg"
         with Image.open(local) as decoded:
+            width, height = decoded.size
+            if width * height > NEWS_IMAGE_MAX_PIXELS:
+                return False
+            if image.get("kind") == "logo":
+                if max(width, height) < 240:
+                    return False
+            elif width < 640 or height < 360:
+                return False
             decoded.verify()
-    except (ElementTree.ParseError, OSError, UnidentifiedImageError, ValueError):
+    except (Image.DecompressionBombError, OSError, UnidentifiedImageError, ValueError):
         return False
     return True
 
@@ -572,11 +604,10 @@ def _cached_manifest(
     images = manifest.get("images") or []
     if not isinstance(images, list) or any(not isinstance(image, dict) for image in images):
         return None
-    try:
-        planned = int(manifest.get("planned_image_count") or 0)
-        requested = int(manifest.get("requested_image_count") or 0)
-        eligible_count = int(manifest.get("eligible_scene_count") or 0)
-    except (TypeError, ValueError, OverflowError):
+    planned = manifest.get("planned_image_count")
+    requested = manifest.get("requested_image_count")
+    eligible_count = manifest.get("eligible_scene_count")
+    if any(type(value) is not int for value in (planned, requested, eligible_count)):
         return None
     if not images or len(images) != planned:
         return None
@@ -633,6 +664,7 @@ def _cached_manifest(
             or digest in seen_hashes
             or not local_path
             or local_path in seen_paths
+            or image.get("display_mode") not in PLAN_MODES
             or image.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
             or image.get("grounding_passed") is not True
             or not anchors
@@ -1747,10 +1779,21 @@ async def acquire_news_images(
 
     # A retry removes only generated paths explicitly owned by the preceding
     # manifest.  A broad image-* glob could delete an operator's source image.
-    for stale_image in (previous_manifest or {}).get("images") or []:
-        stale_path = _generated_asset_path(task_dir, stale_image.get("local_path"))
-        if stale_path is not None and stale_path.is_file():
-            stale_path.unlink()
+    previous_version = (previous_manifest or {}).get("manifest_version")
+    previous_status = str((previous_manifest or {}).get("status") or "")
+    previous_owns_assets = (
+        (previous_manifest or {}).get("storyboard_sha256") == fingerprint
+        and isinstance(previous_version, int)
+        and 8 <= previous_version <= MANIFEST_VERSION
+        and previous_status in {"searching", "partial", "no_results", "ready"}
+    )
+    if previous_owns_assets:
+        for stale_image in (previous_manifest or {}).get("images") or []:
+            if not isinstance(stale_image, dict):
+                continue
+            stale_path = _owned_generated_asset_path(task_dir, stale_image)
+            if stale_path is not None:
+                stale_path.unlink()
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -1946,6 +1989,7 @@ async def acquire_news_images(
                     "local_path": destination.relative_to(task_dir).as_posix(),
                     "bytes": byte_size,
                     "sha256": sha256,
+                    "kind": candidate.get("kind"),
                 }
                 if not _cached_asset_is_intact(task_dir, asset_record):
                     destination.unlink(missing_ok=True)
@@ -2097,11 +2141,10 @@ def attach_news_images(
         or not isinstance(raw_excluded, list)
     ):
         return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
-    try:
-        requested = int(manifest.get("requested_image_count") or 0)
-        planned = int(manifest.get("planned_image_count") or 0)
-        eligible_count = int(manifest.get("eligible_scene_count") or 0)
-    except (TypeError, ValueError, OverflowError):
+    requested = manifest.get("requested_image_count")
+    planned = manifest.get("planned_image_count")
+    eligible_count = manifest.get("eligible_scene_count")
+    if any(type(value) is not int for value in (planned, requested, eligible_count)):
         return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
     eligible = [str(item) for item in raw_eligible]
     excluded = {str(item) for item in raw_excluded}
@@ -2150,6 +2193,7 @@ def attach_news_images(
             or digest in inventory_hashes
             or not local_path
             or local_path in inventory_paths
+            or image.get("display_mode") not in PLAN_MODES
             or not image_grounding_is_valid(image, scene)
             or not _cached_asset_is_intact(task_dir, image)
         ):
