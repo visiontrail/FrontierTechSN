@@ -1041,6 +1041,25 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
     barely_visible.save(sparse, format="PNG")
     assert_payload(sparse.getvalue(), kind="event", expected=False)
 
+    small_visible_patch = Image.new("RGBA", (800, 450), (0, 0, 0, 0))
+    ImageDraw.Draw(small_visible_patch).rectangle((0, 0, 18, 18), fill=(20, 80, 220, 255))
+    small_patch = io.BytesIO()
+    small_visible_patch.save(small_patch, format="PNG")
+    assert_payload(small_patch.getvalue(), kind="event", expected=False)
+
+    faint_pattern = Image.new("RGBA", (800, 450), (255, 255, 255, 16))
+    ImageDraw.Draw(faint_pattern).rectangle((100, 100, 699, 349), fill=(10, 70, 210, 16))
+    faint = io.BytesIO()
+    faint_pattern.save(faint, format="PNG")
+    assert_payload(faint.getvalue(), kind="event", expected=False)
+
+    for exceptional_alpha in (0, 254):
+        almost_uniform = Image.new("RGBA", (800, 450), (255, 255, 255, 255))
+        almost_uniform.putpixel((400, 225), (255, 255, 255, exceptional_alpha))
+        one_alpha_exception = io.BytesIO()
+        almost_uniform.save(one_alpha_exception, format="PNG")
+        assert_payload(one_alpha_exception.getvalue(), kind="event", expected=False)
+
     logo = Image.new("RGBA", (656, 120), (0, 0, 0, 0))
     ImageDraw.Draw(logo).rectangle((80, 30, 575, 89), fill=(15, 75, 210, 255))
     transparent_logo = io.BytesIO()
@@ -1069,7 +1088,12 @@ def test_cached_asset_requires_visible_raster_content(tmp_path: Path):
         ("CC0 1.0 Universal", "cc-zero"),
         ("CC BY", ""),
         ("CC-BY-4.0", ""),
+        ("CC BY 2.1 jp", "cc-by-2.1-jp"),
+        ("CC BY-SA 3.0 CR", "cc-by-sa-3.0-cr"),
+        ("CC BY-SA 3.0 CZ", "cc-by-sa-3.0-cz"),
         ("CC BY-SA 3.0 DE", ""),
+        ("CC BY-SA 3.0 EE", "cc-by-sa-3.0-ee"),
+        ("CC BY-SA 3.0 NO", "cc-by-sa-3.0-no"),
         ("Creative Commons Attribution-Share Alike 4.0 International", ""),
     ],
 )
@@ -1084,12 +1108,16 @@ def test_license_gate_accepts_strict_commons_values(short_name: str, license_cod
         ("Proprietary", "CC-BY"),
         ("Not public domain", ""),
         ("This file is not licensed under CC BY", ""),
+        ("No CC BY", ""),
         ("", "not-cc-by"),
         ("CC BY", "Creative Commons Attribution Non-Commercial"),
         ("CC BY 4.0", "unknown-license-code"),
         ("CC BY-NC 4.0", ""),
         ("CC BY-ND 4.0", ""),
         ("PD-totally-bogus", ""),
+        ("CC BY 1.0 CZ", ""),
+        ("CC BY 2.1 DE", ""),
+        ("CC BY 4.0 DE", ""),
         ("CC BY 4.5", ""),
         ("CC BY 3.0 ZZ", ""),
     ],

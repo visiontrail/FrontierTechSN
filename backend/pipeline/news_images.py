@@ -47,8 +47,9 @@ SUPPORTED_MIME_TYPES = {
     "image/webp",
 }
 LICENSE_NEGATIVE_RE = re.compile(
-    r"(?:\ball rights reserved\b|\bcopyright(?:ed)?\b|\b(?:nc|nd|no|not|proprietary|"
-    r"unlicensed|without)\b|\bnon\s*commercial\b)",
+    r"(?:\ball rights reserved\b|\bcopyright(?:ed)?\b|\b(?:nc|nd|not|proprietary|"
+    r"unlicensed|without)\b|\bnon\s*commercial\b|\bno\s+(?:cc|creative commons|"
+    r"licenses?|rights?|permission|derivatives?|commercial|public domain|reuse|redistribution)\b)",
     flags=re.IGNORECASE,
 )
 PUBLIC_DOMAIN_LICENSES = frozenset(
@@ -81,20 +82,29 @@ PUBLIC_DOMAIN_LICENSES = frozenset(
         "public domain mark 1.0",
     }
 )
-CC_VERSION_PATTERN = r"(?:1\.0|2\.0|2\.5|3\.0|4\.0)"
 CC_REGION_PATTERN = (
-    r"(?:ar|at|au|be|br|ca|ch|cl|cn|co|de|dk|ec|eg|es|fi|fr|gr|gt|hk|hr|hu|ie|"
-    r"igo|il|in|international|it|jp|kr|lu|mk|mt|mx|my|nl|nz|pe|ph|pl|pr|pt|ro|"
-    r"rs|scotland|se|sg|si|th|tw|uk|unported|us|ve|za)"
+    r"(?:ar|at|au|be|bg|br|ca|ch|cl|cn|co|cr|cz|de|dk|ec|ee|eg|es|fi|fr|gr|gt|"
+    r"hk|hr|hu|ie|il|in|it|jp|kr|lu|mk|mt|mx|my|nl|no|nz|pe|ph|pl|pr|pt|ro|rs|"
+    r"scotland|se|sg|si|th|tw|ug|uk|us|ve|vn|za)"
+)
+CC_LICENSE_DETAIL_PATTERN = (
+    rf"(?:"
+    rf"(?:1\.0|2\.0|2\.5)|"
+    rf"3\.0(?: unported)?|"
+    rf"4\.0(?: international)?|"
+    rf"2\.1 jp|"
+    rf"(?:2\.0|2\.5|3\.0) {CC_REGION_PATTERN}|"
+    rf"3\.0 igo"
+    rf")"
 )
 CC0_LICENSE_RE = re.compile(r"cc(?:0| zero)(?: 1\.0)?(?: universal)?", flags=re.IGNORECASE)
 CC_LICENSE_RE = re.compile(
-    rf"cc by(?: sa)?(?: {CC_VERSION_PATTERN}(?: {CC_REGION_PATTERN})?)?",
+    rf"cc by(?: sa)?(?: {CC_LICENSE_DETAIL_PATTERN})?",
     flags=re.IGNORECASE,
 )
 CC_LONG_LICENSE_RE = re.compile(
     rf"creative commons attribution(?: share alike)?"
-    rf"(?: {CC_VERSION_PATTERN}(?: {CC_REGION_PATTERN})?)?",
+    rf"(?: {CC_LICENSE_DETAIL_PATTERN})?",
     flags=re.IGNORECASE,
 )
 PLAN_KINDS = {"logo", "event", "person", "place", "product", "object"}
@@ -172,7 +182,7 @@ def _metadata_value(metadata: dict, key: str) -> str:
 def _is_open_license(short_name: str, license_code: str = "") -> bool:
     values = [str(value or "").strip() for value in (short_name, license_code) if str(value or "").strip()]
     normalized = [" ".join(re.sub(r"[-_]+", " ", value).casefold().split()) for value in values]
-    if not normalized or LICENSE_NEGATIVE_RE.search(" ".join(normalized)):
+    if not normalized or any(LICENSE_NEGATIVE_RE.search(value) for value in normalized):
         return False
     return all(
         value in PUBLIC_DOMAIN_LICENSES
@@ -552,7 +562,7 @@ def _owned_generated_asset_path(task_dir: Path, image: dict) -> Path | None:
 def _raster_has_visible_content(decoded: Image.Image) -> bool:
     width, height = decoded.size
     total = width * height
-    minimum_visible = max(256, math.ceil(total * 0.001))
+    minimum_visible = max(1024, math.ceil(total * 0.01))
     alpha = None
     if "A" in decoded.getbands():
         alpha = decoded.getchannel("A")
@@ -560,11 +570,10 @@ def _raster_has_visible_content(decoded: Image.Image) -> bool:
         alpha = decoded.convert("RGBA").getchannel("A")
     if alpha is not None:
         histogram = alpha.histogram()
-        visible = sum(histogram[16:])
-        if visible < minimum_visible:
+        strong_visible = sum(histogram[64:])
+        if strong_visible < minimum_visible:
             return False
-        low, high = alpha.getextrema()
-        if low != high:
+        if total - strong_visible >= minimum_visible:
             return True
 
     rgb = decoded.convert("RGB")
