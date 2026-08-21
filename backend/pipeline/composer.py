@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 from collections.abc import Callable
@@ -60,33 +61,199 @@ RENDER_TIMEOUT_FLOOR = 900  # never below 15 min, regardless of how short the cl
 # (Chrome launch, first-frame compile) is the longest legitimate quiet stretch.
 RENDER_STALL_TIMEOUT = 600
 
+VISUAL_PLAN_CACHE_FILENAME = "visual_plan.cache.json"
+VISUAL_PLAN_CACHE_VERSION = 1
+VISUAL_PLAN_PROMPT_CONTRACT_VERSION = 1
+_VISUAL_PLAN_CACHE_KEYS = {
+    "cache_version",
+    "planner_input_sha256",
+    "prompt_contract_version",
+    "prompt_sha256",
+    "visual_plan_bytes",
+    "visual_plan_sha256",
+}
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant is not allowed: {value}")
+
+
+def _strict_json_loads(payload: bytes) -> object:
+    value = json.loads(
+        payload.decode("utf-8"),
+        parse_constant=_reject_json_constant,
+    )
+
+    def finite(item: object) -> bool:
+        if isinstance(item, float):
+            return math.isfinite(item)
+        if isinstance(item, list):
+            return all(finite(child) for child in item)
+        if isinstance(item, dict):
+            return all(isinstance(key, str) and finite(child) for key, child in item.items())
+        return item is None or isinstance(item, (str, int, bool))
+
+    if not finite(value):
+        raise ValueError("JSON contains a non-finite or unsupported value")
+    return value
+
+
+def _finite_storyboard_number(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"storyboard {field} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"storyboard {field} must be a finite number")
+    return number
+
+
+def _visual_plan_planner_input(board: dict) -> dict:
+    thesis = board.get("thesis") or ""
+    scenes = board.get("scenes") or []
+    if not isinstance(thesis, str) or not isinstance(scenes, list) or not scenes:
+        raise ValueError("storyboard is missing visual-plan planner input")
+
+    semantic_scenes: list[dict] = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            raise ValueError("storyboard scenes must be objects")
+        scene_id = scene.get("id")
+        text = scene.get("text")
+        index = scene.get("index")
+        keywords = scene.get("keywords") or []
+        if (
+            not isinstance(scene_id, str)
+            or not scene_id
+            or not isinstance(text, str)
+            or type(index) is not int
+            or index < 0
+            or not isinstance(keywords, list)
+            or any(not isinstance(keyword, str) for keyword in keywords)
+        ):
+            raise ValueError("storyboard scene semantics are malformed")
+        semantic_scenes.append(
+            {
+                "id": scene_id,
+                "index": index,
+                "text": text,
+                "start": _finite_storyboard_number(scene.get("start"), f"{scene_id}.start"),
+                "duration": _finite_storyboard_number(
+                    scene.get("duration"), f"{scene_id}.duration"
+                ),
+                "keywords": keywords,
+            }
+        )
+    return {"thesis": thesis, "scenes": semantic_scenes}
+
+
+def _canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _visual_plan_cache_contract(board: dict) -> dict:
+    prompt_bytes = (config.PROMPTS_DIR / "visual_plan.txt").read_bytes()
+    return {
+        "cache_version": VISUAL_PLAN_CACHE_VERSION,
+        "planner_input_sha256": _canonical_sha256(_visual_plan_planner_input(board)),
+        "prompt_contract_version": VISUAL_PLAN_PROMPT_CONTRACT_VERSION,
+        "prompt_sha256": hashlib.sha256(prompt_bytes).hexdigest(),
+    }
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _write_visual_plan_checkpoint(output_dir: Path, board: dict, plans: list[dict]) -> None:
+    plan_path = output_dir / "visual_plan.json"
+    cache_path = output_dir / VISUAL_PLAN_CACHE_FILENAME
+    plan_bytes = json.dumps(
+        plans,
+        indent=2,
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    contract = {
+        **_visual_plan_cache_contract(board),
+        "visual_plan_bytes": len(plan_bytes),
+        "visual_plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+    }
+    cache_bytes = json.dumps(
+        contract,
+        indent=2,
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+    # The sidecar is the commit marker. Invalidate it before replacing the plan,
+    # then publish the new sidecar last so every interrupted write fails closed.
+    cache_path.unlink(missing_ok=True)
+    _atomic_write_bytes(plan_path, plan_bytes)
+    _atomic_write_bytes(cache_path, cache_bytes)
+
 
 def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None:
     """Recover the last fully written direction pass after a late render failure.
 
-    ``visual_plan.json`` is written only after direction, collage attachment,
-    grounding and music mixing have completed.  A missing runtime asset should
-    therefore resume from that checkpoint instead of paying for the same slow
-    provider calls again.  Scene ids are validated against the current
-    storyboard so a changed script/audio pair can never reuse stale direction.
+    ``visual_plan.json`` is committed once immediately after direction and may be
+    enriched after collage, image, and music stages complete. A current sidecar
+    binds its exact bytes to the ordered storyboard semantics and visual-planner
+    prompt contract. Legacy, partial, tampered, and stale checkpoints fail closed.
     """
     path = output_dir / "visual_plan.json"
-    if not path.is_file():
+    cache_path = output_dir / VISUAL_PLAN_CACHE_FILENAME
+    if not path.is_file() or not cache_path.is_file():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        plan_bytes = path.read_bytes()
+        cache = _strict_json_loads(cache_path.read_bytes())
+        expected_contract = _visual_plan_cache_contract(board)
+        if (
+            not isinstance(cache, dict)
+            or set(cache) != _VISUAL_PLAN_CACHE_KEYS
+            or type(cache.get("cache_version")) is not int
+            or type(cache.get("prompt_contract_version")) is not int
+            or type(cache.get("visual_plan_bytes")) is not int
+            or cache.get("visual_plan_bytes") != len(plan_bytes)
+            or cache.get("visual_plan_sha256") != hashlib.sha256(plan_bytes).hexdigest()
+            or any(cache.get(key) != value for key, value in expected_contract.items())
+        ):
+            return None
+        payload = _strict_json_loads(plan_bytes)
+    except (
+        OSError,
+        RecursionError,
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ):
         return None
-    if not isinstance(payload, list):
+    if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
         return None
-    by_id = {
-        str(item.get("id") or ""): item
-        for item in payload
-        if isinstance(item, dict) and str(item.get("id") or "")
-    }
     scene_ids = [str(scene.get("id") or "") for scene in board.get("scenes") or []]
-    if not scene_ids or any(not scene_id or scene_id not in by_id for scene_id in scene_ids):
+    expected_ids = [*scene_ids, visual_plan.OUTRO_SCENE_ID]
+    payload_ids = [item.get("id") for item in payload]
+    if not scene_ids or any(not scene_id for scene_id in scene_ids) or payload_ids != expected_ids:
         return None
+    by_id = {str(item["id"]): item for item in payload}
     recovered: list[dict] = []
     for scene_id in scene_ids:
         plan = dict(by_id[scene_id])
@@ -107,6 +274,38 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
                     plan.pop(key, None)
         recovered.append(plan)
     return recovered
+
+
+async def _load_or_plan_scene_visuals(
+    output_dir: Path,
+    board: dict,
+    *,
+    ai_endpoint: str | None,
+    ai_model: str | None,
+    provider_id: int | None,
+    log: LogCallback,
+) -> list[dict]:
+    plans = _load_cached_scene_plans(output_dir, board)
+    if plans is not None:
+        log(f"Visual plan: reusing {len(plans)}/{board['scene_count']} cached scene plan(s)")
+        return plans
+
+    plans = await visual_plan.plan_scene_visuals(
+        board,
+        ai_endpoint=ai_endpoint,
+        ai_model=ai_model,
+        provider_id=provider_id,
+        log=log,
+    )
+    # Direction is the expensive checkpoint. Commit it before any footage,
+    # collage, image, or music stage can fail so a retry does not repeat the
+    # planner call. Runtime placement fields are added only to the later rewrite.
+    _write_visual_plan_checkpoint(
+        output_dir,
+        board,
+        [*plans, visual_plan.outro_plan(board)],
+    )
+    return plans
 
 
 def _news_image_placement_error(
@@ -656,17 +855,14 @@ async def compose_video(
     emit(f"Composition {board['total_duration']:.1f}s over {board['scene_count']} scenes")
 
     # --- 2. Direction ------------------------------------------------------
-    plans = _load_cached_scene_plans(output_dir_path, board)
-    if plans is not None:
-        emit(f"Visual plan: reusing {len(plans)}/{board['scene_count']} cached scene plan(s)")
-    else:
-        plans = await visual_plan.plan_scene_visuals(
-            board,
-            ai_endpoint=ai_endpoint,
-            ai_model=ai_model,
-            provider_id=provider_id,
-            log=emit,
-        )
+    plans = await _load_or_plan_scene_visuals(
+        output_dir_path,
+        board,
+        ai_endpoint=ai_endpoint,
+        ai_model=ai_model,
+        provider_id=provider_id,
+        log=emit,
+    )
 
     manifest = footage.read_manifest(output_dir_path)
     attached = visual_plan.attach_footage(plans, board, manifest, output_dir_path)
@@ -827,9 +1023,7 @@ async def compose_video(
         }
 
     plans = scene_plans + [visual_plan.outro_plan(board)]
-    (output_dir_path / "visual_plan.json").write_text(
-        json.dumps(plans, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    _write_visual_plan_checkpoint(output_dir_path, board, plans)
 
     # --- 3. Authoring ------------------------------------------------------
     mounts = _mount_list(board)
