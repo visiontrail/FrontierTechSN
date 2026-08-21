@@ -125,6 +125,162 @@ def failure_board() -> dict:
     }
 
 
+def real_split_story_board() -> dict:
+    """The 14-scene split that exposed generic caption words as fake entities."""
+    return {
+        "title": "Frontier Tech Daily",
+        "scenes": [
+            {
+                "id": "scene-01",
+                "text": "Good morning. This is Frontier Tech Daily.",
+                "keywords": ["morning", "briefing"],
+            },
+            {
+                "id": "scene-02",
+                "text": (
+                    "The Financial Times reports that China's humanoid robot makers derive "
+                    "revenue from government-backed training centers that sell training data "
+                    "back to the robot manufacturers."
+                ),
+                "keywords": ["robot", "training", "China"],
+            },
+            {
+                "id": "scene-03",
+                "text": (
+                    "DeepTech China reports that researchers at MIT are exploring whether "
+                    "living bacteria can build computing systems analogous to circuit boards."
+                ),
+                "keywords": ["MIT", "bacteria", "circuit boards"],
+            },
+            {
+                "id": "scene-04",
+                "text": (
+                    "QbitAI reports that Perfect World's 2026 semiannual report shows the "
+                    "company recorded first-half revenue of 2.751 billion yuan."
+                ),
+                "keywords": ["Perfect World", "revenue"],
+            },
+            {
+                "id": "scene-05",
+                "text": (
+                    "IEEE Spectrum published an article with the IEEE Technology and "
+                    "Engineering Management Society examining how engineers gain backing."
+                ),
+                "keywords": ["IEEE", "engineers", "leadership"],
+            },
+            {
+                "id": "scene-06",
+                "text": (
+                    "The article, authored by Alexander Brem, editor in chief of IEEE "
+                    "Engineering Management Review and a professor at the University of "
+                    "Stuttgart, describes promising product ideas."
+                ),
+                "keywords": ["Alexander Brem", "University of Stuttgart"],
+            },
+            {
+                "id": "scene-07",
+                "text": (
+                    "IEEE Spectrum notes that organizations including Google and 3M allocate "
+                    "work time for employee ideas. Brem's research says this practice pays off."
+                ),
+                "keywords": ["Google", "3M", "Brem"],
+            },
+            {
+                "id": "scene-08",
+                "text": (
+                    "The article discusses concepts including bootlegging and skunkworks "
+                    "projects, and outlines a network of promoters for new ideas."
+                ),
+                "keywords": ["bootlegging", "skunkworks", "promoters"],
+            },
+            {
+                "id": "scene-09",
+                "text": (
+                    "Nikkei Asia reports that China is restricting exports to Taiwan of "
+                    "germanium-based and quartz-based materials used in chip manufacturing."
+                ),
+                "keywords": ["China", "Taiwan", "germanium"],
+            },
+            {
+                "id": "scene-10",
+                "text": (
+                    "QbitAI reports that analysts at Jefferies tested global AI agents, with "
+                    "Alibaba's Qwen Office, known in Chinese as Qianwen Office, ranked first "
+                    "ahead of Claude Cowork and Codex."
+                ),
+                "keywords": ["Jefferies", "Qwen Office", "agents"],
+            },
+            {
+                "id": "scene-11",
+                "text": (
+                    "According to QbitAI, the test comprised five real office tasks: "
+                    "summarizing annual reports, operating a desktop browser, and generating "
+                    "marketing posters from reference images."
+                ),
+                "keywords": ["annual reports", "desktop browser", "marketing posters"],
+            },
+            {
+                "id": "scene-12",
+                "text": (
+                    "QbitAI reports that Qwen Office was the only agent to score above 90 in "
+                    "all evaluated dimensions."
+                ),
+                "keywords": ["Qwen Office", "agent"],
+            },
+            {
+                "id": "scene-13",
+                "text": (
+                    "The Jefferies report broke agent capability into model performance and "
+                    "the Harness surrounding the model."
+                ),
+                "keywords": ["model", "Harness"],
+            },
+            {
+                "id": "scene-14",
+                "text": (
+                    "Qwen Office's implied Harness score ranked highest. The report says "
+                    "Qwen 3.8 Max API pricing is lower. Thanks for watching, and I'll see "
+                    "you in the next one."
+                ),
+                "keywords": ["Qwen", "cost", "API"],
+            },
+        ],
+    }
+
+
+def real_split_story_hints() -> dict[str, dict]:
+    return {
+        "scene-02": {
+            "kicker": "HUMANOID ROBOTICS",
+            "headline": "Robot makers sell data back to themselves",
+        },
+        "scene-05": {
+            "kicker": "INNOVATION MANAGEMENT",
+            "headline": "How engineers win backing for out-of-scope ideas",
+        },
+        "scene-07": {
+            "kicker": "INNOVATION MANAGEMENT",
+            "headline": "Dedicated time for side ideas pays off",
+        },
+        "scene-08": {
+            "kicker": "INNOVATION MANAGEMENT",
+            "headline": "Playbooks for ideas that don't fit",
+        },
+        "scene-10": {
+            "kicker": "AI AGENTS",
+            "headline": "Alibaba's Qwen Office tops Jefferies agent test",
+        },
+        "scene-11": {
+            "kicker": "AI AGENTS",
+            "headline": "Five real office tasks put to the test",
+        },
+        "scene-14": {
+            "kicker": "AGENT ARCHITECTURE",
+            "headline": "Qwen wins on harness and on price",
+        },
+    }
+
+
 def _primary_plan() -> list[dict]:
     return [
         {
@@ -307,6 +463,7 @@ def _grounded_image_record(
     shot = {
         "scene_id": scene["id"],
         "expected_subject": subject,
+        "caption": subject,
         "kind": kind,
         "display_mode": mode,
         "search_query": f"{subject} {'logo' if kind == 'logo' else 'photograph'}",
@@ -519,6 +676,509 @@ async def test_planner_timeout_uses_narrated_entities_and_unique_qwen_story_owne
     assert len({news_images._subject_identity_key(shot) for shot in plan}) == 7
     assert {shot["display_mode"] for shot in plan} == {"inline", "fullscreen"}
     assert not {"World", "Google and", "AI AGENTS TESTED"} & set(subjects.values())
+
+
+@pytest.mark.asyncio
+async def test_real_split_story_timeout_backfills_eight_semantic_subjects(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        news_images,
+        "run_opencli_with_retries",
+        AsyncMock(side_effect=TimeoutError("chatgpt planning timed out after 45s")),
+    )
+    data = real_split_story_board()
+    eligible_scene_ids = [
+        "scene-02",
+        "scene-04",
+        "scene-05",
+        "scene-06",
+        "scene-07",
+        "scene-08",
+        "scene-10",
+        "scene-11",
+        "scene-12",
+        "scene-14",
+    ]
+
+    plan, planner, conversation_url = await news_images.plan_news_images(
+        data,
+        eligible_scene_ids=eligible_scene_ids,
+        count=8,
+        scene_hints=real_split_story_hints(),
+    )
+
+    by_scene = {shot["scene_id"]: shot for shot in plan}
+    assert planner == "deterministic-fallback"
+    assert conversation_url == ""
+    assert set(by_scene) == {
+        "scene-02",
+        "scene-04",
+        "scene-05",
+        "scene-06",
+        "scene-07",
+        "scene-10",
+        "scene-11",
+        "scene-12",
+    }
+    assert (by_scene["scene-02"]["expected_subject"], by_scene["scene-02"]["kind"]) == (
+        "humanoid robot",
+        "object",
+    )
+    assert (by_scene["scene-04"]["expected_subject"], by_scene["scene-04"]["kind"]) == (
+        "Perfect World",
+        "logo",
+    )
+    assert (by_scene["scene-05"]["expected_subject"], by_scene["scene-05"]["kind"]) == (
+        "IEEE",
+        "logo",
+    )
+    assert (
+        by_scene["scene-06"]["expected_subject"],
+        by_scene["scene-06"]["kind"],
+    ) in {
+        ("Alexander Brem", "person"),
+        ("University of Stuttgart", "logo"),
+    }
+    assert (by_scene["scene-07"]["expected_subject"], by_scene["scene-07"]["kind"]) == (
+        "Google",
+        "logo",
+    )
+    assert (
+        by_scene["scene-10"]["expected_subject"],
+        by_scene["scene-10"]["kind"],
+    ) in {("Alibaba", "logo"), ("Jefferies", "logo")}
+    assert (
+        by_scene["scene-11"]["expected_subject"],
+        by_scene["scene-11"]["kind"],
+    ) in {("annual reports", "object"), ("desktop browser", "object")}
+    assert (by_scene["scene-12"]["expected_subject"], by_scene["scene-12"]["kind"]) == (
+        "Qwen Office",
+        "logo",
+    )
+    identities = [news_images._subject_identity_key(shot) for shot in plan]
+    assert all(identities)
+    assert len(identities) == len(set(identities)) == 8
+    assert {shot["display_mode"] for shot in plan} == {"inline", "fullscreen"}
+
+
+def test_real_split_story_invalid_planner_rows_are_replaced_and_backfilled():
+    data = real_split_story_board()
+    scenes_by_id = {scene["id"]: scene for scene in data["scenes"]}
+    eligible_scene_ids = [
+        "scene-02",
+        "scene-04",
+        "scene-05",
+        "scene-06",
+        "scene-07",
+        "scene-08",
+        "scene-10",
+        "scene-11",
+        "scene-12",
+        "scene-14",
+    ]
+    eligible_scenes = [scenes_by_id[scene_id] for scene_id in eligible_scene_ids]
+    invalid_plan = [
+        {
+            "scene_id": scene_id,
+            "search_query": f"{subject} logo",
+            "news_query": subject,
+            "expected_subject": subject,
+            "kind": "logo",
+            "display_mode": "inline",
+            "purpose": "Bad planner row",
+            "caption": subject,
+        }
+        for scene_id, subject in (
+            ("scene-02", "China"),
+            ("scene-08", "Bootlegging"),
+            ("scene-11", "Five"),
+            ("scene-14", "I'll"),
+        )
+    ]
+
+    plan = news_images._prepare_primary_plan(
+        invalid_plan,
+        eligible_scenes,
+        8,
+        real_split_story_hints(),
+    )
+
+    assert len(plan) == 8
+    assert {shot["scene_id"] for shot in plan} == {
+        "scene-02",
+        "scene-04",
+        "scene-05",
+        "scene-06",
+        "scene-07",
+        "scene-10",
+        "scene-11",
+        "scene-12",
+    }
+    assert not {"China", "Bootlegging", "Five", "I'll"} & {
+        shot["expected_subject"] for shot in plan
+    }
+    assert len({news_images._subject_identity_key(shot) for shot in plan}) == 8
+
+
+def test_valid_planner_subject_cannot_retain_an_unrelated_outbound_query():
+    scene = next(
+        scene for scene in real_split_story_board()["scenes"] if scene["id"] == "scene-07"
+    )
+    planned = {
+        "scene_id": "scene-07",
+        "search_query": "Five logo",
+        "news_query": "Bootlegging",
+        "expected_subject": "Google",
+        "kind": "logo",
+        "display_mode": "inline",
+        "caption": "Five logo",
+        "purpose": "Unrelated claim",
+    }
+
+    prepared = news_images._prepare_primary_plan([planned], [scene], 1)
+
+    assert prepared[0]["expected_subject"] == "Google"
+    assert prepared[0]["search_query"] == "Google logo"
+    assert prepared[0]["news_query"] == "Google"
+    assert prepared[0]["caption"] == "Google"
+    assert prepared[0]["purpose"] == "Licensed visual grounded to the narrated semantic subject"
+
+
+@pytest.mark.parametrize(
+    ("scene_id", "subject", "kind"),
+    [
+        ("scene-02", "China", "logo"),
+        ("scene-02", "Robot", "logo"),
+        ("scene-08", "Bootlegging", "logo"),
+        ("scene-08", "Skunkworks", "logo"),
+        ("scene-11", "Five", "logo"),
+        ("scene-14", "Max API", "product"),
+        ("scene-14", "I'll", "logo"),
+        ("scene-05", "How", "logo"),
+        ("scene-07", "Brem", "logo"),
+        ("scene-02", "Financial", "logo"),
+        ("scene-07", "IEEE", "logo"),
+        ("scene-09", "Asia", "place"),
+        ("scene-07", "Google and 3M", "logo"),
+        ("scene-10", "Claude Cowork and Codex", "product"),
+        ("scene-02", "training centers", "logo"),
+        ("scene-08", "network of promoters", "logo"),
+        ("scene-11", "information retrieval", "logo"),
+        ("scene-14", "overseas models", "logo"),
+        ("scene-14", "QbitAI also notes", "logo"),
+        ("scene-07", "Google", "product"),
+        ("scene-07", "Google", "event"),
+        ("scene-04", "Perfect World", "event"),
+        ("scene-05", "IEEE", "product"),
+        ("scene-14", "Qwen 3.8", "product"),
+        ("scene-14", "Qwen 3.8 Max", "product"),
+        ("scene-04", "2.751", "logo"),
+        ("scene-14", "3.8", "logo"),
+        ("scene-14", "3.8 Max", "logo"),
+        ("scene-14", "3.8 Max API", "product"),
+        ("scene-14", "3.8-Max", "logo"),
+        ("scene-04", "2.751-billion", "logo"),
+        ("scene-02", "to the robot", "object"),
+        ("scene-04", "of 2.751", "logo"),
+        ("scene-06", "in chief", "person"),
+        ("scene-06", "at the University", "person"),
+        ("scene-06", "in Germany", "place"),
+        ("scene-10", "States", "place"),
+        ("scene-10", "from the United States", "place"),
+        ("scene-11", "summarizing annual reports", "object"),
+        ("scene-11", "from multiple documents", "object"),
+        ("scene-14", "Qwen 3.8 Max API pricing", "person"),
+        ("scene-04", "Perfect", "logo"),
+        ("scene-05", "IEEE Technology", "logo"),
+        ("scene-06", "Alexander", "logo"),
+        ("scene-06", "University", "logo"),
+        ("scene-06", "Stuttgart", "logo"),
+        ("scene-10", "Claude", "logo"),
+        ("scene-10", "Cowork", "logo"),
+    ],
+)
+def test_nonentity_subjects_fail_scene_and_candidate_grounding_gates(
+    scene_id,
+    subject,
+    kind,
+):
+    scene = next(
+        scene for scene in real_split_story_board()["scenes"] if scene["id"] == scene_id
+    )
+    shot = {
+        "scene_id": scene_id,
+        "expected_subject": subject,
+        "kind": kind,
+        "search_query": f"{subject} {'logo' if kind == 'logo' else 'photo'}",
+    }
+    candidate = {
+        "title": f"{subject} {'logo' if kind == 'logo' else 'photograph'}",
+        "description": f"An exact metadata match for {subject}",
+    }
+
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is False
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+    assert evidence["grounding_passed"] is False
+    assert evidence["grounding_distinctive_anchors"] == []
+
+
+@pytest.mark.parametrize(
+    ("scene_id", "subject", "kind"),
+    [
+        ("scene-02", "humanoid robot", "object"),
+        ("scene-04", "Perfect World", "logo"),
+        ("scene-05", "IEEE", "logo"),
+        ("scene-06", "Alexander Brem", "person"),
+        ("scene-06", "University of Stuttgart", "logo"),
+        ("scene-07", "Google", "logo"),
+        ("scene-07", "3M", "logo"),
+        ("scene-10", "Jefferies", "logo"),
+        ("scene-10", "Alibaba", "logo"),
+        ("scene-11", "annual reports", "object"),
+        ("scene-11", "desktop browser", "object"),
+        ("scene-12", "Qwen Office", "logo"),
+        ("scene-14", "Qwen 3.8 Max API", "product"),
+    ],
+)
+def test_semantic_subject_positive_controls_pass_both_grounding_gates(
+    scene_id,
+    subject,
+    kind,
+):
+    scene = next(
+        scene for scene in real_split_story_board()["scenes"] if scene["id"] == scene_id
+    )
+    suffix = "logo" if kind == "logo" else "photograph"
+    shot = {
+        "scene_id": scene_id,
+        "expected_subject": subject,
+        "kind": kind,
+        "search_query": f"{subject} {suffix}",
+    }
+    candidate = {
+        "title": f"{subject} {suffix}",
+        "description": f"A {suffix} of {subject}",
+    }
+
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is True
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+    assert evidence["grounding_passed"] is True
+    assert evidence["grounding_distinctive_anchors"] == news_images._identity_tokens(subject)
+
+
+@pytest.mark.parametrize(
+    ("subject", "scene_text"),
+    [
+        ("Germany", "The research group is based in Germany."),
+        ("Taiwan", "China restricted exports to Taiwan."),
+        ("United States", "The company expanded sales in the United States."),
+    ],
+)
+def test_exact_place_subjects_survive_normal_prepositions(subject, scene_text):
+    shot = {"expected_subject": subject, "kind": "place"}
+    candidate = {"title": f"{subject} photograph", "description": ""}
+    scene = {"text": scene_text, "keywords": []}
+
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is True
+    assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is True
+
+
+@pytest.mark.parametrize("subject", ["August 19", "August 20"])
+def test_calendar_fragments_cannot_become_logo_subjects(subject):
+    shot = {"expected_subject": subject, "kind": "logo"}
+    scene = {"text": f"The briefing aired on {subject}.", "keywords": []}
+    candidate = {"title": f"{subject} logo.svg", "description": f"Logo of {subject}"}
+
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is False
+    assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is False
+
+
+@pytest.mark.parametrize(
+    "subject",
+    ["April Robotics", "June Oven", "March Networks", "May Mobility"],
+)
+def test_month_named_brands_are_not_mistaken_for_calendar_dates(subject):
+    shot = {"expected_subject": subject, "kind": "logo"}
+    scene = {"text": f"{subject} announced a new product.", "keywords": []}
+    candidate = {"title": f"{subject} logo.svg", "description": ""}
+
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is True
+    assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is True
+
+
+def test_qwen_and_qianwen_variants_share_one_canonical_identity():
+    keys = {
+        news_images._subject_identity_key({"expected_subject": subject})
+        for subject in (
+            "Qwen",
+            "Qwen Office",
+            "Qianwen Office",
+            "Qwen 3.8 Max API",
+        )
+    }
+
+    assert keys == {"qwen"}
+
+
+@pytest.mark.parametrize(
+    ("shot", "scene", "candidate"),
+    [
+        (
+            {"expected_subject": "Google", "kind": "logo"},
+            {"text": "Google allocates employee time to ideas.", "keywords": []},
+            {"title": "Five logo.svg", "description": "Google logo"},
+        ),
+        (
+            {"expected_subject": "Google", "kind": "logo"},
+            {"text": "Google allocates employee time to ideas.", "keywords": []},
+            {"title": "Google and Five logo.svg", "description": "Google logo"},
+        ),
+        (
+            {"expected_subject": "Qwen Office", "kind": "logo"},
+            {"text": "Qwen Office ranked first.", "keywords": []},
+            {"title": "ChatGPT logo.svg", "description": "Qwen Office logo"},
+        ),
+        (
+            {"expected_subject": "Alexander Brem", "kind": "person"},
+            {"text": "Alexander Brem authored the article.", "keywords": []},
+            {"title": "Portrait of Elon Musk", "description": "Alexander Brem"},
+        ),
+        (
+            {"expected_subject": "annual reports", "kind": "object"},
+            {"text": "The test included summarizing annual reports.", "keywords": []},
+            {"title": "Desktop browser photograph", "description": "annual reports"},
+        ),
+        (
+            {"expected_subject": "Google", "kind": "logo"},
+            {"text": "Google allocates employee time to ideas.", "keywords": []},
+            {
+                "title": "Google logo.svg",
+                "description": "Official logo of Google Loon",
+                "categories": "Logos of Project Loon",
+                "object_name": "Google Loon logo",
+            },
+        ),
+        (
+            {"expected_subject": "Qwen", "kind": "logo"},
+            {"text": "Qwen ranked first in the test.", "keywords": []},
+            {
+                "title": "Qwen logo.svg",
+                "description": "Logo of Qwen Audio",
+                "categories": "Qwen Audio",
+                "object_name": "Qwen Audio logo",
+            },
+        ),
+        (
+            {"expected_subject": "Google", "kind": "logo"},
+            {"text": "Google allocates employee time to ideas.", "keywords": []},
+            {
+                "title": "Google logo.svg",
+                "description": "Official logo of Google loon",
+            },
+        ),
+        (
+            {"expected_subject": "Qwen", "kind": "logo"},
+            {"text": "Qwen ranked first in the test.", "keywords": []},
+            {
+                "title": "Qwen logo.svg",
+                "description": "Official logo of Qwen (audio)",
+            },
+        ),
+        (
+            {"expected_subject": "Google", "kind": "logo"},
+            {"text": "Google allocates employee time to ideas.", "keywords": []},
+            {"title": "Google logo.svg", "description": "This image shows Google Loon"},
+        ),
+        (
+            {"expected_subject": "Qwen", "kind": "logo"},
+            {"text": "Qwen ranked first in the test.", "keywords": []},
+            {"title": "Qwen logo.svg", "description": "A photograph depicting Qwen Audio"},
+        ),
+        (
+            {"expected_subject": "Google", "kind": "logo"},
+            {"text": "Google allocates employee time to ideas.", "keywords": []},
+            {"title": "Google logo.svg", "description": "Official logo of Google — Loon"},
+        ),
+        (
+            {"expected_subject": "Google", "kind": "logo"},
+            {"text": "Google allocates employee time to ideas.", "keywords": []},
+            {"title": "Google logo.svg", "description": "Official logo of Google–Loon"},
+        ),
+    ],
+)
+def test_candidate_title_cannot_contradict_a_description_identity(shot, scene, candidate):
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+
+    assert evidence["grounding_passed"] is False
+    assert evidence["grounding_distinctive_anchors"] == []
+
+
+@pytest.mark.parametrize(
+    ("subject", "description"),
+    [
+        ("Google", "Official logo of Google LLC"),
+        ("Perfect World", "Logo of Perfect World Co., Ltd."),
+        ("Alibaba", "Logo of Alibaba Group Holding Limited"),
+    ],
+)
+def test_legal_entity_suffixes_do_not_create_false_identity_conflicts(subject, description):
+    shot = {"expected_subject": subject, "kind": "logo"}
+    scene = {"text": f"{subject} announced its results.", "keywords": []}
+    candidate = {"title": f"{subject} logo.svg", "description": description}
+
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+    assert evidence["grounding_passed"] is True
+
+
+def test_google_logo_prose_and_categories_do_not_override_exact_authoritative_identity():
+    shot = {"expected_subject": "Google", "kind": "logo"}
+    scene = {"text": "Google allocates employee time to ideas.", "keywords": []}
+    candidate = {
+        "title": "Google 2026 logo.svg",
+        "description": (
+            "Google logo since May 19, 2026. The letters of Google use a modified "
+            "variant of Google Sans font."
+        ),
+        "categories": "Google.com logos",
+        "object_name": "Google 2026 logo",
+    }
+
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+    assert evidence["grounding_passed"] is True
+
+
+def test_nonlogo_single_identity_does_not_drop_one_letter_subidentities():
+    assert news_images._candidate_identity_match(
+        {"expected_subject": "Google", "kind": "event"},
+        {"title": "Google I/O event", "description": ""},
+    ) is None
+    assert news_images._candidate_identity_match(
+        {"expected_subject": "Google", "kind": "logo"},
+        {"title": "Google G logo", "description": ""},
+    ) is not None
+
+
+def test_versioned_product_identity_keeps_decimal_atomic_in_query_and_candidate_gate():
+    scene = next(
+        scene for scene in real_split_story_board()["scenes"] if scene["id"] == "scene-14"
+    )
+    shot = {
+        "expected_subject": "Qwen 3.8 Max API",
+        "kind": "product",
+    }
+
+    assert news_images._deterministic_query("Qwen 3.8 Max API", "product") == (
+        "Qwen 3.8 Max API product"
+    )
+    assert news_images._grounding_evidence(
+        shot,
+        scene,
+        {
+            "title": "Qwen 3 and 8 Max API product",
+            "description": "Qwen 3 and 8 Max API product",
+        },
+    )["grounding_passed"] is False
 
 
 def test_real_failure_story_entities_keep_possessives_and_strip_caption_residue():
@@ -749,7 +1409,7 @@ def test_three_way_grounding_rejects_world_aquatics_chemical_agents_and_google_l
     assert chemical["grounding_passed"] is False
     assert chemical["grounding_distinctive_anchors"] == []
     assert loon["grounding_passed"] is False
-    assert "complete identity" in loon["grounding_reason"]
+    assert "conflicted with narrated brand subject" in loon["grounding_reason"]
 
 
 @pytest.mark.parametrize(
@@ -875,6 +1535,19 @@ def test_complete_identity_grounding_positive_controls(shot, scene, candidate):
                 "description": "Sencillo de Twice",
                 "categories": "Perfect World (Twice album)|Logos of Twice",
                 "creator": "JYP Entertainment",
+            },
+        ),
+        (
+            {"expected_subject": "Perfect World", "kind": "logo"},
+            {
+                "text": "Perfect World's revenue report described the company's results.",
+                "keywords": [],
+            },
+            {
+                "title": "Perfect World Logo.svg",
+                "description": "Logo for Perfect World, a 2005 MMORPG video game",
+                "categories": "Perfect World (video game)|Video game logos",
+                "object_name": "Perfect World logo",
             },
         ),
         (
@@ -1970,6 +2643,22 @@ def test_cached_manifest_rejects_duplicate_identity_stale_policy_and_bad_hash(
     assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
 
     forged = json.loads(json.dumps(baseline))
+    forged["images"][0]["caption"] = "Five logo"
+    write(forged)
+    assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
+
+    forged = json.loads(json.dumps(baseline))
+    forged["images"][0]["caption"] = "The NVIDIA"
+    write(forged)
+    assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
+
+    forged = json.loads(json.dumps(baseline))
+    forged["images"][0]["expected_subject"] = "The NVIDIA"
+    forged["images"][0]["caption"] = "NVIDIA"
+    write(forged)
+    assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
+
+    forged = json.loads(json.dumps(baseline))
     forged["images"][0]["license"] = "All rights reserved"
     forged["images"][0]["license_code"] = "copyright"
     write(forged)
@@ -2027,6 +2716,34 @@ def test_wikimedia_queries_broaden_without_dropping_the_scene_subject():
 
     assert variants[0] == "NVIDIA VERA logo"
     assert "NVIDIA logo" in variants
+
+    university = news_images._wikimedia_query_variants(
+        {
+            "search_query": "University of Stuttgart logo",
+            "expected_subject": "University of Stuttgart",
+            "kind": "logo",
+        },
+        {
+            "text": "Alexander Brem is a professor at the University of Stuttgart.",
+            "keywords": [],
+        },
+    )
+    reports = news_images._wikimedia_query_variants(
+        {
+            "search_query": "annual reports photo",
+            "expected_subject": "annual reports",
+            "kind": "object",
+        },
+        {
+            "text": "The test included summarizing annual reports from multiple documents.",
+            "keywords": [],
+        },
+    )
+
+    assert "University logo" not in university
+    assert set(university) == {"University of Stuttgart logo"}
+    assert "annual photo" not in reports
+    assert set(reports) == {"annual reports photo", "annual reports event"}
 
 
 def test_acquisition_contract_binds_scene_order_exclusions_and_hints():

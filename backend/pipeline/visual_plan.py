@@ -641,6 +641,7 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
             )
             proof = {
                 "expected_subject": plan.get("news_image_expected_subject") or "",
+                "caption": plan.get("news_image_caption") or "",
                 "kind": plan.get("news_image_kind") or "event",
                 "title": plan.get("news_image_title") or "",
                 "description": plan.get("news_image_description") or "",

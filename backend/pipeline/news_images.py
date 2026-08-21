@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
-MANIFEST_VERSION = 11
-QUERY_SEMANTICS_VERSION = 4
+MANIFEST_VERSION = 12
+QUERY_SEMANTICS_VERSION = 5
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
 NEWS_IMAGE_MAX_PIXELS = 16_000_000
@@ -120,10 +120,21 @@ CC_LONG_LICENSE_RE = re.compile(
 PLAN_KINDS = {"logo", "event", "person", "place", "product", "object"}
 PLAN_MODES = {"inline", "fullscreen"}
 TAG_RE = re.compile(r"<[^>]+>")
-WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?")
+WORD_RE = re.compile(
+    r"[0-9]+(?:\.[0-9]+)+(?:['’-][A-Za-z0-9]+)?|"
+    r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?"
+)
+ENTITY_PHRASE_TOKEN_RE = re.compile(
+    r"[0-9]+(?:\.[0-9]+)+(?:['’-][A-Za-z0-9]+)?|"
+    r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?"
+)
 CAPITAL_PHRASE_RE = re.compile(
     r"\b(?:[A-Z][A-Za-z0-9'’-]*|[0-9]+[A-Z][A-Za-z0-9'’-]*)"
     r"(?:\s+(?:[A-Z][A-Za-z0-9'’-]*|[0-9]+[A-Z][A-Za-z0-9'’-]*|of|the|and)){0,5}\b"
+)
+VERSIONED_PRODUCT_RE = re.compile(
+    r"\b[A-Z][A-Za-z0-9'’-]*\s+[0-9]+(?:\.[0-9]+)+"
+    r"(?:\s+[A-Z][A-Za-z0-9'’-]*){0,3}\b"
 )
 STOPWORDS = frozenset(
     "a an and are as at be been but by for from has have in into is it its of on or that the "
@@ -135,17 +146,20 @@ GENERIC_DIRECTION_TERMS = frozenset(
 )
 GENERIC_ENTITY_TERMS = frozenset(
     "agent agents article august board boards browser business company content department dimension "
-    "dimensions employee employees engineer engineers event germany global harness idea ideas innovation "
+    "dimensions employee employees engineer engineers engineering event germany global harness idea ideas innovation "
     "management model office photo product products project projects report research society system systems "
-    "tested testing technology thursday time tools united world english language".split()
+    "tested testing technology thursday time tools united world english language api max".split()
 )
 GENERIC_QUERY_TERMS = GENERIC_ENTITY_TERMS | frozenset(
     "corporate official image photograph portrait logo mark launch".split()
 )
 ENTITY_EDGE_TERMS = frozenset("and of the for in on at by from with".split())
+SUBJECT_CONTEXT_LEAD_TERMS = ENTITY_EDGE_TERMS | frozenset(
+    "about across after around before during into over through to under without within".split()
+)
 MONTH_TERMS = frozenset("january february march april may june july august september october november december".split())
 REPORTING_VERBS_RE = re.compile(
-    r"^\s+(?:also\s+)?(?:reports|reported|notes?|noted|publishes|published|says|said|writes|wrote|"
+    r"^\s+(?:also\s+)?(?:reports|reported|notes?|noted|says|said|writes|wrote|"
     r"describes|described)\b",
     flags=re.I,
 )
@@ -155,13 +169,87 @@ GENERIC_LOGO_TITLE_TERMS = frozenset(
 )
 IDENTITY_CONNECTORS = frozenset("and of the".split())
 IDENTITY_DECORATORS = frozenset(
-    "black brand chinese company corp corporate corporation english en event file financial group icon image "
-    "jpeg jpg logo mark official photo photograph png portrait product public screenshot symbol transparent white "
-    "wordmark webp zh svg".split()
+    "black brand chinese co company corp corporate corporation editorial english en event file financial group holding "
+    "holdings icon icons image images inc jpeg jpg limited llc logo logos ltd mark marks official photo photograph "
+    "photographs photos plc png portrait product products public screenshot screenshots symbol symbols transparent white "
+    "wordmark wordmarks webp zh svg".split()
 )
 MEDIA_WORK_TERMS = frozenset(
     "album albums book books cinema film films movie movies music musical novel novels record "
     "recording recordings records sencillo series single singles song songs soundtrack television tv".split()
+)
+CARDINAL_OR_ORDINAL_TERMS = frozenset(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+    "sixteen seventeen eighteen nineteen twenty first second third fourth fifth sixth seventh eighth "
+    "ninth tenth dozen hundred thousand million billion all few many multiple several some".split()
+)
+NON_ENTITY_LEAD_TERMS = frozenset(
+    "how what when where which who why according if i i'll im i'm we we'll we're you you'll you're "
+    "they they'll they're this that these those subscribe".split()
+)
+ABSTRACT_PRACTICE_TERMS = frozenset(
+    "bootlegging skunkworks harness innovation management governance capability performance score "
+    "pricing commercialization concept metric value".split()
+)
+GEOGRAPHIC_ENTITY_TERMS = frozenset(
+    "china taiwan germany united states wall street chinese american european asia asian europe africa "
+    "singapore japan korea india france britain british england canada australia russia ukraine".split()
+)
+GEOGRAPHIC_ENTITY_PHRASES = frozenset(
+    {
+        "africa",
+        "asia",
+        "australia",
+        "britain",
+        "canada",
+        "china",
+        "england",
+        "europe",
+        "france",
+        "germany",
+        "india",
+        "japan",
+        "korea",
+        "russia",
+        "singapore",
+        "taiwan",
+        "ukraine",
+        "united states",
+        "wall street",
+    }
+)
+GEOGRAPHIC_ADJECTIVE_TERMS = frozenset(
+    "american asian british chinese european german indian japanese korean russian taiwanese".split()
+)
+CONCRETE_OBJECT_HEADS = frozenset(
+    "robot robots report reports browser browsers poster posters document documents satellite satellites "
+    "rocket rockets drone drones chip chips processor processors computer computers server servers vehicle "
+    "vehicles aircraft phone phones battery batteries camera cameras sensor sensors".split()
+)
+ORGANISATION_NAME_SUFFIXES = frozenset(
+    "association company corporation group institute laboratory labs society university".split()
+)
+PERSON_REFERENCE_TERMS = frozenset(
+    "analyst author editor engineer founder professor researcher scientist".split()
+)
+SUBJECT_IDENTITY_ALIASES = {
+    "qianwen": "qwen",
+}
+BRANDED_PRODUCT_SUFFIXES = frozenset(
+    "agent api app application browser chip cpu model office platform processor service system tool".split()
+)
+PRODUCT_CONTEXT_RE = re.compile(
+    r"\b(?:app|application|model|platform|product|service|software|system|tool|update)\b",
+    flags=re.I,
+)
+EVENT_CONTEXT_RE = re.compile(
+    r"\b(?:announced|conference|event|expo|festival|keynote|launch|launched|opened|summit|tournament)\b",
+    flags=re.I,
+)
+NAMED_SUBJECT_ACTION_RE = re.compile(
+    r"^\s+(?:acquired|allocate(?:d|s)|announced|built|created|developed|introduced|launched|"
+    r"manufactures|published|raised|recorded|released|reported|scored|tested|unveiled)\b",
+    flags=re.I,
 )
 GENERATED_ASSET_RE = re.compile(
     r"^news_images/image-[0-9]+\.(?:jpe?g|png|webp|svg)$",
@@ -295,6 +383,82 @@ def _meaningful_identity_tokens(field_tokens: list[str]) -> list[str]:
     ]
 
 
+def _metadata_extends_subject_identity(value: object, subject: object) -> bool:
+    """Reject a proper-name extension such as ``Google Loon`` for ``Google``."""
+    text = str(value or "")
+    subject_tokens = _identity_tokens(subject)
+    if not text or not subject_tokens:
+        return False
+    for match in CAPITAL_PHRASE_RE.finditer(text):
+        phrase_tokens = _identity_tokens(match.group(0))
+        if not _contains_token_phrase(phrase_tokens, subject_tokens):
+            continue
+        meaningful = _meaningful_identity_tokens(phrase_tokens)
+        if meaningful != subject_tokens:
+            return True
+    normalized_subject = _normalise_entity_phrase(subject)
+    allowed_followers = (
+        IDENTITY_DECORATORS
+        | STOPWORDS
+        | GENERIC_ENTITY_TERMS
+        | CONCRETE_OBJECT_HEADS
+        | ENTITY_EDGE_TERMS
+    )
+    for match in _phrase_matches(text, normalized_subject):
+        tail = text[match.end() :]
+        if re.match(r"^\s*['’]s\b", tail, flags=re.I):
+            tail = re.sub(r"^\s*['’]s\b", "", tail, count=1, flags=re.I)
+        follower = re.match(
+            r"^[\s\(\)\[\]\{\},:;/._–—-]*([A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?)",
+            tail,
+        )
+        if not follower:
+            continue
+        token = follower.group(1)
+        key = token.casefold().strip("'’")
+        if (
+            key in allowed_followers
+            or (len(key) == 4 and key.isdigit())
+            or (len(key) == 1 and key == subject_tokens[0][:1])
+        ):
+            continue
+        return True
+    return False
+
+
+def _first_metadata_subject_identity_extends(value: object, subject: object) -> bool:
+    """Check only the first description mention, ignoring later incidental context."""
+    text = str(value or "")
+    normalized_subject = _normalise_entity_phrase(subject)
+    subject_tokens = _identity_tokens(subject)
+    matches = _phrase_matches(text, normalized_subject)
+    if not matches or not subject_tokens:
+        return False
+    tail = text[matches[0].end() :]
+    if re.match(r"^\s*['’]s\b", tail, flags=re.I):
+        tail = re.sub(r"^\s*['’]s\b", "", tail, count=1, flags=re.I)
+    follower = re.match(
+        r"^[\s\(\)\[\]\{\},:;/._–—-]*([A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?)",
+        tail,
+    )
+    if not follower:
+        return False
+    token = follower.group(1)
+    key = token.casefold().strip("'’")
+    allowed_followers = (
+        IDENTITY_DECORATORS
+        | STOPWORDS
+        | GENERIC_ENTITY_TERMS
+        | CONCRETE_OBJECT_HEADS
+        | ENTITY_EDGE_TERMS
+    )
+    return not (
+        key in allowed_followers
+        or (len(key) == 4 and key.isdigit())
+        or (len(key) == 1 and key == subject_tokens[0][:1])
+    )
+
+
 def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, list[str]] | None:
     """Find the complete subject identity in one metadata field.
 
@@ -310,6 +474,13 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
     subject_tokens = _identity_tokens(shot.get("expected_subject"))
     if not subject_tokens or subject_tokens == ["ai"]:
         return None
+    if any(
+        _metadata_extends_subject_identity(candidate.get(field_name), shot.get("expected_subject"))
+        for field_name in ("title", "object_name")
+    ) or _first_metadata_subject_identity_extends(
+        candidate.get("description"), shot.get("expected_subject")
+    ):
+        return None
     kind = str(shot.get("kind") or "event")
     title_tokens = _identity_tokens(candidate.get("title"))
     if kind == "logo" and not ({"logo", "wordmark", "mark"} & set(title_tokens)):
@@ -319,9 +490,16 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
         field_tokens = _identity_tokens(value)
         if not _contains_token_phrase(field_tokens, subject_tokens):
             continue
-        if (kind == "logo" or len(subject_tokens) == 1) and (
-            _meaningful_identity_tokens(field_tokens) != subject_tokens
-        ):
+        if kind == "logo":
+            exact_identity = _meaningful_identity_tokens(field_tokens)
+        else:
+            exact_identity = [
+                token
+                for token in field_tokens
+                if token not in IDENTITY_DECORATORS
+                and not (len(token) == 4 and token.isdigit())
+            ]
+        if (kind == "logo" or len(subject_tokens) == 1) and exact_identity != subject_tokens:
             continue
         if kind == "logo" and not ({"logo", "wordmark", "mark"} & set(field_tokens)):
             continue
@@ -330,19 +508,37 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
             & set(field_tokens)
         ):
             continue
+        if field_name != "title":
+            contradictory_title = _meaningful_identity_tokens(title_tokens)
+            if kind == "logo":
+                if contradictory_title and contradictory_title != subject_tokens:
+                    continue
+            elif not _contains_token_phrase(title_tokens, subject_tokens) and contradictory_title:
+                continue
         return field_name, " ".join(field_tokens), subject_tokens
     return None
 
 
 def _candidate_context_conflicts(scene: dict, candidate: dict) -> list[str]:
     """Reject an unrelated media work that merely shares an entity's name."""
-    scene_terms = _semantic_terms(scene.get("text"))
-    candidate_terms = _semantic_terms(
+    scene_text = str(scene.get("text") or "")
+    candidate_text = (
         f"{candidate.get('title', '')} {candidate.get('description', '')} "
         f"{candidate.get('categories', '')} {candidate.get('object_name', '')} "
         f"{candidate.get('creator', '')}"
     )
-    return sorted((candidate_terms & MEDIA_WORK_TERMS) - (scene_terms & MEDIA_WORK_TERMS))
+    scene_terms = _semantic_terms(scene_text)
+    candidate_terms = _semantic_terms(
+        candidate_text
+    )
+    conflicts = (candidate_terms & MEDIA_WORK_TERMS) - (scene_terms & MEDIA_WORK_TERMS)
+    game_work_re = re.compile(
+        r"\bmmorpgs?\b|\(\s*(?:video\s+)?game\s*\)|\b(?:video\s+)?game\s+logos?\b",
+        flags=re.I,
+    )
+    if game_work_re.search(candidate_text) and not game_work_re.search(scene_text):
+        conflicts.add("video game")
+    return sorted(conflicts)
 
 
 def _distinctive_terms(value: object) -> set[str]:
@@ -350,13 +546,12 @@ def _distinctive_terms(value: object) -> set[str]:
 
 
 def _normalise_entity_phrase(value: object) -> str:
-    tokens = WORD_RE.findall(str(value or ""))
+    tokens = ENTITY_PHRASE_TOKEN_RE.findall(str(value or ""))
     while tokens and tokens[0].casefold() in {"the"}:
         tokens.pop(0)
     while tokens and (
         tokens[-1].casefold().strip("'’") in ENTITY_EDGE_TERMS
         or tokens[-1].casefold() in MONTH_TERMS
-        or tokens[-1].isdigit()
     ):
         tokens.pop()
     if tokens and tokens[-1].casefold().endswith(("'s", "’s")):
@@ -373,10 +568,389 @@ def _source_entity_keys(text: str) -> set[str]:
             continue
         before = text[max(0, match.start() - 18) : match.start()].casefold()
         after = text[match.end() : match.end() + 28]
-        if re.search(r"(?:according to|described by|reported by|published by)\s*$", before) or REPORTING_VERBS_RE.match(
-            after
+        if (
+            re.search(r"(?:according to|described by|reported by|published by)\s*$", before)
+            or REPORTING_VERBS_RE.match(after)
+            or re.match(r"\s+(?:has\s+)?published\s+an?\s+article\b", after, flags=re.I)
         ):
             output.add(phrase.casefold())
+    return output
+
+
+def _subject_is_only_reporting_source(subject: str, text: str) -> bool:
+    subject_matches = _phrase_matches(text, subject)
+    if not subject_matches:
+        return False
+    source_evidence: list[tuple[list[str], list[re.Match[str]]]] = []
+    subject_identity = _identity_tokens(subject)
+    for source in _source_entity_keys(text):
+        source_identity = _identity_tokens(source)
+        if not (
+            _contains_token_phrase(source_identity, subject_identity)
+            or _contains_token_phrase(subject_identity, source_identity)
+        ):
+            continue
+        source_evidence.append((source_identity, _phrase_matches(text, source)))
+    return bool(source_evidence) and all(
+        any(
+            (
+                source_match.start() <= match.start()
+                and match.end() <= source_match.end()
+            )
+            or (
+                match.start() <= source_match.start()
+                and source_match.end() <= match.end()
+            )
+            for _identity, source_matches in source_evidence
+            for source_match in source_matches
+        )
+        for match in subject_matches
+    )
+
+
+def _phrase_matches(text: str, subject: str, *, case_sensitive: bool = False) -> list[re.Match[str]]:
+    parts = [re.escape(part) for part in subject.split() if part]
+    if not parts:
+        return []
+    flags = 0 if case_sensitive else re.I
+    joined = r"\s+".join(parts)
+    pattern = rf"(?<![A-Za-z0-9]){joined}(?![A-Za-z0-9])"
+    return list(re.finditer(pattern, text, flags=flags))
+
+
+def _person_is_explicit(subject: str, scene_text: str) -> bool:
+    identity = _identity_tokens(subject)
+    if len(identity) < 2:
+        return False
+    named_tokens = [
+        token
+        for token in ENTITY_PHRASE_TOKEN_RE.findall(subject)
+        if token.casefold() not in IDENTITY_CONNECTORS
+    ]
+    if not named_tokens or not all(
+        token[:1].isupper()
+        or token.isupper()
+        or any(char.isdigit() for char in token)
+        or any(char.isupper() for char in token[1:])
+        for token in named_tokens
+    ):
+        return False
+    escaped = r"\s+".join(re.escape(part) for part in subject.split())
+    role = "|".join(sorted(PERSON_REFERENCE_TERMS))
+    return bool(
+        re.search(rf"\b(?:authored|written|reported|researched)\s+by\s+{escaped}\b", scene_text, flags=re.I)
+        or re.search(rf"\b{escaped}\s+(?:authored|wrote|reported|researched)\b", scene_text, flags=re.I)
+        or re.search(rf"\b{escaped}\s*,[^,.]{{0,64}}\b(?:{role})\b", scene_text, flags=re.I)
+        or re.search(rf"\b(?:{role})\s+{escaped}\b", scene_text, flags=re.I)
+    )
+
+
+def _is_incomplete_person_reference(subject: str, scene_text: str) -> bool:
+    identity = _identity_tokens(subject)
+    if len(identity) != 1:
+        return False
+    escaped = re.escape(subject)
+    if re.search(
+        rf"\b{escaped}(?:['’]s)?\s+(?:analysis|article|findings|research|study|work)\b",
+        scene_text,
+        flags=re.I,
+    ):
+        return True
+    for match in CAPITAL_PHRASE_RE.finditer(scene_text):
+        full_name = _normalise_entity_phrase(match.group(0))
+        full_identity = _identity_tokens(full_name)
+        if len(full_identity) >= 2 and full_identity[-1] == identity[0] and _person_is_explicit(
+            full_name, scene_text
+        ):
+            return True
+    return False
+
+
+def _is_incomplete_named_fragment(subject: str, scene_text: str) -> bool:
+    identity = _identity_tokens(subject)
+    if not identity:
+        return True
+    if len(identity) == 1:
+        token = ENTITY_PHRASE_TOKEN_RE.findall(subject)[0]
+        if (
+            token.isupper()
+            or any(char.isdigit() for char in token)
+            or any(char.isupper() for char in token[1:])
+            or token.casefold() in {"qwen", "qianwen"}
+        ):
+            return False
+
+    subject_matches = _phrase_matches(scene_text, subject, case_sensitive=True)
+    if not subject_matches:
+        return True
+    capital_matches = list(CAPITAL_PHRASE_RE.finditer(scene_text))
+    incomplete = []
+    for subject_match in subject_matches:
+        enclosing = [
+            match
+            for match in capital_matches
+            if match.start() <= subject_match.start()
+            and subject_match.end() <= match.end()
+            and _normalise_entity_phrase(match.group(0)).casefold() != subject.casefold()
+        ]
+        if not enclosing:
+            incomplete.append(False)
+            continue
+        complete_segment = False
+        for match in enclosing:
+            raw = match.group(0)
+            raw_words = [token.casefold() for token in WORD_RE.findall(raw)]
+            segments = (
+                [raw]
+                if raw_words and raw_words[-1] in ORGANISATION_NAME_SUFFIXES
+                else re.split(r"\s+and\s+", raw, flags=re.I)
+            )
+            possessive_segments: list[str] = []
+            for segment in segments:
+                tokens = ENTITY_PHRASE_TOKEN_RE.findall(segment)
+                possessive_index = next(
+                    (
+                        index
+                        for index, token in enumerate(tokens)
+                        if token.casefold().endswith(("'s", "’s"))
+                    ),
+                    -1,
+                )
+                if 0 <= possessive_index < len(tokens) - 1:
+                    possessive_segments.extend(
+                        [
+                            " ".join(tokens[: possessive_index + 1]),
+                            " ".join(tokens[possessive_index + 1 :]),
+                        ]
+                    )
+                else:
+                    possessive_segments.append(segment)
+            if any(
+                _normalise_entity_phrase(segment).casefold() == subject.casefold()
+                for segment in possessive_segments
+            ):
+                complete_segment = True
+                break
+        incomplete.append(not complete_segment)
+    return bool(incomplete) and all(incomplete)
+
+
+def _subject_semantic_role(subject: object, scene: dict) -> tuple[str, str]:
+    """Classify a narrated visual subject or return a fail-closed reason.
+
+    Literal repetition is not enough: common words such as ``Five`` and
+    ``Bootlegging`` can have unrelated Commons logos.  The role is derived
+    solely from the narrated scene, never from planner copy or candidate
+    metadata, so every later trust boundary can recompute the same decision.
+    """
+    raw_subject = " ".join(str(subject or "").split())
+    normalized = _normalise_entity_phrase(subject)
+    scene_text = str(scene.get("text") or "")
+    identity = _identity_tokens(normalized)
+    semantic = _semantic_terms(normalized)
+    ordered = _ordered_semantic_terms(normalized)
+    if not normalized or raw_subject != normalized or not identity or not semantic:
+        return "", "shot subject had no usable complete identity"
+    if not _contains_token_phrase(_identity_tokens(scene_text), identity):
+        return "", "shot subject was not a contiguous identity in the narrated scene"
+    if _subject_is_only_reporting_source(normalized, scene_text):
+        return "", "shot subject was only a reporting source in the narrated scene"
+
+    lead = identity[0].casefold().strip("'’")
+    if lead in NON_ENTITY_LEAD_TERMS or lead in SUBJECT_CONTEXT_LEAD_TERMS:
+        return "", "shot subject began with a pronoun, question, or sentence lead"
+    if semantic and semantic.issubset(CARDINAL_OR_ORDINAL_TERMS):
+        return "", "shot subject was only a number or ordinal"
+
+    subject_words = [token.casefold().strip("'’") for token in WORD_RE.findall(normalized)]
+    if subject_words and subject_words[0] in SUBJECT_CONTEXT_LEAD_TERMS:
+        return "", "shot subject began with surrounding sentence context"
+    numeric_identity_re = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:['’-][A-Za-z0-9]+)?$")
+    if (
+        len(subject_words) >= 2
+        and subject_words[0] in MONTH_TERMS
+        and numeric_identity_re.fullmatch(subject_words[1])
+    ):
+        return "", "shot subject was only a calendar date"
+    if subject_words and all(numeric_identity_re.fullmatch(token) for token in subject_words):
+        return "", "shot subject was only a numeric value or version"
+    if subject_words and numeric_identity_re.fullmatch(subject_words[0]):
+        return "", "versioned product subject lacked its leading brand identity"
+    raw_subject_tokens = ENTITY_PHRASE_TOKEN_RE.findall(normalized)
+    if any(token.casefold().endswith(("'s", "’s")) for token in raw_subject_tokens[:-1]):
+        return "", "shot subject combined a possessive owner with a separate identity"
+    if "and" in subject_words and (not subject_words or subject_words[-1] not in ORGANISATION_NAME_SUFFIXES):
+        return "", "shot subject combined multiple independent identities"
+
+    non_abstract = semantic - ABSTRACT_PRACTICE_TERMS - GENERIC_ENTITY_TERMS - {"ai"}
+    if semantic & ABSTRACT_PRACTICE_TERMS and not non_abstract:
+        return "", "shot subject was an abstract practice or evaluation concept"
+
+    if _person_is_explicit(normalized, scene_text):
+        return "person", ""
+    if _is_incomplete_person_reference(normalized, scene_text):
+        return "", "shot subject was an incomplete person identity"
+
+    if semantic and semantic.issubset(GEOGRAPHIC_ADJECTIVE_TERMS):
+        return "", "shot subject was only a geographic adjective"
+    geographic = normalized.casefold() in GEOGRAPHIC_ENTITY_PHRASES
+    if geographic:
+        exact_matches = _phrase_matches(scene_text, normalized, case_sensitive=True)
+        if not exact_matches:
+            return "", "geographic subject was not retained verbatim in the narration"
+        contextual_matches = []
+        for match in exact_matches:
+            after = scene_text[match.end() : match.end() + 24].casefold()
+            if after.startswith(("'s", "’s")):
+                continue
+            if re.match(r"\s+(?:investment\s+)?(?:bank|company|firm|university)\b", after):
+                continue
+            contextual_matches.append(match)
+        if not contextual_matches:
+            return "", "geographic subject was only a modifier of another narrated identity"
+        return "place", ""
+
+    object_identity = [term.casefold() for term in identity]
+    object_head = object_identity[-1] if object_identity else ""
+    if object_head in CONCRETE_OBJECT_HEADS:
+        if normalized != normalized.casefold() or not _phrase_matches(
+            scene_text, normalized, case_sensitive=True
+        ):
+            return "", "concrete object subject was not a lower-case narrated noun phrase"
+        modifier = object_identity[0] if len(object_identity) == 2 else ""
+        if (
+            len(identity) != 2
+            or not modifier
+            or modifier in STOPWORDS
+            or modifier in GENERIC_ENTITY_TERMS
+            or modifier in CARDINAL_OR_ORDINAL_TERMS
+            or modifier in NON_ENTITY_LEAD_TERMS
+            or modifier in SUBJECT_CONTEXT_LEAD_TERMS
+        ):
+            return "", "concrete object subject lacked a specific narrated modifier"
+        return "object", ""
+
+    if VERSIONED_PRODUCT_RE.fullmatch(normalized):
+        matches = _phrase_matches(scene_text, normalized, case_sensitive=True)
+        if matches and all(
+            re.match(r"\s+[A-Z][A-Za-z0-9'’-]*\b", scene_text[match.end() :])
+            for match in matches
+        ):
+            return "", "versioned product subject was only a prefix of the narrated identity"
+        return "product", ""
+
+    strong_identity = [
+        term
+        for term in ordered
+        if term not in GENERIC_QUERY_TERMS
+        and term not in ABSTRACT_PRACTICE_TERMS
+        and term not in CARDINAL_OR_ORDINAL_TERMS
+        and term not in GEOGRAPHIC_ENTITY_TERMS
+        and term not in NON_ENTITY_LEAD_TERMS
+        and term != "ai"
+    ]
+    if not strong_identity:
+        return "", "shot subject had no specific brand, organisation, product, or event identity"
+    if not _phrase_matches(scene_text, normalized, case_sensitive=True):
+        return "", "named subject did not retain entity capitalization in the narration"
+    if _is_incomplete_named_fragment(normalized, scene_text):
+        return "", "named subject was only a fragment of a longer narrated identity"
+    named_tokens = [
+        token
+        for token in ENTITY_PHRASE_TOKEN_RE.findall(normalized)
+        if token.casefold() not in IDENTITY_CONNECTORS
+    ]
+    if not named_tokens or not all(
+        token[:1].isupper()
+        or token.isupper()
+        or any(char.isdigit() for char in token)
+        or any(char.isupper() for char in token[1:])
+        for token in named_tokens
+    ):
+        return "", "shot subject lacked a proper-name, acronym, or product identity form"
+    if len(named_tokens) == 1:
+        token = named_tokens[0]
+        unambiguous_form = (
+            token.isupper()
+            or any(char.isdigit() for char in token)
+            or any(char.isupper() for char in token[1:])
+            or token.casefold() in {"qwen", "qianwen"}
+        )
+        if not unambiguous_form:
+            contextual_name = False
+            for match in _phrase_matches(scene_text, normalized, case_sensitive=True):
+                before = scene_text[: match.start()].rstrip()
+                sentence_start = not before or before[-1] in ".!?"
+                if not sentence_start or NAMED_SUBJECT_ACTION_RE.match(scene_text[match.end() :]):
+                    contextual_name = True
+                    break
+            if not contextual_name:
+                return "", "single title-case subject was only an ungrounded sentence lead"
+    return "brand", ""
+
+
+def _shot_subject_semantic_error(shot: dict, scene: dict) -> str:
+    role, reason = _subject_semantic_role(shot.get("expected_subject"), scene)
+    if reason:
+        return reason
+    kind = str(shot.get("kind") or "").strip().casefold()
+    allowed_kinds = {
+        "brand": {"logo"},
+        "object": {"object"},
+        "person": {"person"},
+        "place": {"place"},
+        "product": {"product", "logo"},
+    }
+    if role == "brand" and kind in {"event", "product"}:
+        normalized = _normalise_entity_phrase(shot.get("expected_subject"))
+        identity = _identity_tokens(normalized)
+        windows = [
+            str(scene.get("text") or "")[max(0, match.start() - 32) : match.end() + 80]
+            for match in _phrase_matches(
+                str(scene.get("text") or ""), normalized, case_sensitive=True
+            )
+        ]
+        if kind == "event" and any(EVENT_CONTEXT_RE.search(window) for window in windows):
+            return ""
+        if kind == "product" and (
+            (identity and identity[-1] in BRANDED_PRODUCT_SUFFIXES)
+            or (
+                len(identity) == 1
+                and any(char.isupper() for char in normalized[1:])
+                and any(PRODUCT_CONTEXT_RE.search(window) for window in windows)
+            )
+        ):
+            return ""
+    if kind not in allowed_kinds.get(role, set()):
+        return f"shot kind {kind or '(missing)'} conflicted with narrated {role} subject"
+    return ""
+
+
+def _concrete_object_candidates(scene: dict) -> list[str]:
+    """Return specific two-word object phrases from narration in text order."""
+    text = str(scene.get("text") or "")
+    output: list[str] = []
+    seen: set[str] = set()
+    heads = "|".join(sorted((re.escape(head) for head in CONCRETE_OBJECT_HEADS), key=len, reverse=True))
+    pattern = re.compile(rf"\b([a-z][A-Za-z0-9'’-]*)[\s-]+({heads})\b")
+    for match in pattern.finditer(text):
+        modifier = match.group(1).casefold().strip("'’")
+        if (
+            modifier in STOPWORDS
+            or modifier in CARDINAL_OR_ORDINAL_TERMS
+            or modifier in GENERIC_ENTITY_TERMS
+            or modifier in NON_ENTITY_LEAD_TERMS
+        ):
+            continue
+        subject = f"{match.group(1)} {match.group(2)}"
+        key = subject.casefold()
+        if key in seen:
+            continue
+        shot = {"expected_subject": subject, "kind": "object"}
+        if _shot_subject_semantic_error(shot, scene):
+            continue
+        seen.add(key)
+        output.append(subject)
     return output
 
 
@@ -421,6 +995,9 @@ def _entity_candidates(scene: dict, hint: dict | None = None) -> list[str]:
         if current is None or candidate > current:
             ranked[key] = candidate
 
+    for match in VERSIONED_PRODUCT_RE.finditer(text):
+        add(match.group(0), position=match.start(), bonus=76)
+
     for match in CAPITAL_PHRASE_RE.finditer(text):
         raw = _normalise_entity_phrase(match.group(0))
         if not raw or raw.casefold() in sources:
@@ -460,7 +1037,9 @@ def _entity_candidates(scene: dict, hint: dict | None = None) -> list[str]:
 
         first = raw_tokens[0] if raw_tokens else ""
         if len(raw_tokens) > 1 and (first.isupper() or any(char.isdigit() for char in first)):
-            add(first, position=match.start(), bonus=central_bonus - 6)
+            remainder = _semantic_terms(" ".join(raw_tokens[1:]))
+            acronym_bonus = 60 if first.isupper() and remainder.issubset(GENERIC_ENTITY_TERMS) else -6
+            add(first, position=match.start(), bonus=central_bonus + acronym_bonus)
         elif (
             len(raw_tokens) == 2
             and raw_tokens[-1].casefold() in {"office", "platform", "model", "system"}
@@ -958,9 +1537,15 @@ def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
 
 def image_grounding_is_valid(image: dict, scene: dict) -> bool:
     """Recompute policy proof instead of trusting manifest booleans."""
+    raw_expected_subject = " ".join(str(image.get("expected_subject") or "").split())
+    expected_subject = _normalise_entity_phrase(image.get("expected_subject"))
+    caption = " ".join(str(image.get("caption") or "").split())
     if (
         image.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
         or image.get("grounding_passed") is not True
+        or not expected_subject
+        or raw_expected_subject != expected_subject
+        or caption != expected_subject
         or not _is_open_license(str(image.get("license") or ""), str(image.get("license_code") or ""))
     ):
         return False
@@ -1055,12 +1640,14 @@ def _cached_manifest(
     seen_sources: set[str] = set()
     seen_hashes: set[str] = set()
     seen_paths: set[str] = set()
+    seen_identities: set[str] = set()
     for image in images:
         scene_id = str(image.get("scene_id") or "")
         source = str(image.get("source_page_url") or "")
         digest = str(image.get("sha256") or "")
         local_path = str(image.get("local_path") or "")
         anchors = image.get("grounding_distinctive_anchors") or []
+        identity = _subject_identity_key(image)
         if (
             not scene_id
             or scene_id not in eligible
@@ -1072,6 +1659,8 @@ def _cached_manifest(
             or digest in seen_hashes
             or not local_path
             or local_path in seen_paths
+            or not identity
+            or identity in seen_identities
             or image.get("display_mode") not in PLAN_MODES
             or image.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
             or image.get("grounding_passed") is not True
@@ -1086,6 +1675,7 @@ def _cached_manifest(
         seen_sources.add(source)
         seen_hashes.add(digest)
         seen_paths.add(local_path)
+        seen_identities.add(identity)
     return manifest
 
 
@@ -1132,7 +1722,13 @@ def _wikimedia_query_variants(shot: dict, scene: dict) -> list[str]:
         raw.append(f"{subject_text} logo")
         # Only an identity-bearing leading token may shorten a product name.
         # Never turn Perfect World into the dangerously broad "World logo".
-        if len(subject) > 1 and subject[0] not in GENERIC_QUERY_TERMS:
+        leading_display = subject_display_terms[0] if subject_display_terms else ""
+        leading_key = leading_display.casefold()
+        if len(subject) > 1 and (
+            leading_display.isupper()
+            or any(char.isdigit() for char in leading_display)
+            or leading_key in {"qwen", "qianwen"}
+        ):
             raw.append(f"{subject_display_terms[0]} logo")
     else:
         if any(term.casefold() in {"mouse", "mice"} for term in subject + scene_words):
@@ -1141,8 +1737,8 @@ def _wikimedia_query_variants(shot: dict, scene: dict) -> list[str]:
             raw.extend(["Falcon 9 rocket launch", "SpaceX Falcon 9 launch"])
         raw.extend(
             [
-                " ".join(subject + ["photo"]),
-                " ".join(subject + ["event"]),
+                f"{subject_text} photo",
+                f"{subject_text} event",
             ]
         )
     output: list[str] = []
@@ -1291,15 +1887,28 @@ def _fallback_subject(scene: dict, hint: dict | None = None) -> str:
 
 
 def _entity_kind(subject: str, scene: dict) -> str:
-    escaped = re.escape(subject).replace(r"\ ", r"\s+")
-    text = str(scene.get("text") or "")
-    if re.search(
-        rf"(?:authored by\s+{escaped}|{escaped}\s*,[^,.]{{0,48}}\b(?:professor|editor|analyst|researcher)\b)",
-        text,
-        flags=re.I,
-    ):
-        return "person"
-    return "logo"
+    role, reason = _subject_semantic_role(subject, scene)
+    if reason:
+        return ""
+    return {
+        "brand": "logo",
+        "object": "object",
+        "person": "person",
+        "place": "place",
+        "product": "product",
+    }.get(role, "")
+
+
+def _deterministic_query(subject: str, kind: str) -> str:
+    suffix = {
+        "event": "event",
+        "logo": "logo",
+        "person": "portrait",
+        "place": "photo",
+        "product": "product",
+        "object": "photo",
+    }.get(kind, "photo")
+    return _sanitize_query(f"{subject} {suffix}")
 
 
 def _fallback_shots_for_scene(
@@ -1308,35 +1917,36 @@ def _fallback_shots_for_scene(
     *,
     display_mode: str = "inline",
 ) -> list[dict]:
-    subjects = _entity_candidates(scene, hint)
+    subjects = [(subject, _entity_kind(subject, scene)) for subject in _entity_candidates(scene, hint)]
+    subjects.extend((subject, "object") for subject in _concrete_object_candidates(scene))
     if not subjects:
-        subjects = [_fallback_subject(scene, hint)]
+        fallback = _fallback_subject(scene, hint)
+        subjects = [(fallback, _entity_kind(fallback, scene))]
     output: list[dict] = []
     seen: set[tuple[str, str]] = set()
-    for subject in subjects[:5]:
-        kind = _entity_kind(subject, scene)
-        if kind == "logo":
-            query = f"{subject} logo"
-        elif kind == "person":
-            query = f"{subject} portrait"
-        else:
-            query = f"{subject} photo"
+    for subject, kind in subjects:
+        if len(output) >= 5:
+            break
+        if not kind:
+            continue
+        query = _deterministic_query(subject, kind)
         signature = (subject.casefold(), query.casefold())
         if signature in seen or not _distinctive_terms(subject):
             continue
+        shot = {
+            "scene_id": str(scene.get("id") or ""),
+            "search_query": _sanitize_query(query),
+            "news_query": _sanitize_query(subject, 14),
+            "expected_subject": subject[:100],
+            "kind": kind,
+            "display_mode": display_mode,
+            "purpose": "Deterministic visual derived from a narrated semantic subject",
+            "caption": subject[:120],
+        }
+        if _shot_subject_semantic_error(shot, scene):
+            continue
         seen.add(signature)
-        output.append(
-            {
-                "scene_id": str(scene.get("id") or ""),
-                "search_query": _sanitize_query(query),
-                "news_query": _sanitize_query(subject, 14),
-                "expected_subject": subject[:100],
-                "kind": kind,
-                "display_mode": display_mode,
-                "purpose": "Deterministic visual derived from a named narration entity",
-                "caption": subject[:120],
-            }
-        )
+        output.append(shot)
     return output
 
 
@@ -1346,7 +1956,7 @@ def _subject_identity_key(shot: dict) -> str:
         for term in _ordered_semantic_terms(shot.get("expected_subject"))
         if term not in GENERIC_QUERY_TERMS and term != "ai"
     ]
-    return ordered[0] if ordered else ""
+    return SUBJECT_IDENTITY_ALIASES.get(ordered[0], ordered[0]) if ordered else ""
 
 
 def _allocate_unique_scene_shots(
@@ -1404,7 +2014,7 @@ def _allocate_unique_scene_shots(
                 for option in options
                 if _subject_identity_key(option) and _subject_identity_key(option) not in used_identities
             ),
-            options[0] if options else None,
+            None,
         )
         if chosen is None:
             continue
@@ -1416,11 +2026,10 @@ def _allocate_unique_scene_shots(
 
 
 def _fallback_plan(scenes: list[dict], count: int, scene_hints: dict[str, dict] | None = None) -> list[dict]:
-    selected_scenes = scenes[:count]
     output = _allocate_unique_scene_shots(
-        selected_scenes,
+        scenes,
         scene_hints=scene_hints,
-    )
+    )[:count]
     _ensure_placement_mode_mix(output)
     return output
 
@@ -1443,6 +2052,11 @@ def _reserve_plan(
     """Create alternate entity queries even when every eligible scene is primary."""
     primary_by_scene = {str(shot.get("scene_id") or ""): shot for shot in primary}
     primary_identities = {identity for shot in primary if (identity := _subject_identity_key(shot))}
+    identity_owners = {
+        identity: str(shot.get("scene_id") or "")
+        for shot in primary
+        if (identity := _subject_identity_key(shot))
+    }
     output: list[dict] = []
     for scene in scenes:
         scene_id = str(scene.get("id") or "")
@@ -1461,6 +2075,10 @@ def _reserve_plan(
             signature = _shot_signature(variant)
             if signature in used:
                 continue
+            identity = _subject_identity_key(variant)
+            owner = identity_owners.get(identity) if identity else None
+            if owner and owner != scene_id:
+                continue
             used.add(signature)
             output.append(
                 {
@@ -1470,6 +2088,8 @@ def _reserve_plan(
                     ),
                 }
             )
+            if identity:
+                identity_owners.setdefault(identity, scene_id)
             added += 1
             if added >= per_scene:
                 break
@@ -1502,18 +2122,7 @@ def _complete_plan(
 
 
 def _shot_is_grounded_to_scene(shot: dict, scene: dict) -> bool:
-    subject = _normalise_entity_phrase(shot.get("expected_subject"))
-    subject_terms = _semantic_terms(subject)
-    identity_terms = _identity_tokens(subject)
-    scene_text = str(scene.get("text") or "")
-    if (
-        not subject_terms
-        or not _distinctive_terms(subject)
-        or not _contains_token_phrase(_identity_tokens(scene_text), identity_terms)
-        or subject.casefold() in _source_entity_keys(scene_text)
-    ):
-        return False
-    return True
+    return not _shot_subject_semantic_error(shot, scene)
 
 
 def _prepare_primary_plan(
@@ -1524,34 +2133,30 @@ def _prepare_primary_plan(
 ) -> list[dict]:
     """Replace hallucinated or generic planner rows with narration entities."""
     scenes_by_id = {str(scene.get("id") or ""): scene for scene in scenes}
-    completed = _complete_plan(plan, scenes, target, scene_hints)
     preferred: dict[str, dict] = {}
-    selected_scenes: list[dict] = []
-    for shot in completed:
+    for shot in plan:
         scene_id = str(shot.get("scene_id") or "")
         scene = scenes_by_id.get(scene_id)
         if scene is None:
             continue
-        selected_scenes.append(scene)
         normalized = {
             **shot,
             "expected_subject": _normalise_entity_phrase(shot.get("expected_subject")),
         }
         if _shot_is_grounded_to_scene(normalized, scene):
+            normalized["search_query"] = _deterministic_query(
+                str(normalized["expected_subject"]),
+                str(normalized.get("kind") or ""),
+            )
+            normalized["news_query"] = _sanitize_query(normalized["expected_subject"], 14)
+            normalized["caption"] = str(normalized["expected_subject"])[:120]
+            normalized["purpose"] = "Licensed visual grounded to the narrated semantic subject"
             preferred[scene_id] = normalized
-            continue
-        replacements = _fallback_shots_for_scene(
-            scene,
-            (scene_hints or {}).get(scene_id) or {},
-            display_mode=str(shot.get("display_mode") or "inline"),
-        )
-        if replacements:
-            preferred[scene_id] = replacements[0]
     output = _allocate_unique_scene_shots(
-        selected_scenes,
+        scenes,
         preferred,
         scene_hints,
-    )
+    )[:target]
     _ensure_placement_mode_mix(output)
     return output[:target]
 
@@ -1725,12 +2330,13 @@ def _grounding_evidence(shot: dict, scene: dict, candidate: dict) -> dict:
     )
     candidate_match = _candidate_identity_match(shot, candidate)
     context_conflicts = _candidate_context_conflicts(scene, candidate)
-    strong_subject_terms = [
-        term for term in subject_terms if term != "ai" and term not in GENERIC_QUERY_TERMS
-    ]
+    semantic_error = _shot_subject_semantic_error(shot, scene)
     passed = True
     reason = "complete subject identity matched narration and one candidate metadata field"
-    if not subject_terms or not strong_subject_terms:
+    if semantic_error:
+        passed = False
+        reason = semantic_error
+    elif not subject_terms:
         passed = False
         reason = "shot subject had no usable complete identity"
     elif not scene_has_identity:
@@ -2900,7 +3506,7 @@ def attach_news_images(
                 "news_image_kind": image.get("kind") or "event",
                 "news_image_fit": image.get("fit") or "cover",
                 "news_image_credit": _credit(image),
-                "news_image_caption": image.get("caption") or image.get("expected_subject") or "",
+                "news_image_caption": image.get("expected_subject") or "",
                 "news_image_query": image.get("search_query") or "",
                 "news_image_expected_subject": image.get("expected_subject") or "",
                 "news_image_source_page_url": source_page_url,

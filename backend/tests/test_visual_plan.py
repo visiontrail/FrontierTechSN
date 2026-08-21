@@ -399,6 +399,7 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
             "news_image": True,
             "news_image_source_scene_id": "scene-01",
             "news_image_expected_subject": "NVIDIA",
+            "news_image_caption": "NVIDIA",
             "news_image_kind": "logo",
             "news_image_title": "NVIDIA logo",
             "news_image_description": "Official NVIDIA logo",
@@ -423,6 +424,11 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
     assert report["passed"] is True
     assert "licensed news image" in report["scenes"][0]["reason"]
 
+    plans[0]["news_image_caption"] = "Five logo"
+    tampered = visual_plan.visual_grounding_report(plans, data)
+    assert tampered["passed"] is False
+    assert "lacked a current exact-scene grounding proof" in tampered["scenes"][0]["reason"]
+
 
 def _verified_news_plan() -> tuple[dict, list[dict]]:
     data = board(1)
@@ -445,6 +451,7 @@ def _verified_news_plan() -> tuple[dict, list[dict]]:
             "news_image": True,
             "news_image_source_scene_id": "scene-01",
             "news_image_expected_subject": "NVIDIA",
+            "news_image_caption": "NVIDIA",
             "news_image_kind": "logo",
             "news_image_title": "NVIDIA logo",
             "news_image_description": "Official NVIDIA logo",
