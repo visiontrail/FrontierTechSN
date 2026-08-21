@@ -40,6 +40,9 @@ GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE = (
 GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE = (
     "OPENCLI_CAPABILITY_DEGRADED:GEMINI_VIDEO_UPLOAD_INPUT_HYDRATION_STUCK"
 )
+CHATGPT_IMAGE_COMPOSER_NOT_READY_SIGNATURE = (
+    "chatgpt-image-command-exec:composer-not-ready"
+)
 
 
 class GeminiVideoUploadCapabilityError(OpenCLIError):
@@ -811,6 +814,7 @@ async def _run_opencli_retry(
     non_retryable: Callable[[Exception], bool] | None = None,
     repeated_failure_signature: Callable[[Exception], str | None] | None = None,
     repeated_failure_threshold: int = 2,
+    repeated_failure_error_code: str | None = None,
 ):
     """Retry transient browser failures, stopping on a proven capability gap."""
     last_error: Exception | None = None
@@ -851,13 +855,17 @@ async def _run_opencli_retry(
                 last_repeated_signature = None
                 repeated_failure_hits = 0
             if repeated_failure_hits >= max(2, repeated_failure_threshold):
-                raise GeminiVideoUploadCapabilityError(
-                    f"{label} repeated the same upload hydration failure "
+                message = (
+                    f"{label} repeated the same stable failure "
                     f"{repeated_failure_hits} times "
-                    f"({GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE}; "
-                    f"signature={repeated_signature}): {exc}",
-                    error_code=GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE,
-                ) from exc
+                    f"(signature={repeated_signature}): {exc}"
+                )
+                if repeated_failure_error_code:
+                    raise GeminiVideoUploadCapabilityError(
+                        f"{message} ({repeated_failure_error_code})",
+                        error_code=repeated_failure_error_code,
+                    ) from exc
+                raise OpenCLIError(message) from exc
             if attempt < maximum_attempts:
                 await asyncio.sleep(min(45, 3 * 2 ** (attempt - 1)))
     raise OpenCLIError(
@@ -903,6 +911,22 @@ def _gemini_video_input_hydration_stuck_signature(
     return match.group(1) if match else None
 
 
+def _chatgpt_image_composer_not_ready_signature(
+    error: Exception,
+) -> str | None:
+    """Recognize the adapter's stable signed-out/unready image-composer error."""
+    message = " ".join(str(error).split()).casefold()
+    required = (
+        "opencli chatgpt image failed",
+        "code: command_exec",
+        "message: failed to send image prompt to chatgpt",
+        "help: open https://chatgpt.com/new and verify the composer is ready.",
+    )
+    if all(token in message for token in required):
+        return CHATGPT_IMAGE_COMPOSER_NOT_READY_SIGNATURE
+    return None
+
+
 async def _generate_still(prompt: str, item_dir: Path) -> tuple[Path, str]:
     still_dir = item_dir / "stills"
     still_dir.mkdir(parents=True, exist_ok=True)
@@ -920,6 +944,8 @@ async def _generate_still(prompt: str, item_dir: Path) -> tuple[Path, str]:
         ],
         timeout=timeout + 60,
         label="ChatGPT collage still",
+        repeated_failure_signature=_chatgpt_image_composer_not_ready_signature,
+        repeated_failure_threshold=2,
     )
     parsed = _rows(first_json(result.stdout))
     reported: list[Path] = []
@@ -1243,6 +1269,7 @@ async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, 
         non_retryable=_is_gemini_video_upload_capability_failure,
         repeated_failure_signature=_gemini_video_input_hydration_stuck_signature,
         repeated_failure_threshold=2,
+        repeated_failure_error_code=GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE,
     )
     if not raw.is_file() or raw.stat().st_size < 1024:
         raise OpenCLIError("Gemini Web Create Video produced no downloaded MP4")

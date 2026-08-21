@@ -541,6 +541,9 @@ def test_opencli_stops_after_two_identical_input_hydration_failures(monkeypatch)
                     collage_broll._gemini_video_input_hydration_stuck_signature
                 ),
                 repeated_failure_threshold=2,
+                repeated_failure_error_code=(
+                    collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE
+                ),
             )
         )
 
@@ -549,6 +552,104 @@ def test_opencli_stops_after_two_identical_input_hydration_failures(monkeypatch)
     )
     assert run.await_count == 2
     assert sleep.await_count == 1
+
+
+def _stuck_chatgpt_image_composer_error() -> collage_broll.OpenCLIError:
+    return collage_broll.OpenCLIError(
+        "OpenCLI chatgpt image failed with exit 1: ok: false\n"
+        "code: COMMAND_EXEC\n"
+        "message: Failed to send image prompt to ChatGPT\n"
+        "help: Open https://chatgpt.com/new and verify the composer is ready."
+    )
+
+
+def test_chatgpt_still_stops_after_two_identical_composer_not_ready_failures(
+    tmp_path: Path,
+    monkeypatch,
+):
+    run = AsyncMock(
+        side_effect=[
+            _stuck_chatgpt_image_composer_error(),
+            _stuck_chatgpt_image_composer_error(),
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 10)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", sleep)
+
+    with pytest.raises(collage_broll.OpenCLIError) as raised:
+        asyncio.run(collage_broll._generate_still("paper collage", tmp_path))
+
+    assert not isinstance(
+        raised.value, collage_broll.GeminiVideoUploadCapabilityError
+    )
+    assert collage_broll.CHATGPT_IMAGE_COMPOSER_NOT_READY_SIGNATURE in str(
+        raised.value
+    )
+    assert run.await_count == 2
+    assert sleep.await_count == 1
+
+
+def test_chatgpt_composer_signature_streak_resets_after_a_different_failure(
+    monkeypatch,
+):
+    run = AsyncMock(
+        side_effect=[
+            _stuck_chatgpt_image_composer_error(),
+            collage_broll.OpenCLIError("browser temporarily busy"),
+            _stuck_chatgpt_image_composer_error(),
+            "ready",
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 4)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", sleep)
+
+    result = asyncio.run(
+        collage_broll._run_opencli_retry(
+            ["chatgpt", "image", "prompt"],
+            timeout=10,
+            label="ChatGPT collage still",
+            repeated_failure_signature=(
+                collage_broll._chatgpt_image_composer_not_ready_signature
+            ),
+            repeated_failure_threshold=2,
+        )
+    )
+
+    assert result == "ready"
+    assert run.await_count == 4
+    assert sleep.await_count == 3
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "OpenCLI chatgpt image failed with exit 1: code: COMMAND_EXEC",
+        (
+            "code: COMMAND_EXEC message: Failed to send image prompt to ChatGPT "
+            "help: Open https://chatgpt.com/new and verify the composer is ready."
+        ),
+        (
+            "OpenCLI chatgpt image failed with exit 1: code: COMMAND_EXEC "
+            "message: Failed to send image prompt to ChatGPT"
+        ),
+        (
+            "OpenCLI chatgpt image failed with exit 1: code: RATE_LIMIT "
+            "message: Failed to send image prompt to ChatGPT "
+            "help: Open https://chatgpt.com/new and verify the composer is ready."
+        ),
+    ],
+)
+def test_chatgpt_composer_classifier_requires_complete_stable_signature(message):
+    assert (
+        collage_broll._chatgpt_image_composer_not_ready_signature(
+            collage_broll.OpenCLIError(message)
+        )
+        is None
+    )
 
 
 def test_opencli_does_not_combine_nonconsecutive_or_different_stuck_states(
@@ -936,6 +1037,11 @@ def test_generate_falls_back_locally_when_web_still_fails(tmp_path: Path):
     assert manifest["ready_count"] == 1
     assert manifest["items"][0]["still_provider"] == "deterministic_local_paper_collage"
     assert manifest["items"][0]["video_provider"] == "deterministic_local_paper_assembly"
+    assert manifest["gemini_video_upload_capability"] == {
+        "status": "unknown",
+        "error_code": None,
+        "detected_at_scene_id": None,
+    }
 
 
 def test_local_animation_assembles_once_and_ends_on_a_distinct_frame(tmp_path: Path):
