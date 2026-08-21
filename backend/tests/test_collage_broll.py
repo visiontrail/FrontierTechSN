@@ -518,7 +518,7 @@ def test_opencli_collage_operation_does_not_retry_stable_upload_capability_failu
 
 
 def test_opencli_stops_after_two_identical_input_hydration_failures(monkeypatch):
-    signature = "keyframe=1;attachments=0;busy=1;inputs=0;click=ok;button=ready;focus=1"
+    signature = "keyframe=2;attachments=1;busy=1;fresh=0;baseline=1;click=ok;button=ready;focus=1"
     run = AsyncMock(
         side_effect=[
             _stuck_gemini_video_input_error(signature),
@@ -655,8 +655,8 @@ def test_chatgpt_composer_classifier_requires_complete_stable_signature(message)
 def test_opencli_does_not_combine_nonconsecutive_or_different_stuck_states(
     monkeypatch,
 ):
-    first = "keyframe=1;attachments=0;busy=1;inputs=0;click=ok;button=ready;focus=1"
-    different = "keyframe=2;attachments=1;busy=1;inputs=0;click=ok;button=ready;focus=1"
+    first = "keyframe=1;attachments=0;busy=1;fresh=0;baseline=0;click=ok;button=ready;focus=1"
+    different = "keyframe=2;attachments=1;busy=1;fresh=0;baseline=1;click=ok;button=ready;focus=1"
     run = AsyncMock(
         side_effect=[
             _stuck_gemini_video_input_error(first),

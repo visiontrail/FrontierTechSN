@@ -166,21 +166,48 @@ function uploadFailure(expectedCount, substep, diagnostic) {
     const buttonReady = inputState?.button?.connected
         && inputState?.button?.visible
         && !inputState?.button?.disabled;
+    const liveInputs = Array.isArray(inputState?.inputs) ? inputState.inputs : [];
+    const baselineInputs = Array.isArray(diagnostic?.baselineState?.inputs)
+        ? diagnostic.baselineState.inputs
+        : [];
+    const baselineInputCount = Number(inputState?.baselineInputCount);
+    const freshInputCount = Number(inputState?.freshInputCount);
+    const onlyStableBaselineInputs = Number.isInteger(baselineInputCount)
+        && baselineInputCount >= 0
+        && baselineInputCount === liveInputs.length
+        && baselineInputCount === baselineInputs.length
+        && liveInputs.every((input, index) => {
+            const baseline = baselineInputs[index];
+            return input?.connected === true
+                && input?.disabled === false
+                && Array.isArray(input?.files)
+                && input.files.length === 0
+                && baseline?.connected === true
+                && baseline?.disabled === false
+                && Array.isArray(baseline?.files)
+                && baseline.files.length === 0
+                && Number(input?.index) === Number(baseline?.index)
+                && String(input?.name || '') === String(baseline?.name || '')
+                && String(input?.type || '') === String(baseline?.type || '');
+        });
     const hydrationStuck = substep === 'discover_live_input'
         && diagnostic?.exhausted === true
+        && diagnostic?.reopened === false
         && clickSucceeded
+        && inputState?.ok === false
         && inputState?.busy === true
+        && Number(inputState?.busyCount) > 0
         && inputState?.documentHasFocus === true
         && buttonReady
-        && Number(inputState?.freshInputCount || 0) === 0
-        && Array.isArray(inputState?.inputs)
-        && inputState.inputs.length === 0;
+        && freshInputCount === 0
+        && onlyStableBaselineInputs;
     const stuckSignature = hydrationStuck
         ? [
             `keyframe=${expectedCount}`,
             `attachments=${Number(diagnostic?.baselineState?.attachments || 0)}`,
             'busy=1',
-            'inputs=0',
+            'fresh=0',
+            `baseline=${baselineInputCount}`,
             'click=ok',
             'button=ready',
             'focus=1',
