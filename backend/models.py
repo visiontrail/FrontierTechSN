@@ -7,7 +7,7 @@ import uuid
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 
 class SourceType(str, Enum):
@@ -204,6 +204,21 @@ class TaskResponse(BaseModel):
     origin_id: Optional[str] = None
     origin_label: Optional[str] = None
     planned_publish_at: Optional[str] = None
+
+    @computed_field
+    @property
+    def video_artifact_state(self) -> Literal["final", "retained"] | None:
+        """Describe whether video_path belongs to the current completed task.
+
+        Failed and in-progress retries deliberately keep the last validated
+        video_path until a replacement is fully promoted. Expose that retained
+        state so clients cannot present an older cut as the current result.
+        """
+        if not self.video_path:
+            return None
+        if self.status == TaskStatus.COMPLETE:
+            return "final"
+        return "retained"
 
 
 class TaskListResponse(BaseModel):

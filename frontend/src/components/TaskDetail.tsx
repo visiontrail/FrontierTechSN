@@ -46,6 +46,25 @@ function stageState(current: string, stage: string): 'done' | 'active' | '' {
   return ''
 }
 
+function retainedVideoWarning(status: string, publicationSafetyHold: boolean): string {
+  if (publicationSafetyHold) {
+    return 'Publication stopped with an indeterminate result after this cut was validated. The cut remains retained while the task is failed; verify every destination before taking further action.'
+  }
+  if (status === 'failed') {
+    return 'This task did not complete. The download is the last validated cut retained before failure; it may belong to an earlier render and is not proof that the failed attempt produced a final result.'
+  }
+  if (status === 'queued') {
+    return 'A new attempt is queued. The download remains the last validated cut until the task completes.'
+  }
+  if (status === 'awaiting_review') {
+    return 'This task is awaiting review. The download is the last validated cut, not the current draft.'
+  }
+  if (status === 'publishing') {
+    return 'Publishing is still in progress. This validated cut remains retained until the task reaches Complete.'
+  }
+  return 'This task is still processing. The download remains the last validated cut until the task completes.'
+}
+
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -175,9 +194,11 @@ export default function TaskDetail() {
                 <button className="btn-ghost" type="button">Audio</button>
               </a>
             )}
-            {task.video_path && (
-              <a href={videoUrl(task.id)} download>
-                <button className="btn-primary" type="button">Download Video</button>
+            {task.video_path && task.video_artifact_state && (
+              <a href={videoUrl(task.id, task.video_artifact_state)} download>
+                <button className="btn-primary" type="button">
+                  {task.video_artifact_state === 'final' ? 'Download Video' : 'Download Last Validated Cut'}
+                </button>
               </a>
             )}
             {task.thumbnail_path && (
@@ -200,6 +221,13 @@ export default function TaskDetail() {
 
       {deleteMutation.isError && (
         <div className="error-box">{(deleteMutation.error as Error).message}</div>
+      )}
+
+      {task.video_artifact_state === 'retained' && (
+        <div className="retained-video-warning" role="status">
+          <strong>Last validated cut retained</strong>
+          <span>{retainedVideoWarning(task.status, task.publication_safety_hold)}</span>
+        </div>
       )}
 
       <div className="detail-progress">
@@ -352,7 +380,7 @@ export default function TaskDetail() {
               <video
                 key={task.updated_at}
                 controls
-                src={`${videoUrl(task.id)}?v=${encodeURIComponent(task.updated_at)}`}
+                src={`${videoUrl(task.id, 'final')}&v=${encodeURIComponent(task.updated_at)}`}
               />
               <div className="actions">
                 <button

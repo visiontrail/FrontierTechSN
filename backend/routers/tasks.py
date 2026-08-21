@@ -3,6 +3,8 @@ import json
 import shutil
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
@@ -549,14 +551,40 @@ async def acquire_task_footage(task_id: str, body: FootageAcquireRequest):
 
 
 @router.get("/{task_id}/video")
-async def download_video(task_id: str):
+async def download_video(
+    task_id: str,
+    artifact: Literal["final", "retained"] = "final",
+):
     task = await db.get_task(task_id)
     if not task or not task.video_path:
         raise HTTPException(404, "Video not available")
+    if task.video_artifact_state != artifact:
+        raise HTTPException(
+            409,
+            f"Requested {artifact} video is unavailable while task status is "
+            f"{task.status.value}; request artifact={task.video_artifact_state} instead",
+            headers={
+                "X-Video-Artifact-State": task.video_artifact_state,
+                "X-Task-Status": task.status.value,
+            },
+        )
     path = Path(task.video_path)
     if not path.exists():
         raise HTTPException(404, "Video file missing")
-    return FileResponse(path, media_type="video/mp4", filename=f"{task_id}.mp4")
+    filename = (
+        f"{task_id}.mp4"
+        if artifact == "final"
+        else f"{task_id}-retained.mp4"
+    )
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=filename,
+        headers={
+            "X-Video-Artifact-State": artifact,
+            "X-Task-Status": task.status.value,
+        },
+    )
 
 
 @router.get("/{task_id}/thumbnail")

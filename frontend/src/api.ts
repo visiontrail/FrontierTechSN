@@ -91,6 +91,7 @@ export interface Task {
   script_path: string | null;
   audio_path: string | null;
   video_path: string | null;
+  video_artifact_state: VideoArtifactState | null;
   thumbnail_path: string | null;
   duration_seconds: number | null;
   suppress_next_auto_publish: boolean;
@@ -669,8 +670,10 @@ export function footageFileUrl(taskId: string, clipId: string): string {
   return `${BASE}/api/tasks/${taskId}/footage/${clipId}/file`;
 }
 
-export function videoUrl(taskId: string): string {
-  return `${BASE}/api/tasks/${taskId}/video`;
+export type VideoArtifactState = 'final' | 'retained';
+
+export function videoUrl(taskId: string, artifact: VideoArtifactState): string {
+  return `${BASE}/api/tasks/${taskId}/video?artifact=${artifact}`;
 }
 
 export function audioUrl(taskId: string): string {

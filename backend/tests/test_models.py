@@ -1,7 +1,13 @@
 import pytest
 from pydantic import ValidationError
 
-from backend.models import DEFAULT_CLOSING_REMARKS, TaskConfig
+from backend.models import (
+    DEFAULT_CLOSING_REMARKS,
+    SourceType,
+    TaskConfig,
+    TaskResponse,
+    TaskStatus,
+)
 
 
 def test_captions_are_off_by_default():
@@ -67,3 +73,32 @@ def test_orpheus_is_monologue_only():
             voice_1="tara",
             voice_2="leah",
         )
+
+
+@pytest.mark.parametrize(
+    ("status", "video_path", "expected"),
+    [
+        (TaskStatus.COMPLETE, "/tmp/final.mp4", "final"),
+        (TaskStatus.FAILED, "/tmp/previous.mp4", "retained"),
+        (TaskStatus.COMPOSING, "/tmp/previous.mp4", "retained"),
+        (TaskStatus.PUBLISHING, "/tmp/validated.mp4", "retained"),
+        (TaskStatus.COMPLETE, None, None),
+    ],
+)
+def test_task_response_computes_truthful_video_artifact_state(
+    status: TaskStatus,
+    video_path: str | None,
+    expected: str | None,
+):
+    task = TaskResponse(
+        id="task-video-state",
+        created_at="2026-08-21T00:00:00+00:00",
+        updated_at="2026-08-21T00:00:00+00:00",
+        source_type=SourceType.TOPIC,
+        status=status,
+        config=TaskConfig(),
+        video_path=video_path,
+    )
+
+    assert task.video_artifact_state == expected
+    assert task.model_dump()["video_artifact_state"] == expected
