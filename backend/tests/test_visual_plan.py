@@ -400,6 +400,9 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
             "news_image_kind": "logo",
             "news_image_title": "NVIDIA logo",
             "news_image_description": "Official NVIDIA logo",
+            "news_image_categories": "",
+            "news_image_object_name": "",
+            "news_image_creator": "",
             "news_image_match_terms": evidence["grounding_distinctive_anchors"],
             "news_image_grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
             "news_image_grounding_passed": True,
@@ -407,6 +410,7 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
             "news_image_grounding_identity_field": evidence["grounding_identity_field"],
             "news_image_grounding_identity_phrase": evidence["grounding_identity_phrase"],
             "news_image_grounding_identity_field_terms": evidence["grounding_identity_field_terms"],
+            "news_image_grounding_context_conflicts": evidence["grounding_context_conflicts"],
             "news_image_license": "Public domain",
             "news_image_license_code": "Public domain",
         }
@@ -422,10 +426,17 @@ def _verified_news_plan() -> tuple[dict, list[dict]]:
     data = board(1)
     data["scenes"][0]["text"] = "NVIDIA announced the Vera CPU."
     plans = visual_plan.fallback_plan(data)
+    candidate = {
+        "title": "NVIDIA logo",
+        "description": "Official NVIDIA logo",
+        "categories": "NVIDIA|Technology company logos",
+        "object_name": "NVIDIA logo",
+        "creator": "NVIDIA Corporation",
+    }
     evidence = news_images._grounding_evidence(
         {"expected_subject": "NVIDIA", "kind": "logo"},
         data["scenes"][0],
-        {"title": "NVIDIA logo", "description": "Official NVIDIA logo"},
+        candidate,
     )
     plans[0].update(
         {
@@ -435,6 +446,9 @@ def _verified_news_plan() -> tuple[dict, list[dict]]:
             "news_image_kind": "logo",
             "news_image_title": "NVIDIA logo",
             "news_image_description": "Official NVIDIA logo",
+            "news_image_categories": candidate["categories"],
+            "news_image_object_name": candidate["object_name"],
+            "news_image_creator": candidate["creator"],
             "news_image_match_terms": evidence["grounding_distinctive_anchors"],
             "news_image_grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
             "news_image_grounding_passed": True,
@@ -442,11 +456,39 @@ def _verified_news_plan() -> tuple[dict, list[dict]]:
             "news_image_grounding_identity_field": evidence["grounding_identity_field"],
             "news_image_grounding_identity_phrase": evidence["grounding_identity_phrase"],
             "news_image_grounding_identity_field_terms": evidence["grounding_identity_field_terms"],
+            "news_image_grounding_context_conflicts": evidence["grounding_context_conflicts"],
             "news_image_license": "Public domain",
             "news_image_license_code": "Public domain",
         }
     )
     return data, plans
+
+
+def test_visual_grounding_report_rejects_category_only_media_identity_conflict():
+    data, plans = _verified_news_plan()
+    plans[0]["news_image_categories"] = "A Perfect World (film)|Movie logos"
+
+    report = visual_plan.visual_grounding_report(plans, data)
+
+    assert report["passed"] is False
+    assert "current exact-scene grounding proof" in report["scenes"][0]["reason"]
+
+
+def test_visual_grounding_report_requires_complete_v4_context_contract():
+    required_context_keys = (
+        "news_image_categories",
+        "news_image_object_name",
+        "news_image_creator",
+        "news_image_grounding_context_conflicts",
+    )
+
+    for missing_key in required_context_keys:
+        data, plans = _verified_news_plan()
+        del plans[0][missing_key]
+
+        report = visual_plan.visual_grounding_report(plans, data)
+
+        assert report["passed"] is False, missing_key
 
 
 def test_visual_grounding_report_recomputes_news_image_policy_and_license():

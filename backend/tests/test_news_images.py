@@ -599,6 +599,10 @@ def test_wikimedia_candidate_is_license_and_resolution_gated():
     assert news_images._extension_for(candidate) == ".png"
 
     page["imageinfo"][0].pop("thumbmime")
+    inferred_candidate = news_images._candidate_from_page(page, shot)
+    assert inferred_candidate is not None
+    assert inferred_candidate["mime_type"] == "image/png"
+
     page["imageinfo"][0].pop("thumburl")
     assert news_images._candidate_from_page(page, shot) is None
 
@@ -607,6 +611,105 @@ def test_wikimedia_candidate_is_license_and_resolution_gated():
 
     page["imageinfo"][0]["extmetadata"]["LicenseShortName"]["value"] = "All rights reserved"
     assert news_images._candidate_from_page(page, shot) is None
+
+
+def test_commons_file_reference_parser_accepts_only_exact_https_file_pages():
+    assert news_images._commons_file_title(
+        {
+            "url": (
+                "https://commons.wikimedia.org/wiki/"
+                "File:Perfect_World_Logo.svg?uselang=en"
+            )
+        }
+    ) == "File:Perfect World Logo.svg"
+
+    for url in (
+        "http://commons.wikimedia.org/wiki/File:Perfect_World_Logo.svg",
+        "https://commons.wikimedia.org.evil.example/wiki/File:Perfect_World_Logo.svg",
+        "https://en.wikipedia.org/wiki/File:Perfect_World_Logo.svg",
+        "https://commons.wikimedia.org/wiki/Category:Perfect_World",
+        "https://commons.wikimedia.org/wiki/File:../Perfect_World_Logo.svg",
+        "https://commons.wikimedia.org/wiki/File:Perfect%7CWorld.svg",
+    ):
+        assert news_images._commons_file_title({"url": url}) == ""
+
+
+@pytest.mark.asyncio
+async def test_exact_commons_reference_resolves_rasterized_svg_without_thumbmime():
+    request = news_images.httpx.Request("GET", news_images.WIKIMEDIA_API)
+    page = {
+        "title": "File:Perfect World Logo.svg",
+        "imageinfo": [
+            {
+                "mime": "image/svg+xml",
+                "url": "https://upload.wikimedia.org/perfect-world.svg",
+                "thumburl": (
+                    "https://upload.wikimedia.org/thumb/perfect-world.svg/"
+                    "1600px-perfect-world.svg.png"
+                ),
+                "descriptionurl": (
+                    "https://commons.wikimedia.org/wiki/File:Perfect_World_Logo.svg"
+                ),
+                "width": 512,
+                "height": 200,
+                "thumbwidth": 1600,
+                "thumbheight": 625,
+                "extmetadata": {
+                    "LicenseShortName": {"value": "Public domain"},
+                    "License": {"value": "pd-textlogo"},
+                    "ImageDescription": {
+                        "value": "Logo of the Chinese video game company Perfect World"
+                    },
+                    "Categories": {
+                        "value": "Perfect World (company)|Video game company logos"
+                    },
+                    "ObjectName": {"value": "Perfect World Logo"},
+                },
+            }
+        ],
+    }
+
+    class FakeClient:
+        async def get(self, _url, params):
+            assert params["titles"] == "File:Perfect World Logo.svg"
+            return news_images.httpx.Response(
+                200,
+                json={"query": {"pages": [page]}},
+                request=request,
+            )
+
+    shot = {
+        "kind": "logo",
+        "display_mode": "inline",
+        "search_query": "Perfect World logo",
+        "expected_subject": "Perfect World",
+        "_scene_text": "Perfect World's revenue report described the company results.",
+        "_scene_keywords": [],
+    }
+    candidates = await news_images.resolve_wikimedia_reference_images(
+        FakeClient(),
+        references=[
+            {
+                "title": "File:Perfect World Logo.svg",
+                "url": (
+                    "https://commons.wikimedia.org/wiki/"
+                    "File:Perfect_World_Logo.svg"
+                ),
+            },
+            {
+                "title": "Untrusted mirror",
+                "url": "https://example.com/wiki/File:Perfect_World_Logo.svg",
+            },
+        ],
+        shot=shot,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["title"] == "Perfect World Logo.svg"
+    assert candidates[0]["mime_type"] == "image/png"
+    assert candidates[0]["source_mime_type"] == "image/svg+xml"
+    assert candidates[0]["download_url"].endswith(".svg.png")
+    assert "Perfect World (company)" in candidates[0]["categories"]
 
 
 def test_three_way_grounding_rejects_world_aquatics_chemical_agents_and_google_loon():
@@ -682,6 +785,18 @@ def test_three_way_grounding_rejects_world_aquatics_chemical_agents_and_google_l
             {"text": "3M allocates employee time to ideas.", "keywords": []},
             {"title": "3M logo", "description": ""},
         ),
+        (
+            {"expected_subject": "Perfect World", "kind": "logo"},
+            {
+                "text": "Perfect World's revenue report described the company's results.",
+                "keywords": [],
+            },
+            {
+                "title": "Perfect World Logo.svg",
+                "description": "Logo of the Chinese video game company Perfect World",
+                "categories": "Perfect World (company)|Video game company logos",
+            },
+        ),
     ],
 )
 def test_complete_identity_grounding_positive_controls(shot, scene, candidate):
@@ -736,6 +851,45 @@ def test_complete_identity_grounding_positive_controls(shot, scene, candidate):
             {"expected_subject": "AI Agents Tested", "kind": "event"},
             {"text": "AI Agents Tested office workflows.", "keywords": []},
             {"title": "AI Agents Tested event", "description": ""},
+        ),
+        (
+            {"expected_subject": "Perfect World", "kind": "logo"},
+            {
+                "text": "Perfect World's revenue report described the company's results.",
+                "keywords": [],
+            },
+            {
+                "title": "A-perfect-world.png",
+                "description": '"A Perfect World" (1993) movie logo',
+                "categories": "A Perfect World (film)|Movie logos",
+            },
+        ),
+        (
+            {"expected_subject": "Perfect World", "kind": "logo"},
+            {
+                "text": "Perfect World's revenue report described the company's results.",
+                "keywords": [],
+            },
+            {
+                "title": "Perfect World Logo.png",
+                "description": "Sencillo de Twice",
+                "categories": "Perfect World (Twice album)|Logos of Twice",
+                "creator": "JYP Entertainment",
+            },
+        ),
+        (
+            {"expected_subject": "University of Stuttgart", "kind": "logo"},
+            {
+                "text": "A professor at the University of Stuttgart authored the article.",
+                "keywords": [],
+            },
+            {
+                "title": "Universität Stuttgart Campus Stadtmitte.jpg",
+                "description": (
+                    "University of Stuttgart campus flags with the university logo"
+                ),
+                "categories": "Campus of the University of Stuttgart",
+            },
         ),
     ],
 )
@@ -840,6 +994,79 @@ async def test_wikimedia_429_honors_retry_after_and_retries(monkeypatch):
     sleep.assert_awaited_once_with(2.0)
 
 
+@pytest.mark.asyncio
+async def test_wikimedia_download_retries_429_and_503_then_validates_raster(
+    tmp_path: Path,
+    monkeypatch,
+):
+    payload = _image_bytes("PNG", "download-retry")
+    statuses = [429, 503, 200]
+    calls: list[int] = []
+
+    def handler(request: news_images.httpx.Request) -> news_images.httpx.Response:
+        status = statuses[len(calls)]
+        calls.append(status)
+        if status == 429:
+            return news_images.httpx.Response(
+                status,
+                headers={"retry-after": "0.1"},
+                request=request,
+            )
+        if status == 503:
+            return news_images.httpx.Response(status, request=request)
+        return news_images.httpx.Response(
+            status,
+            headers={"content-type": "image/png"},
+            content=payload,
+            request=request,
+        )
+
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(news_images.asyncio, "sleep", sleep)
+    destination = tmp_path / "image-01.png"
+    async with news_images.httpx.AsyncClient(
+        transport=news_images.httpx.MockTransport(handler)
+    ) as client:
+        byte_size, digest = await news_images._download_candidate(
+            client,
+            candidate={"download_url": "https://upload.wikimedia.test/image.png"},
+            destination=destination,
+        )
+
+    assert calls == [429, 503, 200]
+    assert sleeps == [0.5, 2.5]
+    assert byte_size == len(payload)
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert destination.read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_wikimedia_download_rejects_non_image_content_type(tmp_path: Path):
+    payload = b"<html>not an image</html>" * 100
+
+    def handler(request: news_images.httpx.Request) -> news_images.httpx.Response:
+        return news_images.httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=payload,
+            request=request,
+        )
+
+    async with news_images.httpx.AsyncClient(
+        transport=news_images.httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ValueError, match="unsupported content type text/html"):
+            await news_images._download_candidate(
+                client,
+                candidate={"download_url": "https://upload.wikimedia.test/image.png"},
+                destination=tmp_path / "image-01.png",
+            )
+
+
 def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(
     tmp_path: Path,
 ):
@@ -885,12 +1112,23 @@ def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(
             ),
         ]
     }
+    manifest["images"][0].update(
+        {
+            "categories": "NVIDIA logos|Technology company logos",
+            "object_name": "NVIDIA logo",
+            "creator": "NVIDIA Corporation",
+        }
+    )
 
     summary = news_images.attach_news_images(plans, data, manifest, tmp_path)
 
     assert summary == {"attached": 2, "placement_modes": {"inline": 1, "fullscreen": 1}}
     assert plans[0]["archetype"] != "news_image"
     assert plans[0]["news_image_src"] == "../news_images/image-01.png"
+    assert plans[0]["news_image_categories"] == "NVIDIA logos|Technology company logos"
+    assert plans[0]["news_image_object_name"] == "NVIDIA logo"
+    assert plans[0]["news_image_creator"] == "NVIDIA Corporation"
+    assert plans[0]["news_image_grounding_context_conflicts"] == []
     assert plans[1]["archetype"] == "news_image"
     assert plans[1]["news_image_original_archetype"] == "topic"
 
@@ -2090,6 +2328,115 @@ async def test_fresh_acquisition_rejects_duplicate_content_hashes(
 
 
 @pytest.mark.asyncio
+async def test_exact_commons_references_fill_real_seven_scene_inventory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    data = failure_board()
+    fallback = news_images._fallback_plan(data["scenes"], 7)
+    monkeypatch.setattr(
+        news_images,
+        "plan_news_images",
+        AsyncMock(return_value=(fallback, "deterministic-fallback", "")),
+    )
+    inventory = {
+        "Perfect World": "Perfect_World_Logo.svg",
+        "IEEE": "IEEE_logo.svg",
+        "University of Stuttgart": "Uni_stuttgart_logo_english.svg",
+        "Google": "Google_2026_logo.svg",
+        "Alibaba": "Alibaba_en_logo.svg",
+        "Qwen": "Qwen_logo.svg",
+        "Jefferies": "Jefferies_logo.svg",
+    }
+
+    async def fake_research(shot: dict) -> tuple[list[dict], str]:
+        filename = inventory.get(shot["expected_subject"])
+        references = (
+            [
+                {
+                    "title": f"File:{filename}",
+                    "url": f"https://commons.wikimedia.org/wiki/File:{filename}",
+                }
+            ]
+            if filename
+            else []
+        )
+        return references, "mock-reference-search"
+
+    async def fake_resolve(_client, *, references: list[dict], shot: dict):
+        if not references:
+            return []
+        candidate = _commons_candidate(
+            shot["scene_id"],
+            shot["expected_subject"],
+            "logo",
+        )
+        slug = news_images._subject_identity_key(shot)
+        candidate.update(
+            {
+                "title": references[0]["title"].removeprefix("File:"),
+                "source_page_url": references[0]["url"],
+                "download_url": f"https://upload.example/{slug}.svg.png",
+                "mime_type": "image/png",
+                "categories": f"{shot['expected_subject']} logos",
+            }
+        )
+        return [candidate]
+
+    async def no_generator_results(_client, *, shot: dict, limit: int = 30):
+        del shot, limit
+        return []
+
+    async def fake_download(_client, *, candidate: dict, destination: Path):
+        payload = _image_bytes(
+            "PNG",
+            seed=candidate["source_page_url"],
+            size=(800, 450),
+        )
+        destination.write_bytes(payload)
+        return len(payload), hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr(news_images, "research_references", fake_research)
+    monkeypatch.setattr(
+        news_images,
+        "resolve_wikimedia_reference_images",
+        fake_resolve,
+    )
+    monkeypatch.setattr(news_images, "search_wikimedia_images", no_generator_results)
+    monkeypatch.setattr(news_images, "_download_candidate", fake_download)
+
+    manifest = await news_images.acquire_news_images(data, tmp_path, count=7)
+
+    assert manifest["status"] == "ready"
+    assert manifest["missing_scene_ids"] == []
+    assert len(manifest["images"]) == 7
+    assert len({image["scene_id"] for image in manifest["images"]}) == 7
+    assert len({image["source_page_url"] for image in manifest["images"]}) == 7
+    assert len({image["sha256"] for image in manifest["images"]}) == 7
+    assert all(
+        image["discovery_method"] == "commons_file_reference"
+        for image in manifest["images"]
+    )
+    assert all(
+        details["candidate_count"] >= 1
+        for details in manifest["candidate_inventory"].values()
+    )
+    subjects = {
+        image["scene_id"]: image["expected_subject"]
+        for image in manifest["images"]
+    }
+    assert subjects == {
+        "scene-02": "Perfect World",
+        "scene-03": "IEEE",
+        "scene-04": "University of Stuttgart",
+        "scene-05": "Google",
+        "scene-07": "Alibaba",
+        "scene-09": "Qwen",
+        "scene-10": "Jefferies",
+    }
+
+
+@pytest.mark.asyncio
 async def test_seven_scene_fallback_reaches_seven_unique_images_with_mode_mix(
     tmp_path: Path,
     monkeypatch,
@@ -2202,6 +2549,8 @@ async def test_acquisition_uses_reserves_continuous_names_and_stops_at_target(
     )
 
     assert manifest["status"] == "ready"
+    assert manifest["missing_scene_ids"] == []
+    assert manifest["candidate_inventory"]["scene-03"]["candidate_count"] >= 1
     assert manifest["primary_query_count"] == 2
     assert manifest["reserve_query_count"] >= 2
     assert [image["scene_id"] for image in manifest["images"]] == [
@@ -2295,6 +2644,90 @@ async def test_acquisition_tries_next_candidate_after_download_failure(
 
 
 @pytest.mark.asyncio
+async def test_acquisition_searches_and_rematches_after_exact_reference_download_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        news_images,
+        "plan_news_images",
+        AsyncMock(return_value=(_primary_plan(), "mock-planner", "")),
+    )
+    monkeypatch.setattr(
+        news_images,
+        "research_references",
+        AsyncMock(
+            return_value=(
+                [
+                    {
+                        "title": "File:NVIDIA logo.svg",
+                        "url": "https://commons.wikimedia.org/wiki/File:NVIDIA_logo.svg",
+                    }
+                ],
+                "mock-reference-search",
+            )
+        ),
+    )
+
+    direct = _commons_candidate("scene-01", "NVIDIA", "logo")
+    direct["source_page_url"] = (
+        "https://commons.wikimedia.org/wiki/File:NVIDIA_logo.svg"
+    )
+    direct["download_url"] = "https://upload.example/direct-broken.svg.png"
+    search_fallback = _commons_candidate("scene-01", "NVIDIA", "logo")
+    search_fallback["source_page_url"] = (
+        "https://commons.wikimedia.org/wiki/File:NVIDIA_wordmark.svg"
+    )
+    search_fallback["download_url"] = "https://upload.example/search-fallback.svg.png"
+
+    monkeypatch.setattr(
+        news_images,
+        "resolve_wikimedia_reference_images",
+        AsyncMock(return_value=[direct]),
+    )
+    search = AsyncMock(return_value=[search_fallback])
+    monkeypatch.setattr(news_images, "search_wikimedia_images", search)
+
+    attempts: list[str] = []
+
+    async def fake_download(_client, *, candidate: dict, destination: Path):
+        source = candidate["source_page_url"]
+        attempts.append(source)
+        if source == direct["source_page_url"]:
+            raise RuntimeError("direct thumbnail was unavailable")
+        payload = _image_bytes("PNG", "search-fallback")
+        destination.write_bytes(payload)
+        return len(payload), hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr(news_images, "_download_candidate", fake_download)
+
+    manifest = await news_images.acquire_news_images(
+        extended_board(),
+        tmp_path,
+        count=1,
+    )
+
+    assert manifest["status"] == "ready"
+    assert search.await_count >= 1
+    assert attempts == [direct["source_page_url"], search_fallback["source_page_url"]]
+    assert manifest["images"][0]["source_page_url"] == search_fallback["source_page_url"]
+    assert manifest["images"][0]["discovery_method"] == "commons_search"
+    inventory = manifest["candidate_inventory"]["scene-01"]
+    assert inventory["candidate_count"] == 2
+    assert inventory["usable_candidate_count"] == 1
+    assert inventory["failed_candidate_count"] == 1
+    assert inventory["discovery_methods"] == [
+        "commons_file_reference",
+        "commons_search",
+    ]
+    assert any(
+        error["stage"] == "download"
+        and error["source_page_url"] == direct["source_page_url"]
+        for error in manifest["errors"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_acquisition_remains_partial_after_all_reserves_are_exhausted(
     tmp_path: Path,
     monkeypatch,
@@ -2311,6 +2744,19 @@ async def test_acquisition_remains_partial_after_all_reserves_are_exhausted(
     assert manifest["planned_image_count"] == 2
     assert len(manifest["images"]) == 1
     assert manifest["images"][0]["id"] == "image-01"
+    assert manifest["missing_scene_ids"] == ["scene-02"]
+    assert manifest["candidate_inventory"]["scene-01"]["candidate_count"] == 1
+    assert manifest["candidate_inventory"]["scene-02"]["candidate_count"] == 0
+    selection_error = next(
+        error for error in manifest["errors"] if error["stage"] == "selection"
+    )
+    assert selection_error["missing_scene_ids"] == ["scene-02"]
+    assert selection_error["candidate_counts"]["scene-01"] == 1
+    assert selection_error["candidate_counts"]["scene-02"] == 0
+    assert any(
+        error.get("scene_id") == "scene-02" and error["stage"] == "inventory"
+        for error in manifest["errors"]
+    )
     assert set(researched) == {"scene-01", "scene-02", "scene-03", "scene-04"}
     assert researched.count("scene-02") >= 2
     fingerprint = news_images.storyboard_fingerprint(extended_board())

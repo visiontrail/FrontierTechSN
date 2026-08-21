@@ -20,7 +20,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from PIL import Image, ImageChops, UnidentifiedImageError
@@ -37,9 +37,10 @@ logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
-MANIFEST_VERSION = 10
-QUERY_SEMANTICS_VERSION = 3
+MANIFEST_VERSION = 11
+QUERY_SEMANTICS_VERSION = 4
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
+WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
 NEWS_IMAGE_MAX_PIXELS = 16_000_000
 ALPHA_FOREGROUND_THRESHOLD = 64
 LOGO_SHAPE_ANALYSIS_MAX_DIMENSION = 512
@@ -155,8 +156,12 @@ GENERIC_LOGO_TITLE_TERMS = frozenset(
 IDENTITY_CONNECTORS = frozenset("and of the".split())
 IDENTITY_DECORATORS = frozenset(
     "black brand chinese company corp corporate corporation english en event file financial group icon image "
-    "jpeg jpg logo mark official photo photograph png product public screenshot symbol transparent white "
+    "jpeg jpg logo mark official photo photograph png portrait product public screenshot symbol transparent white "
     "wordmark webp zh svg".split()
+)
+MEDIA_WORK_TERMS = frozenset(
+    "album albums book books cinema film films movie movies music musical novel novels record "
+    "recording recordings records sencillo series single singles song songs soundtrack television tv".split()
 )
 GENERATED_ASSET_RE = re.compile(
     r"^news_images/image-[0-9]+\.(?:jpe?g|png|webp|svg)$",
@@ -295,21 +300,28 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
 
     Combining title and description allowed a first name in one field and a
     surname in another to masquerade as a full person match.  Multi-token
-    identities must now occur contiguously in one field.  Single-token brands
-    are accepted only when no second meaningful identity is present, so
-    ``Qwen`` cannot validate ``Qwen Audio`` and ``Google`` cannot validate
-    ``Google Loon``.
+    identities must now occur contiguously in one field.  Every logo identity
+    and every single-token identity is accepted only when the field has no
+    second meaningful identity, so
+    ``Qwen`` cannot validate ``Qwen Audio``, ``Google`` cannot validate
+    ``Google Loon``, and ``Perfect World`` cannot validate a film or album
+    title with the same words.
     """
     subject_tokens = _identity_tokens(shot.get("expected_subject"))
     if not subject_tokens or subject_tokens == ["ai"]:
         return None
     kind = str(shot.get("kind") or "event")
+    title_tokens = _identity_tokens(candidate.get("title"))
+    if kind == "logo" and not ({"logo", "wordmark", "mark"} & set(title_tokens)):
+        return None
     for field_name in ("title", "description"):
         value = str(candidate.get(field_name) or "")
         field_tokens = _identity_tokens(value)
         if not _contains_token_phrase(field_tokens, subject_tokens):
             continue
-        if len(subject_tokens) == 1 and _meaningful_identity_tokens(field_tokens) != subject_tokens:
+        if (kind == "logo" or len(subject_tokens) == 1) and (
+            _meaningful_identity_tokens(field_tokens) != subject_tokens
+        ):
             continue
         if kind == "logo" and not ({"logo", "wordmark", "mark"} & set(field_tokens)):
             continue
@@ -320,6 +332,17 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
             continue
         return field_name, " ".join(field_tokens), subject_tokens
     return None
+
+
+def _candidate_context_conflicts(scene: dict, candidate: dict) -> list[str]:
+    """Reject an unrelated media work that merely shares an entity's name."""
+    scene_terms = _semantic_terms(scene.get("text"))
+    candidate_terms = _semantic_terms(
+        f"{candidate.get('title', '')} {candidate.get('description', '')} "
+        f"{candidate.get('categories', '')} {candidate.get('object_name', '')} "
+        f"{candidate.get('creator', '')}"
+    )
+    return sorted((candidate_terms & MEDIA_WORK_TERMS) - (scene_terms & MEDIA_WORK_TERMS))
 
 
 def _distinctive_terms(value: object) -> set[str]:
@@ -951,6 +974,8 @@ def image_grounding_is_valid(image: dict, scene: dict) -> bool:
         and str(image.get("grounding_identity_phrase") or "") == evidence["grounding_identity_phrase"]
         and list(image.get("grounding_identity_field_terms") or [])
         == evidence["grounding_identity_field_terms"]
+        and list(image.get("grounding_context_conflicts") or [])
+        == evidence["grounding_context_conflicts"]
     )
 
 
@@ -1691,12 +1716,15 @@ def _grounding_evidence(shot: dict, scene: dict, candidate: dict) -> dict:
         f"{scene.get('text', '')} {' '.join(str(item) for item in scene.get('keywords') or [])}"
     )
     candidate_terms = _semantic_terms(
-        f"{candidate.get('title', '')} {candidate.get('description', '')} {candidate.get('attribution', '')}"
+        f"{candidate.get('title', '')} {candidate.get('description', '')} "
+        f"{candidate.get('categories', '')} {candidate.get('object_name', '')} "
+        f"{candidate.get('creator', '')}"
     )
     scene_has_identity = bool(subject_terms) and _contains_token_phrase(
         _identity_tokens(scene_text), subject_terms
     )
     candidate_match = _candidate_identity_match(shot, candidate)
+    context_conflicts = _candidate_context_conflicts(scene, candidate)
     strong_subject_terms = [
         term for term in subject_terms if term != "ai" and term not in GENERIC_QUERY_TERMS
     ]
@@ -1711,6 +1739,12 @@ def _grounding_evidence(shot: dict, scene: dict, candidate: dict) -> dict:
     elif candidate_match is None:
         passed = False
         reason = "candidate did not contain the complete identity in one metadata field"
+    elif context_conflicts:
+        passed = False
+        reason = (
+            "candidate media-work context conflicted with the narrated entity: "
+            + ", ".join(context_conflicts)
+        )
 
     identity_field = candidate_match[0] if candidate_match else ""
     identity_phrase = " ".join(subject_terms) if candidate_match else ""
@@ -1728,6 +1762,7 @@ def _grounding_evidence(shot: dict, scene: dict, candidate: dict) -> dict:
         "grounding_subject_terms": subject_terms,
         "grounding_scene_terms": sorted(scene_terms),
         "grounding_candidate_terms": sorted(candidate_terms),
+        "grounding_context_conflicts": context_conflicts,
     }
 
 
@@ -1738,11 +1773,36 @@ def _embedded_scene(shot: dict) -> dict:
     }
 
 
+def _raster_resource_mime(info: dict) -> str:
+    """Return the MIME type of the bytes we will download, never the source SVG."""
+    thumbnail_url = str(info.get("thumburl") or "")
+    download_url = thumbnail_url or str(info.get("url") or "")
+    suffix = Path(urlsplit(download_url).path).suffix.casefold()
+    inferred = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(suffix, "")
+    advertised = str(info.get("thumbmime") or info.get("mime") or "").casefold()
+    if inferred not in SUPPORTED_MIME_TYPES:
+        return ""
+    if advertised in SUPPORTED_MIME_TYPES:
+        return inferred
+    # Exact Commons File lookups frequently omit ``thumbmime`` for an SVG
+    # while still returning a raster ``thumburl`` such as ``.svg.png``.
+    # Inference is allowed only for that thumbnail resource; a raw SVG URL
+    # remains unsupported and can never be written to disk.
+    if thumbnail_url:
+        return inferred
+    return ""
+
+
 def _candidate_from_page(page: dict, shot: dict) -> dict | None:
     info = (page.get("imageinfo") or [None])[0]
     if not isinstance(info, dict):
         return None
-    mime = str(info.get("thumbmime") or info.get("mime") or "").lower()
+    mime = _raster_resource_mime(info)
     if mime not in SUPPORTED_MIME_TYPES:
         return None
     metadata = info.get("extmetadata") or {}
@@ -1774,9 +1834,12 @@ def _candidate_from_page(page: dict, shot: dict) -> dict | None:
         "license_url": _clean_html(_metadata_value(metadata, "LicenseUrl")),
         "attribution": _clean_html(_metadata_value(metadata, "Credit")),
         "description": _clean_html(_metadata_value(metadata, "ImageDescription")),
+        "categories": _clean_html(_metadata_value(metadata, "Categories")),
+        "object_name": _clean_html(_metadata_value(metadata, "ObjectName")),
         "width": width,
         "height": height,
         "mime_type": mime,
+        "source_mime_type": str(info.get("mime") or "").casefold(),
         "kind": shot.get("kind"),
     }
     evidence = _grounding_evidence(shot, _embedded_scene(shot), candidate)
@@ -1828,7 +1891,16 @@ def _candidate_rank(candidate: dict, shot: dict) -> tuple:
     if shot.get("display_mode") == "fullscreen":
         score += max(0, 5 - abs(ratio - 16 / 9) * 3)
     pixels = width * height
-    return (-score, -pixels, candidate["source_page_url"])
+    # Exact Commons File references are still subjected to the same license,
+    # grounding, raster, and decoder gates as generator-search results.  Once
+    # they pass those gates, try them first: they are the research model's
+    # explicit source selection.  Search candidates remain in the pool so a
+    # broken or rate-limited thumbnail can be rematched without losing the
+    # scene.
+    discovery_priority = (
+        0 if candidate.get("discovery_method") == "commons_file_reference" else 1
+    )
+    return (discovery_priority, -score, -pixels, candidate["source_page_url"])
 
 
 def _wikimedia_retry_delay(response: httpx.Response, attempt: int) -> float:
@@ -1851,6 +1923,73 @@ def _wikimedia_retry_delay(response: httpx.Response, attempt: int) -> float:
     return min(30.0, max(0.5, seconds))
 
 
+async def _wikimedia_query(client: httpx.AsyncClient, params: dict[str, object]) -> dict:
+    response = None
+    for attempt in range(WIKIMEDIA_SEARCH_ATTEMPTS):
+        response = await client.get(WIKIMEDIA_API, params=params)
+        if response.status_code != 429:
+            break
+        if attempt + 1 < WIKIMEDIA_SEARCH_ATTEMPTS:
+            await asyncio.sleep(_wikimedia_retry_delay(response, attempt))
+    assert response is not None
+    response.raise_for_status()
+    value = response.json()
+    return value if isinstance(value, dict) else {}
+
+
+def _commons_file_title(reference: dict) -> str:
+    """Extract one exact Commons File title without trusting an arbitrary URL."""
+    parsed = urlsplit(str(reference.get("url") or ""))
+    if parsed.scheme.casefold() != "https" or parsed.hostname != "commons.wikimedia.org":
+        return ""
+    path = unquote(parsed.path)
+    prefix = "/wiki/File:"
+    if not path.startswith(prefix):
+        return ""
+    filename = path[len(prefix) :].replace("_", " ").strip()
+    if not filename or len(filename) > 240 or "/" in filename or "|" in filename:
+        return ""
+    return f"File:{filename}"
+
+
+async def resolve_wikimedia_reference_images(
+    client: httpx.AsyncClient,
+    *,
+    references: list[dict],
+    shot: dict,
+) -> list[dict]:
+    """Resolve exact Commons File references missed by generator search ranking."""
+    titles = list(
+        dict.fromkeys(
+            title
+            for reference in references
+            if isinstance(reference, dict) and (title := _commons_file_title(reference))
+        )
+    )
+    if not titles:
+        return []
+    payload = await _wikimedia_query(
+        client,
+        {
+            "action": "query",
+            "titles": "|".join(titles),
+            "redirects": 1,
+            "prop": "imageinfo",
+            "iiprop": "url|extmetadata|mime|size",
+            "iiurlwidth": 1600,
+            "format": "json",
+            "formatversion": 2,
+        },
+    )
+    pages = (payload.get("query") or {}).get("pages") or []
+    candidates = [
+        candidate
+        for page in pages
+        if isinstance(page, dict) and (candidate := _candidate_from_page(page, shot)) is not None
+    ]
+    return sorted(candidates, key=lambda candidate: _candidate_rank(candidate, shot))
+
+
 async def search_wikimedia_images(
     client: httpx.AsyncClient,
     *,
@@ -1869,16 +2008,8 @@ async def search_wikimedia_images(
         "format": "json",
         "formatversion": 2,
     }
-    response = None
-    for attempt in range(WIKIMEDIA_SEARCH_ATTEMPTS):
-        response = await client.get(WIKIMEDIA_API, params=params)
-        if response.status_code != 429:
-            break
-        if attempt + 1 < WIKIMEDIA_SEARCH_ATTEMPTS:
-            await asyncio.sleep(_wikimedia_retry_delay(response, attempt))
-    assert response is not None
-    response.raise_for_status()
-    pages = (response.json().get("query") or {}).get("pages") or []
+    payload = await _wikimedia_query(client, params)
+    pages = (payload.get("query") or {}).get("pages") or []
     candidates = [candidate for page in pages if (candidate := _candidate_from_page(page, shot)) is not None]
     return sorted(candidates, key=lambda candidate: _candidate_rank(candidate, shot))
 
@@ -1909,23 +2040,51 @@ async def _download_candidate(
     candidate: dict,
     destination: Path,
 ) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    written = 0
-    async with client.stream("GET", candidate["download_url"]) as response:
-        response.raise_for_status()
-        advertised = int(response.headers.get("content-length") or 0)
-        if advertised and advertised > config.NEWS_IMAGE_MAX_BYTES:
-            raise ValueError(f"remote image is {advertised} bytes, above the download limit")
-        with destination.open("wb") as handle:
-            async for chunk in response.aiter_bytes():
-                written += len(chunk)
-                if written > config.NEWS_IMAGE_MAX_BYTES:
-                    raise ValueError("download exceeded the autonomous image byte limit")
-                digest.update(chunk)
-                handle.write(chunk)
-    if written < 1024:
-        raise ValueError("downloaded image is unexpectedly small")
-    return written, digest.hexdigest()
+    for attempt in range(WIKIMEDIA_DOWNLOAD_ATTEMPTS):
+        digest = hashlib.sha256()
+        written = 0
+        retry_delay = None
+        async with client.stream("GET", candidate["download_url"]) as response:
+            if response.status_code == 429 or 500 <= response.status_code < 600:
+                if attempt + 1 < WIKIMEDIA_DOWNLOAD_ATTEMPTS:
+                    retry_delay = _wikimedia_retry_delay(response, attempt)
+                else:
+                    response.raise_for_status()
+            else:
+                response.raise_for_status()
+            if retry_delay is None:
+                response_mime = (
+                    str(response.headers.get("content-type") or "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .casefold()
+                )
+                if response_mime and response_mime not in SUPPORTED_MIME_TYPES:
+                    raise ValueError(
+                        f"remote image returned unsupported content type {response_mime}"
+                    )
+                advertised = int(response.headers.get("content-length") or 0)
+                if advertised and advertised > config.NEWS_IMAGE_MAX_BYTES:
+                    raise ValueError(
+                        f"remote image is {advertised} bytes, above the download limit"
+                    )
+                with destination.open("wb") as handle:
+                    async for chunk in response.aiter_bytes():
+                        written += len(chunk)
+                        if written > config.NEWS_IMAGE_MAX_BYTES:
+                            raise ValueError(
+                                "download exceeded the autonomous image byte limit"
+                            )
+                        digest.update(chunk)
+                        handle.write(chunk)
+        if retry_delay is not None:
+            destination.unlink(missing_ok=True)
+            await asyncio.sleep(retry_delay)
+            continue
+        if written < 1024:
+            raise ValueError("downloaded image is unexpectedly small")
+        return written, digest.hexdigest()
+    raise RuntimeError("Wikimedia image download exhausted retry attempts")
 
 
 def _public_value(value: object) -> object:
@@ -2063,6 +2222,59 @@ async def _discover_shot_candidates(
         )
 
     candidates_by_source: dict[str, dict] = {}
+
+    def add_candidates(
+        raw_candidates: list[dict],
+        *,
+        resolved_query: str,
+        discovery_method: str,
+    ) -> None:
+        for raw_candidate in raw_candidates:
+            evidence = _grounding_evidence(shot, scene, raw_candidate)
+            if not evidence["grounding_passed"]:
+                continue
+            source = str(raw_candidate.get("source_page_url") or "")
+            if not source:
+                continue
+            candidate = {
+                **dict(_public_value(raw_candidate)),
+                **dict(_public_value(shot)),
+                **evidence,
+                "reference_provider": reference_provider,
+                "references": _public_value(references),
+                "resolved_search_query": resolved_query,
+                "discovery_method": discovery_method,
+            }
+            candidates_by_source.setdefault(source, candidate)
+
+    reference_lookup = {
+        **shot,
+        "_scene_text": scene.get("text") or "",
+        "_scene_keywords": scene.get("keywords") or [],
+    }
+    try:
+        add_candidates(
+            await resolve_wikimedia_reference_images(
+                client,
+                references=references,
+                shot=reference_lookup,
+            ),
+            resolved_query=str(shot.get("search_query") or ""),
+            discovery_method="commons_file_reference",
+        )
+    except Exception as exc:  # noqa: BLE001 - generator search remains usable
+        manifest["errors"].append(
+            {
+                "scene_id": scene_id,
+                "stage": "wikimedia_reference",
+                "message": str(exc),
+            }
+        )
+
+    # A metadata-valid exact reference can still fail at download or decode
+    # time.  Keep generator-search alternatives in the same global candidate
+    # pool so failed_sources can trigger a complete rematch rather than leave
+    # the scene with no usable inventory.
     try:
         for query in _wikimedia_query_variants(shot, scene):
             lookup = {
@@ -2071,25 +2283,14 @@ async def _discover_shot_candidates(
                 "_scene_text": scene.get("text") or "",
                 "_scene_keywords": scene.get("keywords") or [],
             }
-            for raw_candidate in await search_wikimedia_images(client, shot=lookup):
-                evidence = _grounding_evidence(shot, scene, raw_candidate)
-                if not evidence["grounding_passed"]:
-                    continue
-                source = str(raw_candidate.get("source_page_url") or "")
-                if not source:
-                    continue
-                candidate = {
-                    **dict(_public_value(raw_candidate)),
-                    **dict(_public_value(shot)),
-                    **evidence,
-                    "reference_provider": reference_provider,
-                    "references": _public_value(references),
-                    "resolved_search_query": query,
-                }
-                candidates_by_source.setdefault(source, candidate)
+            add_candidates(
+                await search_wikimedia_images(client, shot=lookup),
+                resolved_query=query,
+                discovery_method="commons_search",
+            )
             if len(candidates_by_source) >= 8:
                 break
-    except Exception as exc:  # noqa: BLE001 - record exact failed scene
+    except Exception as exc:  # noqa: BLE001 - exact references remain usable
         manifest["errors"].append(
             {
                 "scene_id": scene_id,
@@ -2097,7 +2298,6 @@ async def _discover_shot_candidates(
                 "message": str(exc),
             }
         )
-        return []
     return sorted(
         candidates_by_source.values(),
         key=lambda candidate: _candidate_rank(candidate, shot),
@@ -2409,7 +2609,9 @@ async def acquire_news_images(
                             **candidate,
                             "resolved_search_query": candidate.get("resolved_search_query")
                             or candidate.get("search_query"),
-                            "source_mime_type": candidate.get("mime_type"),
+                            "source_mime_type": candidate.get("source_mime_type")
+                            or candidate.get("mime_type"),
+                            "download_mime_type": candidate.get("mime_type"),
                             "mime_type": {
                                 ".jpg": "image/jpeg",
                                 ".jpeg": "image/jpeg",
@@ -2462,12 +2664,91 @@ async def acquire_news_images(
                 )
             break
 
+    candidate_inventory = {}
+    for scene_id in priority_scenes:
+        candidates = candidate_pools.get(scene_id) or []
+        usable_resources = {
+            (
+                f"sha256:{source_hashes[source]}"
+                if source in source_hashes
+                else f"source:{source}"
+            )
+            for candidate in candidates
+            if (source := str(candidate.get("source_page_url") or ""))
+            and source not in failed_sources
+        }
+        candidate_inventory[scene_id] = {
+            "candidate_count": len(candidates),
+            "usable_candidate_count": len(usable_resources),
+            "failed_candidate_count": sum(
+                str(candidate.get("source_page_url") or "") in failed_sources
+                for candidate in candidates
+            ),
+            "subjects": sorted(
+                {
+                    str(candidate.get("expected_subject") or "")
+                    for candidate in candidates
+                    if str(candidate.get("expected_subject") or "")
+                }
+            ),
+            "discovery_methods": sorted(
+                {
+                    str(candidate.get("discovery_method") or "commons_search")
+                    for candidate in candidates
+                }
+            ),
+        }
+    manifest["candidate_inventory"] = candidate_inventory
+    selected_scene_ids = {
+        str(image.get("scene_id") or "") for image in manifest["images"]
+    }
+    missing_count = max(0, target - len(manifest["images"]))
+    missing_scene_ids = [
+        scene_id
+        for scene_id in priority_scenes
+        if scene_id not in selected_scene_ids
+    ][:missing_count]
+    manifest["missing_scene_ids"] = missing_scene_ids
     if len(manifest["images"]) < target:
+        for scene_id in missing_scene_ids:
+            if candidate_inventory[scene_id]["usable_candidate_count"]:
+                continue
+            manifest["errors"].append(
+                {
+                    "scene_id": scene_id,
+                    "stage": "inventory",
+                    "message": (
+                        "No grounded open-license Commons candidate remained after "
+                        "exact File references and search fallbacks"
+                    ),
+                }
+            )
         manifest["errors"].append(
             {
                 "stage": "selection",
-                "message": "No unique scene/source/content assignment satisfied the grounding contract",
+                "message": (
+                    "No complete unique scene/source/content assignment satisfied "
+                    f"the grounding contract; missing scenes: {', '.join(missing_scene_ids)}"
+                ),
+                "missing_scene_ids": missing_scene_ids,
+                "candidate_counts": {
+                    scene_id: details["candidate_count"]
+                    for scene_id, details in candidate_inventory.items()
+                },
+                "usable_candidate_counts": {
+                    scene_id: details["usable_candidate_count"]
+                    for scene_id, details in candidate_inventory.items()
+                },
             }
+        )
+        _emit(
+            log,
+            "News image inventory incomplete: missing "
+            f"{', '.join(missing_scene_ids)}; usable/discovered candidates="
+            + ", ".join(
+                f"{scene_id}:{details['usable_candidate_count']}/{details['candidate_count']}"
+                for scene_id, details in candidate_inventory.items()
+            ),
         )
 
     acquired = len(manifest["images"])
@@ -2633,8 +2914,12 @@ def attach_news_images(
                 "news_image_grounding_identity_phrase": image.get("grounding_identity_phrase") or "",
                 "news_image_grounding_identity_field_terms": image.get("grounding_identity_field_terms") or [],
                 "news_image_grounding_subject_terms": image.get("grounding_subject_terms") or [],
+                "news_image_grounding_context_conflicts": image.get("grounding_context_conflicts") or [],
                 "news_image_title": image.get("title") or "",
                 "news_image_description": image.get("description") or "",
+                "news_image_categories": image.get("categories") or "",
+                "news_image_object_name": image.get("object_name") or "",
+                "news_image_creator": image.get("creator") or "",
                 "news_image_license": image.get("license") or "",
                 "news_image_license_code": image.get("license_code") or "",
                 "news_image_sha256": digest,

@@ -108,6 +108,31 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
     return recovered
 
 
+def _news_image_placement_error(
+    manifest: dict,
+    *,
+    attached_images: int,
+    required_count: int,
+) -> str:
+    images = manifest.get("images") or []
+    acquired_images = len(images) if isinstance(images, list) else 0
+    manifest_status = str(manifest.get("status") or "unknown")
+    missing_scene_ids = [
+        str(scene_id) for scene_id in manifest.get("missing_scene_ids") or []
+    ]
+    missing_detail = (
+        f"; missing scenes={','.join(missing_scene_ids)}"
+        if missing_scene_ids
+        else ""
+    )
+    return (
+        "News-image placement incomplete: "
+        f"scout acquired {acquired_images}/{required_count} licensed images "
+        f"(manifest status={manifest_status}{missing_detail}); "
+        f"{attached_images}/{required_count} reached final scenes"
+    )
+
+
 def _narration_completeness_failures(alignment: dict) -> list[str]:
     """Return only alignment failures that imply missing spoken content.
 
@@ -555,8 +580,11 @@ async def compose_video(
         image_modes = news_image_inventory["placement_modes"]
         if attached_images != required_count:
             raise RuntimeError(
-                "News-image placement incomplete: "
-                f"{attached_images}/{required_count} licensed images reached final scenes"
+                _news_image_placement_error(
+                    image_manifest,
+                    attached_images=attached_images,
+                    required_count=required_count,
+                )
             )
         if required_count >= 2 and (
             not image_modes.get("inline") or not image_modes.get("fullscreen")

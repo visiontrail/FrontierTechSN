@@ -569,11 +569,23 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
             distinctive_anchors = plan.get("news_image_grounding_distinctive_anchors") or []
             source_scene_id = str(plan.get("news_image_source_scene_id") or "")
             exact_scene = source_scene_id == scene["id"]
+            context_contract_present = all(
+                key in plan
+                for key in (
+                    "news_image_categories",
+                    "news_image_object_name",
+                    "news_image_creator",
+                    "news_image_grounding_context_conflicts",
+                )
+            )
             proof = {
                 "expected_subject": plan.get("news_image_expected_subject") or "",
                 "kind": plan.get("news_image_kind") or "event",
                 "title": plan.get("news_image_title") or "",
                 "description": plan.get("news_image_description") or "",
+                "categories": plan.get("news_image_categories") or "",
+                "object_name": plan.get("news_image_object_name") or "",
+                "creator": plan.get("news_image_creator") or "",
                 "license": plan.get("news_image_license") or "",
                 "license_code": plan.get("news_image_license_code") or "",
                 "match_terms": match_terms,
@@ -583,10 +595,12 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
                 "grounding_identity_field": plan.get("news_image_grounding_identity_field") or "",
                 "grounding_identity_phrase": plan.get("news_image_grounding_identity_phrase") or "",
                 "grounding_identity_field_terms": plan.get("news_image_grounding_identity_field_terms") or [],
+                "grounding_context_conflicts": plan.get("news_image_grounding_context_conflicts") or [],
             }
             grounded = (
                 grounded
                 and exact_scene
+                and context_contract_present
                 and news_images.image_grounding_is_valid(proof, scene)
             )
             reason = (

@@ -81,6 +81,23 @@ def test_cached_scene_plans_strip_news_image_placement_state(tmp_path):
     assert cached == [{"id": "scene-01", "archetype": "statement", "headline": "Launch"}]
 
 
+def test_partial_news_image_error_reports_acquired_attached_and_missing_scenes():
+    message = composer._news_image_placement_error(
+        {
+            "status": "partial",
+            "images": [{"scene_id": "scene-02"}, {"scene_id": "scene-04"}, {"scene_id": "scene-05"}],
+            "missing_scene_ids": ["scene-03", "scene-07", "scene-09", "scene-10"],
+        },
+        attached_images=0,
+        required_count=7,
+    )
+
+    assert "scout acquired 3/7" in message
+    assert "manifest status=partial" in message
+    assert "missing scenes=scene-03,scene-07,scene-09,scene-10" in message
+    assert "0/7 reached final scenes" in message
+
+
 def test_quality_failures_become_final_delivery_warnings():
     warnings = composer._quality_warnings(
         {
