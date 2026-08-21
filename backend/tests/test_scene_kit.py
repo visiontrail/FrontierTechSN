@@ -145,7 +145,11 @@ def test_inline_news_image_is_part_of_the_text_flow_with_seekable_motion():
         plan(
             archetype="topic",
             kicker="NVIDIA VERA",
-            body="The CPU is now in production.",
+            body="The CPU is now in production and the body remains visible.",
+            items=(
+                "MIT bacteria act as <circuit> boards & living computers",
+                'Perfect World reports "H1" revenue and a net loss',
+            ),
             news_image_src="../news_images/nvidia.png",
             news_image_mode="inline",
             news_image_kind="logo",
@@ -158,6 +162,13 @@ def test_inline_news_image_is_part_of_the_text_flow_with_seekable_motion():
     assert validate_scene_html(html, "scene-01") == []
     assert 'class="stage news-inline-stage"' in html
     assert 'src="../news_images/nvidia.png"' in html
+    assert 'id="scene-01-body"' in html
+    assert 'class="news-inline-items"' in html
+    assert "MIT bacteria act as &lt;circuit&gt; boards &amp; living computers" in html
+    assert "Perfect World reports &quot;H1&quot; revenue and a net loss" in html
+    assert "<circuit>" not in html
+    assert '#scene-01-items .news-inline-item' in html
+    assert "stagger: .1" in html
     assert "rotationY" in html and "transformPerspective" in html
     assert "duration: 11.65" in html
     assert "gsap.to(" not in html
@@ -186,6 +197,30 @@ def test_fullscreen_news_image_uses_a_masked_reveal_and_separate_ken_burns_layer
     assert "scale: 1.025" in html
 
 
+def test_fullscreen_news_image_uses_escaped_quote_when_body_is_empty():
+    html = sk.render_scene(
+        plan(
+            archetype="news_image",
+            body="",
+            quote='Promising ideas come from people without a <formal> role & "authority".',
+            news_image_src="../news_images/university.png",
+            news_image_mode="fullscreen",
+            news_image_kind="logo",
+            news_image_fit="contain",
+            news_image_caption="University logo",
+        )
+    )
+
+    assert validate_scene_html(html, "scene-01") == []
+    assert 'class="body news-full-body news-full-quote-support"' in html
+    assert (
+        "Promising ideas come from people without a &lt;formal&gt; role &amp; "
+        "&quot;authority&quot;." in html
+    )
+    assert "<formal>" not in html
+    assert 'inAt("#scene-01-body"' in html
+
+
 def test_video_footage_declares_hyperframes_media_timing():
     html = sk.render_scene(
         plan(
@@ -204,10 +239,12 @@ def test_video_footage_declares_hyperframes_media_timing():
     assert " loop" in video
 
 
-def test_collage_footage_is_clean_locked_off_full_bleed():
+def test_collage_footage_keeps_media_contract_and_adds_seekable_lower_third():
     html = sk.render_scene(
         plan(
             archetype="footage",
+            kicker="SUPPLY & <CHAIN>",
+            headline="China restricts germanium and quartz exports to Taiwan",
             footage_src="collage_broll/01/video/final-8s-noaudio.mp4",
             footage_kind="video",
             collage_broll=True,
@@ -219,6 +256,15 @@ def test_collage_footage_is_clean_locked_off_full_bleed():
     assert 'class="frame collage-frame"' in html
     assert 'class="scrim"' not in html
     assert 'class="stage"' not in html
+    assert 'class="collage-caption"' in html
+    assert "SUPPLY &amp; &lt;CHAIN&gt;" in html
+    assert "<CHAIN>" not in html
+    assert "China restricts germanium and quartz exports to Taiwan" in html
+    assert "background:rgba(11,13,23,.90)" in html
+    assert 'inAt("#scene-01-collage-caption"' in html
+    assert 'inAt("#scene-01-collage-headline"' in html
+    assert "gsap.timeline({ paused: true })" in html
+    assert "tl.fromTo" in html
     assert "scale: 1.16" not in html
     video = re.search(r"<video[^>]*>", html).group(0)
     assert " loop" not in video

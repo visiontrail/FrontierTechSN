@@ -523,6 +523,9 @@ def _portrait_css(plan: ScenePlan) -> str:
   #{sid} .news-inline-window {{ width:100%; height:720px; }}
   #{sid} .news-full-stage {{ padding:190px 92px 330px; }}
   #{sid} .news-full-headline {{ max-width:850px; }}
+  #{sid} .collage-caption {{ left:72px; right:72px; bottom:330px; width:auto; max-width:none;
+      padding:26px 30px 28px; }}
+  #{sid} .collage-headline {{ font-size:min(52px, 5.2vw); }}
 """
 
 
@@ -904,10 +907,58 @@ def _render_footage(plan: ScenePlan) -> str:
       border:1px solid {_rgba(accent, 0.3)}; }}
 """
     if plan.collage_broll:
-        markup = f'    <div class="frame collage-frame" id="{plan.id}-frame">\n' + media + '    </div>\n'
-        timeline = f"""        inAt("#{plan.id}-media", {{ opacity: 0 }}, {{ opacity: 1, duration: .12, ease: "power1.out" }}, 0.1);
+        caption_headline = plan.headline.strip() or plan.body.strip()
+        caption_size = max(
+            42,
+            headline_size(caption_headline, base=64, floor=42),
+        )
+        collage_css = f"""
+  #{plan.id} .collage-caption {{ position:absolute; left:96px; bottom:220px; z-index:3;
+      width:min(860px, calc(100% - 192px)); padding:24px 28px 27px; box-sizing:border-box;
+      display:flex; flex-direction:column; gap:11px; background:rgba(11,13,23,.90);
+      border:2px solid {_rgba(accent, .72)}; border-left:8px solid {accent}; border-radius:0 18px 18px 0;
+      box-shadow:0 22px 70px rgba(0,0,0,.42); }}
+  #{plan.id} .collage-kicker {{ font:700 22px {SANS}; letter-spacing:.18em; text-transform:uppercase;
+      color:{accent}; line-height:1.2; }}
+  #{plan.id} .collage-headline {{ max-width:790px; font:800 {caption_size}px/1.08 {SANS};
+      letter-spacing:-.025em; color:#F5F2EA; text-shadow:0 3px 18px rgba(0,0,0,.72); }}
 """
-        return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
+        caption_markup = ""
+        if plan.kicker or caption_headline:
+            caption_markup = (
+                f'    <div class="collage-caption" id="{plan.id}-collage-caption">\n'
+                + (
+                    f'      <div class="collage-kicker" id="{plan.id}-collage-kicker">'
+                    f'{_esc(plan.kicker)}</div>\n'
+                    if plan.kicker
+                    else ""
+                )
+                + (
+                    f'      <div class="collage-headline" id="{plan.id}-collage-headline">'
+                    f'{_esc(caption_headline)}</div>\n'
+                    if caption_headline
+                    else ""
+                )
+                + "    </div>\n"
+            )
+        markup = (
+            f'    <div class="frame collage-frame" id="{plan.id}-frame">\n'
+            + media
+            + "    </div>\n"
+            + caption_markup
+        )
+        timeline = f"""        inAt("#{plan.id}-media", {{ opacity: 0 }}, {{ opacity: 1, duration: .12, ease: "power1.out" }}, 0.1);
+        inAt("#{plan.id}-collage-caption", {{ x: -72, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .66, ease: "power4.out" }}, 0.24);
+        inAt("#{plan.id}-collage-kicker", {{ y: 14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .46, ease: "power2.out" }}, 0.42);
+        inAt("#{plan.id}-collage-headline", {{ y: 26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .72, ease: "expo.out" }}, 0.5);
+"""
+        return _shell(
+            plan,
+            css=css + collage_css,
+            markup=markup,
+            timeline=timeline,
+            wash=(50, 50),
+        )
 
     markup = (
         f'    <div class="frame" id="{plan.id}-frame">\n'
@@ -936,6 +987,7 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
     accent = accent_hex(plan.accent, plan.theme)
     hsize = headline_size(plan.headline, base=86, floor=52)
     bsize = body_size(plan.body, base=34, floor=27)
+    item_size = max(24, body_size(" ".join(plan.items), base=30, floor=24))
     contain = plan.news_image_fit == "contain"
     media_background = _rgba(plan.theme.ink, 0.94) if contain else plan.theme.bg
     image_padding = "70px" if contain else "0"
@@ -946,6 +998,14 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
   #{plan.id} .news-inline-copy {{ width:47%; display:flex; flex-direction:column; gap:25px; position:relative; z-index:3; }}
   #{plan.id} .news-inline-headline {{ font-size:{hsize}px; max-width:790px; }}
   #{plan.id} .news-inline-body {{ font-size:{bsize}px; max-width:760px; }}
+  #{plan.id} .news-inline-items {{ display:flex; flex-direction:column; gap:13px; max-width:760px;
+      margin:0; padding:0; list-style:none; }}
+  #{plan.id} .news-inline-item {{ display:grid; grid-template-columns:42px minmax(0, 1fr); gap:15px;
+      align-items:start; padding:14px 16px; border-left:4px solid {accent};
+      background:{_rgba(plan.theme.ink, .07)}; }}
+  #{plan.id} .news-inline-item-index {{ font:700 18px {SANS}; line-height:1.45;
+      letter-spacing:.08em; color:{accent}; font-variant-numeric:tabular-nums; }}
+  #{plan.id} .news-inline-item-text {{ font:600 {item_size}px/1.3 {SANS}; color:{plan.theme.ink}; }}
   #{plan.id} .news-inline-rule {{ width:190px; height:4px; border-radius:3px; background:{accent}; }}
   #{plan.id} .news-inline-visual {{ width:48%; height:690px; display:flex; align-items:center; position:relative;
       perspective:1400px; z-index:2; }}
@@ -965,6 +1025,19 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
   #{plan.id} .news-inline-corner {{ position:absolute; left:-18px; bottom:8px; width:94px; height:94px;
       border-left:3px solid {accent}; border-bottom:3px solid {accent}; opacity:.78; }}
 """
+    items_markup = ""
+    if plan.items:
+        rows = "".join(
+            f'          <li class="news-inline-item" id="{plan.id}-item-{index}">'
+            f'<span class="news-inline-item-index">{index:02d}</span>'
+            f'<span class="news-inline-item-text">{_esc(item)}</span></li>\n'
+            for index, item in enumerate(plan.items, start=1)
+        )
+        items_markup = (
+            f'        <ul class="news-inline-items" id="{plan.id}-items">\n'
+            + rows
+            + "        </ul>\n"
+        )
     markup = (
         '    <div class="plate"><div class="wash"></div></div>\n'
         + _motif_block(
@@ -977,6 +1050,7 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
         + f'        <div class="headline news-inline-headline" id="{plan.id}-head">{_esc(plan.headline)}</div>\n'
         + f'        <div class="news-inline-rule" id="{plan.id}-rule"></div>\n'
         + (f'        <div class="body news-inline-body" id="{plan.id}-body">{_esc(plan.body)}</div>\n' if plan.body else "")
+        + items_markup
         + '      </div>\n'
         + f'      <div class="news-inline-visual" id="{plan.id}-visual" data-layout-allow-overflow>\n'
         + f'        <div class="news-inline-window" id="{plan.id}-image-frame">\n'
@@ -996,6 +1070,7 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
         inAt("#{plan.id}-head", {{ y: 58, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .82, ease: "expo.out" }}, 0.28);
         inAt("#{plan.id}-rule", {{ scaleX: 0, transformOrigin: "0 50%" }}, {{ scaleX: 1, duration: .64, ease: "power2.inOut" }}, 0.58);
         inAt("#{plan.id}-body", {{ y: 26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .66, ease: "sine.out" }}, 0.68);
+        inAt("#{plan.id}-items .news-inline-item", {{ x: -24, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .52, ease: "power2.out", stagger: .1 }}, 0.76);
         inAt("#{plan.id}-image-frame", {{ x: {direction * 220}, opacity: 0, rotationY: {direction * -11}, scale: .94 }}, {{ x: 0, opacity: 1, rotationY: 0, scale: 1, duration: .92, ease: "power4.out", transformPerspective: 1400, transformOrigin: "50% 50%" }}, 0.24);
         inAt("#{plan.id}-image", {{ scale: 1.08, x: {direction * -12} }}, {{ scale: 1.02, x: {direction * 12}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.18);
         inAt("#{plan.id}-index", {{ scale: .35, opacity: 0, rotate: -18 }}, {{ scale: 1, opacity: 1, rotate: 0, duration: .58, ease: "back.out(1.8)", transformOrigin: "50% 50%" }}, 0.78);
@@ -1008,6 +1083,9 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
 def _render_news_image_fullscreen(plan: ScenePlan) -> str:
     """Give one factual still the frame with a smooth, seekable reveal."""
     accent = accent_hex(plan.accent, plan.theme)
+    body_copy = plan.body.strip()
+    support_copy = body_copy or plan.quote.strip()
+    support_class = " news-full-quote-support" if not body_copy and support_copy else ""
     contain = plan.news_image_fit == "contain"
     media_background = plan.theme.ink if contain else plan.theme.bg
     image_padding = "150px 220px 260px" if contain else "0"
@@ -1023,7 +1101,7 @@ def _render_news_image_fullscreen(plan: ScenePlan) -> str:
   #{plan.id} .news-full-stage {{ justify-content:flex-end; padding:130px 150px 224px; gap:22px; z-index:3; }}
   #{plan.id} .news-full-headline {{ font-size:{hsize}px; max-width:1240px; color:#F5F2EA;
       text-shadow:0 8px 42px rgba(0,0,0,.62); }}
-  #{plan.id} .news-full-body {{ font-size:{body_size(plan.body, base=34)}px; max-width:990px;
+  #{plan.id} .news-full-body {{ font-size:{body_size(support_copy, base=34)}px; max-width:990px;
       color:rgba(245,242,234,.82); text-shadow:0 4px 22px rgba(0,0,0,.56); }}
   #{plan.id} .news-full-rule {{ width:220px; height:5px; border-radius:3px; background:{accent}; }}
   #{plan.id} .news-full-credit {{ position:absolute; top:38px; right:44px; max-width:820px; z-index:4;
@@ -1047,7 +1125,12 @@ def _render_news_image_fullscreen(plan: ScenePlan) -> str:
         + (f'      <div class="kicker" id="{plan.id}-kicker">{_esc(plan.kicker)}</div>\n' if plan.kicker else "")
         + f'      <div class="headline news-full-headline" id="{plan.id}-head">{_esc(plan.headline)}</div>\n'
         + f'      <div class="news-full-rule" id="{plan.id}-rule"></div>\n'
-        + (f'      <div class="body news-full-body" id="{plan.id}-body">{_esc(plan.body)}</div>\n' if plan.body else "")
+        + (
+            f'      <div class="body news-full-body{support_class}" id="{plan.id}-body">'
+            f'{_esc(support_copy)}</div>\n'
+            if support_copy
+            else ""
+        )
         + '    </div>\n'
     )
     drift = max(2.4, plan.duration - 0.3)
