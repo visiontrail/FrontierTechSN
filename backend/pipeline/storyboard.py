@@ -42,6 +42,12 @@ OUTRO_DURATION = 5.0
 SPEAKER_LABEL_RE = re.compile(r"^Speaker\s*(\d+)\s*[:：\-—–]\s*(.+)$", re.IGNORECASE)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?|[\u3400-\u9fff]")
+CITATION_LEAD_RE = re.compile(
+    r"^\s*(?P<source>[^,;:!?]{1,80}?)\s+(?:also\s+)?reports\b",
+    re.IGNORECASE,
+)
+CITATION_SOURCE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9&.'’/-]*")
+CITATION_SOURCE_CONNECTORS = frozenset({"the", "of", "and", "&"})
 
 # Words too generic to describe a scene visually. Used only for the keyword hint
 # that helps the visual planner and the footage matcher; not user-visible.
@@ -345,70 +351,176 @@ def _keywords(text: str, limit: int = 8) -> list[str]:
     return [word for word, _ in ranked[:limit]]
 
 
+def _citation_source(text: object) -> tuple[str, str] | None:
+    """Return a stable key and label for an explicit ``X reports`` lead.
+
+    Capitalization is deliberately part of the entity test.  It admits named
+    sources such as ``DeepTech China``, ``QbitAI``, and ``The Financial Times``
+    while rejecting generic prose such as ``The company reports``.  The
+    leading article is ignored in the comparison so repeated references to
+    ``The Financial Times`` and ``Financial Times`` remain one topic.
+    """
+    match = CITATION_LEAD_RE.match(str(text or ""))
+    if not match:
+        return None
+    tokens = CITATION_SOURCE_TOKEN_RE.findall(match.group("source"))
+    if not tokens or len(tokens) > 8:
+        return None
+    named_tokens = []
+    for token in tokens:
+        if token.casefold() in CITATION_SOURCE_CONNECTORS:
+            continue
+        named_tokens.append(token)
+        if not any(character.isupper() or character.isdigit() for character in token):
+            return None
+    if not named_tokens:
+        return None
+    comparable = tokens[1:] if tokens[0].casefold() == "the" else tokens
+    if not comparable:
+        return None
+    key = " ".join(token.casefold().strip(".'’") for token in comparable)
+    label = " ".join(tokens)
+    return key, label
+
+
+def _merge_scene_rows(left: dict, right: dict) -> None:
+    """Fold a soft-boundary scene into its predecessor in place."""
+    left["lines"].extend(right["lines"])
+    left["duration"] = round(
+        (right["start"] + right["duration"]) - left["start"], 2
+    )
+    left["text"] = f"{left['text']} {right['text']}"
+    left["word_count"] += right["word_count"]
+    left["keywords"] = _keywords(left["text"])
+
+
 def group_lines_into_scenes(lines: list[dict], offset: float = 0.0) -> list[dict]:
     """Batch timed lines into scenes of roughly ``SCENE_TARGET_SECONDS``.
 
     A scene closes once it has reached the target length; a line that would push
-    it past ``SCENE_MAX_SECONDS`` starts a new scene instead. ``offset`` shifts
-    every time into absolute composition time when a caller needs a lead-in.
+    it farther from the target than the current scene starts a new scene when
+    both sides remain readable.  A change between explicit named ``X reports``
+    citation leads is a hard semantic boundary, regardless of duration.
+    ``offset`` shifts every time into absolute composition time when a caller
+    needs a lead-in.
     """
     scenes: list[dict] = []
     current: list[dict] = []
+    active_source_key = ""
+    active_source_label = ""
+    current_boundary: dict | None = None
 
     def flush() -> None:
+        nonlocal current_boundary
         if not current:
             return
         start = current[0]["start"]
         end = current[-1]["start"] + current[-1]["duration"]
         text = " ".join(line["text"] for line in current)
-        scenes.append(
-            {
-                "id": f"scene-{len(scenes) + 1:02d}",
-                "index": len(scenes),
-                "start": round(start + offset, 2),
-                "duration": round(max(0.5, end - start), 2),
-                "lines": [
-                    {
-                        "start": round(line["start"] + offset, 2),
-                        "duration": round(line["duration"], 2),
-                        "speaker": line["speaker"],
-                        "text": line["text"],
-                    }
-                    for line in current
-                ],
-                "text": text,
-                "word_count": sum(line["word_count"] for line in current),
-                "keywords": _keywords(text),
-            }
-        )
+        scene = {
+            "id": f"scene-{len(scenes) + 1:02d}",
+            "index": len(scenes),
+            "start": round(start + offset, 2),
+            "duration": round(max(0.5, end - start), 2),
+            "lines": [
+                {
+                    "start": round(line["start"] + offset, 2),
+                    "duration": round(line["duration"], 2),
+                    "speaker": line["speaker"],
+                    "text": line["text"],
+                }
+                for line in current
+            ],
+            "text": text,
+            "word_count": sum(line["word_count"] for line in current),
+            "keywords": _keywords(text),
+            "_hard_boundary_before": current_boundary is not None,
+        }
+        if current_boundary is not None:
+            scene["semantic_boundary_before"] = current_boundary
+        scenes.append(scene)
         current.clear()
+        current_boundary = None
 
     for line in lines:
+        cited_source = _citation_source(line.get("text"))
+        cited_key, cited_label = cited_source or ("", "")
+        source_changed = bool(
+            cited_key and active_source_key and cited_key != active_source_key
+        )
+        next_boundary = None
         if current:
+            current_duration = (
+                current[-1]["start"] + current[-1]["duration"] - current[0]["start"]
+            )
             span = (line["start"] + line["duration"]) - current[0]["start"]
             reached_target = (line["start"] - current[0]["start"]) >= SCENE_TARGET_SECONDS
-            if reached_target or span > SCENE_MAX_SECONDS:
+            current_is_closer = (
+                current_duration >= SCENE_MIN_SECONDS
+                and span > SCENE_TARGET_SECONDS
+                and abs(current_duration - SCENE_TARGET_SECONDS)
+                < abs(span - SCENE_TARGET_SECONDS)
+            )
+            if source_changed:
+                previous_label = active_source_label
                 flush()
+                next_boundary = {
+                    "kind": "citation_source_change",
+                    "from": previous_label,
+                    "to": cited_label,
+                }
+            elif current_is_closer or reached_target or span > SCENE_MAX_SECONDS:
+                flush()
+        if cited_key:
+            active_source_key = cited_key
+            active_source_label = cited_label
+        if not current:
+            current_boundary = next_boundary
         current.append(line)
     flush()
 
     # A trailing stub (one short line orphaned by the max-length cut) reads as a
-    # flash frame. Fold anything under the minimum back into its predecessor.
+    # flash frame. Fold a soft-boundary stub back into its predecessor, but
+    # never erase a named-source change to do so.
     merged: list[dict] = []
     for scene in scenes:
-        if merged and scene["duration"] < SCENE_MIN_SECONDS:
-            prev = merged[-1]
-            prev["lines"].extend(scene["lines"])
-            prev["duration"] = round(
-                (scene["start"] + scene["duration"]) - prev["start"], 2
-            )
-            prev["text"] = f"{prev['text']} {scene['text']}"
-            prev["word_count"] += scene["word_count"]
-            prev["keywords"] = _keywords(prev["text"])
+        if (
+            merged
+            and scene["duration"] < SCENE_MIN_SECONDS
+            and not scene["_hard_boundary_before"]
+        ):
+            _merge_scene_rows(merged[-1], scene)
             continue
         merged.append(scene)
 
+    # A short scene that begins at a hard boundary can still absorb a following
+    # duration-only split from the same topic.  If both neighboring boundaries
+    # are semantic, preserving and marking the short scene is safer than either
+    # a false combined topic or silently shifting the narration boundary.
+    index = 0
+    while index + 1 < len(merged):
+        scene = merged[index]
+        following = merged[index + 1]
+        if (
+            scene["duration"] < SCENE_MIN_SECONDS
+            and not following["_hard_boundary_before"]
+        ):
+            _merge_scene_rows(scene, following)
+            del merged[index + 1]
+            continue
+        index += 1
+
     for i, scene in enumerate(merged):
+        protected_short_scene = (
+            scene["duration"] < SCENE_MIN_SECONDS
+            and (
+                scene["_hard_boundary_before"]
+                or (i + 1 < len(merged) and merged[i + 1]["_hard_boundary_before"])
+            )
+        )
+        if protected_short_scene:
+            scene["short_scene_reason"] = "preserved_citation_source_boundary"
+        scene.pop("_hard_boundary_before", None)
         scene["id"] = f"scene-{i + 1:02d}"
         scene["index"] = i
     return merged

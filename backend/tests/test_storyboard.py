@@ -11,6 +11,16 @@ def write_script(tmp_path: Path, lines: list[str]) -> Path:
     return path
 
 
+def timed_line(start: float, duration: float, text: str) -> dict:
+    return {
+        "start": start,
+        "duration": duration,
+        "speaker": 1,
+        "text": text,
+        "word_count": max(1, len(text.split())),
+    }
+
+
 def test_parse_script_lines_reads_bare_monologue_lines(tmp_path):
     path = write_script(tmp_path, ["First line here.", "", "Second line here."])
     lines = sb.parse_script_lines(path, is_monologue=True)
@@ -150,6 +160,133 @@ def test_short_trailing_scene_is_folded_into_its_predecessor(tmp_path):
         script_path=path, audio_duration=120.0, title="T", is_monologue=True
     )
     assert all(scene["duration"] >= sb.SCENE_MIN_SECONDS for scene in board["scenes"][1:])
+
+
+def test_different_named_report_sources_force_the_real_scene_two_boundary():
+    lines = [
+        timed_line(
+            19.19,
+            7.47,
+            "DeepTech China reports that researchers at MIT are exploring whether living "
+            "bacteria can be used to build computing systems analogous to circuit boards.",
+        ),
+        timed_line(
+            26.66,
+            13.11,
+            "QbitAI reports that Perfect World's 2026 semiannual report shows first-half "
+            "revenue of 2.751 billion yuan and a net loss of 118 million yuan.",
+        ),
+    ]
+
+    scenes = sb.group_lines_into_scenes(lines)
+
+    assert [(scene["start"], scene["duration"]) for scene in scenes] == [
+        (19.19, 7.47),
+        (26.66, 13.11),
+    ]
+    assert scenes[1]["semantic_boundary_before"] == {
+        "kind": "citation_source_change",
+        "from": "DeepTech China",
+        "to": "QbitAI",
+    }
+    assert all(scene["duration"] >= sb.SCENE_MIN_SECONDS for scene in scenes)
+
+
+def test_repeated_reports_from_the_same_named_source_do_not_force_a_boundary():
+    lines = [
+        timed_line(0.0, 5.0, "The Financial Times reports that robot revenue increased."),
+        timed_line(5.0, 6.0, "Financial Times reports that training data sales also grew."),
+    ]
+
+    scenes = sb.group_lines_into_scenes(lines)
+
+    assert len(scenes) == 1
+    assert scenes[0]["duration"] == 11.0
+    assert "semantic_boundary_before" not in scenes[0]
+
+
+def test_generic_lowercase_report_subjects_are_not_named_source_boundaries():
+    lines = [
+        timed_line(0.0, 5.0, "The company reports that robot revenue increased."),
+        timed_line(5.0, 6.0, "The division reports that training data sales also grew."),
+    ]
+
+    scenes = sb.group_lines_into_scenes(lines)
+
+    assert len(scenes) == 1
+    assert "semantic_boundary_before" not in scenes[0]
+
+
+@pytest.mark.parametrize(
+    ("durations", "short_index"),
+    [((5.0, 9.0), 0), ((9.0, 5.0), 1)],
+)
+def test_short_named_source_scene_is_marked_instead_of_cross_boundary_merge(
+    durations, short_index
+):
+    first_duration, second_duration = durations
+    lines = [
+        timed_line(0.0, first_duration, "Reuters reports that the first topic changed."),
+        timed_line(
+            first_duration,
+            second_duration,
+            "Bloomberg reports that a separate second topic changed.",
+        ),
+    ]
+
+    scenes = sb.group_lines_into_scenes(lines)
+
+    assert len(scenes) == 2
+    assert scenes[0]["text"].startswith("Reuters reports")
+    assert scenes[1]["text"].startswith("Bloomberg reports")
+    assert scenes[short_index]["short_scene_reason"] == (
+        "preserved_citation_source_boundary"
+    )
+
+
+def test_short_source_lead_absorbs_its_own_continuation_before_source_change():
+    lines = [
+        timed_line(0.0, 4.0, "Reuters reports that the first topic changed."),
+        timed_line(4.0, 4.0, "The same report adds supporting context."),
+        timed_line(8.0, 9.0, "Bloomberg reports that a separate topic changed."),
+    ]
+
+    scenes = sb.group_lines_into_scenes(lines)
+
+    assert [scene["duration"] for scene in scenes] == [8.0, 9.0]
+    assert len(scenes[0]["lines"]) == 2
+    assert "short_scene_reason" not in scenes[0]
+    assert scenes[1]["semantic_boundary_before"]["to"] == "Bloomberg"
+
+
+def test_target_closeness_splits_long_scene_before_third_sentence():
+    lines = [
+        timed_line(0.0, 7.5, "IEEE Spectrum notes that organizations allocate idea time."),
+        timed_line(7.5, 4.0, "The research indicates that the practice pays off."),
+        timed_line(
+            11.5,
+            9.91,
+            "The article discusses bootlegging and skunkworks projects and promoter networks.",
+        ),
+    ]
+
+    scenes = sb.group_lines_into_scenes(lines)
+
+    assert [scene["duration"] for scene in scenes] == [11.5, 9.91]
+    assert len(scenes[0]["lines"]) == 2
+    assert len(scenes[1]["lines"]) == 1
+
+
+def test_target_closeness_keeps_next_sentence_when_combined_span_is_closer():
+    lines = [
+        timed_line(0.0, 8.0, "The first sentence establishes one visual topic."),
+        timed_line(8.0, 8.0, "The second sentence continues that same visual topic."),
+    ]
+
+    scenes = sb.group_lines_into_scenes(lines)
+
+    assert len(scenes) == 1
+    assert scenes[0]["duration"] == 16.0
 
 
 def test_scene_ids_are_sequential_after_merging(tmp_path):
