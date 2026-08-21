@@ -250,21 +250,6 @@ if (utils.includes(legacyGeminiSubmitAction)) {
     'Gemini resilient submit action',
   )
 }
-utils = replaceOnce(
-  utils,
-  `    let hasText = false;
-    if (page.nativeType) {`,
-  `    let hasText = false;
-    if (typeof page.fillText === 'function') {
-        try {
-            const filled = await page.fillText('[contenteditable="true"][aria-label*="Gemini"]', text);
-            hasText = filled?.verified === true && filled?.actual === text;
-        }
-        catch { }
-    }
-    if (!hasText && page.nativeType) {`,
-  'Gemini verified composer fill',
-)
 utils = replaceWithinFunction(
   utils,
   'export async function sendGeminiMessage(page, text) {',
@@ -376,6 +361,112 @@ utils = replaceOnce(
     'Gemini short model label read-back',
   )
 }
+utils = replaceOnce(
+  utils,
+  `      return {
+        hasText: !!(composer && ((composer.textContent || '').trim() || (composer.innerText || '').trim())),
+      };`,
+  `      const actual = String(composer?.innerText || composer?.textContent || '')
+        .replace(/\\u00a0/g, ' ')
+        .trim();
+      return {
+        hasText: actual.length > 0,
+        actual,
+      };`,
+  'Gemini exact composer read-back',
+)
+if (!utils.includes("    const normalizeComposerText = (value) => String(value || '')")) {
+  utils = replaceOnce(
+    utils,
+    `    let hasText = false;
+    if (page.nativeType) {`,
+    `    let hasText = false;
+    if (typeof page.fillText === 'function') {
+        try {
+            const filled = await page.fillText('[contenteditable="true"][aria-label*="Gemini"]', text);
+            hasText = filled?.verified === true && filled?.actual === text;
+        }
+        catch { }
+    }
+    if (!hasText && page.nativeType) {`,
+    'Gemini verified composer fill',
+  )
+}
+const legacyGeminiVerifiedFill = `    let hasText = false;
+    if (typeof page.fillText === 'function') {
+        try {
+            const filled = await page.fillText('[contenteditable="true"][aria-label*="Gemini"]', text);
+            hasText = filled?.verified === true && filled?.actual === text;
+        }
+        catch { }
+    }
+    if (!hasText && page.nativeType) {
+        try {
+            await page.nativeType(text);
+            await page.wait(0.2);
+            const nativeState = await page.evaluate(composerHasTextScript());
+            hasText = !!nativeState?.hasText;
+        }
+        catch { }
+    }
+    if (!hasText) {
+        const fallbackState = await page.evaluate(insertComposerTextFallbackScript(text));
+        hasText = !!fallbackState?.hasText;
+    }`
+const exactGeminiVerifiedFill = `    const normalizeComposerText = (value) => String(value || '')
+        .replace(/\\u00a0/g, ' ')
+        .replace(/\\s+/g, ' ')
+        .trim();
+    const expectedText = normalizeComposerText(text);
+    const exactComposerState = async () => {
+        const state = await page.evaluate(composerHasTextScript());
+        const actual = normalizeComposerText(state?.actual);
+        return {
+            hasText: !!state?.hasText,
+            exact: actual === expectedText,
+            actual,
+        };
+    };
+    const clearComposer = async () => {
+        const reset = await page.evaluate(prepareComposerScript());
+        if (!reset?.ok) {
+            throw new CommandExecutionError(reset?.reason || 'Could not clear Gemini composer');
+        }
+    };
+    let hasText = false;
+    if (typeof page.fillText === 'function') {
+        try {
+            await page.fillText('[contenteditable="true"][aria-label*="Gemini"]', text);
+        }
+        catch { }
+        await page.wait(0.2);
+        const fillState = await exactComposerState();
+        hasText = fillState.exact;
+        if (!hasText && fillState.hasText) await clearComposer();
+    }
+    if (!hasText && page.nativeType) {
+        try {
+            await page.nativeType(text);
+            await page.wait(0.2);
+            const nativeState = await exactComposerState();
+            hasText = nativeState.exact;
+            if (!hasText && nativeState.hasText) await clearComposer();
+        }
+        catch { }
+    }
+    if (!hasText) {
+        await page.evaluate(insertComposerTextFallbackScript(text));
+        const fallbackState = await exactComposerState();
+        hasText = fallbackState.exact;
+    }`
+utils = replaceWithinFunction(
+  utils,
+  'export async function sendGeminiMessage(page, text) {',
+  'function normalizeGeminiExportUrls(value) {',
+  legacyGeminiVerifiedFill,
+  exactGeminiVerifiedFill,
+  'Gemini write-once exact composer fill',
+)
 utils = replaceOnce(
   utils,
   `        const expectedVariant = String(modelId).replace(/^\\d+(?:\\.\\d+)?-/, '').toLowerCase();

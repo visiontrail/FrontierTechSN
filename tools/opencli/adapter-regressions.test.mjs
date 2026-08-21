@@ -623,7 +623,7 @@ test('Gemini video submitted-state page script compiles and executes after templ
 
 test('Gemini clicks a discovered semantic send button instead of pressing Enter', async () => {
   const actions = []
-  let composerHasText = false
+  let composerText = ''
   const page = {
     async evaluate(script) {
       if (script === 'window.location.href') return 'https://gemini.google.com/app/test'
@@ -635,22 +635,22 @@ test('Gemini clicks a discovered semantic send button instead of pressing Enter'
           y: 456,
         }
       }
-      if (script.includes('hasText: !!(composer')) {
-        return { hasText: composerHasText }
+      if (script.includes('hasText: actual.length > 0')) {
+        return { hasText: composerText.length > 0, actual: composerText }
       }
       if (script.includes('inputText') && script.includes('InputEvent')) {
-        return { hasText: composerHasText }
+        return { hasText: composerText.length > 0, actual: composerText }
       }
       if (script.includes('Could not find Gemini composer')) return { ok: true }
       throw new Error(`Unexpected Gemini evaluate script: ${String(script).slice(0, 100)}`)
     },
     async nativeType(text) {
       actions.push(['nativeType', text])
-      composerHasText = true
+      composerText += text
     },
     async fillText(selector, text) {
       actions.push(['fillText', selector, text])
-      composerHasText = true
+      composerText = text
       return { verified: true, actual: text }
     },
     async nativeClick(x, y) {
@@ -661,7 +661,7 @@ test('Gemini clicks a discovered semantic send button instead of pressing Enter'
     },
     async click(selector) {
       actions.push(['click', selector])
-      composerHasText = false
+      composerText = ''
     },
     async wait() {},
   }
@@ -708,7 +708,7 @@ test('Gemini accepts an owned short reply already present at submission confirma
 })
 
 test('Gemini does not click twice when the first click submits but reports an error', async () => {
-  let composerHasText = false
+  let composerText = ''
   let clickCount = 0
   const page = {
     async evaluate(script) {
@@ -716,19 +716,19 @@ test('Gemini does not click twice when the first click submits but reports an er
       if (script.includes('bestButton instanceof HTMLElement')) {
         return { action: 'button', label: 'Send message', x: 123, y: 456 }
       }
-      if (script.includes('hasText: !!(composer')) {
-        return { hasText: composerHasText }
+      if (script.includes('hasText: actual.length > 0')) {
+        return { hasText: composerText.length > 0, actual: composerText }
       }
       if (script.includes('Could not find Gemini composer')) return { ok: true }
       throw new Error(`Unexpected Gemini evaluate script: ${String(script).slice(0, 100)}`)
     },
     async fillText(_selector, text) {
-      composerHasText = true
+      composerText = text
       return { verified: true, actual: text }
     },
     async click() {
       clickCount += 1
-      composerHasText = false
+      composerText = ''
       throw new Error('transport response was lost after dispatch')
     },
     async wait() {},
@@ -738,6 +738,89 @@ test('Gemini does not click twice when the first click submits but reports an er
 
   assert.equal(result, 'button')
   assert.equal(clickCount, 1)
+})
+
+test('Gemini accepts exact DOM text when fill verification is unavailable without appending', async () => {
+  const actions = []
+  let composerText = ''
+  let submittedText = ''
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app/test'
+      if (script.includes('bestButton instanceof HTMLElement')) {
+        return { action: 'button', label: 'Send message', x: 123, y: 456 }
+      }
+      if (script.includes('Could not find Gemini composer')) {
+        composerText = ''
+        return { ok: true }
+      }
+      if (script.includes('hasText: actual.length > 0')) {
+        return { hasText: composerText.length > 0, actual: composerText }
+      }
+      throw new Error(`Unexpected Gemini evaluate script: ${String(script).slice(0, 100)}`)
+    },
+    async fillText(_selector, text) {
+      actions.push('fillText')
+      composerText = text
+      return { verified: false, actual: '' }
+    },
+    async nativeType(text) {
+      actions.push('nativeType')
+      composerText += text
+    },
+    async click() {
+      submittedText = composerText
+      composerText = ''
+    },
+    async wait() {},
+  }
+
+  assert.equal(await sendGeminiMessage(page, 'hello world'), 'button')
+  assert.deepEqual(actions, ['fillText'])
+  assert.equal(submittedText, 'hello world')
+})
+
+test('Gemini clears partial fill text before native typing the exact prompt once', async () => {
+  const actions = []
+  let composerText = ''
+  let submittedText = ''
+  let prepareCalls = 0
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app/test'
+      if (script.includes('bestButton instanceof HTMLElement')) {
+        return { action: 'button', label: 'Send message', x: 123, y: 456 }
+      }
+      if (script.includes('Could not find Gemini composer')) {
+        prepareCalls += 1
+        composerText = ''
+        return { ok: true }
+      }
+      if (script.includes('hasText: actual.length > 0')) {
+        return { hasText: composerText.length > 0, actual: composerText }
+      }
+      throw new Error(`Unexpected Gemini evaluate script: ${String(script).slice(0, 100)}`)
+    },
+    async fillText() {
+      actions.push('fillText')
+      composerText = 'hello'
+      return { verified: false, actual: 'hello' }
+    },
+    async nativeType(text) {
+      actions.push('nativeType')
+      composerText += text
+    },
+    async click() {
+      submittedText = composerText
+      composerText = ''
+    },
+    async wait() {},
+  }
+
+  assert.equal(await sendGeminiMessage(page, 'hello world'), 'button')
+  assert.deepEqual(actions, ['fillText', 'nativeType'])
+  assert.equal(prepareCalls, 2)
+  assert.equal(submittedText, 'hello world')
 })
 
 test('ChatGPT waits for a delayed slider after one model-trigger click', async () => {

@@ -194,7 +194,13 @@ def create_contact_sheet(frames: list[dict], output_path: str | Path) -> Path:
     return destination
 
 
-def _review_prompt(title: str, frames: list[dict]) -> str:
+def _review_prompt(
+    title: str,
+    frames: list[dict],
+    minimum_scene_score: int,
+    minimum_average_score: int,
+) -> str:
+    partial_floor = min(45, max(1, minimum_scene_score - 1))
     segments = [
         {
             "id": frame["id"],
@@ -225,9 +231,20 @@ def _review_prompt(title: str, frames: list[dict]) -> str:
         '"visual_summary":"what is actually visible",'
         '"alignment_reason":"why it matches or does not",'
         '"issues":["specific issue"],'
-        '"suggested_visual":"replacement concept if score is below 70"}]}. '
-        "Use integer scores from 0 to 100. A score of 70 means clearly relevant; "
-        "85 means strong correspondence; 95+ means exceptionally literal and precise. "
+        '"suggested_visual":"replacement concept when verdict is partial or mismatch"}]}. '
+        "Scores and verdicts are one strict contract: "
+        f"match requires score {minimum_scene_score}-100 and issues=[]; "
+        f"partial requires score {partial_floor}-{minimum_scene_score - 1}, at least "
+        "one concrete issue, and a non-empty suggested_visual; mismatch requires score "
+        f"0-{partial_floor - 1}, at least one concrete issue, and a non-empty "
+        "suggested_visual. Never return a verdict outside its score band. "
+        f"The full-video release average is {minimum_average_score}/100. A direct, "
+        "clearly correct depiction or text/data card that covers every core narrated "
+        f"subject should normally score at least {minimum_average_score}; do not deduct "
+        "for illustration style, branding, or layout when the semantic message is clear. "
+        "If one scene contains multiple distinct narrated subjects, the visible frame "
+        "must represent every core subject, including through readable text or data. "
+        "Use integer scores from 0 to 100. "
         "Include every supplied scene id exactly once. If the attachment is absent or "
         "unreadable, set image_received to false and do not invent reviews."
     )
@@ -267,7 +284,7 @@ def normalise_batch(
     returned_ids = [
         str(row.get("id")) for row in rows if isinstance(row, dict) and row.get("id") is not None
     ]
-    structure_valid = (
+    id_structure_valid = (
         len(returned_ids) == len(expected_ids)
         and len(set(returned_ids)) == len(returned_ids)
         and set(returned_ids) == set(expected_ids)
@@ -278,15 +295,78 @@ def normalise_batch(
         if isinstance(row, dict) and row.get("id") is not None
     }
     reviews: list[dict] = []
+    partial_floor = min(45, max(1, minimum_scene_score - 1))
     for frame in frames:
         scene_id = str(frame["id"])
         row = by_id.get(scene_id, {})
-        visual_summary = str(row.get("visual_summary") or "").strip()
-        alignment_reason = str(row.get("alignment_reason") or "").strip()
-        score = _score(row.get("score")) if image_received else 0
+        raw_visual_summary = row.get("visual_summary")
+        raw_alignment_reason = row.get("alignment_reason")
+        raw_score = row.get("score")
+        raw_issues = row.get("issues")
+        raw_suggested_visual = row.get("suggested_visual")
+        raw_gemini_verdict = row.get("verdict")
+        visual_summary = (
+            raw_visual_summary.strip()[:500]
+            if isinstance(raw_visual_summary, str)
+            else ""
+        )
+        alignment_reason = (
+            raw_alignment_reason.strip()[:500]
+            if isinstance(raw_alignment_reason, str)
+            else ""
+        )
+        score_schema_valid = type(raw_score) is int and 0 <= raw_score <= 100
+        score = _score(raw_score) if image_received else 0
         if not visual_summary or not alignment_reason:
             score = 0
-        issues = row.get("issues") if isinstance(row.get("issues"), list) else []
+        issues_schema_valid = isinstance(raw_issues, list) and all(
+            isinstance(issue, str) and bool(issue.strip()) for issue in raw_issues
+        )
+        issues = [
+            str(issue).strip()[:300]
+            for issue in (raw_issues if isinstance(raw_issues, list) else [])[:6]
+            if str(issue).strip()
+        ]
+        suggested_visual = (
+            raw_suggested_visual.strip()[:500]
+            if isinstance(raw_suggested_visual, str)
+            else ""
+        )
+        gemini_verdict = (
+            raw_gemini_verdict.strip().casefold()
+            if isinstance(raw_gemini_verdict, str)
+            else ""
+        )
+        rubric_consistent = False
+        if (
+            visual_summary
+            and alignment_reason
+            and score_schema_valid
+            and scene_id in by_id
+            and image_received
+        ):
+            if gemini_verdict == "match":
+                rubric_consistent = (
+                    score >= minimum_scene_score
+                    and issues_schema_valid
+                    and raw_issues == []
+                )
+            elif gemini_verdict == "partial":
+                rubric_consistent = (
+                    partial_floor <= score < minimum_scene_score
+                    and issues_schema_valid
+                    and bool(issues)
+                    and isinstance(raw_suggested_visual, str)
+                    and bool(suggested_visual)
+                )
+            elif gemini_verdict == "mismatch":
+                rubric_consistent = (
+                    score < partial_floor
+                    and issues_schema_valid
+                    and bool(issues)
+                    and isinstance(raw_suggested_visual, str)
+                    and bool(suggested_visual)
+                )
         reviews.append(
             {
                 "id": scene_id,
@@ -300,16 +380,19 @@ def normalise_batch(
                     if score >= 45
                     else "mismatch"
                 ),
-                "gemini_verdict": str(row.get("verdict") or "").strip(),
+                "gemini_verdict": gemini_verdict,
+                "rubric_consistent": rubric_consistent,
                 "visual_summary": visual_summary,
                 "alignment_reason": alignment_reason,
-                "issues": [str(issue)[:300] for issue in issues[:6]],
-                "suggested_visual": str(row.get("suggested_visual") or "").strip()[:500],
+                "issues": issues,
+                "suggested_visual": suggested_visual,
             }
         )
     return {
         "image_received": image_received,
-        "structure_valid": structure_valid,
+        "structure_valid": id_structure_valid,
+        "contract_valid": id_structure_valid
+        and all(review["rubric_consistent"] for review in reviews),
         "reviews": reviews,
     }
 
@@ -376,7 +459,10 @@ async def review_video(
                         "gemini",
                         "ask",
                         _review_prompt(
-                            str(storyboard.get("title") or "Untitled"), batch_frames
+                            str(storyboard.get("title") or "Untitled"),
+                            batch_frames,
+                            minimum_scene_score,
+                            minimum_average_score,
                         ),
                         "--file",
                         str(sheet),
@@ -402,9 +488,16 @@ async def review_video(
                 normalized = normalise_batch(
                     payload, batch_frames, minimum_scene_score
                 )
-                if normalized["image_received"] and normalized["structure_valid"]:
+                if (
+                    normalized["image_received"]
+                    and normalized["structure_valid"]
+                    and normalized["contract_valid"]
+                ):
                     break
-                raise OpenCLIError("Gemini omitted the image or required scene ids")
+                raise OpenCLIError(
+                    "Gemini omitted the image, required scene ids, or a score/verdict "
+                    "row violated the requested review rubric"
+                )
             except Exception as exc:  # noqa: BLE001 - bounded web retry
                 last_error = str(exc)
                 normalized = None
@@ -429,6 +522,7 @@ async def review_video(
                 "scene_ids": [frame["id"] for frame in batch_frames],
                 "image_received": normalized["image_received"],
                 "structure_valid": normalized["structure_valid"],
+                "contract_valid": normalized["contract_valid"],
                 "attempts": attempts,
             }
         )
@@ -440,6 +534,7 @@ async def review_video(
         and len(reviews) == len(expected)
         and all(batch["image_received"] for batch in batches)
         and all(batch["structure_valid"] for batch in batches)
+        and all(batch["contract_valid"] for batch in batches)
         and not failed
         and average >= minimum_average_score
     )

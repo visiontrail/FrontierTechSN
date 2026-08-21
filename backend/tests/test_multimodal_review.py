@@ -68,8 +68,10 @@ def test_missing_or_unsubstantiated_gemini_rows_fail_closed(tmp_path: Path):
                 {
                     "id": "scene-01",
                     "score": 95,
+                    "verdict": "match",
                     "visual_summary": "A gold bar and a record-price chart.",
                     "alignment_reason": "The visible chart directly supports the claim.",
+                    "issues": [],
                 }
             ],
         },
@@ -81,6 +83,59 @@ def test_missing_or_unsubstantiated_gemini_rows_fail_closed(tmp_path: Path):
     assert normalized["reviews"][1]["score"] == 0
     assert normalized["reviews"][1]["verdict"] == "mismatch"
     assert normalized["structure_valid"] is False
+    assert normalized["contract_valid"] is False
+
+
+def test_score_verdict_contradiction_invalidates_review_contract(tmp_path: Path):
+    scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
+    normalized = multimodal_review.normalise_batch(
+        {
+            "image_received": True,
+            "reviews": [
+                {
+                    "id": "scene-01",
+                    "score": 68,
+                    "verdict": "match",
+                    "visual_summary": "A gold bar and a record-price chart.",
+                    "alignment_reason": "The visible subject directly matches.",
+                    "issues": [],
+                    "suggested_visual": "",
+                }
+            ],
+        },
+        _frames(tmp_path, scenes),
+        minimum_scene_score=70,
+    )
+
+    assert normalized["structure_valid"] is True
+    assert normalized["contract_valid"] is False
+    assert normalized["reviews"][0]["rubric_consistent"] is False
+
+
+def test_malformed_issue_field_cannot_disappear_into_a_valid_match(tmp_path: Path):
+    scenes = [_scene("scene-01", 0, "Two distinct subjects must both be visible.")]
+    normalized = multimodal_review.normalise_batch(
+        {
+            "image_received": True,
+            "reviews": [
+                {
+                    "id": "scene-01",
+                    "score": 90,
+                    "verdict": "match",
+                    "visual_summary": "Only the first subject is visible.",
+                    "alignment_reason": "The second subject is missing.",
+                    "issues": "Missing second subject",
+                    "suggested_visual": "Show both subjects.",
+                }
+            ],
+        },
+        _frames(tmp_path, scenes),
+        minimum_scene_score=70,
+    )
+
+    assert normalized["structure_valid"] is True
+    assert normalized["contract_valid"] is False
+    assert normalized["reviews"][0]["rubric_consistent"] is False
 
 
 class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
@@ -163,8 +218,10 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "id": "scene-01",
                         "score": 90,
+                        "verdict": "match",
                         "visual_summary": "A gold bar and a rising price chart.",
                         "alignment_reason": "The visible subject matches the narration.",
+                        "issues": [],
                     }
                 ],
             }
@@ -218,14 +275,18 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "id": "scene-01",
                         "score": 100,
+                        "verdict": "match",
                         "visual_summary": "Gold bars and a price chart.",
                         "alignment_reason": "Direct match.",
+                        "issues": [],
                     },
                     {
                         "id": "scene-02",
                         "score": 65,
+                        "verdict": "partial",
                         "visual_summary": "A generic beach.",
                         "alignment_reason": "No central-bank or reserve imagery is visible.",
+                        "issues": ["No central-bank or reserve imagery is visible."],
                         "suggested_visual": "Show a central bank vault and reserve ledger.",
                     },
                 ],
@@ -260,3 +321,78 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(report["passed"])
             self.assertEqual(report["failed_scene_ids"], ["scene-02"])
             self.assertEqual(report["average_score"], 82.5)
+
+    async def test_inconsistent_score_and_verdict_are_retried(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
+            frames = _frames(root, scenes)
+            contradictory = {
+                "image_received": True,
+                "reviews": [
+                    {
+                        "id": "scene-01",
+                        "score": 68,
+                        "verdict": "match",
+                        "visual_summary": "Gold bars and a price chart.",
+                        "alignment_reason": "Direct match.",
+                        "issues": [],
+                        "suggested_visual": "",
+                    }
+                ],
+            }
+            consistent = {
+                "image_received": True,
+                "reviews": [
+                    {
+                        "id": "scene-01",
+                        "score": 88,
+                        "verdict": "match",
+                        "visual_summary": "Gold bars and a price chart.",
+                        "alignment_reason": "Direct match.",
+                        "issues": [],
+                        "suggested_visual": "",
+                    }
+                ],
+            }
+            opencli = AsyncMock(
+                side_effect=[
+                    OpenCLIResult(
+                        args=(),
+                        returncode=0,
+                        stdout=json.dumps([{"response": json.dumps(contradictory)}]),
+                        stderr="",
+                    ),
+                    OpenCLIResult(
+                        args=(),
+                        returncode=0,
+                        stdout=json.dumps([{"response": json.dumps(consistent)}]),
+                        stderr="",
+                    ),
+                ]
+            )
+            with (
+                patch.object(
+                    multimodal_review,
+                    "extract_scene_frames",
+                    AsyncMock(return_value=frames),
+                ),
+                patch.object(multimodal_review, "run_opencli", opencli),
+                patch.object(config, "AV_SYNC_GEMINI_BATCH_SIZE", 8),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_SCENE_SCORE", 70),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
+                patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
+                patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 1),
+            ):
+                report = await multimodal_review.review_video(
+                    root / "video.mp4",
+                    {"title": "Gold", "scenes": scenes},
+                    root,
+                )
+
+            self.assertTrue(report["passed"])
+            self.assertEqual(opencli.await_count, 2)
+            self.assertEqual(report["batches"][0]["attempts"], 2)
+            prompt = opencli.await_args_list[0].args[0][2]
+            self.assertIn("match requires score 70-100 and issues=[]", prompt)
+            self.assertIn("release average is 82/100", prompt)
