@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -24,6 +25,105 @@ def _board(count: int = 6) -> dict:
             for index in range(count)
         ],
     }
+
+
+class _CollageCacheHarness:
+    """Deterministic media boundaries for cache-contract regression tests."""
+
+    def __init__(self, task_dir: Path) -> None:
+        self.task_dir = task_dir
+        self.calls = {
+            "plan": 0,
+            "still": 0,
+            "frames": 0,
+            "video": 0,
+            "normalize": 0,
+            "probe": 0,
+            "sheet": 0,
+        }
+        self._stack = ExitStack()
+
+    def __enter__(self):
+        for name, replacement in (
+            ("plan_specs", self.plan_specs),
+            ("_generate_still", self.generate_still),
+            ("_prepare_frames", self.prepare_frames),
+            ("_generate_video", self.generate_video),
+            ("_normalize_video", self.normalize_video),
+            ("probe_video", self.probe_video),
+            ("_contact_sheet", self.contact_sheet),
+        ):
+            self._stack.enter_context(patch.object(collage_broll, name, replacement))
+        return self
+
+    def __exit__(self, *args):
+        return self._stack.__exit__(*args)
+
+    async def plan_specs(
+        self,
+        storyboard,
+        *,
+        count,
+        force_opening,
+        **_kwargs,
+    ):
+        self.calls["plan"] += 1
+        choices = collage_broll._scene_choices(storyboard, count, force_opening)
+        return [
+            collage_broll._fallback_spec(scene, index)
+            for index, scene in enumerate(choices)
+        ]
+
+    async def generate_still(self, prompt, item_dir):
+        self.calls["still"] += 1
+        output = item_dir / "stills" / "generated.png"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"still:" + prompt.encode("utf-8"))
+        return output, "https://chatgpt.test/collage"
+
+    async def prepare_frames(self, source, item_dir, _color, _frame):
+        self.calls["frames"] += 1
+        frames = item_dir / "frames"
+        frames.mkdir(parents=True, exist_ok=True)
+        first = frames / "first-frame.png"
+        last = frames / "last-frame.jpg"
+        first.write_bytes(b"first")
+        last.write_bytes(b"hold:" + source.read_bytes())
+        return first, last
+
+    async def generate_video(self, prompt, _first, last, item_dir, _frame):
+        self.calls["video"] += 1
+        raw = item_dir / "video" / "raw.mp4"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes(b"raw:" + prompt.encode("utf-8") + last.read_bytes())
+        return raw, "https://gemini.test/collage"
+
+    async def normalize_video(self, raw, item_dir, _frame, target_duration):
+        self.calls["normalize"] += 1
+        final = collage_broll._final_clip_path(item_dir, target_duration)
+        final.write_bytes(b"final:" + raw.read_bytes())
+        return final
+
+    async def probe_video(self, _video, _frame, _target_duration):
+        self.calls["probe"] += 1
+        return {"passed": True, "checks": {"deterministic": True}}
+
+    async def contact_sheet(self, _video, item_dir, _frame, _target_duration):
+        self.calls["sheet"] += 1
+        sheet = item_dir / "video" / "contact-sheet.jpg"
+        sheet.write_bytes(b"sheet")
+        return sheet
+
+    def run(self, storyboard: dict, *, count: int | None = None) -> dict:
+        return asyncio.run(
+            collage_broll.generate_collage_broll(
+                storyboard,
+                self.task_dir,
+                count=count if count is not None else len(storyboard["scenes"]),
+                force_opening=False,
+                frame=LANDSCAPE,
+            )
+        )
 
 
 def test_scene_selection_forces_opening_and_spreads_the_rest():
@@ -62,6 +162,285 @@ def test_clip_duration_matches_script_and_respects_gemini_ceiling():
     assert short["target_duration_seconds"] == 5.25
     assert long["script_duration_seconds"] == 12.0
     assert long["target_duration_seconds"] == 8.0
+
+
+def test_semantically_unchanged_collage_reuses_visual_spec_and_final(tmp_path: Path):
+    storyboard = _board(1)
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        first = harness.run(storyboard)
+        final = tmp_path / first["items"][0]["video_path"]
+        first_bytes = final.read_bytes()
+        second = harness.run(storyboard)
+
+    assert first["status"] == second["status"] == "ready"
+    assert first["visual_spec_cache"] == "miss"
+    assert second["visual_spec_cache"] == "hit"
+    assert second["items"][0]["cache_reuse"] == {"still": False, "final": True}
+    assert harness.calls == {
+        "plan": 1,
+        "still": 1,
+        "frames": 1,
+        "video": 1,
+        "normalize": 1,
+        "probe": 2,
+        "sheet": 2,
+    }
+    assert final.read_bytes() == first_bytes
+    envelope = json.loads(
+        (tmp_path / "collage_broll" / "visual-spec.json").read_text()
+    )
+    assert envelope["specs_sha256"] == collage_broll._fingerprint(envelope["specs"])
+    final_contract = json.loads(
+        (
+            tmp_path
+            / "collage_broll"
+            / "01-scene-01"
+            / "video"
+            / "cache-contract.json"
+        ).read_text()
+    )
+    assert final_contract["artifact_sha256"] == collage_broll._file_sha256(final)
+    assert final_contract["hold_frame_sha256"] == collage_broll._file_sha256(
+        tmp_path / first["items"][0]["still_path"]
+    )
+
+
+def test_same_scene_id_with_changed_narration_invalidates_every_cache_layer(
+    tmp_path: Path,
+):
+    storyboard = _board(1)
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        first = harness.run(storyboard)
+        item_dir = tmp_path / "collage_broll" / "01-scene-01"
+        old_prompt = (item_dir / "image-prompt.txt").read_text()
+        old_still = (item_dir / "stills" / "generated.png").read_bytes()
+        old_final = (item_dir / "video" / "final-6s-noaudio.mp4").read_bytes()
+        changed = json.loads(json.dumps(storyboard))
+        changed["scenes"][0]["text"] = (
+            "A different narration now describes a paper observatory opening."
+        )
+        observed: dict[str, str] = {}
+        original_loader = collage_broll._load_final_cache
+
+        def observe_prompt_before_validation(item_dir, **kwargs):
+            observed["persisted"] = (item_dir / "image-prompt.txt").read_text()
+            observed["expected"] = kwargs["still_prompt"] + "\n"
+            return original_loader(item_dir, **kwargs)
+
+        with patch.object(
+            collage_broll, "_load_final_cache", side_effect=observe_prompt_before_validation
+        ):
+            second = harness.run(changed)
+
+    assert first["planning_fingerprint"] != second["planning_fingerprint"]
+    assert first["items"][0]["scene_id"] == second["items"][0]["scene_id"]
+    assert first["items"][0]["scene_semantic_fingerprint"] != second["items"][0][
+        "scene_semantic_fingerprint"
+    ]
+    assert second["visual_spec_cache"] == "miss"
+    assert second["items"][0]["cache_reuse"] == {"still": False, "final": False}
+    assert harness.calls["plan"] == 2
+    assert harness.calls["still"] == 2
+    assert harness.calls["normalize"] == 2
+    assert observed["persisted"] == old_prompt
+    assert observed["persisted"] != observed["expected"]
+    assert (item_dir / "stills" / "generated.png").read_bytes() != old_still
+    assert (item_dir / "video" / "final-6s-noaudio.mp4").read_bytes() != old_final
+
+
+def test_partial_stale_final_preserves_exact_still_and_other_scene_artifacts(
+    tmp_path: Path,
+):
+    storyboard = _board(2)
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        harness.run(storyboard)
+        root = tmp_path / "collage_broll"
+        first_item = root / "01-scene-01"
+        stale_item = root / "02-scene-02"
+        first_sentinel = first_item / "keep-first.txt"
+        stale_sentinel = stale_item / "keep-stale.txt"
+        root_sentinel = root / "keep-root.txt"
+        first_sentinel.write_text("first")
+        stale_sentinel.write_text("stale")
+        root_sentinel.write_text("root")
+        still = stale_item / "stills" / "generated.png"
+        still_bytes = still.read_bytes()
+        (stale_item / "video" / "final-6s-noaudio.mp4").write_bytes(b"tampered")
+
+        second = harness.run(storyboard)
+
+    assert second["items"][0]["cache_reuse"] == {"still": False, "final": True}
+    assert second["items"][1]["cache_reuse"] == {"still": True, "final": False}
+    assert harness.calls["plan"] == 1
+    assert harness.calls["still"] == 2
+    assert harness.calls["normalize"] == 3
+    assert still.read_bytes() == still_bytes
+    assert first_sentinel.read_text() == "first"
+    assert stale_sentinel.read_text() == "stale"
+    assert root_sentinel.read_text() == "root"
+
+
+def test_legacy_visual_spec_and_artifacts_fail_closed(tmp_path: Path):
+    storyboard = _board(1)
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        harness.run(storyboard)
+        root = tmp_path / "collage_broll"
+        item = root / "01-scene-01"
+        envelope = json.loads((root / "visual-spec.json").read_text())
+        (root / "visual-spec.json").write_text(json.dumps(envelope["specs"]))
+        (item / "stills" / "cache-contract.json").unlink()
+        (item / "video" / "cache-contract.json").unlink()
+
+        second = harness.run(storyboard)
+
+    assert second["visual_spec_cache"] == "miss"
+    assert second["items"][0]["cache_reuse"] == {"still": False, "final": False}
+    assert harness.calls["plan"] == 2
+    assert harness.calls["still"] == 2
+    assert harness.calls["normalize"] == 2
+    rewritten = json.loads((root / "visual-spec.json").read_text())
+    assert rewritten["cache_contract_version"] == collage_broll.CACHE_CONTRACT_VERSION
+    assert rewritten["specs_sha256"] == collage_broll._fingerprint(rewritten["specs"])
+
+
+def test_visual_spec_content_edit_with_stale_sha_replans_but_reuses_exact_media(
+    tmp_path: Path,
+):
+    storyboard = _board(1)
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        harness.run(storyboard)
+        specs_path = tmp_path / "collage_broll" / "visual-spec.json"
+        envelope = json.loads(specs_path.read_text())
+        envelope["specs"][0]["visual_metaphor"] = "accidentally edited"
+        specs_path.write_text(json.dumps(envelope))
+
+        second = harness.run(storyboard)
+
+    assert second["visual_spec_cache"] == "miss"
+    assert second["items"][0]["cache_reuse"] == {"still": False, "final": True}
+    assert harness.calls["plan"] == 2
+    assert harness.calls["still"] == 1
+    assert harness.calls["normalize"] == 1
+
+
+def test_visual_spec_nan_is_a_cache_miss_instead_of_a_crash(tmp_path: Path):
+    storyboard = _board(1)
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        harness.run(storyboard)
+        specs_path = tmp_path / "collage_broll" / "visual-spec.json"
+        envelope = json.loads(specs_path.read_text())
+        envelope["specs"][0]["elements"][0]["motion"] = float("nan")
+        specs_path.write_text(json.dumps(envelope))
+
+        recovered = harness.run(storyboard)
+
+    assert recovered["status"] == "ready"
+    assert recovered["visual_spec_cache"] == "miss"
+    assert recovered["items"][0]["cache_reuse"] == {"still": False, "final": True}
+    assert harness.calls["plan"] == 2
+    assert harness.calls["still"] == 1
+    assert "NaN" not in specs_path.read_text()
+
+
+def test_fresh_nonfinite_planner_spec_falls_back_before_cache_write(tmp_path: Path):
+    storyboard = _board(1)
+
+    with _CollageCacheHarness(tmp_path) as harness:
+
+        async def nonfinite_plan(*args, **kwargs):
+            specs = await harness.plan_specs(*args, **kwargs)
+            specs[0]["elements"][0]["motion"] = float("nan")
+            return specs
+
+        with patch.object(collage_broll, "plan_specs", nonfinite_plan):
+            manifest = harness.run(storyboard)
+
+    specs_path = tmp_path / "collage_broll" / "visual-spec.json"
+    saved = specs_path.read_text()
+    assert manifest["status"] == "ready"
+    assert manifest["items"][0]["spec"]["planner"] == "deterministic_fallback"
+    assert "NaN" not in saved
+    assert json.loads(saved)["specs"][0]["planner"] == "deterministic_fallback"
+
+
+def test_failed_still_decode_never_commits_reusable_contract(tmp_path: Path):
+    storyboard = _board(1)
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        with patch.object(
+            collage_broll,
+            "_prepare_frames",
+            AsyncMock(side_effect=RuntimeError("decode failed")),
+        ):
+            failed = harness.run(storyboard)
+        contract = (
+            tmp_path
+            / "collage_broll"
+            / "01-scene-01"
+            / "stills"
+            / "cache-contract.json"
+        )
+        assert not contract.exists()
+
+        recovered = harness.run(storyboard)
+
+    assert failed["status"] == "failed"
+    assert recovered["status"] == "ready"
+    assert recovered["items"][0]["cache_reuse"] == {"still": False, "final": False}
+    assert harness.calls["still"] == 2
+    assert contract.is_file()
+
+
+@pytest.mark.parametrize("symlink_level", ["task", "root", "item", "stage"])
+def test_collage_cache_rejects_symlinked_owned_paths(
+    tmp_path: Path,
+    symlink_level: str,
+):
+    real_task = tmp_path / "real-task"
+    real_task.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("untouched")
+    task_dir = real_task
+    root = real_task / "collage_broll"
+    item = root / "01-scene-01"
+
+    if symlink_level == "task":
+        task_dir = tmp_path / "task-link"
+        task_dir.symlink_to(real_task, target_is_directory=True)
+    elif symlink_level == "root":
+        root.symlink_to(outside, target_is_directory=True)
+    elif symlink_level == "item":
+        root.mkdir()
+        item.symlink_to(outside, target_is_directory=True)
+    else:
+        item.mkdir(parents=True)
+        (item / "video").symlink_to(outside, target_is_directory=True)
+
+    with _CollageCacheHarness(task_dir) as harness:
+        with pytest.raises(RuntimeError, match="symlink"):
+            harness.run(_board(1))
+
+    assert sentinel.read_text() == "untouched"
+    assert list(outside.iterdir()) == [sentinel]
+
+
+def test_collage_cache_rejects_scene_ids_that_can_escape_item_root(tmp_path: Path):
+    storyboard = _board(1)
+    storyboard["scenes"][0]["id"] = "../outside"
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        with pytest.raises(ValueError, match="Unsafe collage scene id"):
+            harness.run(storyboard)
+
+    assert not (tmp_path / "collage_broll").exists()
 
 
 def test_opencli_collage_operation_retries_until_success(monkeypatch):

@@ -28,8 +28,11 @@ SOURCE_REPOSITORY = "https://github.com/pyang5166/gbro-collage-broll"
 SOURCE_COMMIT = "a1a4ee2e2abf7d44e460026b706d0c72c2cf8a91"
 CLIP_FPS = 24
 MOTION_SAMPLE_FPS = 4
+CACHE_CONTRACT_VERSION = 1
+PLAYBACK_POLICY = "play_once_then_hold_last_frame"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_SAFE_SCENE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _COLORS = ("#D96B35", "#D2A928", "#315F4C", "#594080", "#188C85", "#B73D3D")
 GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE = (
     "OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD"
@@ -84,10 +87,488 @@ def _log(log: LogCallback | None, message: str) -> None:
 
 
 def _write_json(path: Path, payload: Any) -> None:
+    _assert_safe_write_target(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
+    _assert_safe_write_target(temporary)
     temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     temporary.replace(path)
+
+
+def _write_text(path: Path, value: str) -> None:
+    _assert_safe_write_target(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    _assert_safe_write_target(temporary)
+    temporary.write_text(value, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _assert_no_symlink_components(path: Path) -> None:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise RuntimeError(f"Collage cache path cannot contain symlinks: {current}")
+
+
+def _assert_safe_write_target(path: Path) -> None:
+    _assert_no_symlink_components(path.parent)
+    if path.is_symlink():
+        raise RuntimeError(f"Collage cache write target cannot be a symlink: {path}")
+
+
+def _assert_tree_has_no_symlinks(path: Path) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"Collage cache stage cannot be a symlink: {path}")
+    if not path.is_dir():
+        return
+    try:
+        for child in path.rglob("*"):
+            if child.is_symlink():
+                raise RuntimeError(
+                    f"Collage cache stage cannot contain symlinks: {child}"
+                )
+    except OSError as exc:
+        raise RuntimeError(f"Unable to inspect collage cache stage {path}: {exc}") from exc
+
+
+def _ensure_owned_directory(path: Path, *, parent: Path | None = None) -> Path:
+    _assert_no_symlink_components(path)
+    if path.exists() and not path.is_dir():
+        raise RuntimeError(f"Collage cache directory is not a directory: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    _assert_no_symlink_components(path)
+    resolved = path.resolve(strict=True)
+    if parent is not None:
+        parent_resolved = parent.resolve(strict=True)
+        if path.absolute().parent != parent.absolute():
+            raise RuntimeError(f"Collage cache path escapes lexical parent: {path}")
+        if resolved.parent != parent_resolved:
+            raise RuntimeError(f"Collage cache path escapes resolved parent: {path}")
+    return resolved
+
+
+def _validate_storyboard_scene_ids(storyboard: dict) -> None:
+    scene_ids: list[str] = []
+    for scene in storyboard.get("scenes") or []:
+        scene_id = str(scene.get("id") or "")
+        if not _SAFE_SCENE_ID.fullmatch(scene_id) or scene_id in {".", ".."}:
+            raise ValueError(f"Unsafe collage scene id: {scene_id!r}")
+        scene_ids.append(scene_id)
+    if len(scene_ids) != len(set(scene_ids)):
+        raise ValueError("Collage scene ids must be unique")
+
+
+def _assert_item_stage_paths_safe(item_dir: Path) -> None:
+    _assert_no_symlink_components(item_dir)
+    for path in (
+        item_dir / "stills",
+        item_dir / "frames",
+        item_dir / "video",
+    ):
+        _assert_tree_has_no_symlinks(path)
+    for path in (
+        item_dir / "image-prompt.txt",
+        item_dir / "image-prompt.txt.tmp",
+        item_dir / "video-prompt.txt",
+        item_dir / "video-prompt.txt.tmp",
+        item_dir / "stills" / "cache-contract.json",
+        item_dir / "stills" / "cache-contract.json.tmp",
+        item_dir / "video" / "cache-contract.json",
+        item_dir / "video" / "cache-contract.json.tmp",
+    ):
+        if path.is_symlink():
+            raise RuntimeError(f"Collage cache stage file cannot be a symlink: {path}")
+
+
+def _normalized_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _fingerprint(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_strict_json_value(value: Any) -> bool:
+    if value is None or isinstance(value, (bool, int, str)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_strict_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_strict_json_value(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _file_sha256(path: Path) -> str:
+    if path.is_symlink():
+        raise RuntimeError(f"Collage cache artifact cannot be a symlink: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _frame_contract(frame: FrameSpec) -> dict[str, Any]:
+    return {
+        "orientation": frame.orientation,
+        "aspect_ratio": frame.aspect_ratio,
+        "width": frame.width,
+        "height": frame.height,
+        "media_width": frame.media_width,
+        "media_height": frame.media_height,
+    }
+
+
+def _planning_fingerprint(
+    storyboard: dict,
+    *,
+    count: int,
+    force_opening: bool,
+    frame: FrameSpec,
+) -> str:
+    scenes = list(storyboard.get("scenes") or [])
+    target_count = min(max(1, count), len(scenes)) if scenes else 0
+    return _fingerprint(
+        {
+            "cache_contract_version": CACHE_CONTRACT_VERSION,
+            "contract": "collage_visual_spec",
+            "video_thesis": _normalized_text(storyboard.get("thesis")),
+            "target_count": target_count,
+            "force_opening_scene": bool(force_opening),
+            "frame": _frame_contract(frame),
+            "candidate_scenes": [
+                {
+                    "scene_id": str(scene.get("id") or ""),
+                    "start": _seconds(scene.get("start")),
+                    "duration": _seconds(scene.get("duration")),
+                    # Keep the complete narration here even though the planner
+                    # prompt is bounded. A semantic change anywhere in a scene
+                    # must invalidate the selection/design cache.
+                    "narration": _normalized_text(scene.get("text")),
+                    "keywords": [
+                        _normalized_text(keyword)
+                        for keyword in (scene.get("keywords") or [])
+                    ],
+                }
+                for scene in scenes
+            ],
+        }
+    )
+
+
+def _scene_semantic_fingerprint(storyboard: dict, scene: dict[str, Any]) -> str:
+    return _fingerprint(
+        {
+            "cache_contract_version": CACHE_CONTRACT_VERSION,
+            "contract": "collage_scene_semantics",
+            "video_thesis": _normalized_text(storyboard.get("thesis")),
+            "scene_id": str(scene.get("id") or ""),
+            "narration": _normalized_text(scene.get("text")),
+            "keywords": [
+                _normalized_text(keyword) for keyword in (scene.get("keywords") or [])
+            ],
+        }
+    )
+
+
+def _prompt_sha256(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _prompt_file_matches(path: Path, prompt: str) -> bool:
+    if path.is_symlink():
+        raise RuntimeError(f"Collage prompt cannot be a symlink: {path}")
+    try:
+        return path.is_file() and path.read_text(encoding="utf-8") == prompt + "\n"
+    except (OSError, UnicodeError):
+        return False
+
+
+def _resolve_contract_artifact(
+    item_dir: Path,
+    relative_path: Any,
+    *,
+    owned_root: Path,
+    suffixes: set[str],
+) -> Path | None:
+    if not isinstance(relative_path, str) or not relative_path:
+        return None
+    relative = Path(relative_path)
+    if relative.is_absolute():
+        return None
+    _assert_tree_has_no_symlinks(owned_root)
+    lexical_candidate = item_dir / relative
+    _assert_no_symlink_components(lexical_candidate)
+    if lexical_candidate.is_symlink():
+        raise RuntimeError(
+            f"Collage cache artifact cannot be a symlink: {lexical_candidate}"
+        )
+    try:
+        candidate = lexical_candidate.resolve()
+        root = owned_root.resolve()
+        if not candidate.is_relative_to(root):
+            return None
+        if not candidate.is_file() or candidate.suffix.lower() not in suffixes:
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return candidate
+
+
+def _read_contract(path: Path) -> dict[str, Any] | None:
+    if path.is_symlink():
+        raise RuntimeError(f"Collage cache contract cannot be a symlink: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _contract_bindings_match(
+    payload: dict[str, Any], expected: dict[str, Any]
+) -> bool:
+    return all(payload.get(key) == value for key, value in expected.items())
+
+
+def _load_still_cache(
+    item_dir: Path,
+    *,
+    expected: dict[str, Any],
+    still_prompt: str,
+) -> Path | None:
+    payload = _read_contract(item_dir / "stills" / "cache-contract.json")
+    if payload is None or not _contract_bindings_match(payload, expected):
+        return None
+    if not _prompt_file_matches(item_dir / "image-prompt.txt", still_prompt):
+        return None
+    artifact = _resolve_contract_artifact(
+        item_dir,
+        payload.get("artifact_path"),
+        owned_root=item_dir / "stills",
+        suffixes=_IMAGE_SUFFIXES,
+    )
+    try:
+        if artifact is None or _file_sha256(artifact) != payload.get("artifact_sha256"):
+            return None
+    except OSError:
+        return None
+    return artifact
+
+
+def _load_final_cache(
+    item_dir: Path,
+    *,
+    expected: dict[str, Any],
+    still_prompt: str,
+    motion_prompt: str,
+    final_path: Path,
+) -> tuple[Path, Path] | None:
+    payload = _read_contract(item_dir / "video" / "cache-contract.json")
+    if payload is None or not _contract_bindings_match(payload, expected):
+        return None
+    if not _prompt_file_matches(item_dir / "image-prompt.txt", still_prompt):
+        return None
+    if not _prompt_file_matches(item_dir / "video-prompt.txt", motion_prompt):
+        return None
+    final = _resolve_contract_artifact(
+        item_dir,
+        payload.get("artifact_path"),
+        owned_root=item_dir / "video",
+        suffixes={".mp4"},
+    )
+    hold = _resolve_contract_artifact(
+        item_dir,
+        payload.get("hold_frame_path"),
+        owned_root=item_dir / "frames",
+        suffixes=_IMAGE_SUFFIXES,
+    )
+    try:
+        if final is None or final != final_path.resolve():
+            return None
+        if hold is None:
+            return None
+        if _file_sha256(final) != payload.get("artifact_sha256"):
+            return None
+        if _file_sha256(hold) != payload.get("hold_frame_sha256"):
+            return None
+    except OSError:
+        return None
+    return final, hold
+
+
+def _remove_owned_path(path: Path) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing to clean symlinked collage cache path: {path}")
+    if path.is_dir():
+        _assert_tree_has_no_symlinks(path)
+        shutil.rmtree(path)
+    elif path.is_file():
+        path.unlink(missing_ok=True)
+
+
+def _clear_downstream_stage(item_dir: Path) -> None:
+    for path in (
+        item_dir / "frames",
+        item_dir / "video",
+        item_dir / "video-prompt.txt",
+        item_dir / "video-prompt.txt.tmp",
+    ):
+        _remove_owned_path(path)
+
+
+def _clear_all_stages(item_dir: Path) -> None:
+    _clear_downstream_stage(item_dir)
+    for path in (
+        item_dir / "stills",
+        item_dir / "image-prompt.txt",
+        item_dir / "image-prompt.txt.tmp",
+    ):
+        _remove_owned_path(path)
+
+
+def _stage_has_content(path: Path) -> bool:
+    try:
+        return path.is_file() or (path.is_dir() and any(path.iterdir()))
+    except OSError:
+        return True
+
+
+def _still_stage_has_content(item_dir: Path) -> bool:
+    return any(
+        _stage_has_content(path)
+        for path in (item_dir / "stills", item_dir / "image-prompt.txt")
+    )
+
+
+def _downstream_stage_has_content(item_dir: Path) -> bool:
+    return any(
+        _stage_has_content(path)
+        for path in (
+            item_dir / "frames",
+            item_dir / "video",
+            item_dir / "video-prompt.txt",
+        )
+    )
+
+
+def _materialize_still(still: Path, item_dir: Path) -> Path:
+    still_dir = item_dir / "stills"
+    _ensure_owned_directory(still_dir, parent=item_dir)
+    if still.is_symlink():
+        raise RuntimeError(f"Collage still cannot be a symlink: {still}")
+    source = still.resolve()
+    try:
+        if source.is_relative_to(still_dir.resolve()):
+            return source
+    except (OSError, RuntimeError):
+        pass
+    suffix = source.suffix.lower() if source.suffix.lower() in _IMAGE_SUFFIXES else ".png"
+    destination = still_dir / f"generated-still{suffix}"
+    _assert_safe_write_target(destination)
+    shutil.copyfile(source, destination)
+    return destination.resolve()
+
+
+def _artifact_relative_path(item_dir: Path, artifact: Path) -> str:
+    if artifact.is_symlink():
+        raise RuntimeError(f"Collage cache artifact cannot be a symlink: {artifact}")
+    _assert_no_symlink_components(artifact)
+    return artifact.resolve().relative_to(item_dir.resolve()).as_posix()
+
+
+def _still_contract_bindings(
+    *,
+    scene_id: str,
+    semantic_fingerprint: str,
+    spec: dict[str, Any],
+    still_prompt: str,
+    frame: FrameSpec,
+) -> dict[str, Any]:
+    inputs = {
+        "cache_contract_version": CACHE_CONTRACT_VERSION,
+        "stage": "still",
+        "scene_id": scene_id,
+        "scene_semantic_fingerprint": semantic_fingerprint,
+        "spec_fingerprint": _fingerprint(spec),
+        "image_prompt_sha256": _prompt_sha256(still_prompt),
+        "frame": _frame_contract(frame),
+    }
+    return {**inputs, "fingerprint": _fingerprint(inputs)}
+
+
+def _final_contract_bindings(
+    *,
+    scene_id: str,
+    semantic_fingerprint: str,
+    spec: dict[str, Any],
+    still_prompt: str,
+    motion_prompt: str,
+    frame: FrameSpec,
+    target_duration: float,
+) -> dict[str, Any]:
+    inputs = {
+        "cache_contract_version": CACHE_CONTRACT_VERSION,
+        "stage": "final",
+        "scene_id": scene_id,
+        "scene_semantic_fingerprint": semantic_fingerprint,
+        "spec_fingerprint": _fingerprint(spec),
+        "image_prompt_sha256": _prompt_sha256(still_prompt),
+        "video_prompt_sha256": _prompt_sha256(motion_prompt),
+        "frame": _frame_contract(frame),
+        "target_duration_seconds": round(target_duration, 3),
+        "clip_fps": CLIP_FPS,
+        "playback_policy": PLAYBACK_POLICY,
+    }
+    return {**inputs, "fingerprint": _fingerprint(inputs)}
+
+
+def _write_still_contract(
+    item_dir: Path,
+    bindings: dict[str, Any],
+    artifact: Path,
+) -> None:
+    _write_json(
+        item_dir / "stills" / "cache-contract.json",
+        {
+            **bindings,
+            "artifact_path": _artifact_relative_path(item_dir, artifact),
+            "artifact_sha256": _file_sha256(artifact),
+        },
+    )
+
+
+def _write_final_contract(
+    item_dir: Path,
+    bindings: dict[str, Any],
+    artifact: Path,
+    hold_frame: Path,
+) -> None:
+    _write_json(
+        item_dir / "video" / "cache-contract.json",
+        {
+            **bindings,
+            "artifact_path": _artifact_relative_path(item_dir, artifact),
+            "artifact_sha256": _file_sha256(artifact),
+            "hold_frame_path": _artifact_relative_path(item_dir, hold_frame),
+            "hold_frame_sha256": _file_sha256(hold_frame),
+        },
+    )
 
 
 def _json_array(value: str) -> list[dict[str, Any]]:
@@ -929,11 +1410,26 @@ async def generate_collage_broll(
     log: LogCallback | None = None,
 ) -> dict[str, Any]:
     """Run the former three-gate workflow automatically, one web job at a time."""
+    _validate_storyboard_scene_ids(storyboard)
+    _ensure_owned_directory(task_dir)
     root = task_dir / "collage_broll"
-    root.mkdir(parents=True, exist_ok=True)
+    _ensure_owned_directory(root, parent=task_dir)
     manifest_path = root / "manifest.json"
+    specs_path = root / "visual-spec.json"
+    for cache_file in (manifest_path, specs_path, root / "visual-spec.json.tmp"):
+        if cache_file.is_symlink():
+            raise RuntimeError(f"Collage cache file cannot be a symlink: {cache_file}")
+    planning_fingerprint = _planning_fingerprint(
+        storyboard,
+        count=count,
+        force_opening=force_opening,
+        frame=frame,
+    )
     manifest: dict[str, Any] = {
         "status": "planning",
+        "cache_contract_version": CACHE_CONTRACT_VERSION,
+        "planning_fingerprint": planning_fingerprint,
+        "visual_spec_cache": "miss",
         "source_repository": SOURCE_REPOSITORY,
         "source_commit": SOURCE_COMMIT,
         "approval_gates": [],
@@ -951,43 +1447,63 @@ async def generate_collage_broll(
         "aspect_ratio": frame.aspect_ratio,
         "requested_count": count,
         "gemini_max_clip_seconds": config.COLLAGE_GEMINI_MAX_SECONDS,
-        "playback_policy": "play_once_then_hold_last_frame",
+        "playback_policy": PLAYBACK_POLICY,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "completed_at": None,
         "items": [],
         "errors": [],
     }
-    specs_path = root / "visual-spec.json"
     cached_specs: list[dict[str, Any]] = []
+    cache_hit = False
+    scenes = list(storyboard.get("scenes") or [])
+    target_count = min(max(1, count), len(scenes)) if scenes else 0
     if specs_path.is_file():
         try:
             payload = json.loads(specs_path.read_text(encoding="utf-8"))
             valid_scene_ids = {
-                str(scene.get("id") or "") for scene in storyboard.get("scenes") or []
+                str(scene.get("id") or "") for scene in scenes
             }
+            candidate_specs = payload.get("specs") if isinstance(payload, dict) else None
+            candidate_specs_sha256 = (
+                _fingerprint(candidate_specs) if isinstance(candidate_specs, list) else ""
+            )
+            candidate_ids = (
+                [str(item.get("scene_id") or "") for item in candidate_specs]
+                if isinstance(candidate_specs, list)
+                and all(isinstance(item, dict) for item in candidate_specs)
+                else []
+            )
             if (
-                isinstance(payload, list)
-                and len(payload) == min(max(1, count), len(valid_scene_ids))
+                isinstance(payload, dict)
+                and payload.get("cache_contract_version") == CACHE_CONTRACT_VERSION
+                and payload.get("planning_fingerprint") == planning_fingerprint
+                and payload.get("specs_sha256") == candidate_specs_sha256
+                and isinstance(candidate_specs, list)
+                and len(candidate_specs) == target_count
+                and len(candidate_ids) == len(set(candidate_ids))
                 and (
                     not force_opening
                     or (
-                        bool(payload)
-                        and str(payload[0].get("scene_id") or "")
-                        == str((storyboard.get("scenes") or [{}])[0].get("id") or "")
+                        bool(candidate_specs)
+                        and candidate_ids[0] == str((scenes or [{}])[0].get("id") or "")
                     )
                 )
-                and all(
-                    isinstance(item, dict)
-                    and str(item.get("scene_id") or "") in valid_scene_ids
-                    for item in payload
-                )
+                and all(scene_id in valid_scene_ids for scene_id in candidate_ids)
             ):
-                cached_specs = payload
-        except (OSError, json.JSONDecodeError):
+                cached_specs = candidate_specs
+                cache_hit = True
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ):
             cached_specs = []
     _write_json(manifest_path, manifest)
-    if cached_specs:
+    if cache_hit:
         specs = cached_specs
+        manifest["visual_spec_cache"] = "hit"
         _log(log, f"Collage B-roll: reusing {len(specs)} existing visual spec(s)")
     else:
         specs = await plan_specs(
@@ -1003,29 +1519,74 @@ async def generate_collage_broll(
     scenes_by_id = {
         str(scene.get("id") or ""): scene for scene in storyboard.get("scenes") or []
     }
-    specs = [
-        _with_scene_timing(spec, scenes_by_id[str(spec.get("scene_id") or "")])
-        for spec in specs
-        if str(spec.get("scene_id") or "") in scenes_by_id
-    ]
-    _write_json(specs_path, specs)
+    safe_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(specs):
+        scene_id = str(spec.get("scene_id") or "")
+        if scene_id not in scenes_by_id:
+            continue
+        scene = scenes_by_id[scene_id]
+        timed_spec = _with_scene_timing(spec, scene)
+        if not _is_strict_json_value(timed_spec):
+            _log(
+                log,
+                f"Collage B-roll: rejected non-finite/non-JSON spec for {scene_id}; "
+                "using narration-derived fallback",
+            )
+            timed_spec = _fallback_spec(scene, index)
+        safe_specs.append(timed_spec)
+    specs = safe_specs
+    specs_sha256 = _fingerprint(specs)
+    manifest["specs_sha256"] = specs_sha256
+    _write_json(
+        specs_path,
+        {
+            "cache_contract_version": CACHE_CONTRACT_VERSION,
+            "planning_fingerprint": planning_fingerprint,
+            "specs_sha256": specs_sha256,
+            "specs": specs,
+        },
+    )
     manifest["status"] = "generating"
     _write_json(manifest_path, manifest)
     gemini_video_upload_unavailable = False
 
     for index, spec in enumerate(specs, start=1):
-        scene_id = spec["scene_id"]
+        scene_id = str(spec["scene_id"])
+        scene = scenes_by_id[scene_id]
         target_duration = _seconds(spec.get("target_duration_seconds"), 8.0)
         item_dir = root / f"{index:02d}-{scene_id}"
-        item_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_owned_directory(item_dir, parent=root)
+        _assert_item_stage_paths_safe(item_dir)
         still_prompt = image_prompt(spec, frame)
         motion_prompt = video_prompt(spec, frame)
-        (item_dir / "image-prompt.txt").write_text(still_prompt + "\n", encoding="utf-8")
-        (item_dir / "video-prompt.txt").write_text(motion_prompt + "\n", encoding="utf-8")
+        semantic_fingerprint = _scene_semantic_fingerprint(storyboard, scene)
+        still_bindings = _still_contract_bindings(
+            scene_id=scene_id,
+            semantic_fingerprint=semantic_fingerprint,
+            spec=spec,
+            still_prompt=still_prompt,
+            frame=frame,
+        )
+        final_bindings = _final_contract_bindings(
+            scene_id=scene_id,
+            semantic_fingerprint=semantic_fingerprint,
+            spec=spec,
+            still_prompt=still_prompt,
+            motion_prompt=motion_prompt,
+            frame=frame,
+            target_duration=target_duration,
+        )
         item: dict[str, Any] = {
             "scene_id": scene_id,
             "status": "generating",
             "spec": spec,
+            "scene_semantic_fingerprint": semantic_fingerprint,
+            "spec_fingerprint": still_bindings["spec_fingerprint"],
+            "image_prompt_sha256": still_bindings["image_prompt_sha256"],
+            "video_prompt_sha256": final_bindings["video_prompt_sha256"],
+            "still_fingerprint": still_bindings["fingerprint"],
+            "final_fingerprint": final_bindings["fingerprint"],
+            "cache_reuse": {"still": False, "final": False},
             "still_path": "",
             "video_path": "",
             "contact_sheet": "",
@@ -1033,7 +1594,7 @@ async def generate_collage_broll(
             "gemini_url": "",
             "script_duration_seconds": spec["script_duration_seconds"],
             "target_duration_seconds": target_duration,
-            "playback_policy": "play_once_then_hold_last_frame",
+            "playback_policy": PLAYBACK_POLICY,
             "qa": {},
             "generation_warnings": [],
             "error": None,
@@ -1041,55 +1602,88 @@ async def generate_collage_broll(
         manifest["items"].append(item)
         _write_json(manifest_path, manifest)
         try:
-            cached_final = _final_clip_path(item_dir, target_duration)
-            if cached_final.is_file():
-                cached_qa = await probe_video(cached_final, frame, target_duration)
-                if cached_qa["passed"]:
-                    # Rebuild the sheet because an existing filename may have
-                    # been produced for an older fixed-duration clip.
-                    cached_sheet = await _contact_sheet(
-                        cached_final, item_dir, frame, target_duration
-                    )
-                    cached_still = item_dir / "frames" / "last-frame.jpg"
-                    item.update(
-                        {
-                            "status": "ready",
-                            "still_path": (
-                                str(cached_still.relative_to(task_dir))
-                                if cached_still.is_file()
-                                else ""
-                            ),
-                            "video_path": str(cached_final.relative_to(task_dir)),
-                            "contact_sheet": str(cached_sheet.relative_to(task_dir)),
-                            "still_provider": "existing_verified_artifact",
-                            "video_provider": "existing_verified_artifact",
-                            "qa": cached_qa,
-                        }
-                    )
-                    _log(log, f"Collage B-roll {index}/{len(specs)}: reused verified clip for {scene_id}")
-                    _write_json(manifest_path, manifest)
-                    continue
-            _log(log, f"Collage B-roll {index}/{len(specs)}: generating {frame.aspect_ratio} still for {scene_id}")
-            still_dir = item_dir / "stills"
-            reusable_stills = (
-                sorted(
-                    (
-                        path
-                        for path in still_dir.glob("*")
-                        if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES
-                    ),
-                    key=lambda path: path.stat().st_mtime_ns,
-                )
-                if still_dir.is_dir()
-                else []
+            expected_final = _final_clip_path(item_dir, target_duration)
+            # Validate all persisted evidence before touching either prompt.
+            # A final contract is self-contained because it binds the exact
+            # clip and attach hold frame as well as all semantic/prompt inputs.
+            cached_final = _load_final_cache(
+                item_dir,
+                expected=final_bindings,
+                still_prompt=still_prompt,
+                motion_prompt=motion_prompt,
+                final_path=expected_final,
             )
-            if reusable_stills:
-                still = reusable_stills[-1]
+            if cached_final is not None:
+                final_artifact, cached_hold = cached_final
+                try:
+                    cached_qa = await probe_video(
+                        final_artifact, frame, target_duration
+                    )
+                    if cached_qa["passed"]:
+                        # The sheet is a disposable review derivative; rebuild
+                        # it from the verified final rather than trusting cache.
+                        cached_sheet = await _contact_sheet(
+                            final_artifact, item_dir, frame, target_duration
+                        )
+                        item.update(
+                            {
+                                "status": "ready",
+                                "still_path": str(cached_hold.relative_to(task_dir)),
+                                "video_path": str(final_artifact.relative_to(task_dir)),
+                                "contact_sheet": str(cached_sheet.relative_to(task_dir)),
+                                "still_provider": "existing_verified_artifact",
+                                "video_provider": "existing_verified_artifact",
+                                "cache_reuse": {"still": False, "final": True},
+                                "qa": cached_qa,
+                            }
+                        )
+                        _log(
+                            log,
+                            f"Collage B-roll {index}/{len(specs)}: "
+                            f"reused semantic-verified clip for {scene_id}",
+                        )
+                        _write_json(manifest_path, manifest)
+                        continue
+                except Exception as exc:  # noqa: BLE001 - regenerate bad cache
+                    _log(
+                        log,
+                        f"Collage B-roll {index}/{len(specs)}: "
+                        f"cached final validation failed for {scene_id} ({exc})",
+                    )
+
+            cached_still = _load_still_cache(
+                item_dir,
+                expected=still_bindings,
+                still_prompt=still_prompt,
+            )
+            still_stage_present = _still_stage_has_content(item_dir)
+            downstream_stage_present = _downstream_stage_has_content(item_dir)
+            if cached_still is None and still_stage_present:
+                # A legacy/mismatched still cannot seed any new downstream
+                # artifact. Remove only this item's owned pipeline stages.
+                _clear_all_stages(item_dir)
+                downstream_stage_present = False
+            elif downstream_stage_present:
+                # Missing, mismatched, incomplete, or QA-failed final evidence
+                # invalidates frames/video, but an independently valid still
+                # remains reusable.
+                _clear_downstream_stage(item_dir)
+
+            # Prompt writes deliberately happen after old contract/artifact
+            # validation and cleanup, so they cannot make stale media appear
+            # current after a crash.
+            _write_text(item_dir / "image-prompt.txt", still_prompt + "\n")
+            _write_text(item_dir / "video-prompt.txt", motion_prompt + "\n")
+            _log(log, f"Collage B-roll {index}/{len(specs)}: generating {frame.aspect_ratio} still for {scene_id}")
+            if cached_still is not None:
+                still = cached_still
                 chatgpt_url = ""
-                item["still_provider"] = "existing_chatgpt_artifact"
+                item["still_provider"] = "existing_verified_artifact"
+                item["cache_reuse"]["still"] = True
                 _log(
                     log,
-                    f"Collage B-roll {index}/{len(specs)}: reusing existing still for {scene_id}",
+                    f"Collage B-roll {index}/{len(specs)}: "
+                    f"reusing semantic-verified still for {scene_id}",
                 )
             else:
                 try:
@@ -1102,7 +1696,15 @@ async def generate_collage_broll(
                     still = await _render_local_still(spec, item_dir, frame)
                     chatgpt_url = ""
                     item["still_provider"] = "deterministic_local_paper_collage"
+                _assert_item_stage_paths_safe(item_dir)
+                still = _materialize_still(still, item_dir)
             first, last = await _prepare_frames(still, item_dir, spec["background_hex"], frame)
+            _assert_item_stage_paths_safe(item_dir)
+            if cached_still is None:
+                # Frame preparation is the still decode gate. Commit the proof
+                # only after it succeeds; a partial download can never become
+                # a permanently reusable, failing still.
+                _write_still_contract(item_dir, still_bindings, still)
             _log(
                 log,
                 f"Collage B-roll {index}/{len(specs)}: animating {scene_id} once for "
@@ -1148,11 +1750,16 @@ async def generate_collage_broll(
                     )
                     gemini_url = ""
                     item["video_provider"] = "deterministic_local_paper_assembly"
+            _assert_item_stage_paths_safe(item_dir)
             final = await _normalize_video(raw, item_dir, frame, target_duration)
             qa = await probe_video(final, frame, target_duration)
             if not qa["passed"]:
                 raise RuntimeError(f"normalized collage clip failed QA: {qa['checks']}")
             sheet = await _contact_sheet(final, item_dir, frame, target_duration)
+            _assert_item_stage_paths_safe(item_dir)
+            # Publish the reusable-final proof last. Until QA, hold-frame, and
+            # contact-sheet work all succeed, an existing MP4 stays untrusted.
+            _write_final_contract(item_dir, final_bindings, final, last)
             item.update(
                 {
                     "status": "ready",
