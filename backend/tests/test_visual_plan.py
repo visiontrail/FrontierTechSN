@@ -416,6 +416,7 @@ def test_visual_grounding_report_accepts_exact_licensed_news_image():
             "news_image_grounding_context_conflicts": evidence["grounding_context_conflicts"],
             "news_image_license": "Public domain",
             "news_image_license_code": "Public domain",
+            "news_image_source_mime_type": "image/png",
         }
     )
 

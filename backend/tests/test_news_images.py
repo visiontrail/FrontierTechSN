@@ -446,6 +446,7 @@ def _commons_candidate(scene_id: str, subject: str, kind: str = "event") -> dict
         "width": 1600,
         "height": 900,
         "mime_type": "image/jpeg",
+        "source_mime_type": "image/jpeg",
         "kind": kind,
     }
 
@@ -475,6 +476,7 @@ def _grounded_image_record(
         "license": "CC BY-SA 4.0",
         "license_code": "CC-BY-SA-4.0",
         "source_page_url": source,
+        "source_mime_type": "image/png" if local_path.endswith(".png") else "image/jpeg",
     }
     evidence = news_images._grounding_evidence(shot, scene, candidate)
     assert evidence["grounding_passed"] is True
@@ -1273,6 +1275,52 @@ def test_wikimedia_candidate_is_license_and_resolution_gated():
     assert news_images._candidate_from_page(page, shot) is None
 
 
+def test_wikimedia_candidate_rejects_rasterized_pdf_and_disputed_rights():
+    shot = {
+        "kind": "object",
+        "display_mode": "inline",
+        "search_query": "humanoid robot photo",
+        "expected_subject": "humanoid robot",
+        "_scene_text": "Humanoid robot makers sell training data.",
+        "_scene_keywords": ["humanoid", "robot"],
+    }
+    page = {
+        "title": "File:Humanoid robot research paper.pdf",
+        "imageinfo": [
+            {
+                "mime": "application/pdf",
+                "thumbmime": "image/jpeg",
+                "url": "https://upload.wikimedia.org/paper.pdf",
+                "thumburl": "https://upload.wikimedia.org/page1-paper.pdf.jpg",
+                "descriptionurl": "https://commons.wikimedia.org/wiki/File:paper.pdf",
+                "width": 1239,
+                "height": 1754,
+                "thumbwidth": 960,
+                "thumbheight": 1391,
+                "extmetadata": {
+                    "LicenseShortName": {"value": "CC BY 4.0"},
+                    "ImageDescription": {"value": "A study mentioning a humanoid robot"},
+                    "ObjectName": {"value": "Humanoid robot research paper"},
+                },
+            }
+        ],
+    }
+
+    assert news_images._candidate_from_page(page, shot) is None
+
+    page["imageinfo"][0].update(
+        {
+            "mime": "image/jpeg",
+            "url": "https://upload.wikimedia.org/humanoid-robot.jpg",
+            "thumburl": "https://upload.wikimedia.org/humanoid-robot.jpg",
+        }
+    )
+    page["imageinfo"][0]["extmetadata"]["Categories"] = {
+        "value": "Humanoid robots|Items with disputed copyright information"
+    }
+    assert news_images._candidate_from_page(page, shot) is None
+
+
 def test_commons_file_reference_parser_accepts_only_exact_https_file_pages():
     assert news_images._commons_file_title(
         {
@@ -1292,6 +1340,27 @@ def test_commons_file_reference_parser_accepts_only_exact_https_file_pages():
         "https://commons.wikimedia.org/wiki/File:Perfect%7CWorld.svg",
     ):
         assert news_images._commons_file_title({"url": url}) == ""
+
+
+@pytest.mark.parametrize(
+    ("subject", "kind", "title"),
+    [
+        ("humanoid robot", "object", "File:Humanoid robot is being programmed.jpg"),
+        ("annual reports", "object", "File:WMUA Annual reports 2012.JPG"),
+        ("Qwen", "logo", "File:Qwen Logo.svg"),
+    ],
+)
+def test_vetted_commons_file_hints_are_exact_and_subject_bound(
+    subject: str,
+    kind: str,
+    title: str,
+):
+    assert news_images._known_commons_file_titles(
+        {"expected_subject": subject, "kind": kind}
+    ) == (title,)
+    assert news_images._known_commons_file_titles(
+        {"expected_subject": f"unrelated {subject}", "kind": kind}
+    ) == ()
 
 
 @pytest.mark.asyncio
@@ -1370,6 +1439,62 @@ async def test_exact_commons_reference_resolves_rasterized_svg_without_thumbmime
     assert candidates[0]["source_mime_type"] == "image/svg+xml"
     assert candidates[0]["download_url"].endswith(".svg.png")
     assert "Perfect World (company)" in candidates[0]["categories"]
+
+
+@pytest.mark.asyncio
+async def test_vetted_object_reference_resolves_without_search_results():
+    request = news_images.httpx.Request("GET", news_images.WIKIMEDIA_API)
+    page = {
+        "title": "File:WMUA Annual reports 2012.JPG",
+        "imageinfo": [
+            {
+                "mime": "image/jpeg",
+                "url": "https://upload.wikimedia.org/wmua-annual-reports.jpg",
+                "thumburl": "https://upload.wikimedia.org/wmua-annual-reports-1600.jpg",
+                "descriptionurl": (
+                    "https://commons.wikimedia.org/wiki/File:WMUA_Annual_reports_2012.JPG"
+                ),
+                "width": 4928,
+                "height": 3264,
+                "thumbwidth": 1600,
+                "thumbheight": 1060,
+                "extmetadata": {
+                    "LicenseShortName": {"value": "CC BY-SA 3.0"},
+                    "License": {"value": "cc-by-sa-3.0"},
+                    "ImageDescription": {"value": "WMUA Annual reports 2012"},
+                    "ObjectName": {"value": "WMUA Annual reports 2012"},
+                    "Categories": {"value": "Wikimedia Ukraine publications"},
+                },
+            }
+        ],
+    }
+
+    class FakeClient:
+        async def get(self, _url, params):
+            assert params["titles"] == "File:WMUA Annual reports 2012.JPG"
+            return news_images.httpx.Response(
+                200,
+                json={"query": {"pages": [page]}},
+                request=request,
+            )
+
+    candidates = await news_images.resolve_wikimedia_reference_images(
+        FakeClient(),
+        references=[],
+        shot={
+            "kind": "object",
+            "display_mode": "inline",
+            "search_query": "annual reports photo",
+            "expected_subject": "annual reports",
+            "_scene_text": "The test summarized annual reports from multiple documents.",
+            "_scene_keywords": ["annual", "reports"],
+        },
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["title"] == "WMUA Annual reports 2012.JPG"
+    assert candidates[0]["source_mime_type"] == "image/jpeg"
+    assert candidates[0]["grounding_passed"] is True
 
 
 def test_three_way_grounding_rejects_world_aquatics_chemical_agents_and_google_loon():
@@ -2533,6 +2658,7 @@ def test_raster_content_gate_survives_cache_attach_and_visual_pipeline(tmp_path:
         ("CC BY-SA 3.0 EE", "cc-by-sa-3.0-ee"),
         ("CC BY-SA 3.0 NO", "cc-by-sa-3.0-no"),
         ("Creative Commons Attribution-Share Alike 4.0 International", ""),
+        ("Apache License 2.0", ""),
     ],
 )
 def test_license_gate_accepts_strict_commons_values(short_name: str, license_code: str):
@@ -2689,6 +2815,16 @@ def test_cached_manifest_rejects_duplicate_identity_stale_policy_and_bad_hash(
     assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
 
     forged = json.loads(json.dumps(baseline))
+    forged["images"][0]["source_mime_type"] = "application/pdf"
+    write(forged)
+    assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
+
+    forged = json.loads(json.dumps(baseline))
+    forged["images"][0]["categories"] = "Items with disputed copyright information"
+    write(forged)
+    assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) is None
+
+    forged = json.loads(json.dumps(baseline))
     forged["images"][0]["expected_subject"] = "The NVIDIA"
     forged["images"][0]["caption"] = "NVIDIA"
     write(forged)
@@ -2779,7 +2915,7 @@ def test_wikimedia_queries_broaden_without_dropping_the_scene_subject():
     assert "University logo" not in university
     assert set(university) == {"University of Stuttgart logo"}
     assert "annual photo" not in reports
-    assert set(reports) == {"annual reports photo", "annual reports event"}
+    assert reports == ["annual reports photo", "annual reports", "annual reports event"]
 
 
 def test_acquisition_contract_binds_scene_order_exclusions_and_hints():

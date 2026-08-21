@@ -650,6 +650,7 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
                 "creator": plan.get("news_image_creator") or "",
                 "license": plan.get("news_image_license") or "",
                 "license_code": plan.get("news_image_license_code") or "",
+                "source_mime_type": plan.get("news_image_source_mime_type") or "",
                 "match_terms": match_terms,
                 "grounding_policy_version": plan.get("news_image_grounding_policy_version"),
                 "grounding_passed": plan.get("news_image_grounding_passed") is True,

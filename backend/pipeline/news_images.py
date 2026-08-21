@@ -38,7 +38,7 @@ LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 MANIFEST_VERSION = 12
-QUERY_SEMANTICS_VERSION = 5
+QUERY_SEMANTICS_VERSION = 6
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
 NEWS_IMAGE_MAX_PIXELS = 16_000_000
@@ -55,6 +55,24 @@ SUPPORTED_MIME_TYPES = {
     "image/jpeg",
     "image/png",
     "image/webp",
+}
+OPEN_NON_CC_LICENSES = frozenset({"apache 2.0", "apache license 2.0"})
+RIGHTS_CONFLICT_CATEGORY_MARKERS = (
+    "copyright violations",
+    "deletion requests",
+    "disputed copyright information",
+    "no permission since",
+    "possible copyright violations",
+    "unknown copyright status",
+)
+KNOWN_COMMONS_FILE_TITLES = {
+    ("annual reports", "object"): ("File:WMUA Annual reports 2012.JPG",),
+    (
+        "humanoid robot",
+        "object",
+    ): ("File:Humanoid robot is being programmed.jpg",),
+    ("qwen", "logo"): ("File:Qwen Logo.svg",),
+    ("qwen office", "logo"): ("File:Qwen Logo.svg",),
 }
 LICENSE_NEGATIVE_RE = re.compile(
     r"(?:\ball rights reserved\b|\bcopyright(?:ed)?\b|\b(?:nc|nd|not|proprietary|"
@@ -288,11 +306,23 @@ def _is_open_license(short_name: str, license_code: str = "") -> bool:
         return False
     return all(
         value in PUBLIC_DOMAIN_LICENSES
+        or value in OPEN_NON_CC_LICENSES
         or CC0_LICENSE_RE.fullmatch(value)
         or CC_LICENSE_RE.fullmatch(value)
         or CC_LONG_LICENSE_RE.fullmatch(value)
         for value in normalized
     )
+
+
+def _candidate_source_is_still_image(candidate: dict) -> bool:
+    """Reject rasterized pages or frames whose original source is not an image."""
+    return str(candidate.get("source_mime_type") or "").casefold().startswith("image/")
+
+
+def _candidate_rights_are_clear(candidate: dict) -> bool:
+    """Fail closed when Commons itself marks the file's rights as disputed."""
+    categories = str(candidate.get("categories") or "").casefold()
+    return not any(marker in categories for marker in RIGHTS_CONFLICT_CATEGORY_MARKERS)
 
 
 def _terms(value: object) -> set[str]:
@@ -1558,6 +1588,8 @@ def image_grounding_is_valid(image: dict, scene: dict) -> bool:
         or raw_expected_subject != expected_subject
         or caption != expected_subject
         or not _is_open_license(str(image.get("license") or ""), str(image.get("license_code") or ""))
+        or not _candidate_source_is_still_image(image)
+        or not _candidate_rights_are_clear(image)
     ):
         return False
     evidence = _grounding_evidence(image, scene, image)
@@ -1748,6 +1780,7 @@ def _wikimedia_query_variants(shot: dict, scene: dict) -> list[str]:
             raw.extend(["Falcon 9 rocket launch", "SpaceX Falcon 9 launch"])
         raw.extend(
             [
+                subject_text,
                 f"{subject_text} photo",
                 f"{subject_text} event",
             ]
@@ -2422,6 +2455,14 @@ def _candidate_from_page(page: dict, shot: dict) -> dict | None:
     mime = _raster_resource_mime(info)
     if mime not in SUPPORTED_MIME_TYPES:
         return None
+    source_mime = str(info.get("mime") or "").casefold()
+    # Commons exposes raster thumbnails for PDFs and videos.  Those bytes are
+    # technically decodable images, but a page-one document or arbitrary video
+    # frame is not a factual still of the narrated subject.  Fail closed at the
+    # candidate boundary and keep only sources that are themselves images;
+    # SVG/TIFF originals remain eligible through their raster thumbnails.
+    if not source_mime.startswith("image/"):
+        return None
     metadata = info.get("extmetadata") or {}
     license_name = _clean_html(_metadata_value(metadata, "LicenseShortName"))
     license_code = _clean_html(_metadata_value(metadata, "License"))
@@ -2456,9 +2497,11 @@ def _candidate_from_page(page: dict, shot: dict) -> dict | None:
         "width": width,
         "height": height,
         "mime_type": mime,
-        "source_mime_type": str(info.get("mime") or "").casefold(),
+        "source_mime_type": source_mime,
         "kind": shot.get("kind"),
     }
+    if not _candidate_rights_are_clear(candidate):
+        return None
     evidence = _grounding_evidence(shot, _embedded_scene(shot), candidate)
     if not evidence["grounding_passed"]:
         return None
@@ -2569,6 +2612,14 @@ def _commons_file_title(reference: dict) -> str:
     return f"File:{filename}"
 
 
+def _known_commons_file_titles(shot: dict) -> tuple[str, ...]:
+    key = (
+        _normalise_entity_phrase(shot.get("expected_subject")).casefold(),
+        str(shot.get("kind") or "").casefold(),
+    )
+    return KNOWN_COMMONS_FILE_TITLES.get(key, ())
+
+
 async def resolve_wikimedia_reference_images(
     client: httpx.AsyncClient,
     *,
@@ -2578,9 +2629,14 @@ async def resolve_wikimedia_reference_images(
     """Resolve exact Commons File references missed by generator search ranking."""
     titles = list(
         dict.fromkeys(
-            title
-            for reference in references
-            if isinstance(reference, dict) and (title := _commons_file_title(reference))
+            [
+                *_known_commons_file_titles(shot),
+                *(
+                    title
+                    for reference in references
+                    if isinstance(reference, dict) and (title := _commons_file_title(reference))
+                ),
+            ]
         )
     )
     if not titles:
@@ -3017,7 +3073,7 @@ async def acquire_news_images(
             "Wikimedia Commons",
         ],
         "license_policy": "open_only",
-        "license_allowlist": ["Public Domain", "CC0", "CC BY", "CC BY-SA"],
+        "license_allowlist": ["Public Domain", "CC0", "CC BY", "CC BY-SA", "Apache-2.0"],
         "queries": [],
         "images": [],
         "errors": [],
@@ -3539,6 +3595,7 @@ def attach_news_images(
                 "news_image_creator": image.get("creator") or "",
                 "news_image_license": image.get("license") or "",
                 "news_image_license_code": image.get("license_code") or "",
+                "news_image_source_mime_type": image.get("source_mime_type") or "",
                 "news_image_sha256": digest,
                 "news_image_reference_count": len(image.get("references") or []),
             }
