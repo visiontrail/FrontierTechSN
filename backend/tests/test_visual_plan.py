@@ -2,7 +2,9 @@ import asyncio
 import json
 from pathlib import Path
 
-from backend.pipeline import digester, news_images, scene_kit, visual_plan
+import pytest
+
+from backend.pipeline import composer, digester, news_images, scene_kit, visual_plan
 
 
 def board(n: int = 3) -> dict:
@@ -561,3 +563,89 @@ def test_visual_planner_does_not_load_unrelated_project_skills(monkeypatch):
     assert observed["enable_skills"] is False
     assert observed["max_tokens"] == visual_plan.VISUAL_PLAN_MAX_TOKENS
     assert len(plans) == 1
+
+
+@pytest.mark.parametrize("nonfinite", ["NaN", "Infinity", "1e999"])
+def test_visual_planner_drops_unknown_nonfinite_and_arbitrary_fields(
+    tmp_path,
+    monkeypatch,
+    nonfinite,
+):
+    async def fake_resolve_provider(*_args, **_kwargs):
+        return "http://provider.test", "model", "key"
+
+    async def fake_chat(*_args, **_kwargs):
+        return (
+            '[{"id":"scene-01","archetype":"topic",'
+            '"headline":"Sentence 0 opens the scene",'
+            '"body":"It continues with more detail",'
+            f'"debug":{nonfinite},'
+            '"arbitrary_extra":{"value":"discard me"},'
+            '"collage_broll":true,"news_image":true,'
+            '"footage_src":"../untrusted-runtime.mp4",'
+            '"left":{"label":"Before","text":"Sentence 0",'
+            f'"debug":{nonfinite}'
+            "}}]"
+        )
+
+    monkeypatch.setattr(digester, "_resolve_provider", fake_resolve_provider)
+    monkeypatch.setattr(digester, "_chat", fake_chat)
+    data = board(1)
+
+    plans = asyncio.run(visual_plan.plan_scene_visuals(data))
+
+    assert plans[0]["grounding_source"] == "model"
+    assert "debug" not in plans[0]
+    assert "arbitrary_extra" not in plans[0]
+    assert "collage_broll" not in plans[0]
+    assert "news_image" not in plans[0]
+    assert "footage_src" not in plans[0]
+    assert "debug" not in plans[0]["left"]
+    composer._write_visual_plan_checkpoint(
+        tmp_path,
+        data,
+        [*plans, visual_plan.outro_plan(data)],
+    )
+    encoded = (tmp_path / "visual_plan.json").read_text(encoding="utf-8")
+    assert nonfinite not in encoded
+    assert "arbitrary_extra" not in encoded
+    assert composer._load_cached_scene_plans(tmp_path, data) is not None
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        '"headline":NaN',
+        '"items":[Infinity]',
+        '"items":5',
+        '"left":{"label":1e999,"text":"Before"}',
+    ],
+)
+def test_visual_planner_falls_back_for_known_nonfinite_fields_and_checkpoints(
+    tmp_path,
+    monkeypatch,
+    invalid_fields,
+):
+    async def fake_resolve_provider(*_args, **_kwargs):
+        return "http://provider.test", "model", "key"
+
+    async def fake_chat(*_args, **_kwargs):
+        return (
+            f'[{{"id":"scene-01",{invalid_fields}}},'
+            '{"id":"scene-02","headline":"Sentence 1 opens the scene"}]'
+        )
+
+    monkeypatch.setattr(digester, "_resolve_provider", fake_resolve_provider)
+    monkeypatch.setattr(digester, "_chat", fake_chat)
+    data = board(2)
+
+    plans = asyncio.run(visual_plan.plan_scene_visuals(data))
+
+    assert plans[0]["grounding_source"] == "narration_fallback"
+    assert plans[1]["grounding_source"] == "model"
+    composer._write_visual_plan_checkpoint(
+        tmp_path,
+        data,
+        [*plans, visual_plan.outro_plan(data)],
+    )
+    assert composer._load_cached_scene_plans(tmp_path, data) == plans

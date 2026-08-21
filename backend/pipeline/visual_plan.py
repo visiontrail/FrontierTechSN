@@ -53,6 +53,18 @@ _NEGATIVE_ANALYSIS = re.compile(
     re.IGNORECASE,
 )
 _FOOTAGE_CREDIT_LIMIT = 90
+_MODEL_TEXT_FIELDS = (
+    "archetype",
+    "kicker",
+    "headline",
+    "body",
+    "quote",
+    "attribution",
+    "stat",
+    "stat_label",
+    "accent",
+    "motif",
+)
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -172,10 +184,44 @@ def fallback_plan(storyboard: dict) -> list[dict]:
     return plans
 
 
+def _model_text(raw: dict, key: str) -> str:
+    value = raw.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"visual plan field {key} must be a string")
+    return value
+
+
+def _model_panel(raw: dict, key: str) -> dict[str, str]:
+    value = raw.get(key)
+    if value is None:
+        return {"label": "", "text": ""}
+    if not isinstance(value, dict):
+        raise ValueError(f"visual plan field {key} must be an object")
+    return {
+        "label": _model_text(value, "label"),
+        "text": _model_text(value, "text"),
+    }
+
+
 def _normalise(raw: dict, scene: dict, index: int) -> dict:
-    """Coerce one model-produced entry into the scene-kit contract."""
-    plan = dict(raw or {})
-    plan["id"] = scene["id"]
+    """Coerce one model entry into an explicit, finite scene-kit allowlist."""
+    raw_items = raw.get("items")
+    if raw_items is None:
+        raw_items = []
+    if not isinstance(raw_items, list) or any(not isinstance(item, str) for item in raw_items):
+        raise ValueError("visual plan field items must be an array of strings")
+
+    plan = {key: _model_text(raw, key) for key in _MODEL_TEXT_FIELDS}
+    plan.update(
+        {
+            "id": scene["id"],
+            "items": list(raw_items),
+            "left": _model_panel(raw, "left"),
+            "right": _model_panel(raw, "right"),
+        }
+    )
 
     archetype = str(plan.get("archetype") or "").lower()
     if archetype not in scene_kit.ARCHETYPES or archetype in ("title", "outro", "footage"):
@@ -202,7 +248,7 @@ def _normalise(raw: dict, scene: dict, index: int) -> dict:
     plan["headline"] = str(plan["headline"])[:110]
     plan["body"] = str(plan.get("body") or "")[:260]
     plan["kicker"] = str(plan["kicker"])[:30]
-    plan["items"] = [str(item)[:90] for item in (plan.get("items") or [])][:4]
+    plan["items"] = [item[:90] for item in plan["items"]][:4]
     for key, limit in (
         ("quote", 260),
         ("attribution", 90),
@@ -213,7 +259,14 @@ def _normalise(raw: dict, scene: dict, index: int) -> dict:
         ("right_label", 48),
         ("right_text", 150),
     ):
-        plan[key] = str(plan.get(key) or "")[:limit]
+        plan[key] = plan.get(key, "")[:limit]
+    for side in ("left", "right"):
+        plan[side] = {
+            "label": plan[side]["label"][:48],
+            "text": plan[side]["text"][:150],
+        }
+        plan[f"{side}_label"] = plan[side]["label"]
+        plan[f"{side}_text"] = plan[side]["text"]
     plan["grounding_source"] = "model"
     return plan
 
@@ -382,7 +435,15 @@ async def plan_scene_visuals(
             raw = indexed.get(scene["id"])
             if raw is None:
                 continue
-            normalised = _normalise(raw, scene, scene["index"])
+            try:
+                normalised = _normalise(raw, scene, scene["index"])
+            except (TypeError, ValueError) as exc:
+                _emit(
+                    log,
+                    f"Visual plan {scene['id']}: invalid model fields ({exc}); "
+                    "using narration-derived direction",
+                )
+                continue
             grounded, _ = _plan_grounding(normalised, scene)
             if grounded:
                 by_id[scene["id"]] = normalised

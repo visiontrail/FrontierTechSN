@@ -107,6 +107,7 @@ def test_cached_scene_plans_require_exact_current_checkpoint_and_strip_placement
     ("field", "replacement"),
     [
         ("thesis", "A different thesis"),
+        ("thesis", None),
         ("index", 4),
         ("text", "Unrelated narration with the same scene id"),
         ("start", 0.125),

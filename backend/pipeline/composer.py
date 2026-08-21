@@ -63,7 +63,7 @@ RENDER_STALL_TIMEOUT = 600
 
 VISUAL_PLAN_CACHE_FILENAME = "visual_plan.cache.json"
 VISUAL_PLAN_CACHE_VERSION = 1
-VISUAL_PLAN_PROMPT_CONTRACT_VERSION = 1
+VISUAL_PLAN_PROMPT_CONTRACT_VERSION = 2
 _VISUAL_PLAN_CACHE_KEYS = {
     "cache_version",
     "planner_input_sha256",
@@ -108,7 +108,7 @@ def _finite_storyboard_number(value: object, field: str) -> float:
 
 
 def _visual_plan_planner_input(board: dict) -> dict:
-    thesis = board.get("thesis") or ""
+    thesis = board.get("thesis", "")
     scenes = board.get("scenes") or []
     if not isinstance(thesis, str) or not isinstance(scenes, list) or not scenes:
         raise ValueError("storyboard is missing visual-plan planner input")
