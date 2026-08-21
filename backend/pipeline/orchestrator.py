@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from backend import config
 from backend.database import update_task
-from backend.models import TaskResponse, TaskStatus, ScriptFormat
+from backend.models import SourceType, TaskResponse, TaskStatus, ScriptFormat
 from backend.pipeline.extractors.youtube import extract_youtube
 from backend.pipeline.extractors.epub import extract_epub
 from backend.pipeline.extractors.epub_curated import extract_epub_curated
@@ -80,6 +80,11 @@ def emit_pipeline_log(task_id: str, task_dir: Path, message: str, log: LogCallba
     logger.info(formatted)
     if log:
         log(formatted)
+
+
+def task_output_dir(task: TaskResponse) -> Path:
+    """Return the immutable artifact root persisted with an existing task."""
+    return Path(task.output_dir) if task.output_dir else config.OUTPUTS_DIR / task.id
 
 
 async def _acquire_task_footage(
@@ -184,11 +189,12 @@ async def _after_audio(
 
 
 async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
-    task_dir = config.OUTPUTS_DIR / task.id
+    task_dir = task_output_dir(task)
     task_dir.mkdir(parents=True, exist_ok=True)
     task_log = lambda message: emit_pipeline_log(task.id, task_dir, message, log)
 
     await update_task(task.id, output_dir=str(task_dir))
+    task.output_dir = str(task_dir)
 
     ai_endpoint = task.config.ai_endpoint
     ai_model = task.config.ai_model
@@ -384,7 +390,7 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
 async def run_regenerate(task: TaskResponse, log: LogCallback | None = None):
     """Re-run only the TTS and compose stages from an existing (possibly
     edited) script, skipping extraction and digestion."""
-    task_dir = config.OUTPUTS_DIR / task.id
+    task_dir = task_output_dir(task)
     task_dir.mkdir(parents=True, exist_ok=True)
     task_log = lambda message: emit_pipeline_log(task.id, task_dir, message, log)
 
@@ -455,7 +461,7 @@ async def run_tts_resume(task: TaskResponse, log: LogCallback | None = None):
     existing publication title and thumbnail. It is intended for a failed TTS
     run whose upstream editorial artifacts are already complete.
     """
-    task_dir = config.OUTPUTS_DIR / task.id
+    task_dir = task_output_dir(task)
     task_dir.mkdir(parents=True, exist_ok=True)
     task_log = lambda message: emit_pipeline_log(task.id, task_dir, message, log)
 
@@ -498,10 +504,10 @@ async def run_daily_review_resume(task: TaskResponse, log: LogCallback | None = 
     correction: rerun the independent review, persist the approved script, and
     continue through the ordinary regenerate/TTS/render path.
     """
-    if str(task.source_type) != "news_daily":
+    if task.source_type != SourceType.NEWS_DAILY:
         raise ValueError("Review resume is only available for daily-news tasks")
 
-    task_dir = config.OUTPUTS_DIR / task.id
+    task_dir = task_output_dir(task)
     task_log = lambda message: emit_pipeline_log(task.id, task_dir, message, log)
     dossier_path = task_dir / "research" / "dossier.json"
     draft_path = task_dir / "script.draft.txt"
@@ -549,7 +555,7 @@ async def run_footage_acquisition(
     log: LogCallback | None = None,
 ):
     """Run or retry only the public-footage scout from an existing script."""
-    task_dir = config.OUTPUTS_DIR / task.id
+    task_dir = task_output_dir(task)
     task_dir.mkdir(parents=True, exist_ok=True)
     task_log = lambda message: emit_pipeline_log(task.id, task_dir, message, log)
 
@@ -573,7 +579,7 @@ async def run_footage_acquisition(
 async def run_compose(task: TaskResponse, log: LogCallback | None = None):
     """Resume from the compose stage using an already-generated script and
     audio. Triggered after the user has reviewed the audio preview."""
-    task_dir = config.OUTPUTS_DIR / task.id
+    task_dir = task_output_dir(task)
     task_dir.mkdir(parents=True, exist_ok=True)
     task_log = lambda message: emit_pipeline_log(task.id, task_dir, message, log)
 
@@ -644,7 +650,11 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
     )
     completion_fields = {
         "video_path": video_path,
-        "status": TaskStatus.COMPLETE.value,
+        # Keep COMPLETE private until the worker has either completed the
+        # publication decision or deliberately skipped a duplicate publish.
+        # This prevents the UI from starting a rework against a version whose
+        # publication outcome is still in flight.
+        "status": TaskStatus.PUBLISHING.value,
     }
     rendered_video = Path(video_path)
     # Real composers return a materialized MP4 and should persist its probed

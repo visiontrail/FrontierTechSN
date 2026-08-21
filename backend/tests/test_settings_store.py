@@ -134,16 +134,96 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertFalse(self.store.exists())
 
     def test_reset_restores_the_default_and_reports_restart_keys(self):
+        live_outputs_dir = config.OUTPUTS_DIR
         settings_store.update({"RENDER_FPS": 42, "OUTPUTS_DIR": str(self.root / "out")})
-        self.assertEqual(config.OUTPUTS_DIR, self.root / "out")
+        self.assertEqual(config.OUTPUTS_DIR, live_outputs_dir)
+        self.assertEqual(Path(self.stored()["OUTPUTS_DIR"]), self.root / "out")
 
         restart = settings_store.reset(["RENDER_FPS", "OUTPUTS_DIR"])
 
         self.assertEqual(config.RENDER_FPS, settings_store.defaults()["RENDER_FPS"])
-        self.assertEqual(config.OUTPUTS_DIR, settings_store.defaults()["OUTPUTS_DIR"])
+        self.assertEqual(config.OUTPUTS_DIR, live_outputs_dir)
         self.assertEqual(self.stored(), {})
         # Only the mount-bound path needs the process restarted.
         self.assertEqual(restart, ["OUTPUTS_DIR"])
+
+    def test_output_root_change_migrates_podcast_and_waits_for_restart(self):
+        live_root = self.root / "live-output"
+        desired_root = self.root / "next-output"
+        podcast = live_root / "podcast"
+        (podcast / "media").mkdir(parents=True)
+        (podcast / "episodes.json").write_text(
+            '[{"guid":"one"}]',
+            encoding="utf-8",
+        )
+        (podcast / "feed.xml").write_text("<rss>one</rss>", encoding="utf-8")
+        (podcast / "media" / "one.wav").write_bytes(b"episode one")
+        config.apply_values({"OUTPUTS_DIR": live_root})
+
+        restart = settings_store.update({"OUTPUTS_DIR": str(desired_root)})
+
+        self.assertEqual(restart, ["OUTPUTS_DIR"])
+        self.assertEqual(config.OUTPUTS_DIR, live_root)
+        self.assertEqual(Path(self.stored()["OUTPUTS_DIR"]), desired_root)
+        self.assertEqual(
+            (desired_root / "podcast" / "episodes.json").read_bytes(),
+            (podcast / "episodes.json").read_bytes(),
+        )
+        self.assertEqual(
+            (desired_root / "podcast" / "feed.xml").read_bytes(),
+            (podcast / "feed.xml").read_bytes(),
+        )
+        self.assertEqual(
+            (desired_root / "podcast" / "media" / "one.wav").read_bytes(),
+            b"episode one",
+        )
+        settings_store.apply_saved()
+        self.assertEqual(config.OUTPUTS_DIR, desired_root)
+
+    def test_output_root_change_refuses_divergent_podcast_state(self):
+        live_root = self.root / "live-output"
+        desired_root = self.root / "next-output"
+        (live_root / "podcast").mkdir(parents=True)
+        (desired_root / "podcast").mkdir(parents=True)
+        (live_root / "podcast" / "episodes.json").write_bytes(b"source ledger")
+        (desired_root / "podcast" / "episodes.json").write_bytes(b"different ledger")
+        config.apply_values({"OUTPUTS_DIR": live_root})
+
+        with self.assertRaises(settings_store.SettingsError) as raised:
+            settings_store.update({"OUTPUTS_DIR": str(desired_root)})
+
+        self.assertIn("different podcast state", str(raised.exception))
+        self.assertEqual(config.OUTPUTS_DIR, live_root)
+        self.assertFalse(self.store.exists())
+
+    def test_output_root_change_refuses_nested_podcast_destination(self):
+        live_root = self.root / "live-output"
+        podcast = live_root / "podcast"
+        podcast.mkdir(parents=True)
+        (podcast / "episodes.json").write_bytes(b"source ledger")
+        desired_root = podcast / "nested-output"
+        config.apply_values({"OUTPUTS_DIR": live_root})
+
+        with self.assertRaises(settings_store.SettingsError) as raised:
+            settings_store.update({"OUTPUTS_DIR": str(desired_root)})
+
+        self.assertIn("nested output roots", str(raised.exception))
+        self.assertFalse(desired_root.exists())
+        self.assertFalse(self.store.exists())
+
+    def test_output_root_change_refuses_nested_podcast_source(self):
+        desired_root = self.root / "outer-output"
+        live_root = desired_root / "podcast" / "nested-live-output"
+        podcast = live_root / "podcast"
+        podcast.mkdir(parents=True)
+        (podcast / "episodes.json").write_bytes(b"source ledger")
+        config.apply_values({"OUTPUTS_DIR": live_root})
+
+        with self.assertRaises(settings_store.SettingsError) as raised:
+            settings_store.update({"OUTPUTS_DIR": str(desired_root)})
+
+        self.assertIn("nested output roots", str(raised.exception))
+        self.assertFalse(self.store.exists())
 
     def test_update_flags_only_the_settings_that_need_a_restart(self):
         self.assertEqual(settings_store.update({"RENDER_FPS": 24}), [])

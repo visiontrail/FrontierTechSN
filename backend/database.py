@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     video_path TEXT,
     thumbnail_path TEXT,
     duration_seconds REAL,
+    suppress_next_auto_publish INTEGER NOT NULL DEFAULT 0,
+    publication_safety_hold INTEGER NOT NULL DEFAULT 0,
     origin_type TEXT NOT NULL DEFAULT 'manual',
     origin_id TEXT,
     origin_label TEXT,
@@ -199,10 +201,25 @@ async def _migrate_tasks(db: aiosqlite.Connection):
         "origin_id": "TEXT",
         "origin_label": "TEXT",
         "planned_publish_at": "TEXT",
+        "suppress_next_auto_publish": "INTEGER NOT NULL DEFAULT 0",
+        "publication_safety_hold": "INTEGER NOT NULL DEFAULT 0",
     }
+    had_publication_safety_hold = "publication_safety_hold" in existing
     for name, definition in additions.items():
         if name not in existing:
             await db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+    if not had_publication_safety_hold and "status" in existing:
+        # In the immediately preceding schema, FAILED+suppress was reserved
+        # for an indeterminate external publication result; pre-publication
+        # failures explicitly cleared it. Preserve those live safety holds
+        # while splitting the two meanings into separate columns.
+        await db.execute(
+            """UPDATE tasks
+               SET publication_safety_hold = 1,
+                   suppress_next_auto_publish = 0
+               WHERE status = ? AND suppress_next_auto_publish = 1""",
+            (TaskStatus.FAILED.value,),
+        )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_origin ON tasks(origin_type, origin_id)"
     )
@@ -445,6 +462,8 @@ def _row_to_response(row: aiosqlite.Row) -> TaskResponse:
         video_path=row["video_path"],
         thumbnail_path=row["thumbnail_path"],
         duration_seconds=row["duration_seconds"],
+        suppress_next_auto_publish=bool(row["suppress_next_auto_publish"]),
+        publication_safety_hold=bool(row["publication_safety_hold"]),
         origin_type=row["origin_type"],
         origin_id=row["origin_id"],
         origin_label=row["origin_label"],
@@ -521,6 +540,56 @@ async def update_task(task_id: str, **kwargs):
     await db.close()
 
 
+async def compare_and_set_task_status(
+    task_id: str,
+    expected_status: str | TaskStatus,
+    new_status: str | TaskStatus,
+    *,
+    error_message: str | None = None,
+    expected_updated_at: str | None = None,
+    suppress_next_auto_publish: bool | None = None,
+    publication_safety_hold: bool | None = None,
+) -> bool:
+    """Atomically claim one task state transition.
+
+    Routes that materialize an on-disk worker marker use this before exposing
+    QUEUED. Only one concurrent request can move the same status snapshot, and
+    the worker never observes QUEUED before its marker has been written.
+    """
+    expected = getattr(expected_status, "value", expected_status)
+    target = getattr(new_status, "value", new_status)
+    now = datetime.now(timezone.utc).isoformat()
+    db = await get_db()
+    try:
+        assignments = ["status = ?", "error_message = ?", "updated_at = ?"]
+        parameters: list[object] = [target, error_message, now]
+        if suppress_next_auto_publish is not None:
+            assignments.append("suppress_next_auto_publish = ?")
+            parameters.append(int(suppress_next_auto_publish))
+        if publication_safety_hold is not None:
+            assignments.append("publication_safety_hold = ?")
+            parameters.append(int(publication_safety_hold))
+        predicates = ["id = ?", "status = ?"]
+        parameters.extend((task_id, expected))
+        if expected_updated_at is not None:
+            predicates.append("updated_at = ?")
+            parameters.append(expected_updated_at)
+        cursor = await db.execute(
+            f"UPDATE tasks SET {', '.join(assignments)} WHERE {' AND '.join(predicates)}",
+            parameters,
+        )
+        changed = cursor.rowcount == 1
+        if changed:
+            await _sync_content_plan_status(db, task_id, target, error_message)
+        await db.commit()
+        return changed
+    except BaseException:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
 async def reschedule_task(task_id: str, scheduled_at: str | None) -> None:
     """Move a task and its editorial plan clock together in one transaction."""
     now = datetime.now(timezone.utc).isoformat()
@@ -584,14 +653,43 @@ async def reset_orphaned_tasks() -> int:
         TaskStatus.TTS.value,
         TaskStatus.MUSIC.value,
         TaskStatus.COMPOSING.value,
-        TaskStatus.PUBLISHING.value,
     )
     now = datetime.now(timezone.utc).isoformat()
     db = await get_db()
     try:
+        # A PUBLISHING task without rework suppression may have crossed an
+        # external commit boundary before its local receipt was persisted.
+        # Keep that uncertainty distinct from the durable rework skip intent.
+        publishing_cursor = await db.execute(
+            """UPDATE tasks
+               SET status = ?, error_message = ?, updated_at = ?,
+                   publication_safety_hold = 1
+               WHERE status = ? AND suppress_next_auto_publish = 0""",
+            (
+                TaskStatus.FAILED.value,
+                "Interrupted while publishing — automatic republish is suppressed; "
+                "verify the destination before retrying.",
+                now,
+                TaskStatus.PUBLISHING.value,
+            ),
+        )
+        skipped_publishing_cursor = await db.execute(
+            """UPDATE tasks
+               SET status = ?, error_message = ?, updated_at = ?,
+                   publication_safety_hold = 0
+               WHERE status = ? AND suppress_next_auto_publish = 1""",
+            (
+                TaskStatus.FAILED.value,
+                "Interrupted before a completed-edition rework could be finalized — "
+                "please retry; automatic publication remains suppressed.",
+                now,
+                TaskStatus.PUBLISHING.value,
+            ),
+        )
         placeholders = ", ".join("?" for _ in in_progress)
         cursor = await db.execute(
-            f"""UPDATE tasks SET status = ?, error_message = ?, updated_at = ?
+            f"""UPDATE tasks SET status = ?, error_message = ?, updated_at = ?,
+                    publication_safety_hold = 0
                 WHERE status IN ({placeholders})""",
             (TaskStatus.FAILED.value, "Interrupted by a server restart — please retry.", now, *in_progress),
         )
@@ -611,7 +709,11 @@ async def reset_orphaned_tasks() -> int:
             ),
         )
         await db.commit()
-        return cursor.rowcount
+        return (
+            cursor.rowcount
+            + publishing_cursor.rowcount
+            + skipped_publishing_cursor.rowcount
+        )
     except BaseException:
         await db.rollback()
         raise
@@ -696,6 +798,7 @@ async def _sync_content_plan_status(
         TaskStatus.TTS.value,
         TaskStatus.AWAITING_REVIEW.value,
         TaskStatus.COMPOSING.value,
+        TaskStatus.PUBLISHING.value,
     }:
         await db.execute(
             """UPDATE content_plan_items

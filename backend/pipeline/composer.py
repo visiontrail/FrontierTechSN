@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -163,41 +164,203 @@ def _narration_completeness_failures(alignment: dict) -> list[str]:
     return failures
 
 
-def _orpheus_manifest_failures(
+def _narration_manifest_failures(
     script_path: str | Path,
     audio_path: str | Path,
     tts_model: str | None,
 ) -> list[str]:
-    """Recheck the fail-closed Orpheus source/audio contract before render."""
-    if tts_model != "orpheus-en":
-        return []
-    from backend.pipeline.tts import _file_sha256, _strip_speaker_labels
+    """Recheck the generated narration's source/audio contract before render."""
+    from backend.pipeline.tts import (
+        _expand_vibevoice_pronunciations,
+        _file_sha256,
+        _strip_speaker_labels,
+    )
 
     audio = Path(audio_path).resolve()
     manifest_path = audio.parent / "tts_manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return [f"Orpheus integrity manifest is unavailable: {exc}"]
+        return [f"narration integrity manifest is unavailable: {exc}"]
+    if not isinstance(manifest, dict):
+        return ["narration integrity manifest must be a JSON object"]
 
     failures: list[str] = []
-    integrity = manifest.get("integrity") or {}
-    if not integrity.get("passed"):
-        failures.append("Orpheus per-utterance acoustic verification did not pass")
-    if float(integrity.get("verified_source_coverage") or 0) != 1.0:
+    manifest_model = str(manifest.get("model") or "")
+    effective_model = tts_model or config.TTS_DEFAULT_MODEL
+    if manifest_model and manifest_model != effective_model:
         failures.append(
-            "Orpheus verified source coverage is not 100% "
-            f"({float(integrity.get('verified_source_coverage') or 0):.1%})"
+            "the narration manifest model does not match the current task "
+            f"({manifest_model} != {effective_model})"
         )
 
+    model = config.TTS_MODELS.get(effective_model)
+    if model is None:
+        failures.append(f"the configured TTS model is unknown ({effective_model})")
+        return failures
+
     script = Path(script_path).read_text(encoding="utf-8")
-    canonical = _strip_speaker_labels(script)
-    source_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    canonical = (
+        script.strip()
+        if model.get("requires_speaker_labels")
+        else _strip_speaker_labels(script)
+    )
+    manifest_source = canonical
+    if model.get("kind") != "orpheus_http":
+        manifest_source, _ = _expand_vibevoice_pronunciations(canonical)
+    source_hash = hashlib.sha256(manifest_source.encode("utf-8")).hexdigest()
     if source_hash != manifest.get("source_text_sha256"):
-        failures.append("the current audio script changed after Orpheus verification")
+        failures.append("the current script changed after narration generation")
     if _file_sha256(audio) != manifest.get("output_audio_sha256"):
-        failures.append("the narration WAV changed after Orpheus verification")
+        failures.append("the narration WAV changed after narration generation")
+
+    if model.get("kind") == "orpheus_http":
+        integrity = manifest.get("integrity") or {}
+        if not isinstance(integrity, dict):
+            failures.append("Orpheus integrity report must be a JSON object")
+            return failures
+        if not integrity.get("passed"):
+            failures.append("Orpheus per-utterance acoustic verification did not pass")
+        if float(integrity.get("verified_source_coverage") or 0) != 1.0:
+            failures.append(
+                "Orpheus verified source coverage is not 100% "
+                f"({float(integrity.get('verified_source_coverage') or 0):.1%})"
+            )
     return failures
+
+
+def _orpheus_manifest_failures(
+    script_path: str | Path,
+    audio_path: str | Path,
+    tts_model: str | None,
+) -> list[str]:
+    """Compatibility wrapper retained for focused integrity callers/tests."""
+    if tts_model != "orpheus-en":
+        return []
+    return _narration_manifest_failures(script_path, audio_path, tts_model)
+
+
+def _rendered_video_failures(
+    video_path: Path,
+    *,
+    frame: FrameSpec,
+    expected_duration: float,
+) -> list[str]:
+    """Probe a staged render before it can replace the last completed cut."""
+    result = run_capture_logged(
+        name="Rendered video probe",
+        command=[
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        logger=logger,
+        timeout=30,
+        stdout_log_limit=2000,
+        stderr_log_limit=1000,
+    )
+    if result.returncode != 0:
+        return [f"ffprobe exited {result.returncode}: {(result.stderr or '')[-500:]}"]
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return [f"ffprobe returned invalid JSON: {exc}"]
+    streams = payload.get("streams") or []
+    videos = [item for item in streams if item.get("codec_type") == "video"]
+    audios = [item for item in streams if item.get("codec_type") == "audio"]
+    failures: list[str] = []
+    if len(videos) != 1:
+        failures.append(f"expected one video stream, found {len(videos)}")
+    else:
+        width = int(videos[0].get("width") or 0)
+        height = int(videos[0].get("height") or 0)
+        if (width, height) != (frame.width, frame.height):
+            failures.append(
+                f"render dimensions are {width}x{height}, expected "
+                f"{frame.width}x{frame.height}"
+            )
+    if len(audios) != 1:
+        failures.append(f"expected one audio stream, found {len(audios)}")
+    try:
+        duration = float(
+            (payload.get("format") or {}).get("duration")
+            or (videos[0].get("duration") if videos else 0)
+            or 0
+        )
+    except (TypeError, ValueError):
+        duration = 0.0
+    tolerance = max(0.5, 2 / max(1, config.RENDER_FPS))
+    if duration <= 0 or abs(duration - expected_duration) > tolerance:
+        failures.append(
+            f"render duration is {duration:.3f}s, expected {expected_duration:.3f}s "
+            f"within {tolerance:.3f}s"
+        )
+    if failures:
+        return failures
+
+    # ffprobe proves only container metadata. Decode every staged stream before
+    # promotion so a truncated/corrupt rerender can never replace the last
+    # completed cut merely because its headers are readable.
+    decode = run_capture_logged(
+        name="Rendered video full decode",
+        command=[
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-i",
+            str(video_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-f",
+            "null",
+            "-",
+        ],
+        logger=logger,
+        timeout=max(60, min(900, int(expected_duration * 2 + 30))),
+        stdout_log_limit=500,
+        stderr_log_limit=2000,
+    )
+    if decode.returncode != 0:
+        return [
+            "full render decode failed with ffmpeg exit "
+            f"{decode.returncode}: {(decode.stderr or '')[-1000:]}"
+        ]
+    return []
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _promote_render_candidate(
+    staged_video_path: Path,
+    staged_report_path: Path,
+    output_dir: Path,
+    video_sha256: str,
+) -> Path:
+    """Publish a versioned cut without touching the prior task video pointer."""
+    final_video_path = output_dir / f"video-{video_sha256[:16]}.mp4"
+    os.replace(staged_video_path, final_video_path)
+    # The report remains a convenience alias. If this second promotion fails,
+    # the previous task.video_path is still intact and the new version is an
+    # auditable orphan that a retry may safely replace.
+    os.replace(staged_report_path, output_dir / "av_sync_report.json")
+    return final_video_path
 
 
 def _detect_silence_boundaries(wav_path: str, log: LogCallback | None = None) -> list[float]:
@@ -434,7 +597,7 @@ async def compose_video(
     emit = lambda message: log(message) if log else logger.info(message)
 
     # --- 1. Storyboard -----------------------------------------------------
-    manifest_failures = _orpheus_manifest_failures(script_path, audio_path, tts_model)
+    manifest_failures = _narration_manifest_failures(script_path, audio_path, tts_model)
     if manifest_failures:
         detail = "; ".join(manifest_failures)
         emit(f"Narration integrity failed; video render blocked: {detail}")
@@ -625,7 +788,9 @@ async def compose_video(
         "multimodal": {"status": "pending", "passed": False},
         "background_music": {"enabled": bool(background_music_path), "passed": None},
     }
-    (output_dir_path / "av_sync_report.json").write_text(
+    quality_report_path = output_dir_path / "av_sync_report.next.json"
+    quality_report_path.unlink(missing_ok=True)
+    quality_report_path.write_text(
         json.dumps(quality_report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     if visual_grounding["passed"]:
@@ -797,7 +962,8 @@ async def compose_video(
                     )
 
     # --- 5. Render ---------------------------------------------------------
-    video_path = output_dir_path / "video.mp4"
+    staged_video_path = output_dir_path / "video.next.mp4"
+    staged_video_path.unlink(missing_ok=True)
     total_frames = max(1, round(float(board["total_duration"]) * config.RENDER_FPS))
     render_timeout = max(RENDER_TIMEOUT_FLOOR, int(300 + total_frames * RENDER_SECONDS_PER_FRAME))
     emit(
@@ -807,7 +973,7 @@ async def compose_video(
         f"stall timeout {RENDER_STALL_TIMEOUT}s"
     )
 
-    render_command = _build_render_command(output_dir_path, video_path, frame)
+    render_command = _build_render_command(output_dir_path, staged_video_path, frame)
     returncode, output = await stream_subprocess(
         name="HyperFrames render",
         command=render_command,
@@ -819,15 +985,29 @@ async def compose_video(
     )
 
     if returncode != 0:
+        staged_video_path.unlink(missing_ok=True)
         raise RuntimeError(f"Video render failed (exit {returncode}): {output[-500:]}")
 
-    if not video_path.exists():
+    if not staged_video_path.exists():
         raise RuntimeError("Video render produced no output file")
 
-    emit(f"Video rendered: {video_path} ({video_path.stat().st_size / 1024 / 1024:.1f} MB)")
+    probe_failures = _rendered_video_failures(
+        staged_video_path,
+        frame=frame,
+        expected_duration=float(board["total_duration"]),
+    )
+    if probe_failures:
+        staged_video_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Staged video failed validation: " + "; ".join(probe_failures)
+        )
+    emit(
+        f"Video rendered: {staged_video_path} "
+        f"({staged_video_path.stat().st_size / 1024 / 1024:.1f} MB)"
+    )
     if config.AV_SYNC_GEMINI_REVIEW_ENABLED:
         gemini_review = await multimodal_review.review_video(
-            video_path,
+            staged_video_path,
             board,
             output_dir_path,
             log=emit,
@@ -846,7 +1026,12 @@ async def compose_video(
         gemini_review,
         multimodal_enabled=config.AV_SYNC_GEMINI_REVIEW_ENABLED,
     )
-    (output_dir_path / "av_sync_report.json").write_text(
+    rendered_video_sha256 = _sha256_path(staged_video_path)
+    quality_report["rendered_video_sha256"] = rendered_video_sha256
+    quality_report["rendered_video_filename"] = (
+        f"video-{rendered_video_sha256[:16]}.mp4"
+    )
+    quality_report_path.write_text(
         json.dumps(quality_report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     if gemini_review.get("passed"):
@@ -865,4 +1050,10 @@ async def compose_video(
             f"Video completed with {len(quality_report['warnings'])} A/V quality "
             "warning(s); see av_sync_report.json"
         )
+    video_path = _promote_render_candidate(
+        staged_video_path,
+        quality_report_path,
+        output_dir_path,
+        rendered_video_sha256,
+    )
     return str(video_path)

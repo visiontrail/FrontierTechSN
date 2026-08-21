@@ -189,6 +189,15 @@ class TaskResponse(BaseModel):
     video_path: Optional[str] = None
     thumbnail_path: Optional[str] = None
     duration_seconds: Optional[float] = None
+    # A completed edition may be reworked without being published twice. This
+    # intent survives process crashes and cross-mode retries until a later
+    # successful completion consumes it atomically.
+    suppress_next_auto_publish: bool = False
+    # An external publication/deletion may have succeeded before its local
+    # receipt was committed. Keep this safety hold separate from rework
+    # suppression so a failed render remains retryable without losing its
+    # eventual skip-publication intent.
+    publication_safety_hold: bool = False
     # Provenance is first-class: manually created tasks remain distinguishable
     # from tasks materialized by the editorial planning system.
     origin_type: Literal["manual", "content_plan", "daily_news"] = "manual"
@@ -597,6 +606,18 @@ class TaskPublicationRequest(BaseModel):
 
 class TaskPublicationDeleteRequest(BaseModel):
     targets: list[Literal["youtube", "x"]] = Field(default_factory=lambda: ["youtube", "x"])
+
+
+class TaskPublicationReconcileRequest(BaseModel):
+    acknowledge_no_unrecorded_publication: bool = False
+    confirmed_deleted_test_targets: list[Literal["youtube", "x"]] = Field(
+        default_factory=list
+    )
+
+    @field_validator("confirmed_deleted_test_targets")
+    @classmethod
+    def unique_confirmed_deleted_targets(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
 
 
 class PromptSummary(BaseModel):

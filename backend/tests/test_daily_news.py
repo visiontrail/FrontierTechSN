@@ -405,7 +405,13 @@ def test_apple_podcast_feed_is_prepared_without_external_submission(tmp_path: Pa
     _tone(audio, 2.0, 220)
     task = _task(tmp_path, audio)
 
-    with patch.object(config, "OUTPUTS_DIR", tmp_path):
+    with (
+        patch.object(config, "OUTPUTS_DIR", tmp_path),
+        patch(
+            "backend.settings_store.restart_required_change_pending",
+            return_value=False,
+        ),
+    ):
         result = prepare_apple_podcast(task)
         manifest = read_publication_manifest(task)
 

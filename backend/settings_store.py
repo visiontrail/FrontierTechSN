@@ -16,8 +16,10 @@ pick it up.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -839,6 +841,96 @@ def _resolved(overrides: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
+def _tree_fingerprint(root: Path) -> tuple[tuple[str, str, int, str], ...]:
+    """Content fingerprint for a small durable directory tree."""
+    rows: list[tuple[str, str, int, str]] = []
+    try:
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                raise SettingsError(
+                    f"Refusing to migrate symlinked podcast state: {path}"
+                )
+            if path.is_dir():
+                rows.append((relative, "dir", 0, ""))
+                continue
+            if not path.is_file():
+                raise SettingsError(
+                    f"Refusing to migrate non-file podcast state: {path}"
+                )
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            rows.append((relative, "file", path.stat().st_size, digest.hexdigest()))
+    except OSError as exc:
+        raise SettingsError(f"Could not inspect podcast state under {root}: {exc}") from exc
+    return tuple(rows)
+
+
+def _migrate_podcast_state(current_root: Path, desired_root: Path) -> None:
+    """Copy the global podcast ledger when OUTPUTS_DIR changes.
+
+    Task artifacts retain their own persisted roots; the podcast feed is the
+    one cross-task artifact served from the configured root and must move as a
+    single verified unit before a restart can switch the static mount.
+    """
+    current_root = current_root.resolve()
+    desired_root = desired_root.resolve()
+    if current_root == desired_root:
+        return
+    source = current_root / "podcast"
+    destination = desired_root / "podcast"
+    if destination.is_relative_to(source) or source.is_relative_to(destination):
+        raise SettingsError(
+            "Refusing to migrate podcast state between nested output roots"
+        )
+    if not source.exists():
+        return
+    if source.is_symlink() or not source.is_dir():
+        raise SettingsError(f"Podcast source is not a regular directory: {source}")
+    source_fingerprint = _tree_fingerprint(source)
+    if destination.exists() or destination.is_symlink():
+        if destination.is_symlink() or not destination.is_dir():
+            raise SettingsError(
+                f"Podcast destination is not a regular directory: {destination}"
+            )
+        if _tree_fingerprint(destination) != source_fingerprint:
+            raise SettingsError(
+                "The new outputs directory already contains different podcast "
+                "state; reconcile it before changing OUTPUTS_DIR"
+            )
+        return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=".podcast-migration-", dir=destination.parent)
+    )
+    try:
+        shutil.rmtree(staging)
+        shutil.copytree(source, staging)
+        if _tree_fingerprint(staging) != source_fingerprint:
+            raise SettingsError("Podcast state migration did not verify byte-for-byte")
+        os.replace(staging, destination)
+    except OSError as exc:
+        raise SettingsError(
+            f"Could not migrate podcast state to {destination}: {exc}"
+        ) from exc
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def _apply_live_values(after: Mapping[str, Any]) -> None:
+    """Apply hot settings while retaining restart-bound process resources."""
+    config = _config()
+    live = dict(after)
+    for spec in SPECS:
+        if spec.restart_required:
+            live[spec.key] = getattr(config, spec.key)
+    config.apply_values(live)
+
+
 def apply_saved() -> None:
     """Snapshot the .env defaults, then apply the saved overrides to ``config``.
 
@@ -850,11 +942,24 @@ def apply_saved() -> None:
     global _DEFAULTS
     if not _DEFAULTS:
         _DEFAULTS = {spec.key: getattr(config, spec.key) for spec in SPECS}
-    config.apply_values(_resolved(_read_store()))
+    resolved = _resolved(_read_store())
+    _migrate_podcast_state(
+        Path(config.OUTPUTS_DIR),
+        Path(resolved["OUTPUTS_DIR"]),
+    )
+    config.apply_values(resolved)
 
 
 def defaults() -> dict[str, Any]:
     return dict(_DEFAULTS)
+
+
+def restart_required_change_pending(key: str) -> bool:
+    spec = _SPEC_BY_KEY.get(key)
+    if spec is None or not spec.restart_required:
+        return False
+    desired = _resolved(_read_store()).get(key)
+    return desired != getattr(_config(), key)
 
 
 def mask_secret(value: str) -> str:
@@ -941,9 +1046,13 @@ def update(submitted: Mapping[str, Any]) -> list[str]:
         else:
             overrides[key] = _store_value(spec, value)
 
-    _write_store(overrides)
     after = _resolved(overrides)
-    _config().apply_values(after)
+    _migrate_podcast_state(
+        Path(_config().OUTPUTS_DIR),
+        Path(after["OUTPUTS_DIR"]),
+    )
+    _write_store(overrides)
+    _apply_live_values(after)
     return [
         key
         for key in submitted
@@ -964,9 +1073,13 @@ def reset(keys: Iterable[str]) -> list[str]:
     before = _resolved(overrides)
     for key in keys:
         overrides.pop(key, None)
-    _write_store(overrides)
     after = _resolved(overrides)
-    _config().apply_values(after)
+    _migrate_podcast_state(
+        Path(_config().OUTPUTS_DIR),
+        Path(after["OUTPUTS_DIR"]),
+    )
+    _write_store(overrides)
+    _apply_live_values(after)
     return [
         key
         for key in keys

@@ -21,7 +21,7 @@ import PublicationPanel from './PublicationPanel'
 import { IconChevronLeft } from './Icons'
 import { countdown, formatStart, isPendingStart, localInputToIso, toLocalInputValue } from '../schedule'
 
-const STAGES = ['researching', 'digesting', 'reviewing', 'sourcing', 'tts', 'music', 'composing', 'complete'] as const
+const STAGES = ['researching', 'digesting', 'reviewing', 'sourcing', 'tts', 'music', 'composing', 'publishing', 'complete'] as const
 const STAGE_LABELS: Record<string, string> = {
   researching: 'Research',
   extracting: 'Extract',
@@ -33,6 +33,7 @@ const STAGE_LABELS: Record<string, string> = {
   awaiting_review: 'Review',
   music: 'Music',
   composing: 'Compose',
+  publishing: 'Publish',
   complete: 'Done',
 }
 
@@ -87,6 +88,8 @@ export default function TaskDetail() {
     onSuccess: () => {
       setDraftOverride(null)
       queryClient.invalidateQueries({ queryKey: ['script', id] })
+      queryClient.invalidateQueries({ queryKey: ['task', id] })
+      queryClient.invalidateQueries({ queryKey: ['tasks'] })
     },
   })
 
@@ -119,6 +122,9 @@ export default function TaskDetail() {
 
   const isRunning = !['complete', 'failed', 'queued', 'awaiting_review'].includes(task.status)
   const awaitingReview = task.status === 'awaiting_review'
+  const publicationRecovery = task.status === 'failed' && task.publication_safety_hold
+  const retryingFailedRender = task.status === 'failed' && !publicationRecovery && !!task.audio_path && hasScript
+  const scriptLocked = publicationRecovery || isRunning || task.status === 'queued' || saveMutation.isPending || renderMutation.isPending || regenMutation.isPending
   // Parked in the queue behind a future start time — still cancellable.
   const parked = task.status === 'queued' && isPendingStart(task.scheduled_at)
   const startDraft = startOverride ?? (task.scheduled_at ? toLocalInputValue(new Date(task.scheduled_at)) : '')
@@ -182,6 +188,8 @@ export default function TaskDetail() {
             <button
               className="btn-danger"
               type="button"
+              disabled={publicationRecovery || deleteMutation.isPending || isRunning || renderMutation.isPending || regenMutation.isPending}
+              title={publicationRecovery ? 'Resolve the publication safety hold before deleting this task' : isRunning ? 'Task cannot be deleted while it is processing' : ''}
               onClick={() => { if (confirm('Delete this task?')) deleteMutation.mutate() }}
             >
               Delete
@@ -189,6 +197,10 @@ export default function TaskDetail() {
           </div>
         </div>
       </header>
+
+      {deleteMutation.isError && (
+        <div className="error-box">{(deleteMutation.error as Error).message}</div>
+      )}
 
       <div className="detail-progress">
         <div className="pipeline-stages">
@@ -337,31 +349,59 @@ export default function TaskDetail() {
           {task.status === 'complete' && task.video_path && (
             <section className="detail-panel">
               <h3>Final Cut</h3>
-              <video controls src={videoUrl(task.id)} />
+              <video
+                key={task.updated_at}
+                controls
+                src={`${videoUrl(task.id)}?v=${encodeURIComponent(task.updated_at)}`}
+              />
+              <div className="actions">
+                <button
+                  className="btn-ghost"
+                  disabled={renderMutation.isPending || regenMutation.isPending || dirty}
+                  title={dirty ? 'Save your changes first' : ''}
+                  onClick={() => renderMutation.mutate()}
+                >
+                  {renderMutation.isPending ? 'Starting...' : 'Re-render Video'}
+                </button>
+              </div>
+              {renderMutation.isError && (
+                <div className="error-box" style={{ marginTop: 8 }}>
+                  {(renderMutation.error as Error).message}
+                </div>
+              )}
             </section>
           )}
 
-          {task.status === 'complete' && task.video_path && task.origin_type === 'daily_news' && (
-            <PublicationPanel taskId={task.id} />
+          {(task.status === 'complete' || publicationRecovery) && task.video_path && task.origin_type === 'daily_news' && (
+            <PublicationPanel
+              taskId={task.id}
+              recoveryRequired={publicationRecovery}
+            />
           )}
 
           {task.audio_path && task.status !== 'complete' && (
             <section className="detail-panel">
               <h3>Audio Preview</h3>
               <audio controls src={audioUrl(task.id)} />
-              {awaitingReview && (
+              {(awaitingReview || retryingFailedRender) && (
                 <>
                   <p className="detail-hint">
-                    Listen to the generated audio. Render the video to continue, or edit the
-                    script below and re-generate the audio.
+                    {retryingFailedRender
+                      ? 'Retry only the video render with the saved script and audio.'
+                      : 'Listen to the generated audio. Render the video to continue, or edit the script below and re-generate the audio.'}
                   </p>
                   <div className="actions">
                     <button
                       className="btn-primary"
-                      disabled={renderMutation.isPending}
+                      disabled={renderMutation.isPending || regenMutation.isPending || dirty}
+                      title={dirty ? 'Save your changes first' : ''}
                       onClick={() => renderMutation.mutate()}
                     >
-                      {renderMutation.isPending ? 'Starting...' : 'Render Video'}
+                      {renderMutation.isPending
+                        ? 'Starting...'
+                        : retryingFailedRender
+                          ? 'Retry Video Render'
+                          : 'Render Video'}
                     </button>
                   </div>
                   {renderMutation.isError && (
@@ -381,20 +421,22 @@ export default function TaskDetail() {
                 className="script-editor"
                 value={draft}
                 onChange={(e) => setDraftOverride(e.target.value)}
+                disabled={scriptLocked}
                 spellCheck={false}
               />
               <div className="actions">
                 <button
                   className="btn-ghost"
-                  disabled={!dirty || saveMutation.isPending}
+                  disabled={!dirty || saveMutation.isPending || scriptLocked}
+                  title={scriptLocked ? 'Script is locked while the task is processing' : ''}
                   onClick={() => saveMutation.mutate()}
                 >
                   {saveMutation.isPending ? 'Saving...' : 'Save Script'}
                 </button>
                 <button
                   className="btn-primary"
-                  disabled={isRunning || dirty || regenMutation.isPending}
-                  title={dirty ? 'Save your changes first' : isRunning ? 'Task is processing' : ''}
+                  disabled={publicationRecovery || isRunning || task.status === 'queued' || dirty || regenMutation.isPending || renderMutation.isPending}
+                  title={publicationRecovery ? 'Resolve the publication safety hold first' : dirty ? 'Save your changes first' : isRunning ? 'Task is processing' : ''}
                   onClick={() => regenMutation.mutate()}
                 >
                   {regenMutation.isPending ? 'Starting...' : 'Re-generate Audio'}

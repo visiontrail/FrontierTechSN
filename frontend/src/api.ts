@@ -93,6 +93,8 @@ export interface Task {
   video_path: string | null;
   thumbnail_path: string | null;
   duration_seconds: number | null;
+  suppress_next_auto_publish: boolean;
+  publication_safety_hold: boolean;
   origin_type: 'manual' | 'content_plan' | 'daily_news';
   origin_id: string | null;
   origin_label: string | null;
@@ -218,11 +220,15 @@ export interface PublicationEntry {
   identity?: Record<string, string> | null;
   published_at?: string;
   deleted_at?: string;
+  sha256?: string;
+  matches_current_media?: boolean;
 }
 
 export interface PublicationManifest {
   task_id: string;
   updated_at?: string;
+  current_video_sha256?: string | null;
+  current_audio_sha256?: string | null;
   platforms: Partial<Record<'youtube' | 'x' | 'apple_podcast', PublicationEntry>>;
 }
 
@@ -372,7 +378,8 @@ export async function scheduleTask(taskId: string, scheduledAt: string | null): 
 }
 
 export async function deleteTask(id: string): Promise<void> {
-  await fetch(`${BASE}/api/tasks/${id}`, { method: 'DELETE' });
+  const res = await fetch(`${BASE}/api/tasks/${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(await res.text());
 }
 
 export async function fetchSettings(): Promise<Settings> {
@@ -725,11 +732,38 @@ export async function fetchPublications(taskId: string): Promise<PublicationMani
   return res.json();
 }
 
-export async function publishTestEpisode(taskId: string): Promise<PublicationManifest> {
+export async function publishTestEpisode(
+  taskId: string,
+  options: {
+    targets?: Array<'youtube' | 'x' | 'apple_podcast'>
+    testMode?: boolean
+    visibility?: 'private' | 'unlisted' | 'public'
+  } = {},
+): Promise<PublicationManifest> {
   const res = await fetch(`${BASE}/api/tasks/${taskId}/publications`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ targets: ['youtube', 'x'], test_mode: true, visibility: 'private' }),
+    body: JSON.stringify({
+      targets: options.targets || ['youtube', 'x'],
+      test_mode: options.testMode ?? true,
+      visibility: options.visibility || 'private',
+    }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function reconcilePublicationSafetyHold(
+  taskId: string,
+  confirmedDeletedTestTargets: Array<'youtube' | 'x'> = [],
+): Promise<Task> {
+  const res = await fetch(`${BASE}/api/tasks/${taskId}/publications/reconcile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      acknowledge_no_unrecorded_publication: true,
+      confirmed_deleted_test_targets: confirmedDeletedTestTargets,
+    }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
