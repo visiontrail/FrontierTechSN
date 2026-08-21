@@ -532,11 +532,22 @@ def _candidate_context_conflicts(scene: dict, candidate: dict) -> list[str]:
         candidate_text
     )
     conflicts = (candidate_terms & MEDIA_WORK_TERMS) - (scene_terms & MEDIA_WORK_TERMS)
-    game_work_re = re.compile(
-        r"\bmmorpgs?\b|\(\s*(?:video\s+)?game\s*\)|\b(?:video\s+)?game\s+logos?\b",
+    game_term_re = re.compile(r"\bmmorpgs?\b|\bvideo[\s-]+games?\b", flags=re.I)
+    organisation_after_game_re = re.compile(
+        r"^[\s\(\)\[\]\{\},:;/._–—-]*"
+        r"(?:(?:video[\s-]+games?|games?)\s+)?"
+        r"(?:business(?:es)?|companies|company|corporations?|developers?|firms?|industr(?:y|ies)|"
+        r"publishers?|studios?)\b",
         flags=re.I,
     )
-    if game_work_re.search(candidate_text) and not game_work_re.search(scene_text):
+
+    def has_game_work_context(value: str) -> bool:
+        return any(
+            not organisation_after_game_re.match(value[match.end() :])
+            for match in game_term_re.finditer(value)
+        )
+
+    if has_game_work_context(candidate_text) and not has_game_work_context(scene_text):
         conflicts.add("video game")
     return sorted(conflicts)
 

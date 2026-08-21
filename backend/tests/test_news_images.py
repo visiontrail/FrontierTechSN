@@ -1457,6 +1457,18 @@ def test_three_way_grounding_rejects_world_aquatics_chemical_agents_and_google_l
                 "categories": "Perfect World (company)|Video game company logos",
             },
         ),
+        (
+            {"expected_subject": "Perfect World", "kind": "logo"},
+            {
+                "text": "Perfect World's revenue report described the company's results.",
+                "keywords": [],
+            },
+            {
+                "title": "Perfect World Logo.svg",
+                "description": "Logo of Perfect World, a Chinese MMORPG developer",
+                "categories": "Video game developers|Perfect World (company)",
+            },
+        ),
     ],
 )
 def test_complete_identity_grounding_positive_controls(shot, scene, candidate):
@@ -1547,6 +1559,30 @@ def test_complete_identity_grounding_positive_controls(shot, scene, candidate):
                 "title": "Perfect World Logo.svg",
                 "description": "Logo for Perfect World, a 2005 MMORPG video game",
                 "categories": "Perfect World (video game)|Video game logos",
+                "object_name": "Perfect World logo",
+            },
+        ),
+        (
+            {"expected_subject": "Perfect World", "kind": "logo"},
+            {
+                "text": "Perfect World's revenue report described the company's results.",
+                "keywords": [],
+            },
+            {
+                "title": "Perfect World Logo.svg",
+                "description": "Logo for Perfect World, a 2005 video game",
+                "object_name": "Perfect World logo",
+            },
+        ),
+        (
+            {"expected_subject": "Perfect World", "kind": "logo"},
+            {
+                "text": "Perfect World's revenue report described the company's results.",
+                "keywords": [],
+            },
+            {
+                "title": "Perfect World Logo.svg",
+                "description": "Logo for the video game Perfect World",
                 "object_name": "Perfect World logo",
             },
         ),
