@@ -163,6 +163,9 @@ ACOUSTIC_EQUIVALENTS = {
     # syllables while Whisper rendered them as the phonetic spelling Irindil.
     # Keep the unrelated and repeatedly observed Arendelle substitution hard.
     "irindil": "earendil",
+    # Whisper may choose the past-tense spelling for the acoustically
+    # identical number word. Numeric completeness and position stay strict.
+    "won": "1",
 }
 ACOUSTIC_PHRASE_EQUIVALENTS = {
     # The investment-bank name is acoustically ambiguous with two common
@@ -197,6 +200,7 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("tech", "meme"): "techmeme",
     ("tech", "meme's"): "techmeme's",
     ("ear", "en", "dill"): "earendil",
+    ("ear", "endil"): "earendil",
     # Provider-only phonetics for the Chinese personal name Zhu Yi. Keep this
     # equivalence scoped to the complete two-token name so an unrelated "Joo"
     # or "Yee" remains distinct and positional completeness still applies.
