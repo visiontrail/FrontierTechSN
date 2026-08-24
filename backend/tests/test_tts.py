@@ -280,6 +280,25 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_orpheus_prompt_articulates_techmeme_as_two_words(self):
+        self.assertEqual(
+            tts._orpheus_prompt_text("According to Techmeme's summary"),
+            "According to Tech Meme's summary.",
+        )
+
+    def test_orpheus_transcript_accepts_tech_meme_but_rejects_tech_mean(self):
+        expected = "According to Techmeme's summary"
+
+        def verified(observed: str) -> bool:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return bool(tts._orpheus_transcript_report(expected, words)["verified"])
+
+        self.assertTrue(verified("According to Tech Meme's summary"))
+        self.assertFalse(verified("According to Tech Mean's summary"))
+
     def test_orpheus_prompt_articulates_brem_possessive_vowel(self):
         self.assertEqual(
             tts._orpheus_prompt_text("Brem's research indicates a result"),

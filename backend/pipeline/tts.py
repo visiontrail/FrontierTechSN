@@ -186,6 +186,8 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("3", "m"): "3m",
     ("multi", "modal"): "multimodal",
     ("a", "p", "i"): "api",
+    ("tech", "meme"): "techmeme",
+    ("tech", "meme's"): "techmeme's",
     # Provider-only phonetics for the Chinese personal name Zhu Yi. Keep this
     # equivalence scoped to the complete two-token name so an unrelated "Joo"
     # or "Yee" remains distinct and positional completeness still applies.
@@ -1200,6 +1202,10 @@ def _orpheus_prompt_text(text: str) -> str:
         "Joo Yee. Co-founder of Prana. Labs",
         stripped,
     )
+    # Orpheus consistently realizes the publication name Techmeme as
+    # "TechMean" unless the two semantic words are exposed. Keep the source
+    # script canonical and join only the exact "Tech Meme" ASR token pair.
+    stripped = re.sub(r"\bTechmeme\b", "Tech Meme", stripped)
     # The speech LM can parse the CamelCase publication name as "two-bit AI".
     # Expose the intended letter and word boundaries only in the provider
     # prompt; verification still requires Whisper to recover QbitAI/Qubit AI.
