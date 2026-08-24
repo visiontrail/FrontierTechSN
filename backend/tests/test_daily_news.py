@@ -19,6 +19,7 @@ from backend.daily_news.scriptwriter import (
     _minimalize_unsupported_paragraphs,
     enforce_script_contract,
     morning_opening,
+    script_contract_report,
 )
 from backend.daily_news.source_catalog import load_source_catalog
 from backend.models import DailyAutomationSettings, SourceType, TaskConfig, TaskResponse, TaskStatus
@@ -190,6 +191,117 @@ def test_fixed_morning_opening_and_contract_are_software_owned():
     assert final.endswith(closing)
     assert final.count("Good morning") == 1
     assert SOURCE_SPOKEN_ALIASES["量子位 QbitAI"] == ("QbitAI",)
+
+
+def _attribution_dossier() -> research.ResearchDossier:
+    rows = [
+        (
+            "techmeme-axios",
+            "techmeme",
+            "Techmeme",
+            'Data-center backlash grows in Texas (Axios)',
+            'Axios : Texas officials criticized data-center expansion — details.',
+        ),
+        (
+            "qbitai",
+            "qbitai",
+            "量子位 QbitAI",
+            "A robot coffee shop operates at WRC",
+            "The robots served customers in an open environment.",
+        ),
+        (
+            "deeptech",
+            "deeptech_china",
+            "DeepTech 深科技",
+            "Multimodal intelligence may accelerate",
+            "A coding agent can run experiments and return results.",
+        ),
+        (
+            "techmeme-bloomberg",
+            "techmeme",
+            "Techmeme",
+            "A foldable iPhone is being tested (Mark Gurman/Bloomberg)",
+            "Mark Gurman / Bloomberg : Sources describe the prototype — details.",
+        ),
+    ]
+    articles = [
+        research.NewsArticle(
+            id=article_id,
+            source_id=source_id,
+            source_name=source_name,
+            language="en",
+            title=title,
+            url=f"https://example.com/{article_id}",
+            published_at="2026-08-24T00:00:00+00:00",
+            summary=summary,
+            evidence_text=summary,
+        )
+        for article_id, source_id, source_name, title, summary in rows
+    ]
+    return research.ResearchDossier(
+        "2026-08-24",
+        "now",
+        36,
+        articles,
+        articles,
+        [],
+    )
+
+
+def _attribution_script(*paragraphs: str) -> str:
+    opening = morning_opening(date(2026, 8, 24), "en")
+    closing = "Thanks for listening."
+    filler = " ".join(["evidence"] * 125)
+    return "\n".join([opening, *paragraphs, filler, closing])
+
+
+def test_contract_accepts_original_publications_carried_by_techmeme_credit():
+    dossier = _attribution_dossier()
+    script = _attribution_script(
+        "Axios reports growing data-center opposition.",
+        "QbitAI reports a robot coffee shop.",
+        "DeepTech China reports progress in coding agents.",
+        "According to Bloomberg, a foldable iPhone prototype is being tested.",
+    )
+
+    report = script_contract_report(
+        script,
+        dossier,
+        date(2026, 8, 24),
+        language="en",
+        closing_remarks="Thanks for listening.",
+    )
+
+    assert report["passed"] is True
+    assert report["matched_publication_count"] == 4
+    assert report["required_publication_count"] == 3
+    assert report["source_mentions"] == {
+        "Axios": True,
+        "量子位 QbitAI": True,
+        "DeepTech 深科技": True,
+        "Bloomberg": True,
+    }
+
+
+def test_contract_counts_one_aggregator_mention_only_once():
+    dossier = _attribution_dossier()
+    script = _attribution_script(
+        "Techmeme reports both aggregated stories.",
+        "QbitAI reports the robot coffee shop.",
+        "The coding-agent story follows without a publication attribution.",
+    )
+
+    report = script_contract_report(
+        script,
+        dossier,
+        date(2026, 8, 24),
+        language="en",
+        closing_remarks="Thanks for listening.",
+    )
+
+    assert report["passed"] is False
+    assert report["matched_publication_count"] == 2
+    assert "fewer than three selected publications are attributed aloud" in report["failures"]
 
 
 def test_daily_scheduler_uses_timezone_and_runs_once_after_desk_time():

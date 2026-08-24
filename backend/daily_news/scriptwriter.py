@@ -18,6 +18,8 @@ SOURCE_SPOKEN_ALIASES = {
     "IT之家 AI / 智能时代": ("ITHome",),
     "极客公园": ("GeekPark",),
 }
+TECHMEME_CREDIT_RE = re.compile(r"^\s*([^:\n]{2,120}?)\s+:\s+")
+TITLE_CREDIT_RE = re.compile(r"\(([^()]{2,120})\)\s*$")
 
 
 def morning_opening(edition_date: date, language: str = "en") -> str:
@@ -42,6 +44,62 @@ def _spoken_lines(value: str) -> list[str]:
         if line and not re.fullmatch(r"[A-Z][A-Z\s/&-]{3,}:?", line):
             lines.append(line)
     return lines
+
+
+def _techmeme_credit_names(title: str, summary: str) -> tuple[str, ...]:
+    """Return the byline/outlet names carried by a Techmeme story record."""
+    match = TECHMEME_CREDIT_RE.search(summary or "")
+    raw_credit = match.group(1) if match else ""
+    if not raw_credit:
+        match = TITLE_CREDIT_RE.search(title or "")
+        raw_credit = match.group(1) if match else ""
+    names: list[str] = []
+    for raw_name in re.split(r"\s*/\s*", raw_credit):
+        name = re.sub(r"\s+", " ", raw_name).strip(" \t.,:;()[]{}")
+        if (
+            3 <= len(name) <= 64
+            and re.search(r"[A-Za-z0-9]", name)
+            and name.casefold() not in {"source", "sources", "exclusive"}
+        ):
+            names.append(name)
+    return tuple(dict.fromkeys(names))
+
+
+def _script_mentions(script_folded: str, name: str) -> bool:
+    escaped = re.escape(name.casefold())
+    return re.search(rf"(?<!\w){escaped}(?!\w)", script_folded) is not None
+
+
+def _publication_attribution(article) -> tuple[str, str, dict[str, tuple[str, str]]]:
+    """Describe one expected publication and every acceptable spoken identity.
+
+    Techmeme is a discovery source whose title/summary carries the original
+    byline and outlet.  A script may truthfully cite either the aggregator or
+    that carried credit, but one spoken ``Techmeme`` mention must still count as
+    only one publication across multiple aggregated stories.
+    """
+    source_identity = f"source:{article.source_id or article.source_name.casefold()}"
+    source_aliases = (article.source_name, *SOURCE_SPOKEN_ALIASES.get(article.source_name, ()))
+    accepted = {
+        alias: (source_identity, article.source_name)
+        for alias in source_aliases
+        if alias
+    }
+    if article.source_id != "techmeme":
+        return source_identity, article.source_name, accepted
+
+    credit_names = _techmeme_credit_names(article.title, article.summary)
+    if not credit_names:
+        return source_identity, article.source_name, accepted
+    outlet = credit_names[-1]
+    publication_identity = f"publication:{outlet.casefold()}"
+    accepted.update(
+        {
+            alias: (publication_identity, outlet)
+            for alias in credit_names
+        }
+    )
+    return publication_identity, outlet, accepted
 
 
 def enforce_script_contract(
@@ -287,11 +345,30 @@ def script_contract_report(
     closing_remarks: str,
 ) -> dict:
     opening = morning_opening(edition_date, language)
-    source_mentions = {}
     script_folded = script.casefold()
+    expected_publications: dict[str, str] = {}
+    accepted_attributions: dict[str, dict[str, tuple[str, str]]] = {}
     for article in dossier.selected:
-        names = (article.source_name, *SOURCE_SPOKEN_ALIASES.get(article.source_name, ()))
-        source_mentions[article.source_name] = any(name.casefold() in script_folded for name in names)
+        expected_identity, expected_label, accepted = _publication_attribution(article)
+        expected_publications[expected_identity] = expected_label
+        accepted_attributions[article.id] = accepted
+
+    matched_publications: dict[str, str] = {}
+    story_source_mentions: dict[str, list[str]] = {}
+    for article in dossier.selected:
+        matched_names: list[str] = []
+        for alias, (identity, label) in accepted_attributions[article.id].items():
+            if _script_mentions(script_folded, alias):
+                matched_names.append(alias)
+                matched_publications[identity] = label
+        story_source_mentions[article.id] = matched_names
+
+    source_mentions = {
+        label: identity in matched_publications
+        for identity, label in expected_publications.items()
+    }
+    for identity, label in matched_publications.items():
+        source_mentions.setdefault(label, True)
     failures: list[str] = []
     if not script.startswith(opening):
         failures.append("fixed dated opening is missing or modified")
@@ -301,7 +378,8 @@ def script_contract_report(
         failures.append("English script contains CJK text")
     if len(script.split()) < 120:
         failures.append("script is implausibly short")
-    if sum(source_mentions.values()) < min(3, len(source_mentions)):
+    required_publications = min(3, len(expected_publications))
+    if len(matched_publications) < required_publications:
         failures.append("fewer than three selected publications are attributed aloud")
     return {
         "passed": not failures,
@@ -309,6 +387,9 @@ def script_contract_report(
         "opening": opening,
         "closing": closing_remarks,
         "source_mentions": source_mentions,
+        "story_source_mentions": story_source_mentions,
+        "matched_publication_count": len(matched_publications),
+        "required_publication_count": required_publications,
         "script_sha256": __import__("hashlib").sha256(script.encode("utf-8")).hexdigest(),
         "dossier_selected_ids": [article.id for article in dossier.selected],
     }
