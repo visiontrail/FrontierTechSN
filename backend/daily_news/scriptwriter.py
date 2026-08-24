@@ -128,7 +128,20 @@ def enforce_script_contract(
     return final
 
 
-def _minimalize_unsupported_paragraphs(script: str, issues: list[dict]) -> str:
+def _preferred_spoken_source(article) -> str:
+    """Choose the evidence-bound source name suitable for a spoken prefix."""
+    _identity, expected_label, _accepted = _publication_attribution(article)
+    if article.source_id == "techmeme":
+        return expected_label
+    aliases = SOURCE_SPOKEN_ALIASES.get(article.source_name, ())
+    return aliases[0] if aliases else article.source_name
+
+
+def _minimalize_unsupported_paragraphs(
+    script: str,
+    issues: list[dict],
+    dossier: ResearchDossier | None = None,
+) -> str:
     """Make repeated D-code corrections deterministic after the LLM rewrite."""
     story_numbers = {
         int(number)
@@ -142,7 +155,16 @@ def _minimalize_unsupported_paragraphs(script: str, issues: list[dict]) -> str:
         if not 1 <= story_number < len(lines) - 1:
             continue
         sentences = re.split(r"(?<=[.!?])\s+", lines[story_number], maxsplit=1)
-        lines[story_number] = sentences[0].strip()
+        lead = sentences[0].strip()
+        if dossier is not None and story_number <= len(dossier.selected):
+            article = dossier.selected[story_number - 1]
+            _identity, _label, accepted = _publication_attribution(article)
+            if not any(
+                _script_mentions(lead.casefold(), alias)
+                for alias in accepted
+            ):
+                lead = f"According to {_preferred_spoken_source(article)}, {lead}"
+        lines[story_number] = lead
     return "\n".join(lines)
 
 
@@ -260,7 +282,7 @@ async def revise_daily_script(
     # blocking an otherwise deterministic edit. Names, numbers, attribution,
     # contradictions, and missing coverage still require the writing model.
     if _issues_are_unsupported_only(issues):
-        revised = _minimalize_unsupported_paragraphs(script, issues)
+        revised = _minimalize_unsupported_paragraphs(script, issues, dossier)
         if revised != script:
             if log:
                 log("Daily news audit correction: applied deterministic D-only evidence trim")
@@ -327,7 +349,7 @@ Exact closing: {closing_remarks}
         closing=closing_remarks,
         language=language,
     )
-    revised = _minimalize_unsupported_paragraphs(revised, issues)
+    revised = _minimalize_unsupported_paragraphs(revised, issues, dossier)
     return enforce_script_contract(
         revised,
         opening=opening,

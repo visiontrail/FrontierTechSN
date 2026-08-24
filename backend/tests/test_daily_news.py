@@ -304,6 +304,39 @@ def test_contract_counts_one_aggregator_mention_only_once():
     assert "fewer than three selected publications are attributed aloud" in report["failures"]
 
 
+def test_d_only_trim_preserves_every_selected_publication_attribution():
+    dossier = _attribution_dossier()
+    script = _attribution_script(
+        "Communities are resisting data-center expansion. Axios reports the dispute.",
+        "A robot coffee shop operated in an open crowd. QbitAI documented the trial.",
+        "Coding agents can run experiments. DeepTech China reports the workflow.",
+        "A foldable phone prototype is being tested. Bloomberg reports the details.",
+    )
+    issues = [
+        {
+            "claim": f"Web audit codes D for story {story_number}",
+            "evidence_story_numbers": [story_number],
+        }
+        for story_number in range(1, 5)
+    ]
+
+    revised = _minimalize_unsupported_paragraphs(script, issues, dossier)
+    report = script_contract_report(
+        revised,
+        dossier,
+        date(2026, 8, 24),
+        language="en",
+        closing_remarks="Thanks for listening.",
+    )
+
+    assert "According to Axios, Communities are resisting data-center expansion." in revised
+    assert "According to QbitAI, A robot coffee shop operated in an open crowd." in revised
+    assert "According to DeepTech China, Coding agents can run experiments." in revised
+    assert "According to Bloomberg, A foldable phone prototype is being tested." in revised
+    assert report["passed"] is True
+    assert report["matched_publication_count"] == 4
+
+
 def test_daily_scheduler_uses_timezone_and_runs_once_after_desk_time():
     settings = DailyAutomationSettings(enabled=True, generation_time="05:30", timezone="Asia/Singapore")
     before = datetime(2026, 8, 17, 20, 0, tzinfo=timezone.utc)  # 04:00 SGT
