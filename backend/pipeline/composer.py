@@ -562,6 +562,29 @@ def _promote_render_candidate(
     return final_video_path
 
 
+def _promote_quality_gated_candidate(
+    staged_video_path: Path,
+    staged_report_path: Path,
+    output_dir: Path,
+    video_sha256: str,
+    quality_report: dict,
+) -> Path:
+    """Promote only a candidate whose final persisted quality report passed."""
+    if quality_report.get("passed") is not True:
+        details = [str(value) for value in quality_report.get("warnings") or []]
+        raise RuntimeError(
+            "Rendered candidate failed the final A/V quality gate and was not "
+            "promoted"
+            + (f": {'; '.join(details)}" if details else "")
+        )
+    return _promote_render_candidate(
+        staged_video_path,
+        staged_report_path,
+        output_dir,
+        video_sha256,
+    )
+
+
 def _detect_silence_boundaries(wav_path: str, log: LogCallback | None = None) -> list[float]:
     command = [
         "ffmpeg", "-i", wav_path,
@@ -661,7 +684,7 @@ def _quality_warnings(
     visual_grounding: dict,
     multimodal: dict | None = None,
 ) -> list[str]:
-    """Summarize advisory A/V findings for the final delivery report."""
+    """Summarize A/V quality-gate failures for the final delivery report."""
     warnings: list[str] = []
     if not alignment.get("passed"):
         detail = "; ".join(
@@ -720,23 +743,19 @@ def _finalize_quality_report(
     *,
     multimodal_enabled: bool,
 ) -> dict:
-    """Mark quality truthfully without turning an advisory miss into no delivery."""
-    multimodal_passed = (
-        bool(multimodal.get("passed")) if multimodal_enabled else True
-    )
+    """Finalize the strict quality gate before candidate promotion."""
+    multimodal_passed = multimodal.get("passed") is True if multimodal_enabled else True
     quality_passed = (
-        bool(alignment.get("passed"))
-        and bool(visual_grounding.get("passed"))
+        alignment.get("passed") is True
+        and visual_grounding.get("passed") is True
         and multimodal_passed
     )
     warnings = _quality_warnings(alignment, visual_grounding, multimodal)
     report.update(
         {
             "passed": quality_passed,
-            "quality_status": "passed" if quality_passed else "warning",
-            "delivery_status": (
-                "completed_with_warnings" if warnings else "completed"
-            ),
+            "quality_status": "passed" if quality_passed else "failed",
+            "delivery_status": "completed" if quality_passed else "blocked",
             "warnings": warnings,
             "multimodal": multimodal,
         }
@@ -1236,18 +1255,19 @@ async def compose_video(
         )
     elif config.AV_SYNC_GEMINI_REVIEW_ENABLED:
         emit(
-            "A/V sync warning: Gemini review did not fully pass after retries; "
-            "video delivery continues and details are recorded in av_sync_report.json"
+            "A/V quality gate failed: Gemini review did not fully pass after retries; "
+            "the rendered candidate and av_sync_report.next.json remain for diagnosis"
         )
-    if quality_report["warnings"]:
+    if not quality_report["passed"]:
         emit(
-            f"Video completed with {len(quality_report['warnings'])} A/V quality "
-            "warning(s); see av_sync_report.json"
+            f"Final A/V quality gate blocked promotion with "
+            f"{len(quality_report['warnings'])} failure(s)"
         )
-    video_path = _promote_render_candidate(
+    video_path = _promote_quality_gated_candidate(
         staged_video_path,
         quality_report_path,
         output_dir_path,
         rendered_video_sha256,
+        quality_report,
     )
     return str(video_path)

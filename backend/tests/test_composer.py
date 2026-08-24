@@ -84,6 +84,26 @@ def test_mount_list_starts_with_content_and_has_no_title_card():
     ]
 
 
+def test_kit_plans_preserve_the_fifth_narrative_item():
+    items = [
+        "Summarize annual reports across multiple documents",
+        "Search and compare company operational data online",
+        "Control a desktop browser for retrieval and document generation",
+        "Build English-language presentations from data",
+        "Generate marketing posters from reference images",
+        "A sixth unsupported task",
+    ]
+
+    plans = composer._kit_plans(
+        [{"id": "scene-11", "archetype": "list", "items": items}],
+        [{"id": "scene-11", "duration": 12.0}],
+        composer.scene_kit.DEFAULT_THEME,
+    )
+
+    assert plans[0].items == tuple(items[: composer.scene_kit.MAX_NARRATIVE_ITEMS])
+    assert plans[0].items[-1] == "Generate marketing posters from reference images"
+
+
 def test_cached_scene_plans_require_exact_current_checkpoint_and_strip_placements(tmp_path):
     board = _cache_board()
     _write_cache(tmp_path, board)
@@ -359,7 +379,7 @@ def test_clean_quality_report_has_no_warnings():
     ) == []
 
 
-def test_failed_review_completes_delivery_with_warning():
+def test_failed_review_blocks_delivery():
     report = composer._finalize_quality_report(
         {},
         {"passed": True},
@@ -375,9 +395,43 @@ def test_failed_review_completes_delivery_with_warning():
     )
 
     assert report["passed"] is False
-    assert report["quality_status"] == "warning"
-    assert report["delivery_status"] == "completed_with_warnings"
+    assert report["quality_status"] == "failed"
+    assert report["delivery_status"] == "blocked"
     assert "81.42" in report["warnings"][0]
+
+
+def test_failed_quality_report_never_promotes_and_preserves_candidate(tmp_path, monkeypatch):
+    previous = tmp_path / "video.mp4"
+    staged = tmp_path / "video.next.mp4"
+    staged_report = tmp_path / "av_sync_report.next.json"
+    previous.write_bytes(b"previous completed cut")
+    staged.write_bytes(b"new rejected candidate")
+    staged_report.write_text('{"passed": false}', encoding="utf-8")
+    promoted = False
+
+    def should_not_promote(*_args, **_kwargs):
+        nonlocal promoted
+        promoted = True
+        raise AssertionError("quality-failed candidate was promoted")
+
+    monkeypatch.setattr(composer, "_promote_render_candidate", should_not_promote)
+
+    with pytest.raises(RuntimeError, match="failed the final A/V quality gate"):
+        composer._promote_quality_gated_candidate(
+            staged,
+            staged_report,
+            tmp_path,
+            composer._sha256_path(staged),
+            {
+                "passed": False,
+                "warnings": ["Gemini rendered-frame review average stayed below 82"],
+            },
+        )
+
+    assert promoted is False
+    assert previous.read_bytes() == b"previous completed cut"
+    assert staged.read_bytes() == b"new rejected candidate"
+    assert staged_report.read_text(encoding="utf-8") == '{"passed": false}'
 
 
 def test_portrait_render_command_uses_task_resolution(tmp_path):

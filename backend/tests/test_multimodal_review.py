@@ -36,6 +36,33 @@ def _frames(root: Path, scenes: list[dict]) -> list[dict]:
     return frames
 
 
+def _opencli_result(payload: dict) -> OpenCLIResult:
+    return OpenCLIResult(
+        args=(),
+        returncode=0,
+        stdout=json.dumps([{"response": json.dumps(payload)}]),
+        stderr="",
+    )
+
+
+def _matching_payload(scenes: list[dict], score: int) -> dict:
+    return {
+        "image_received": True,
+        "reviews": [
+            {
+                "id": scene["id"],
+                "score": score,
+                "verdict": "match",
+                "visual_summary": f"Visible subject for {scene['id']}",
+                "alignment_reason": "The visible subject matches the narration.",
+                "issues": [],
+                "suggested_visual": "",
+            }
+            for scene in scenes
+        ],
+    }
+
+
 def test_contact_sheet_labels_and_compacts_frames(tmp_path: Path):
     scenes = [
         _scene("scene-01", 0, "Gold reaches a record price."),
@@ -202,6 +229,10 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(report["passed"])
             self.assertEqual(report["average_score"], 90)
+            self.assertFalse(report["calibration"]["attempted"])
+            self.assertEqual(report["calibration"]["initial_average_score"], 90)
+            self.assertEqual(report["calibration"]["match_floor"], 82)
+            self.assertEqual(opencli.await_count, 1)
             args = opencli.await_args.args[0]
             self.assertIn("--file", args)
             self.assertIn("foreground", args)
@@ -260,6 +291,154 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(report["passed"])
             self.assertEqual(opencli.await_count, 2)
             self.assertEqual(report["batches"][0]["attempts"], 2)
+            self.assertFalse(report["calibration"]["attempted"])
+
+    async def test_real_partial_match_never_enters_aggregate_calibration(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenes = [
+                _scene("scene-01", 0, "Gold reaches a record price."),
+                _scene("scene-02", 8, "Central banks increase reserves."),
+            ]
+            frames = _frames(root, scenes)
+            payload = {
+                "image_received": True,
+                "reviews": [
+                    {
+                        "id": "scene-01",
+                        "score": 75,
+                        "verdict": "match",
+                        "visual_summary": "Gold bars and a price chart.",
+                        "alignment_reason": "Direct match.",
+                        "issues": [],
+                    },
+                    {
+                        "id": "scene-02",
+                        "score": 65,
+                        "verdict": "partial",
+                        "visual_summary": "A generic bank building.",
+                        "alignment_reason": "The reserve increase is not visible.",
+                        "issues": ["The reserve increase is not visible."],
+                        "suggested_visual": "Show a reserve ledger rising beside the bank.",
+                    },
+                ],
+            }
+            opencli = AsyncMock(return_value=_opencli_result(payload))
+            with (
+                patch.object(
+                    multimodal_review,
+                    "extract_scene_frames",
+                    AsyncMock(return_value=frames),
+                ),
+                patch.object(multimodal_review, "run_opencli", opencli),
+                patch.object(config, "AV_SYNC_GEMINI_BATCH_SIZE", 8),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_SCENE_SCORE", 70),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
+                patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
+                patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+            ):
+                report = await multimodal_review.review_video(
+                    root / "video.mp4",
+                    {"title": "Gold", "scenes": scenes},
+                    root,
+                )
+
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["average_score"], 70)
+            self.assertEqual(report["failed_scene_ids"], ["scene-02"])
+            self.assertFalse(report["calibration"]["attempted"])
+            self.assertEqual(opencli.await_count, 1)
+
+    async def test_clean_low_average_gets_one_strict_calibration_round_and_passes(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
+            frames = _frames(root, scenes)
+            opencli = AsyncMock(
+                side_effect=[
+                    _opencli_result(_matching_payload(scenes, 80)),
+                    _opencli_result(_matching_payload(scenes, 88)),
+                ]
+            )
+            with (
+                patch.object(
+                    multimodal_review,
+                    "extract_scene_frames",
+                    AsyncMock(return_value=frames),
+                ),
+                patch.object(multimodal_review, "run_opencli", opencli),
+                patch.object(config, "AV_SYNC_GEMINI_BATCH_SIZE", 8),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_SCENE_SCORE", 70),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
+                patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
+                patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+            ):
+                report = await multimodal_review.review_video(
+                    root / "video.mp4",
+                    {"title": "Gold", "scenes": scenes},
+                    root,
+                )
+
+            self.assertTrue(report["passed"])
+            self.assertEqual(report["average_score"], 88)
+            self.assertEqual(opencli.await_count, 2)
+            calibration = report["calibration"]
+            self.assertTrue(calibration["attempted"])
+            self.assertEqual(calibration["initial_average_score"], 80)
+            self.assertEqual(calibration["match_floor"], 82)
+            self.assertEqual(len(calibration["batches"]), 1)
+            self.assertTrue(calibration["batches"][0]["contract_valid"])
+            initial_command = opencli.await_args_list[0].args[0]
+            calibration_command = opencli.await_args_list[1].args[0]
+            self.assertEqual(
+                initial_command[initial_command.index("--file") + 1],
+                calibration_command[calibration_command.index("--file") + 1],
+            )
+            self.assertIn("match requires score 70-100", initial_command[2])
+            self.assertIn("one aggregate-score calibration pass", calibration_command[2])
+            self.assertIn("match requires score 82-100", calibration_command[2])
+
+    async def test_low_calibration_match_below_strict_floor_is_invalid_and_fails(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
+            frames = _frames(root, scenes)
+            low_match = _matching_payload(scenes, 80)
+            opencli = AsyncMock(
+                side_effect=[
+                    _opencli_result(low_match),
+                    _opencli_result(low_match),
+                ]
+            )
+            with (
+                patch.object(
+                    multimodal_review,
+                    "extract_scene_frames",
+                    AsyncMock(return_value=frames),
+                ),
+                patch.object(multimodal_review, "run_opencli", opencli),
+                patch.object(config, "AV_SYNC_GEMINI_BATCH_SIZE", 8),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_SCENE_SCORE", 70),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
+                patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
+                patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+            ):
+                report = await multimodal_review.review_video(
+                    root / "video.mp4",
+                    {"title": "Gold", "scenes": scenes},
+                    root,
+                )
+
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["average_score"], 80)
+            self.assertEqual(report["failed_scene_ids"], ["scene-01"])
+            self.assertEqual(opencli.await_count, 2)
+            calibration = report["calibration"]
+            self.assertTrue(calibration["attempted"])
+            self.assertFalse(calibration["batches"][0]["contract_valid"])
+            self.assertEqual(calibration["batches"][0]["match_floor"], 82)
+            self.assertIn("violated the requested review rubric", calibration["errors"][0])
+            self.assertIn("calibration batch 1", report["errors"][0])
 
     async def test_low_scene_score_rejects_video_even_when_average_is_high(self):
         with TemporaryDirectory() as temporary:
