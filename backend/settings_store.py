@@ -28,6 +28,7 @@ from typing import Any, Callable, Iterable, Mapping
 _STORE_VERSION = 1
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off", ""}
+_RETIRED_KEYS = {"ORPHEUS_TTS_SPEED_PERCENT"}
 
 
 class SettingsError(ValueError):
@@ -377,12 +378,6 @@ SPECS: tuple[SettingSpec, ...] = (
         description="Sent only as X-API-Key to the configured Orpheus service.",
     ),
     SettingSpec(
-        "ORPHEUS_TTS_SPEED_PERCENT", "tts", "Orpheus speed", "int", unit="%",
-        minimum=50, maximum=200,
-        description="Playback speed sent to Orpheus (100% = natural speed). The "
-                    "finished WAV is measured again before video timing is built.",
-    ),
-    SettingSpec(
         "ORPHEUS_TTS_MAX_TOKENS", "tts", "Orpheus max tokens", "int",
         minimum=28, maximum=16384,
         description="Maximum audio-token ceiling. Each short utterance gets a "
@@ -729,6 +724,14 @@ def _read_store() -> dict[str, Any]:
     values = payload.get("values")
     if not isinstance(values, dict):
         return {}
+    # Voice speed used to be an Admin knob and could be persisted at values such
+    # as 140%.  It is now an immutable natural-speed contract: prune the retired
+    # override rather than merely hiding it, so it cannot return after restart.
+    if any(key in values for key in _RETIRED_KEYS):
+        values = {
+            key: value for key, value in values.items() if key not in _RETIRED_KEYS
+        }
+        _write_store(values)
     # TTS_CHUNK_WORDS used to drive every provider. Preserve an existing Admin
     # override as the VibeVoice-only limit after the model-specific migration.
     if (

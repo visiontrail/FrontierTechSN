@@ -41,6 +41,8 @@ ORPHEUS_TOKEN_LIMIT_RATIO = 0.97
 ORPHEUS_MIN_EXACT_ASR_COVERAGE = 1.0
 ORPHEUS_MIN_ASR_WORD_RATIO = 1.0
 ORPHEUS_MAX_ASR_WORD_RATIO = 1.0
+NARRATION_PACING_POLICY = "natural_speech_visuals_follow_audio"
+NARRATION_SYNTHESIS_SPEED_RATIO = 1.0
 
 # VibeVoice reads some technology names as invented words instead of familiar
 # initialisms.  These provider-only spellings improve pronunciation while the
@@ -1172,12 +1174,15 @@ def _write_tts_manifest(
                 "audio_sha256": _file_sha256(path),
                 "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "word_count": _spoken_word_count(text),
+                "synthesis_speed_ratio": NARRATION_SYNTHESIS_SPEED_RATIO,
                 **asdict(info),
             }
         )
     payload = {
         "model": model,
         "deterministic_decoding": deterministic,
+        "pacing_policy": NARRATION_PACING_POLICY,
+        "synthesis_speed_ratio": NARRATION_SYNTHESIS_SPEED_RATIO,
         "source_text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
         "source_word_count": _spoken_word_count(source_text),
         "chunk_count": len(parts),
@@ -1905,7 +1910,9 @@ async def _generate_orpheus(
                 "min_p": 0.05,
                 "pre_buffer_size": 1.5,
                 "n_threads": config.ORPHEUS_TTS_N_THREADS,
-                "speed": config.ORPHEUS_TTS_SPEED_PERCENT / 100,
+                # Do not retime narration to hit a requested video length.  The
+                # measured natural-speed WAV drives storyboard/scene duration.
+                "speed": NARRATION_SYNTHESIS_SPEED_RATIO,
                 "response_format": "wav",
             }
             try:
@@ -2054,9 +2061,9 @@ async def _generate_orpheus(
                         if verify_text
                         else request_token_budget
                         / ORPHEUS_AUDIO_TOKENS_PER_SECOND
-                        / (config.ORPHEUS_TTS_SPEED_PERCENT / 100)
+                        / NARRATION_SYNTHESIS_SPEED_RATIO
                     ),
-                    speed=config.ORPHEUS_TTS_SPEED_PERCENT / 100,
+                    speed=NARRATION_SYNTHESIS_SPEED_RATIO,
                 )
             except TtsIntegrityError as exc:
                 raise TtsIntegrityError(str(exc), part_key=input_path.name) from exc

@@ -290,6 +290,28 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(config.VIBEVOICE_TTS_CHUNK_WORDS, 275)
         self.assertTrue(self.field("VIBEVOICE_TTS_CHUNK_WORDS")["is_overridden"])
 
+    def test_retired_orpheus_speed_is_pruned_and_cannot_change_narration(self):
+        self.store.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "values": {
+                        "ORPHEUS_TTS_SPEED_PERCENT": 140,
+                        "RENDER_QUALITY": "high",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        settings_store.apply_saved()
+
+        self.assertEqual(config.ORPHEUS_TTS_SPEED_PERCENT, 100)
+        self.assertNotIn("ORPHEUS_TTS_SPEED_PERCENT", self.stored())
+        self.assertEqual(self.stored()["RENDER_QUALITY"], "high")
+        with self.assertRaises(AssertionError):
+            self.field("ORPHEUS_TTS_SPEED_PERCENT")
+
     def test_corrupt_store_file_falls_back_to_defaults(self):
         self.store.write_text("{not json", encoding="utf-8")
         settings_store.apply_saved()

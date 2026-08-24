@@ -219,7 +219,10 @@ TTS_DEFAULT_VOICE_2 = os.getenv("TTS_DEFAULT_VOICE_2", "Alice")
 # managed as a masked secret by Admin -> System (or seeded through .env).
 ORPHEUS_TTS_URL = os.getenv("ORPHEUS_TTS_URL", "http://10.60.11.3:8088").rstrip("/")
 ORPHEUS_TTS_API_KEY = os.getenv("ORPHEUS_TTS_API_KEY", "")
-ORPHEUS_TTS_SPEED_PERCENT = int(os.getenv("ORPHEUS_TTS_SPEED_PERCENT", "100"))
+# Narration is the timing source of truth.  Keep synthesis at the provider's
+# natural speed and make scenes follow the measured WAV; accepting a saved/env
+# speed override would hide a script-duration mismatch by retiming the voice.
+ORPHEUS_TTS_SPEED_PERCENT = 100
 # 16,384 is the current external service maximum. It is only a ceiling: the
 # client derives a much smaller request budget for each short utterance so a
 # bad generation cannot burn through minutes of unrelated audio tokens.

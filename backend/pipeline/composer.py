@@ -370,6 +370,8 @@ def _narration_manifest_failures(
 ) -> list[str]:
     """Recheck the generated narration's source/audio contract before render."""
     from backend.pipeline.tts import (
+        NARRATION_PACING_POLICY,
+        NARRATION_SYNTHESIS_SPEED_RATIO,
         _expand_vibevoice_pronunciations,
         _file_sha256,
         _strip_speaker_labels,
@@ -385,6 +387,22 @@ def _narration_manifest_failures(
         return ["narration integrity manifest must be a JSON object"]
 
     failures: list[str] = []
+    if manifest.get("pacing_policy") != NARRATION_PACING_POLICY:
+        failures.append(
+            "the narration manifest does not prove the natural-speech, "
+            "visuals-follow-audio pacing policy"
+        )
+    speed_ratio = manifest.get("synthesis_speed_ratio")
+    if (
+        isinstance(speed_ratio, bool)
+        or not isinstance(speed_ratio, (int, float))
+        or not math.isfinite(float(speed_ratio))
+        or float(speed_ratio) != NARRATION_SYNTHESIS_SPEED_RATIO
+    ):
+        failures.append(
+            "the narration manifest does not prove natural 1.0x synthesis speed "
+            f"(recorded {speed_ratio!r})"
+        )
     manifest_model = str(manifest.get("model") or "")
     effective_model = tts_model or config.TTS_DEFAULT_MODEL
     if manifest_model and manifest_model != effective_model:
@@ -825,6 +843,7 @@ async def compose_video(
         )
     if tts_model == "orpheus-en":
         emit("Narration integrity: Orpheus manifest verifies 100% of source utterances")
+    emit("Narration pacing: natural 1.0x speech locked; scene timing follows measured audio")
     audio_duration = sb.get_audio_duration(audio_path)
     word_transcript, transcription = await av_sync.ensure_word_transcript(
         audio_path,
