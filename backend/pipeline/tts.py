@@ -120,6 +120,11 @@ CALENDAR_ORDINAL_RE = re.compile(r"([0-9]{1,2})(?:st|nd|rd|th)")
 # deliberately narrow; near-homophones such as ``feed``/``feet`` must still fail.
 ACOUSTIC_EQUIVALENTS = {
     "feat": "feet",
+    # The common noun "night" and the title/name spelling "Knight" are exact
+    # homophones. A live Morning Desk utterance contained every requested word
+    # and both edges, but Whisper capitalized the final word as the latter.
+    # Canonicalize only that spelling; omissions and near-homophones still fail.
+    "knight": "night",
     # Possessive "its" and the contraction "it's" are exact homophones.
     # Whisper uses the contraction spelling for either meaning, so spelling
     # cannot be used as acoustic evidence that the narration is wrong.

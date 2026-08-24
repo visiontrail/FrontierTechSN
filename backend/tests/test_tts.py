@@ -1741,6 +1741,24 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tts._orpheus_transcript_report(expected, feat_words)["verified"])
         self.assertFalse(tts._orpheus_transcript_report(expected, feed_words)["verified"])
 
+    def test_orpheus_transcript_accepts_night_knight_homophone_only(self):
+        expected = "The headline question of whether night."
+
+        def report(final_word: str) -> dict:
+            observed = f"The headline question of whether {final_word}".split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        accepted = report("Knight")
+
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report("light")["verified"])
+        self.assertFalse(report("")["verified"])
+
     def test_orpheus_transcript_accepts_its_contraction_homophone(self):
         expected = "The things we admire in a culture, its art."
         observed = "The things we admire in a culture it's art".split()
