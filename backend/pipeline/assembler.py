@@ -7,7 +7,7 @@ scene file costs one bad-looking scene instead of a blank 12-minute video.
 
 Everything the earlier renders got wrong is enforced here:
 
-* the root composition carries ``data-start="0"`` and a registered timeline;
+* the root composition carries ``data-start="0"`` and deterministic adapter state;
 * every timed element has ``class="clip"``, an ``id``, and a track index;
 * clips on one track never overlap (each layer gets its own track);
 * fonts and GSAP are local files, so nothing depends on the network at capture.
@@ -38,6 +38,7 @@ TRACK_SCENE_B = 1
 TRACK_CAPTION = 4
 TRACK_CHROME = 5
 TRACK_CHARACTER = 6
+TRACK_PROGRESS = 7
 
 LINT_TIMEOUT = 180
 # `inspect` drives the composition in headless Chrome and samples the timeline,
@@ -294,8 +295,18 @@ def _spine_css(theme: scene_kit.Theme, frame: FrameSpec = LANDSCAPE) -> str:
         background:rgba(128,128,128,.18);
       }}
       .progress-fill {{
-        height:100%; width:100%; transform-origin:0 50%;
+        position:absolute; left:0; right:0; bottom:0; height:6px; width:100%;
+        pointer-events:none; z-index:41; transform-origin:0 50%;
         background:linear-gradient(90deg, {progress_from}, {progress_to});
+        animation-name:timeline-progress;
+        animation-timing-function:linear;
+        animation-iteration-count:1;
+        animation-fill-mode:both;
+        animation-play-state:paused;
+      }}
+      @keyframes timeline-progress {{
+        from {{ transform:scaleX(0); }}
+        to {{ transform:scaleX(1); }}
       }}
       .character {{ position:absolute; right:64px; bottom:132px; width:210px; height:210px; z-index:30;
         pointer-events:none; }}
@@ -378,8 +389,10 @@ def build_spine(
 
 {character_html}      <div id="chrome" class="clip chrome" data-start="0" data-duration="{total}"
            data-track-index="{TRACK_CHROME}">
-{brand_html}        <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+{brand_html}        <div class="progress-track"></div>
       </div>
+      <div id="progress-fill" class="clip progress-fill" data-start="0" data-duration="{total}"
+           data-track-index="{TRACK_PROGRESS}" style="animation-duration:{total}s"></div>
 
       <audio id="narration" src="{_esc(audio_src)}" data-start="{content_start}"
              data-duration="{audio_duration}" data-track-index="9" data-volume="1"></audio>
@@ -388,12 +401,9 @@ def build_spine(
     <script src="vendor/gsap.min.js"></script>
     <script>
       window.__timelines = window.__timelines || {{}};
-      (function () {{
-        const tl = gsap.timeline({{ paused: true }});
-        tl.fromTo("#progress-fill", {{ scaleX: 0 }}, {{ scaleX: 1, duration: {total}, ease: "none" }}, 0);
-        window.__timelines["root"] = tl;
-      }})();
-    </script>{character_script}
+      window.__timelines["root"] = gsap.timeline({{ paused: true }});
+    </script>
+{character_script}
   </body>
 </html>
 """

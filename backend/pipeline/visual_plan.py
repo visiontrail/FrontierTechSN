@@ -18,6 +18,7 @@ import logging
 import math
 import re
 from collections.abc import Callable
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from backend import config
@@ -53,6 +54,17 @@ _NEGATIVE_ANALYSIS = re.compile(
     re.IGNORECASE,
 )
 _FOOTAGE_CREDIT_LIMIT = 90
+_SCALED_NUMBER_RE = re.compile(
+    r"(?P<number>\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+    r"(?P<unit>thousand|million|billion|trillion|[KMBT])\b",
+    re.IGNORECASE,
+)
+_SCALE_NAMES = {
+    "k": "thousand",
+    "m": "million",
+    "b": "billion",
+    "t": "trillion",
+}
 _MODEL_TEXT_FIELDS = (
     "archetype",
     "kicker",
@@ -205,6 +217,47 @@ def _model_panel(raw: dict, key: str) -> dict[str, str]:
     }
 
 
+def _restore_scaled_number_precision(value: str, narration: str) -> str:
+    """Restore source decimals when a model rounded a scaled on-screen fact.
+
+    The replacement is deliberately narrow: the abbreviated/full scale must
+    match and exactly one more-precise narration value must round to the model
+    value. This recovers ``2.751 billion`` from ``2.75B`` without guessing when
+    a scene contains multiple plausible figures.
+    """
+    source_numbers: dict[str, list[tuple[str, Decimal, int]]] = {}
+    for match in _SCALED_NUMBER_RE.finditer(narration or ""):
+        literal = match.group("number")
+        unit = _SCALE_NAMES.get(match.group("unit").casefold(), match.group("unit").casefold())
+        try:
+            number = Decimal(literal.replace(",", ""))
+        except InvalidOperation:
+            continue
+        decimals = len(literal.rsplit(".", 1)[1]) if "." in literal else 0
+        source_numbers.setdefault(unit, []).append((literal, number, decimals))
+
+    def restore(match: re.Match[str]) -> str:
+        literal = match.group("number")
+        unit = _SCALE_NAMES.get(match.group("unit").casefold(), match.group("unit").casefold())
+        try:
+            number = Decimal(literal.replace(",", ""))
+        except InvalidOperation:
+            return match.group(0)
+        decimals = len(literal.rsplit(".", 1)[1]) if "." in literal else 0
+        quantum = Decimal(1).scaleb(-decimals)
+        matches = [
+            source_literal
+            for source_literal, source_number, source_decimals in source_numbers.get(unit, [])
+            if source_decimals > decimals
+            and source_number.quantize(quantum, rounding=ROUND_HALF_UP) == number
+        ]
+        if len(matches) != 1:
+            return match.group(0)
+        return match.group(0).replace(literal, matches[0], 1)
+
+    return _SCALED_NUMBER_RE.sub(restore, value or "")
+
+
 def _normalise(raw: dict, scene: dict, index: int) -> dict:
     """Coerce one model entry into an explicit, finite scene-kit allowlist."""
     raw_items = raw.get("items")
@@ -221,6 +274,9 @@ def _normalise(raw: dict, scene: dict, index: int) -> dict:
             "left": _model_panel(raw, "left"),
             "right": _model_panel(raw, "right"),
         }
+    )
+    plan["stat"] = _restore_scaled_number_precision(
+        plan.get("stat", ""), str(scene.get("text") or "")
     )
 
     archetype = str(plan.get("archetype") or "").lower()
@@ -248,7 +304,9 @@ def _normalise(raw: dict, scene: dict, index: int) -> dict:
     plan["headline"] = str(plan["headline"])[:110]
     plan["body"] = str(plan.get("body") or "")[:260]
     plan["kicker"] = str(plan["kicker"])[:30]
-    plan["items"] = [item[:90] for item in plan["items"]][:4]
+    plan["items"] = [item[:90] for item in plan["items"]][
+        : scene_kit.MAX_NARRATIVE_ITEMS
+    ]
     for key, limit in (
         ("quote", 260),
         ("attribution", 90),

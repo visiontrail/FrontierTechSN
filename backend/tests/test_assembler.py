@@ -29,7 +29,22 @@ def test_spine_declares_the_runtime_contract_the_old_template_was_missing():
     root = re.search(r'<div id="root"[^>]*>', html).group(0)
     assert 'data-start="0"' in root
     assert 'data-composition-id="root"' in root
-    assert re.search(r'window\.__timelines\[\s*"root"\s*\]\s*=', html)
+    assert "animation-name:timeline-progress" in html
+    assert "animation-duration:70.0s" in html
+    assert "animation-timing-function:linear" in html
+    assert "animation-iteration-count:1" in html
+    assert "animation-fill-mode:both" in html
+    assert "animation-play-state:paused" in html
+    assert "@keyframes timeline-progress" in html
+    assert "from { transform:scaleX(0); }" in html
+    assert "to { transform:scaleX(1); }" in html
+    progress = re.search(r'<div id="progress-fill"[^>]*>', html).group(0)
+    assert 'class="clip progress-fill"' in progress
+    assert 'data-start="0"' in progress
+    assert 'data-duration="70.0"' in progress
+    assert f'data-track-index="{assembler.TRACK_PROGRESS}"' in progress
+    assert 'tl.fromTo("#progress-fill"' not in html
+    assert 'window.__timelines["root"] = gsap.timeline({ paused: true })' in html
     assert "vendor/gsap.min.js" in html
     # Every timed element must be a .clip or the runtime never hides it.
     for tag in re.findall(r"<div [^>]*data-start=[^>]*>", html):

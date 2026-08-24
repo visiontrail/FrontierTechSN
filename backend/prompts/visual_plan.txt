@@ -40,7 +40,7 @@ scene's exact `id`. No prose, no markdown fences, no explanation.
 - `contrast` — two panels set against each other. Use ONLY when the narration
   compares two things (then vs now, A vs B). Fill `left.label`, `left.text`,
   `right.label`, `right.text`, plus `headline`.
-- `list` — 2 to 4 short parallel items. Use when the narration enumerates.
+- `list` — 2 to 5 short parallel items. Use when the narration enumerates.
   Fill `items` and `headline`.
 - `stat` — a single number, year, or short phrase blown up huge. Use when the
   narration lands on a figure or a hard fact. Fill `stat` and `stat_label`.
@@ -65,7 +65,9 @@ scene's exact `id`. No prose, no markdown fences, no explanation.
 - `kicker`: max 24 characters, 1 to 3 words, the section the scene belongs to.
   Repeat the same kicker across consecutive scenes that share a subject — it
   reads as a chapter label.
-- `items`: max 80 characters each.
+- `items`: at most 5 items, max 80 characters each.
+- Preserve every factual number at the narration's exact precision. Never round
+  or shorten a source value such as `2.751 billion` to `2.75B`.
 - Every string must be in the same language as the narration.
 - Leave unused fields as empty strings or empty arrays. Never invent facts that
   are not in the narration.

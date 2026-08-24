@@ -174,6 +174,66 @@ def test_inline_news_image_is_part_of_the_text_flow_with_seekable_motion():
     assert "gsap.to(" not in html
 
 
+def test_inline_news_image_renders_stat_value_and_label():
+    html = sk.render_scene(
+        plan(
+            archetype="stat",
+            kicker="GAMING / AI",
+            headline="Perfect World's first-half results",
+            stat="¥2.751B revenue · ¥118M loss",
+            stat_label="First-half 2026, per semiannual report filed Aug 19",
+            news_image_src="../news_images/perfect-world.png",
+            news_image_mode="inline",
+            news_image_kind="logo",
+            news_image_fit="contain",
+        )
+    )
+
+    assert validate_scene_html(html, "scene-01") == []
+    assert 'class="news-inline-stat" id="scene-01-stat"' in html
+    assert 'class="news-inline-stat-value" id="scene-01-stat-value"' in html
+    assert "¥2.751B revenue · ¥118M loss" in html
+    assert 'class="news-inline-stat-label" id="scene-01-stat-label"' in html
+    assert "First-half 2026, per semiannual report filed Aug 19" in html
+    assert 'inAt("#scene-01-stat"' in html
+
+
+def test_inline_news_image_uses_compact_layout_and_keeps_fifth_item():
+    items = [
+        "Summarize annual reports across multiple documents",
+        "Search and compare company operational data online",
+        "Control a desktop browser for retrieval and document generation",
+        "Build English-language presentations from data",
+        "Generate marketing posters from reference images",
+        "A sixth unsupported task",
+    ]
+    scene_plan = sk.ScenePlan.from_dict(
+        {
+            "archetype": "list",
+            "kicker": "AI AGENTS",
+            "headline": "Five real office tasks put to the test",
+            "items": items,
+            "news_image_src": "../news_images/annual-reports.jpg",
+            "news_image_mode": "inline",
+            "news_image_kind": "event",
+            "news_image_fit": "cover",
+        },
+        duration=12.0,
+        scene_id="scene-11",
+    )
+
+    html = sk.render_scene(scene_plan)
+
+    assert validate_scene_html(html, "scene-11") == []
+    assert 'class="news-inline-copy news-inline-copy-five"' in html
+    assert 'class="news-inline-items news-inline-items-five"' in html
+    assert 'id="scene-11-item-5"' in html
+    assert "Generate marketing posters from reference images" in html
+    assert "A sixth unsupported task" not in html
+    assert ".news-inline-items-five { gap:8px; }" in html
+    assert "gap:10px; padding:9px 12px;" in html
+
+
 def test_fullscreen_news_image_uses_a_masked_reveal_and_separate_ken_burns_layer():
     html = sk.render_scene(
         plan(

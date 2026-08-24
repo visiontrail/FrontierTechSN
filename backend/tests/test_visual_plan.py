@@ -93,15 +93,59 @@ def test_missing_keywords_do_not_create_a_generic_chapter_label():
 
 def test_normalise_clamps_copy_to_what_fits_a_frame():
     scene = board(1)["scenes"][0]
+    items = [
+        "Summarize annual reports across multiple documents",
+        "Search and compare company operational data online",
+        "Control a desktop browser for retrieval and document generation",
+        "Build English-language presentations from data",
+        "Generate marketing posters from reference images",
+        "This sixth item must not reach the renderer",
+    ]
     plan = visual_plan._normalise(
-        {"headline": "h" * 400, "body": "b" * 900, "kicker": "k" * 90, "items": ["i" * 200] * 9},
+        {
+            "headline": "h" * 400,
+            "body": "b" * 900,
+            "kicker": "k" * 90,
+            "items": items,
+        },
         scene,
         0,
     )
     assert len(plan["headline"]) <= 110
     assert len(plan["body"]) <= 260
     assert len(plan["kicker"]) <= 30
-    assert len(plan["items"]) <= 4
+    assert plan["items"] == items[: scene_kit.MAX_NARRATIVE_ITEMS]
+    assert plan["items"][-1] == "Generate marketing posters from reference images"
+
+
+def test_normalise_restores_exact_scaled_number_precision_from_narration():
+    scene = board(1)["scenes"][0]
+    scene["text"] = (
+        "Perfect World's 2026 semiannual report recorded first-half revenue of "
+        "2.751 billion yuan and a net loss of 118 million yuan."
+    )
+
+    plan = visual_plan._normalise(
+        {
+            "archetype": "stat",
+            "headline": "Perfect World's first-half results",
+            "stat": "¥2.75B revenue · ¥118M loss",
+            "stat_label": "First-half 2026",
+        },
+        scene,
+        0,
+    )
+
+    assert plan["stat"] == "¥2.751B revenue · ¥118M loss"
+
+
+def test_scaled_number_precision_restoration_fails_closed_when_ambiguous():
+    narration = "The estimates were 2.751 billion and 2.749 billion yuan."
+
+    assert (
+        visual_plan._restore_scaled_number_precision("About 2.75B", narration)
+        == "About 2.75B"
+    )
 
 
 def test_footage_is_attached_to_the_scene_whose_keywords_match(tmp_path: Path):

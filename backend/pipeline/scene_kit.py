@@ -127,6 +127,8 @@ ARCHETYPES = (
     "outro",
 )
 
+MAX_NARRATIVE_ITEMS = 5
+
 
 def accent_hex(name: str | None, theme: Theme | None = None) -> str:
     key = (name or "").lower()
@@ -426,7 +428,11 @@ class ScenePlan:
         motif = (data.get("motif") or "orbit").lower()
         if motif not in MOTIFS:
             motif = "orbit"
-        items = tuple(str(i) for i in (data.get("items") or [])[:4] if str(i).strip())
+        items = tuple(
+            str(item)
+            for item in (data.get("items") or [])[:MAX_NARRATIVE_ITEMS]
+            if str(item).strip()
+        )
         return cls(
             id=scene_id,
             duration=duration,
@@ -985,9 +991,28 @@ def _render_footage(plan: ScenePlan) -> str:
 def _render_news_image_inline(plan: ScenePlan) -> str:
     """Place a sourced image inside the HyperFrames editorial text flow."""
     accent = accent_hex(plan.accent, plan.theme)
-    hsize = headline_size(plan.headline, base=86, floor=52)
-    bsize = body_size(plan.body, base=34, floor=27)
-    item_size = max(24, body_size(" ".join(plan.items), base=30, floor=24))
+    five_item_layout = len(plan.items) == MAX_NARRATIVE_ITEMS
+    hsize = headline_size(
+        plan.headline,
+        base=76 if five_item_layout else 86,
+        floor=48 if five_item_layout else 52,
+    )
+    bsize = body_size(
+        plan.body,
+        base=30 if five_item_layout else 34,
+        floor=25 if five_item_layout else 27,
+    )
+    item_size = max(
+        22 if five_item_layout else 24,
+        body_size(
+            " ".join(plan.items),
+            base=28 if five_item_layout else 30,
+            floor=22 if five_item_layout else 24,
+        ),
+    )
+    stat_size = headline_size(plan.stat, base=60, floor=36)
+    copy_class = " news-inline-copy-five" if five_item_layout else ""
+    items_class = " news-inline-items-five" if five_item_layout else ""
     contain = plan.news_image_fit == "contain"
     media_background = _rgba(plan.theme.ink, 0.94) if contain else plan.theme.bg
     image_padding = "70px" if contain else "0"
@@ -996,6 +1021,7 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
   #{plan.id} .news-inline-stage {{ flex-direction:row; align-items:center; justify-content:space-between;
       gap:72px; padding:112px 124px 218px; }}
   #{plan.id} .news-inline-copy {{ width:47%; display:flex; flex-direction:column; gap:25px; position:relative; z-index:3; }}
+  #{plan.id} .news-inline-copy-five {{ gap:16px; }}
   #{plan.id} .news-inline-headline {{ font-size:{hsize}px; max-width:790px; }}
   #{plan.id} .news-inline-body {{ font-size:{bsize}px; max-width:760px; }}
   #{plan.id} .news-inline-items {{ display:flex; flex-direction:column; gap:13px; max-width:760px;
@@ -1006,6 +1032,15 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
   #{plan.id} .news-inline-item-index {{ font:700 18px {SANS}; line-height:1.45;
       letter-spacing:.08em; color:{accent}; font-variant-numeric:tabular-nums; }}
   #{plan.id} .news-inline-item-text {{ font:600 {item_size}px/1.3 {SANS}; color:{plan.theme.ink}; }}
+  #{plan.id} .news-inline-items-five {{ gap:8px; }}
+  #{plan.id} .news-inline-items-five .news-inline-item {{ grid-template-columns:34px minmax(0, 1fr);
+      gap:10px; padding:9px 12px; }}
+  #{plan.id} .news-inline-items-five .news-inline-item-text {{ line-height:1.2; }}
+  #{plan.id} .news-inline-stat {{ display:flex; flex-direction:column; gap:7px; max-width:760px;
+      padding:17px 20px; border-left:5px solid {accent}; background:{_rgba(plan.theme.ink, .1)}; }}
+  #{plan.id} .news-inline-stat-value {{ font:800 {stat_size}px/1.05 {SANS}; color:{plan.theme.ink};
+      letter-spacing:-.025em; font-variant-numeric:tabular-nums; }}
+  #{plan.id} .news-inline-stat-label {{ font:500 22px/1.3 {SANS}; color:{plan.theme.muted}; }}
   #{plan.id} .news-inline-rule {{ width:190px; height:4px; border-radius:3px; background:{accent}; }}
   #{plan.id} .news-inline-visual {{ width:48%; height:690px; display:flex; align-items:center; position:relative;
       perspective:1400px; z-index:2; }}
@@ -1034,9 +1069,23 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
             for index, item in enumerate(plan.items, start=1)
         )
         items_markup = (
-            f'        <ul class="news-inline-items" id="{plan.id}-items">\n'
+            f'        <ul class="news-inline-items{items_class}" id="{plan.id}-items">\n'
             + rows
             + "        </ul>\n"
+        )
+    stat_markup = ""
+    if plan.stat:
+        stat_markup = (
+            f'        <div class="news-inline-stat" id="{plan.id}-stat">\n'
+            f'          <div class="news-inline-stat-value" id="{plan.id}-stat-value">'
+            f'{_esc(plan.stat)}</div>\n'
+            + (
+                f'          <div class="news-inline-stat-label" id="{plan.id}-stat-label">'
+                f'{_esc(plan.stat_label)}</div>\n'
+                if plan.stat_label
+                else ""
+            )
+            + "        </div>\n"
         )
     markup = (
         '    <div class="plate"><div class="wash"></div></div>\n'
@@ -1045,11 +1094,12 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
             style="left:-120px; top:-140px; width:620px; height:620px; opacity:.16;",
         )
         + f'    <div class="stage news-inline-stage" id="{plan.id}-inline-stage">\n'
-        + '      <div class="news-inline-copy">\n'
+        + f'      <div class="news-inline-copy{copy_class}">\n'
         + (f'        <div class="kicker" id="{plan.id}-kicker">{_esc(plan.kicker)}</div>\n' if plan.kicker else "")
         + f'        <div class="headline news-inline-headline" id="{plan.id}-head">{_esc(plan.headline)}</div>\n'
         + f'        <div class="news-inline-rule" id="{plan.id}-rule"></div>\n'
         + (f'        <div class="body news-inline-body" id="{plan.id}-body">{_esc(plan.body)}</div>\n' if plan.body else "")
+        + stat_markup
         + items_markup
         + '      </div>\n'
         + f'      <div class="news-inline-visual" id="{plan.id}-visual" data-layout-allow-overflow>\n'
@@ -1070,6 +1120,7 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
         inAt("#{plan.id}-head", {{ y: 58, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .82, ease: "expo.out" }}, 0.28);
         inAt("#{plan.id}-rule", {{ scaleX: 0, transformOrigin: "0 50%" }}, {{ scaleX: 1, duration: .64, ease: "power2.inOut" }}, 0.58);
         inAt("#{plan.id}-body", {{ y: 26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .66, ease: "sine.out" }}, 0.68);
+        inAt("#{plan.id}-stat", {{ y: 22, opacity: 0, scale: .97 }}, {{ y: 0, opacity: 1, scale: 1, duration: .62, ease: "circ.out", transformOrigin: "0 50%" }}, 0.72);
         inAt("#{plan.id}-items .news-inline-item", {{ x: -24, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .52, ease: "power2.out", stagger: .1 }}, 0.76);
         inAt("#{plan.id}-image-frame", {{ x: {direction * 220}, opacity: 0, rotationY: {direction * -11}, scale: .94 }}, {{ x: 0, opacity: 1, rotationY: 0, scale: 1, duration: .92, ease: "power4.out", transformPerspective: 1400, transformOrigin: "50% 50%" }}, 0.24);
         inAt("#{plan.id}-image", {{ scale: 1.08, x: {direction * -12} }}, {{ scale: 1.02, x: {direction * 12}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.18);
