@@ -300,6 +300,25 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(verified("According to TechMemes' summary"))
         self.assertFalse(verified("According to Tech Mean's summary"))
 
+    def test_orpheus_prompt_articulates_earendil_one(self):
+        self.assertEqual(
+            tts._orpheus_prompt_text("a satellite named Earendil-1 later"),
+            "a satellite named Ear-en-dill one later.",
+        )
+
+    def test_orpheus_transcript_accepts_earendil_syllables_not_arendelle(self):
+        expected = "a satellite named Earendil-1 later"
+
+        def verified(observed: str) -> bool:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return bool(tts._orpheus_transcript_report(expected, words)["verified"])
+
+        self.assertTrue(verified("a satellite named Ear en dill one later"))
+        self.assertFalse(verified("a satellite named Arendelle one later"))
+
     def test_orpheus_prompt_articulates_brem_possessive_vowel(self):
         self.assertEqual(
             tts._orpheus_prompt_text("Brem's research indicates a result"),
