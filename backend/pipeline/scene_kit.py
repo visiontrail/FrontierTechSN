@@ -1103,7 +1103,8 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
         + items_markup
         + '      </div>\n'
         + f'      <div class="news-inline-visual" id="{plan.id}-visual" data-layout-allow-overflow>\n'
-        + f'        <div class="news-inline-window" id="{plan.id}-image-frame">\n'
+        + f'        <div class="news-inline-window" id="{plan.id}-image-frame" '
+        + 'data-layout-allow-overflow>\n'
         + f'          <img class="news-inline-media" id="{plan.id}-image" src="{_esc(plan.news_image_src)}" '
         + f'alt="{_esc(plan.news_image_caption)}" crossorigin="anonymous">\n'
         + (f'          <div class="news-inline-credit" id="{plan.id}-credit">{_esc(plan.news_image_credit)}</div>\n' if plan.news_image_credit else "")
