@@ -1468,6 +1468,53 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(verified("It cost 5 dollars", ["It", "cost", "$5"]))
         self.assertFalse(verified("It cost 5", ["It", "cost", "$5"]))
 
+    def test_orpheus_transcript_normalizes_currency_decimal_split_by_whisper(self):
+        expected = (
+            "bond sale, equivalent to roughly six point three billion dollars, "
+            "marking"
+        )
+
+        def report(raw_words: list[str]) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(raw_words)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        whisper_split = report(
+            [
+                "bond", "sale,", "equivalent", "to", "roughly", "$6", ".3",
+                "billion,", "marking.",
+            ]
+        )
+
+        self.assertTrue(whisper_split["verified"])
+        self.assertEqual(whisper_split["exact_asr_word_coverage"], 1.0)
+        self.assertTrue(
+            report(
+                [
+                    "bond", "sale,", "equivalent", "to", "roughly", "$6.3",
+                    "billion,", "marking.",
+                ]
+            )["verified"]
+        )
+        self.assertFalse(
+            report(
+                [
+                    "bond", "sale,", "equivalent", "to", "roughly", "6", ".3",
+                    "billion,", "marking.",
+                ]
+            )["verified"]
+        )
+        self.assertFalse(
+            report(
+                [
+                    "bond", "sale,", "equivalent", "to", "roughly", "$6", ".4",
+                    "billion,", "marking.",
+                ]
+            )["verified"]
+        )
+
     def test_transcript_number_indexes_preserve_later_name_provenance(self):
         raw_words = "twenty twenty six Q bit AI works".split()
         words = [

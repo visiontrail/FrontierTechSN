@@ -90,6 +90,10 @@ MAX_PLAUSIBLE_SPEECH_WPM = 320
 LEXICAL_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?|[\u3400-\u9fff]")
 DECIMAL_LITERAL_RE = re.compile(r"(\d+)\.(\d+)")
 CURRENCY_AMOUNT_RE = re.compile(r"\$([0-9]+(?:\.\d+)?)")
+CURRENCY_TRANSCRIPT_AMOUNT_RE = re.compile(
+    r"\s*\$([0-9]+)(?:\.(\d+))?[.,;:!?]?\s*"
+)
+CURRENCY_SCALE_TOKENS = {"hundred", "thousand", "million", "billion", "trillion"}
 DECIMAL_INTEGER_WORD_RE = re.compile(r"\s*(\d+)\s*")
 DECIMAL_FRACTION_WORD_RE = re.compile(r"\s*\.(\d+)[.,;:!?]?\s*")
 NUMBER_WORDS = {
@@ -504,6 +508,54 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
     index = 0
     while index < len(words):
         word_text = str(words[index].get("text") or "")
+        currency_match = CURRENCY_TRANSCRIPT_AMOUNT_RE.fullmatch(word_text)
+        if currency_match is not None:
+            integer = currency_match.group(1)
+            fraction = currency_match.group(2)
+            consumed_words = 1
+            if fraction is None and index + 1 < len(words):
+                split_fraction = DECIMAL_FRACTION_WORD_RE.fullmatch(
+                    str(words[index + 1].get("text") or "")
+                )
+                if split_fraction is not None:
+                    fraction = split_fraction.group(1)
+                    consumed_words = 2
+            amount_token = (
+                f"decimalnumber{integer}point{fraction}"
+                if fraction is not None
+                else integer
+            )
+            tokens.append(amount_token)
+            word_indexes.append(index)
+
+            following_index = index + consumed_words
+            following_tokens = (
+                _raw_lexical_tokens(str(words[following_index].get("text") or ""))
+                if following_index < len(words)
+                else []
+            )
+            # Whisper conventionally writes spoken currency with the symbol in
+            # front ("$6" + ".3" + "billion") even though the acoustic unit
+            # follows the scale ("six point three billion dollars"). Preserve
+            # that exact unit and order instead of treating the symbol as an
+            # extra word or accepting a genuinely missing currency unit.
+            has_scale = (
+                len(following_tokens) == 1
+                and following_tokens[0] in CURRENCY_SCALE_TOKENS
+            )
+            if has_scale:
+                tokens.append(following_tokens[0])
+                word_indexes.append(following_index)
+                consumed_words += 1
+            amount_is_one = (
+                integer == "1"
+                and (fraction is None or set(fraction) <= {"0"})
+                and not has_scale
+            )
+            tokens.append("dollar" if amount_is_one else "dollars")
+            word_indexes.append(index)
+            index += consumed_words
+            continue
         integer_match = DECIMAL_INTEGER_WORD_RE.fullmatch(word_text)
         fraction_match = (
             DECIMAL_FRACTION_WORD_RE.fullmatch(
