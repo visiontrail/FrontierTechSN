@@ -439,6 +439,27 @@ def _canonicalize_number_tokens_with_indexes(
     result_indexes: list[int] = []
     index = 0
     while index < len(tokens):
+        # Canonicalize standard compound quantities such as "two hundred
+        # fifty thousand" before the simpler scale handling below can split
+        # them into 200 + 50,000. Whisper may render the same speech as the
+        # comma-grouped pair "250" + ",000"; both must resolve to the exact
+        # numeric value, while a different value or missing unit still fails.
+        if (
+            tokens[index].isdigit()
+            and 1 <= int(tokens[index]) <= 9
+            and index + 3 < len(tokens)
+            and tokens[index + 1] == "hundred"
+            and tokens[index + 2].isdigit()
+            and 1 <= int(tokens[index + 2]) <= 99
+            and tokens[index + 3] in {"thousand", "million"}
+        ):
+            value = (
+                int(tokens[index]) * 100 + int(tokens[index + 2])
+            ) * NUMBER_SCALES[tokens[index + 3]]
+            result.append(str(value))
+            result_indexes.append(word_indexes[index])
+            index += 4
+            continue
         if (
             tokens[index].isdigit()
             and len(tokens[index]) == 2

@@ -1606,6 +1606,28 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             )["verified"]
         )
 
+    def test_orpheus_transcript_normalizes_split_thousands_without_losing_unit(self):
+        expected = "A prize of two hundred fifty thousand yuan."
+
+        def report(raw_words: list[str]) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(raw_words)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        whisper_split = report(["A", "prize", "of", "250", ",000", "yuan."])
+
+        self.assertTrue(whisper_split["verified"])
+        self.assertEqual(whisper_split["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(
+            report(["A", "prize", "of", "251", ",000", "yuan."])["verified"]
+        )
+        self.assertFalse(report(["A", "prize", "of", "250", ",000"])["verified"])
+        self.assertFalse(
+            report(["A", "prize", "of", "250", ",000", "ren."])["verified"]
+        )
+
     def test_transcript_number_indexes_preserve_later_name_provenance(self):
         raw_words = "twenty twenty six Q bit AI works".split()
         words = [
