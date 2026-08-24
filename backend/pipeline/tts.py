@@ -155,6 +155,10 @@ ACOUSTIC_EQUIVALENTS = {
     # unrelated near-matches remain rejected.
     "suarcese": "scorsese",
     "sorsese": "scorsese",
+    # Singular possessive "Techmeme's" and plural possessive "TechMemes'"
+    # have the same /z/ ending. Whisper used the latter spelling for a live,
+    # otherwise exact utterance; TechMean remains intentionally distinct.
+    "techmemes": "techmeme's",
 }
 ACOUSTIC_PHRASE_EQUIVALENTS = {
     # The investment-bank name is acoustically ambiguous with two common
