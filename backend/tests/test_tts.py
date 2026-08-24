@@ -317,6 +317,7 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             return bool(tts._orpheus_transcript_report(expected, words)["verified"])
 
         self.assertTrue(verified("a satellite named Ear en dill one later"))
+        self.assertTrue(verified("a satellite named Irindil one later"))
         self.assertFalse(verified("a satellite named Arendelle one later"))
 
     def test_orpheus_prompt_articulates_brem_possessive_vowel(self):

@@ -159,6 +159,10 @@ ACOUSTIC_EQUIVALENTS = {
     # have the same /z/ ending. Whisper used the latter spelling for a live,
     # otherwise exact utterance; TechMean remains intentionally distinct.
     "techmemes": "techmeme's",
+    # The explicit Ear-en-dill provider prompt produced the intended three
+    # syllables while Whisper rendered them as the phonetic spelling Irindil.
+    # Keep the unrelated and repeatedly observed Arendelle substitution hard.
+    "irindil": "earendil",
 }
 ACOUSTIC_PHRASE_EQUIVALENTS = {
     # The investment-bank name is acoustically ambiguous with two common
