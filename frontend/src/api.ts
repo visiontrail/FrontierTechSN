@@ -644,6 +644,12 @@ export async function regenerateTask(taskId: string): Promise<Task> {
   return res.json();
 }
 
+export async function resumeTaskTts(taskId: string): Promise<Task> {
+  const res = await fetch(`${BASE}/api/tasks/${taskId}/resume-tts`, { method: 'POST' });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function renderTask(taskId: string): Promise<Task> {
   const res = await fetch(`${BASE}/api/tasks/${taskId}/render`, { method: 'POST' });
   if (!res.ok) throw new Error(await res.text());

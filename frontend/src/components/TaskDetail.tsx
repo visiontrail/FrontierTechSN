@@ -7,6 +7,7 @@ import {
   fetchScript,
   updateScript,
   regenerateTask,
+  resumeTaskTts,
   renderTask,
   scheduleTask,
   videoUrl,
@@ -93,6 +94,11 @@ export default function TaskDetail() {
 
   const [startOverride, setStartOverride] = useState<string | null>(null)
   const [titleCopied, setTitleCopied] = useState(false)
+  const resumableFailedTts = task?.status === 'failed'
+    && !task.publication_safety_hold
+    && !!task.script_path
+    && !!task.generated_title
+    && !task.audio_path
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteTask(id!),
@@ -113,7 +119,7 @@ export default function TaskDetail() {
   })
 
   const regenMutation = useMutation({
-    mutationFn: () => regenerateTask(id!),
+    mutationFn: () => resumableFailedTts ? resumeTaskTts(id!) : regenerateTask(id!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task', id] })
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
@@ -467,7 +473,11 @@ export default function TaskDetail() {
                   title={publicationRecovery ? 'Resolve the publication safety hold first' : dirty ? 'Save your changes first' : isRunning ? 'Task is processing' : ''}
                   onClick={() => regenMutation.mutate()}
                 >
-                  {regenMutation.isPending ? 'Starting...' : 'Re-generate Audio'}
+                  {regenMutation.isPending
+                    ? 'Starting...'
+                    : resumableFailedTts
+                      ? 'Resume Audio'
+                      : 'Re-generate Audio'}
                 </button>
               </div>
               {regenMutation.isError && (
