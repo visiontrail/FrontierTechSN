@@ -16,7 +16,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -68,11 +68,17 @@ RIGHTS_CONFLICT_CATEGORY_MARKERS = (
 KNOWN_COMMONS_FILE_TITLES = {
     ("annual reports", "object"): ("File:WMUA Annual reports 2012.JPG",),
     (
+        "coffee shop",
+        "object",
+    ): ('File:Coffee shop in "The Boulevard" - geograph.org.uk - 1368799.jpg',),
+    (
         "humanoid robot",
         "object",
     ): ("File:Humanoid robot is being programmed.jpg",),
     ("qwen", "logo"): ("File:Qwen Logo.svg",),
     ("qwen office", "logo"): ("File:Qwen Logo.svg",),
+    ("softbank group", "logo"): ("File:SoftBank Group logo.svg",),
+    ("techmeme", "logo"): ("File:Techmeme.png",),
 }
 LICENSE_NEGATIVE_RE = re.compile(
     r"(?:\ball rights reserved\b|\bcopyright(?:ed)?\b|\b(?:nc|nd|not|proprietary|"
@@ -242,7 +248,7 @@ GEOGRAPHIC_ADJECTIVE_TERMS = frozenset(
 CONCRETE_OBJECT_HEADS = frozenset(
     "robot robots report reports browser browsers poster posters document documents satellite satellites "
     "rocket rockets drone drones chip chips processor processors computer computers server servers vehicle "
-    "vehicles aircraft phone phones battery batteries camera cameras sensor sensors".split()
+    "vehicles aircraft phone phones battery batteries camera cameras sensor sensors shop shops".split()
 )
 ORGANISATION_NAME_SUFFIXES = frozenset(
     "association company corporation group institute laboratory labs society university".split()
@@ -403,11 +409,16 @@ def _contains_token_phrase(field_tokens: list[str], subject_tokens: list[str]) -
     )
 
 
-def _meaningful_identity_tokens(field_tokens: list[str]) -> list[str]:
+def _meaningful_identity_tokens(
+    field_tokens: list[str],
+    *,
+    retained_tokens: Sequence[str] = (),
+) -> list[str]:
+    retained = set(retained_tokens)
     return [
         token
         for token in field_tokens
-        if token not in IDENTITY_DECORATORS
+        if (token in retained or token not in IDENTITY_DECORATORS)
         and not (len(token) == 4 and token.isdigit())
         and (len(token) > 1 or any(char.isdigit() for char in token))
     ]
@@ -423,7 +434,13 @@ def _metadata_extends_subject_identity(value: object, subject: object) -> bool:
         phrase_tokens = _identity_tokens(match.group(0))
         if not _contains_token_phrase(phrase_tokens, subject_tokens):
             continue
-        meaningful = _meaningful_identity_tokens(phrase_tokens)
+        # A legal suffix such as ``Group`` is decoration for ``Google Group``
+        # when the narrated identity is Google, but it is part of the identity
+        # when the narration itself says ``SoftBank Group``.
+        meaningful = _meaningful_identity_tokens(
+            phrase_tokens,
+            retained_tokens=subject_tokens,
+        )
         if meaningful != subject_tokens:
             return True
     normalized_subject = _normalise_entity_phrase(subject)
@@ -475,6 +492,16 @@ def _first_metadata_subject_identity_extends(value: object, subject: object) -> 
         return False
     token = follower.group(1)
     key = token.casefold().strip("'’")
+    if key in {"see", "siehe"}:
+        cross_reference = re.match(
+            r"^[\s\(\)\[\]\{\},:;/._–—-]*([A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?)",
+            tail[follower.end() :],
+        )
+        if (
+            cross_reference
+            and cross_reference.group(1).casefold().strip("'’") in subject_tokens
+        ):
+            return False
     allowed_followers = (
         IDENTITY_DECORATORS
         | STOPWORDS
@@ -513,15 +540,32 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
         return None
     kind = str(shot.get("kind") or "event")
     title_tokens = _identity_tokens(candidate.get("title"))
-    if kind == "logo" and not ({"logo", "wordmark", "mark"} & set(title_tokens)):
-        return None
+    if kind == "logo":
+        # Exact Commons file titles can be just ``Techmeme.png`` while the
+        # linked description or object name says ``logo for Techmeme``.  Keep
+        # the strong logo proof, but allow it in any authoritative identity
+        # field rather than requiring the filename to contain the word logo.
+        logo_identity_proved = False
+        for field_name in ("title", "description", "object_name"):
+            field_tokens = _identity_tokens(candidate.get(field_name))
+            if (
+                {"logo", "wordmark", "mark"} & set(field_tokens)
+                and _contains_token_phrase(field_tokens, subject_tokens)
+            ):
+                logo_identity_proved = True
+                break
+        if not logo_identity_proved:
+            return None
     for field_name in ("title", "description"):
         value = str(candidate.get(field_name) or "")
         field_tokens = _identity_tokens(value)
         if not _contains_token_phrase(field_tokens, subject_tokens):
             continue
         if kind == "logo":
-            exact_identity = _meaningful_identity_tokens(field_tokens)
+            exact_identity = _meaningful_identity_tokens(
+                field_tokens,
+                retained_tokens=subject_tokens,
+            )
         else:
             exact_identity = [
                 token
@@ -530,8 +574,6 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
                 and not (len(token) == 4 and token.isdigit())
             ]
         if (kind == "logo" or len(subject_tokens) == 1) and exact_identity != subject_tokens:
-            continue
-        if kind == "logo" and not ({"logo", "wordmark", "mark"} & set(field_tokens)):
             continue
         if kind != "logo" and ({"logo", "wordmark", "icon"} & set(field_tokens)) and not (
             {"event", "photo", "photograph", "screenshot", "launch", "conference", "expo"}
@@ -1961,8 +2003,12 @@ def _fallback_shots_for_scene(
     *,
     display_mode: str = "inline",
 ) -> list[dict]:
-    subjects = [(subject, _entity_kind(subject, scene)) for subject in _entity_candidates(scene, hint)]
-    subjects.extend((subject, "object") for subject in _concrete_object_candidates(scene))
+    entities = [(subject, _entity_kind(subject, scene)) for subject in _entity_candidates(scene, hint)]
+    objects = [(subject, "object") for subject in _concrete_object_candidates(scene)]
+    # The central named entity remains the first choice.  Put exact narrated
+    # objects immediately behind it so source/publication names do not consume
+    # every reserve slot before a concrete visual such as ``coffee shop``.
+    subjects = [*entities[:1], *objects, *entities[1:]]
     if not subjects:
         fallback = _fallback_subject(scene, hint)
         subjects = [(fallback, _entity_kind(fallback, scene))]
@@ -1992,6 +2038,11 @@ def _fallback_shots_for_scene(
         seen.add(signature)
         output.append(shot)
     return output
+
+
+def grounded_visual_subject_count(scene: dict, hint: dict | None = None) -> int:
+    """Return how many strict licensed-image subjects the scene can support."""
+    return len(_fallback_shots_for_scene(scene, hint))
 
 
 def _subject_identity_key(shot: dict) -> str:

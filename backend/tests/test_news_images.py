@@ -1133,6 +1133,80 @@ def test_legal_entity_suffixes_do_not_create_false_identity_conflicts(subject, d
     assert evidence["grounding_passed"] is True
 
 
+def test_narrated_group_suffix_remains_part_of_exact_logo_identity():
+    shot = {"expected_subject": "SoftBank Group", "kind": "logo"}
+    scene = {"text": "SoftBank Group plans a record retail bond sale.", "keywords": []}
+    candidate = {
+        "title": "SoftBank Group logo.svg",
+        "description": "Logo of the SoftBank Group",
+        "object_name": "SoftBank Group logo",
+    }
+
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+
+    assert evidence["grounding_passed"] is True
+    assert evidence["grounding_identity_field"] == "title"
+
+
+def test_matching_multilingual_cross_reference_does_not_extend_logo_identity():
+    shot = {"expected_subject": "SoftBank Group", "kind": "logo"}
+    scene = {"text": "SoftBank Group plans a record retail bond sale.", "keywords": []}
+    candidate = {
+        "title": "SoftBank Group logo.svg",
+        "description": "Logo der SoftBank Group, siehe Softbank",
+        "object_name": "SoftBank Group logo",
+    }
+
+    assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is True
+
+
+def test_multilingual_cross_reference_to_another_identity_still_conflicts():
+    shot = {"expected_subject": "SoftBank Group", "kind": "logo"}
+    scene = {"text": "SoftBank Group plans a record retail bond sale.", "keywords": []}
+    candidate = {
+        "title": "SoftBank Group logo.svg",
+        "description": "Logo der SoftBank Group, siehe Arm Holdings",
+        "object_name": "SoftBank Group logo",
+    }
+
+    assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is False
+
+
+def test_bare_commons_filename_can_use_matching_description_as_logo_proof():
+    shot = {"expected_subject": "Techmeme", "kind": "logo"}
+    scene = {"text": "The reporting was surfaced through Techmeme.", "keywords": []}
+
+    evidence = news_images._grounding_evidence(
+        shot,
+        scene,
+        {
+            "title": "Techmeme.png",
+            "description": "logo for Techmeme",
+            "object_name": "Techmeme",
+        },
+    )
+
+    assert evidence["grounding_passed"] is True
+    assert evidence["grounding_identity_field"] == "title"
+
+
+def test_bare_commons_filename_rejects_unrelated_description_logo_proof():
+    shot = {"expected_subject": "Techmeme", "kind": "logo"}
+    scene = {"text": "The reporting was surfaced through Techmeme.", "keywords": []}
+
+    evidence = news_images._grounding_evidence(
+        shot,
+        scene,
+        {
+            "title": "Techmeme.png",
+            "description": "logo for another news site",
+            "object_name": "Techmeme",
+        },
+    )
+
+    assert evidence["grounding_passed"] is False
+
+
 def test_google_logo_prose_and_categories_do_not_override_exact_authoritative_identity():
     shot = {"expected_subject": "Google", "kind": "logo"}
     scene = {"text": "Google allocates employee time to ideas.", "keywords": []}

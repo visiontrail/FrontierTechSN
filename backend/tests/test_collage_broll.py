@@ -727,6 +727,59 @@ def test_agent_selects_beats_from_the_full_timeline():
     assert all(spec["planner"] == "claude_agent_sdk" for spec in specs)
 
 
+def test_agent_reserves_abstract_scene_for_collage_instead_of_grounded_scene():
+    board = {
+        "thesis": "Named systems produce an uncertain future",
+        "scenes": [
+            {
+                "id": "scene-01",
+                "start": 0.0,
+                "duration": 6.0,
+                "text": "Google announced a new system.",
+                "keywords": [],
+            },
+            {
+                "id": "scene-02",
+                "start": 6.0,
+                "duration": 6.0,
+                "text": "Whether the future itself disappears remains the question.",
+                "keywords": [],
+            },
+            {
+                "id": "scene-03",
+                "start": 12.0,
+                "duration": 6.0,
+                "text": "Microsoft released another product.",
+                "keywords": [],
+            },
+        ],
+    }
+    answer = json.dumps(
+        [
+            {"scene_id": "scene-01", "visual_metaphor": "a paper search box"},
+            {"scene_id": "scene-03", "visual_metaphor": "a folding software box"},
+        ]
+    )
+    with (
+        patch(
+            "backend.pipeline.digester._resolve_provider",
+            AsyncMock(return_value=("https://example.test", "model", "key")),
+        ),
+        patch("backend.pipeline.agent.agent_complete", AsyncMock(return_value=answer)),
+    ):
+        specs = asyncio.run(
+            collage_broll.plan_specs(
+                board,
+                count=2,
+                force_opening=False,
+                frame=LANDSCAPE,
+            )
+        )
+
+    assert [spec["scene_id"] for spec in specs] == ["scene-02", "scene-03"]
+    assert specs[0]["planner"] == "claude_agent_sdk"
+
+
 def test_attach_collage_only_promotes_ready_existing_clips(tmp_path: Path):
     clip = tmp_path / "collage_broll" / "01-scene-01" / "video" / "final-5s-noaudio.mp4"
     clip.parent.mkdir(parents=True)

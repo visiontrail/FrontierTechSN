@@ -29,6 +29,7 @@ SOURCE_COMMIT = "a1a4ee2e2abf7d44e460026b706d0c72c2cf8a91"
 CLIP_FPS = 24
 MOTION_SAMPLE_FPS = 4
 CACHE_CONTRACT_VERSION = 1
+SELECTION_POLICY_VERSION = 2
 PLAYBACK_POLICY = "play_once_then_hold_last_frame"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -249,6 +250,7 @@ def _planning_fingerprint(
     return _fingerprint(
         {
             "cache_contract_version": CACHE_CONTRACT_VERSION,
+            "selection_policy_version": SELECTION_POLICY_VERSION,
             "contract": "collage_visual_spec",
             "video_thesis": _normalized_text(storyboard.get("thesis")),
             "target_count": target_count,
@@ -730,6 +732,48 @@ async def plan_specs(
             if scene_id not in selected_ids:
                 selected_ids.append(scene_id)
         selected_ids = selected_ids[:target_count]
+
+        # Collage is the correct treatment for abstract narration that cannot
+        # support a strictly grounded licensed still.  If the agent selected a
+        # concrete named scene while leaving such an abstract scene outside,
+        # swap the most image-rich selected scene out.  This preserves the
+        # configured visual inventory without forcing the image scout to
+        # invent or weakly match a subject.
+        from backend.pipeline import news_images
+
+        grounded_counts = {
+            str(scene["id"]): news_images.grounded_visual_subject_count(scene)
+            for scene in scenes
+        }
+        protected = {str(scenes[0]["id"])} if force_opening else set()
+        missing_abstract = [
+            str(scene["id"])
+            for scene in scenes
+            if not grounded_counts[str(scene["id"])]
+            and str(scene["id"]) not in selected_ids
+        ]
+        for abstract_id in missing_abstract:
+            replaceable = [
+                scene_id
+                for scene_id in selected_ids
+                if scene_id not in protected and grounded_counts.get(scene_id, 0) > 0
+            ]
+            if not replaceable:
+                break
+            victim = max(
+                replaceable,
+                key=lambda scene_id: (
+                    grounded_counts.get(scene_id, 0),
+                    -selected_ids.index(scene_id),
+                ),
+            )
+            selected_ids[selected_ids.index(victim)] = abstract_id
+            _log(
+                log,
+                "Collage B-roll agent: reserved "
+                f"{abstract_id} for metaphor treatment and left {victim} "
+                "available for a strictly grounded licensed still",
+            )
         choices = sorted(
             (allowed[scene_id] for scene_id in selected_ids),
             key=lambda scene: float(scene.get("start") or 0),
