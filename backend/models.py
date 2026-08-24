@@ -539,7 +539,7 @@ class DailyAutomationSettings(BaseModel):
     # Do not publish a stale morning edition when the app is first started
     # late in the day. Normal runs still fire once at the configured desk time.
     catch_up_after_restart: bool = False
-    target_duration_minutes: int = Field(default=8, ge=1, le=30)
+    target_duration_minutes: int = Field(default=3, ge=1, le=30)
     language: Literal["en", "zh"] = "en"
     max_stories: int = Field(default=6, ge=3, le=12)
     source_window_hours: int = Field(default=36, ge=12, le=96)

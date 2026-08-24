@@ -17,12 +17,15 @@ from backend.daily_news.scriptwriter import (
     SOURCE_SPOKEN_ALIASES,
     _issues_are_unsupported_only,
     _minimalize_unsupported_paragraphs,
+    daily_script_duration_report,
     enforce_script_contract,
     morning_opening,
+    narration_duration_report,
     script_contract_report,
 )
 from backend.daily_news.source_catalog import load_source_catalog
 from backend.models import DailyAutomationSettings, SourceType, TaskConfig, TaskResponse, TaskStatus
+from backend.pipeline import orchestrator
 from backend.pipeline.music import build_music_prompt, mix_narration_and_music
 from backend.pipeline.opencli import OpenCLIError, OpenCLIResult
 from backend.publishing import prepare_apple_podcast, read_publication_manifest
@@ -193,6 +196,50 @@ def test_fixed_morning_opening_and_contract_are_software_owned():
     assert SOURCE_SPOKEN_ALIASES["量子位 QbitAI"] == ("QbitAI",)
 
 
+def test_daily_duration_contract_rejects_the_observed_two_minute_eight_minute_mismatch():
+    short_script = " ".join(["word"] * 390)
+    on_target_script = " ".join(["word"] * 540)
+
+    short = daily_script_duration_report(short_script, 8, "en")
+    on_target = daily_script_duration_report(on_target_script, 3, "en")
+    narration_short = narration_duration_report(125.760792, 8)
+
+    assert short["passed"] is False
+    assert short["estimated_duration_minutes"] == pytest.approx(2.167, abs=0.001)
+    assert on_target["passed"] is True
+    assert narration_short["passed"] is False
+    assert narration_duration_report(180.0, 3)["passed"] is True
+
+
+def test_daily_audio_gate_blocks_render_when_real_narration_misses_target():
+    task = TaskResponse(
+        id="daily-duration-mismatch",
+        created_at="2026-08-24T00:00:00+00:00",
+        updated_at="2026-08-24T00:00:00+00:00",
+        source_type=SourceType.NEWS_DAILY,
+        status=TaskStatus.TTS,
+        config=TaskConfig(target_duration_minutes=8, auto_render=True),
+    )
+    compose = AsyncMock()
+
+    with (
+        patch.object(orchestrator, "_probe_duration", AsyncMock(return_value=125.760792)),
+        patch.object(orchestrator, "run_compose", compose),
+    ):
+        with pytest.raises(RuntimeError, match="target 8 min, actual 2.10 min"):
+            asyncio.run(
+                orchestrator._after_audio(
+                    task,
+                    script_path="script.txt",
+                    audio_path="audio.wav",
+                    task_log=lambda _message: None,
+                    log=None,
+                )
+            )
+
+    compose.assert_not_awaited()
+
+
 def _attribution_dossier() -> research.ResearchDossier:
     rows = [
         (
@@ -352,6 +399,7 @@ def test_daily_desk_defaults_to_unattended_next_run():
 
     assert settings.enabled is True
     assert settings.catch_up_after_restart is False
+    assert settings.target_duration_minutes == 3
     assert settings.tts_model == "orpheus-en"
     assert settings.voice == "leah"
     assert settings.auto_publish is True
@@ -1002,3 +1050,73 @@ def test_review_report_records_gemini_primary_and_chatgpt_fallback(
     )
     assert (tmp_path / "review" / "story-review-prompt-1-group-1.txt").exists()
     assert (tmp_path / "review" / "story-review-response-1-group-1.txt").exists()
+
+
+def test_review_fits_script_to_target_before_web_accuracy_audit(tmp_path: Path):
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-24T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-24",
+        "now",
+        36,
+        articles,
+        articles,
+        [],
+    )
+    repaired = "Opening.\n" + " ".join(["word"] * 540) + "\nClosing."
+    duration_contract = daily_script_duration_report(repaired, 3, "en")
+    fit = AsyncMock(return_value=(repaired, duration_contract))
+    web_review = AsyncMock(
+        return_value=(
+            {
+                "approved": True,
+                "confidence": 100,
+                "summary": "2/2 story audits passed.",
+                "issues": [],
+            },
+            "[RAW]",
+            "",
+            "gemini",
+        )
+    )
+
+    with (
+        patch.object(review, "fit_daily_script_duration", fit),
+        patch.object(
+            review,
+            "script_contract_report",
+            return_value={"passed": True, "failures": []},
+        ),
+        patch.object(review, "_web_story_review", web_review),
+    ):
+        result = asyncio.run(
+            review.review_daily_script(
+                "Opening.\nToo short.\nClosing.",
+                dossier,
+                date(2026, 8, 24),
+                tmp_path,
+                language="en",
+                closing_remarks="Closing.",
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+                target_duration_minutes=3,
+            )
+        )
+
+    assert result.script == repaired
+    assert result.report["attempts"][0]["duration_contract"]["passed"] is True
+    assert fit.await_args.kwargs["target_duration_minutes"] == 3
+    assert (tmp_path / "review" / "candidate-duration-cycle-1.txt").exists()

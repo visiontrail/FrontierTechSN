@@ -237,12 +237,12 @@ export default function MorningDesk() {
           <article className="morning-config-panel">
             <header><span>02</span><div><strong>Editorial brief</strong><small>Length, language, and evidence window</small></div></header>
             <div className="morning-field-grid morning-field-grid--four">
-              <label><span>Run length</span><div className="morning-unit-input"><input type="number" min="1" max="30" value={draft.target_duration_minutes} onChange={(event) => patch('target_duration_minutes', Number(event.target.value))} /><i>min</i></div></label>
+              <label><span>Target length</span><div className="morning-unit-input"><input type="number" min="1" max="30" value={draft.target_duration_minutes} onChange={(event) => patch('target_duration_minutes', Number(event.target.value))} /><i>min</i></div></label>
               <label><span>Language</span><select value={draft.language} onChange={(event) => patch('language', event.target.value as 'en' | 'zh')}><option value="en">English</option><option value="zh">中文</option></select></label>
               <label><span>Stories</span><input type="number" min="3" max="12" value={draft.max_stories} onChange={(event) => patch('max_stories', Number(event.target.value))} /></label>
               <label><span>Source window</span><div className="morning-unit-input"><input type="number" min="12" max="96" step="12" value={draft.source_window_hours} onChange={(event) => patch('source_window_hours', Number(event.target.value))} /><i>hr</i></div></label>
             </div>
-            <p className="morning-panel-note">The source quorum remains a hard gate; widening the window never lowers evidence requirements.</p>
+            <p className="morning-panel-note">The final script and narration must stay within 20% of this target. The source quorum remains a hard gate; widening the window never lowers evidence requirements.</p>
           </article>
 
           <article className="morning-config-panel">

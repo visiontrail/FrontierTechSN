@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable
 from datetime import date
@@ -10,6 +11,12 @@ from backend.pipeline.digester import _chat, _resolve_provider
 
 LogCallback = Callable[[str], None]
 NON_ENGLISH_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+ENGLISH_SPOKEN_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’.-][A-Za-z0-9]+)*")
+CHINESE_SPOKEN_CHARACTER_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+DAILY_NEWS_ENGLISH_WORDS_PER_MINUTE = 180
+DAILY_NEWS_CHINESE_CHARACTERS_PER_MINUTE = 280
+DAILY_NEWS_DURATION_LOWER_RATIO = 0.8
+DAILY_NEWS_DURATION_UPPER_RATIO = 1.2
 SOURCE_SPOKEN_ALIASES = {
     "机器之心 AI Daily": ("Machine Heart", "Jiqizhixin"),
     "量子位 QbitAI": ("QbitAI",),
@@ -20,6 +27,64 @@ SOURCE_SPOKEN_ALIASES = {
 }
 TECHMEME_CREDIT_RE = re.compile(r"^\s*([^:\n]{2,120}?)\s+:\s+")
 TITLE_CREDIT_RE = re.compile(r"\(([^()]{2,120})\)\s*$")
+
+
+def daily_script_duration_report(
+    script: str,
+    target_duration_minutes: int,
+    language: str,
+) -> dict:
+    """Estimate spoken duration and enforce the Morning Desk length contract.
+
+    English uses words, while Mandarin uses Han characters plus embedded Latin
+    terms.  The estimate is deliberately checked again against the real TTS
+    artifact later; this gate prevents a radically short script from reaching
+    an expensive synthesis/render stage in the first place.
+    """
+    if language == "zh":
+        han_characters = len(CHINESE_SPOKEN_CHARACTER_RE.findall(script))
+        latin_terms = len(ENGLISH_SPOKEN_WORD_RE.findall(script))
+        spoken_units = han_characters + latin_terms
+        units_per_minute = DAILY_NEWS_CHINESE_CHARACTERS_PER_MINUTE
+        unit_label = "spoken characters"
+    else:
+        spoken_units = len(ENGLISH_SPOKEN_WORD_RE.findall(script))
+        units_per_minute = DAILY_NEWS_ENGLISH_WORDS_PER_MINUTE
+        unit_label = "spoken words"
+
+    target_units = max(1, round(target_duration_minutes * units_per_minute))
+    minimum_units = max(1, math.ceil(target_units * DAILY_NEWS_DURATION_LOWER_RATIO))
+    maximum_units = max(minimum_units, math.floor(target_units * DAILY_NEWS_DURATION_UPPER_RATIO))
+    estimated_minutes = spoken_units / units_per_minute
+    return {
+        "passed": minimum_units <= spoken_units <= maximum_units,
+        "spoken_units": spoken_units,
+        "unit_label": unit_label,
+        "units_per_minute": units_per_minute,
+        "target_duration_minutes": target_duration_minutes,
+        "estimated_duration_minutes": round(estimated_minutes, 3),
+        "minimum_units": minimum_units,
+        "target_units": target_units,
+        "maximum_units": maximum_units,
+    }
+
+
+def narration_duration_report(
+    duration_seconds: float,
+    target_duration_minutes: int,
+) -> dict:
+    """Compare the real narration artifact with the configured run length."""
+    target_seconds = float(target_duration_minutes * 60)
+    minimum_seconds = target_seconds * DAILY_NEWS_DURATION_LOWER_RATIO
+    maximum_seconds = target_seconds * DAILY_NEWS_DURATION_UPPER_RATIO
+    return {
+        "passed": minimum_seconds <= duration_seconds <= maximum_seconds,
+        "duration_seconds": round(duration_seconds, 3),
+        "target_duration_minutes": target_duration_minutes,
+        "target_seconds": target_seconds,
+        "minimum_seconds": minimum_seconds,
+        "maximum_seconds": maximum_seconds,
+    }
 
 
 def morning_opening(edition_date: date, language: str = "en") -> str:
@@ -185,6 +250,90 @@ def _issues_are_unsupported_only(issues: list[dict]) -> bool:
     return all(codes == {"D"} for codes in code_sets)
 
 
+async def fit_daily_script_duration(
+    script: str,
+    dossier: ResearchDossier,
+    edition_date: date,
+    *,
+    target_duration_minutes: int,
+    language: str,
+    closing_remarks: str,
+    ai_endpoint: str | None,
+    ai_model: str | None,
+    provider_id: int | None,
+    log: LogCallback | None = None,
+) -> tuple[str, dict]:
+    """Repair a materially short/long script before independent fact review."""
+    report = daily_script_duration_report(script, target_duration_minutes, language)
+    if report["passed"]:
+        return script, report
+
+    endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
+    opening = morning_opening(edition_date, language)
+    direction = "expand" if report["spoken_units"] < report["minimum_units"] else "condense"
+    language_rule = (
+        "Use natural broadcast Mandarin Chinese."
+        if language == "zh"
+        else "Use natural broadcast English and no Chinese, Japanese, or Korean characters."
+    )
+    system_prompt = f"""You are the length editor for Frontier Tech Daily.
+{direction.capitalize()} the complete spoken script to fit a {target_duration_minutes}-minute edition.
+The final script must contain between {report['minimum_units']} and {report['maximum_units']} {report['unit_label']} (target {report['target_units']}).
+Use only facts already present in CURRENT SCRIPT or the supplied EVIDENCE DOSSIER. Never add generic commentary, repetition, speculation, invented transitions, or unsupported significance merely to reach the length.
+Preserve the exact story order and output exactly {len(dossier.selected) + 2} nonblank paragraphs: the exact opening, one paragraph for each selected story, and the exact closing.
+Attribute reported claims aloud. Preserve every number, name, uncertainty word, and factual limitation.
+{language_rule}
+Output spoken prose only with no markdown, labels, citations section, or explanation.
+
+Exact opening: {opening}
+Exact closing: {closing_remarks}
+"""
+    raw = await _chat(
+        system_prompt,
+        "\n\n".join(
+            [
+                "CURRENT SCRIPT\n" + script,
+                "EVIDENCE DOSSIER\n" + dossier_markdown(dossier),
+            ]
+        ),
+        endpoint,
+        model,
+        api_key,
+        log,
+        "Daily news duration correction",
+        max_tokens=max(4096, min(8192, report["target_units"] * 3)),
+        enable_skills=False,
+    )
+    repaired = enforce_script_contract(
+        raw,
+        opening=opening,
+        closing=closing_remarks,
+        language=language,
+    )
+    repaired_report = daily_script_duration_report(
+        repaired,
+        target_duration_minutes,
+        language,
+    )
+    if not repaired_report["passed"]:
+        raise RuntimeError(
+            "Daily-news script length contract failed after correction: "
+            f"target {target_duration_minutes} min, estimated "
+            f"{repaired_report['estimated_duration_minutes']:.2f} min "
+            f"({repaired_report['spoken_units']} {repaired_report['unit_label']}; "
+            f"required {repaired_report['minimum_units']}-"
+            f"{repaired_report['maximum_units']})"
+        )
+    if log:
+        log(
+            "Daily script duration corrected: "
+            f"{report['estimated_duration_minutes']:.2f} -> "
+            f"{repaired_report['estimated_duration_minutes']:.2f} min "
+            f"for {target_duration_minutes}-minute target"
+        )
+    return repaired, repaired_report
+
+
 async def generate_daily_script(
     dossier: ResearchDossier,
     edition_date: date,
@@ -198,11 +347,16 @@ async def generate_daily_script(
     log: LogCallback | None = None,
 ) -> str:
     opening = morning_opening(edition_date, language)
-    word_count = max(180, target_duration_minutes * (280 if language == "zh" else 150))
+    units_per_minute = (
+        DAILY_NEWS_CHINESE_CHARACTERS_PER_MINUTE
+        if language == "zh"
+        else DAILY_NEWS_ENGLISH_WORDS_PER_MINUTE
+    )
+    spoken_unit_target = max(units_per_minute, target_duration_minutes * units_per_minute)
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
     language_label = "natural broadcast Mandarin Chinese" if language == "zh" else "natural broadcast English"
     system_prompt = f"""You are the senior anchor and evidence editor for Frontier Tech Daily.
-Write a solo morning-news video podcast script in {language_label}, about {word_count} spoken words.
+Write a solo morning-news video podcast script in {language_label}, about {spoken_unit_target} spoken {'characters' if language == 'zh' else 'words'}.
 
 NON-NEGOTIABLE EDITORIAL CONTRACT
 1. The first spoken line will be injected by software. Do not write a greeting, date, show name, headline list, title, markdown, labels, stage directions, citations section, or speaker prefixes.
@@ -230,7 +384,7 @@ Software-controlled closing (for context only; DO NOT repeat):
         api_key,
         log,
         "Daily news script",
-        max_tokens=max(4096, min(8192, word_count * 3)),
+        max_tokens=max(4096, min(8192, spoken_unit_target * 3)),
         enable_skills=False,
     )
     if language == "en" and NON_ENGLISH_RE.search(raw):
@@ -244,7 +398,7 @@ Software-controlled closing (for context only; DO NOT repeat):
             api_key,
             log,
             "Daily news English translation repair",
-            max_tokens=max(4096, min(8192, word_count * 3)),
+            max_tokens=max(4096, min(8192, spoken_unit_target * 3)),
             enable_skills=False,
         )
     script = enforce_script_contract(
@@ -365,6 +519,7 @@ def script_contract_report(
     *,
     language: str,
     closing_remarks: str,
+    target_duration_minutes: int | None = None,
 ) -> dict:
     opening = morning_opening(edition_date, language)
     script_folded = script.casefold()
@@ -400,6 +555,19 @@ def script_contract_report(
         failures.append("English script contains CJK text")
     if len(script.split()) < 120:
         failures.append("script is implausibly short")
+    duration_contract = None
+    if target_duration_minutes is not None:
+        duration_contract = daily_script_duration_report(
+            script,
+            target_duration_minutes,
+            language,
+        )
+        if not duration_contract["passed"]:
+            failures.append(
+                "script duration is outside target tolerance: "
+                f"target {target_duration_minutes} min, estimated "
+                f"{duration_contract['estimated_duration_minutes']:.2f} min"
+            )
     required_publications = min(3, len(expected_publications))
     if len(matched_publications) < required_publications:
         failures.append("fewer than three selected publications are attributed aloud")
@@ -412,6 +580,7 @@ def script_contract_report(
         "story_source_mentions": story_source_mentions,
         "matched_publication_count": len(matched_publications),
         "required_publication_count": required_publications,
+        "duration_contract": duration_contract,
         "script_sha256": __import__("hashlib").sha256(script.encode("utf-8")).hexdigest(),
         "dossier_selected_ids": [article.id for article in dossier.selected],
     }

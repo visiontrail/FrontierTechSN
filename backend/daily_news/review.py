@@ -13,6 +13,7 @@ from uuid import uuid4
 from backend import config
 from backend.daily_news.research import ResearchDossier
 from backend.daily_news.scriptwriter import (
+    fit_daily_script_duration,
     morning_opening,
     revise_daily_script,
     script_contract_report,
@@ -717,6 +718,7 @@ async def review_daily_script(
     ai_endpoint: str | None,
     ai_model: str | None,
     provider_id: int | None,
+    target_duration_minutes: int | None = None,
     log: LogCallback | None = None,
 ) -> ScriptReviewResult:
     review_dir = output_dir / "review"
@@ -728,6 +730,26 @@ async def review_daily_script(
         f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{uuid4().hex}"
     )
     for cycle in range(1, max_cycles + 1):
+        length_contract = None
+        if target_duration_minutes is not None:
+            prior_candidate = candidate
+            candidate, length_contract = await fit_daily_script_duration(
+                candidate,
+                dossier,
+                edition_date,
+                target_duration_minutes=target_duration_minutes,
+                language=language,
+                closing_remarks=closing_remarks,
+                ai_endpoint=ai_endpoint,
+                ai_model=ai_model,
+                provider_id=provider_id,
+                log=log,
+            )
+            if candidate != prior_candidate:
+                (review_dir / f"candidate-duration-cycle-{cycle}.txt").write_text(
+                    candidate,
+                    encoding="utf-8",
+                )
         # Each two-story group owns a fresh Gemini turn. A failed primary turn
         # gets a fresh ChatGPT fallback instead of reusing mutable active-page state.
         contract = script_contract_report(
@@ -736,6 +758,7 @@ async def review_daily_script(
             edition_date,
             language=language,
             closing_remarks=closing_remarks,
+            target_duration_minutes=target_duration_minutes,
         )
         if not contract["passed"]:
             raise RuntimeError(
@@ -805,6 +828,7 @@ async def review_daily_script(
             "summary": payload.get("summary", ""),
             "issues": payload.get("issues", []),
             "contract": contract,
+            "duration_contract": length_contract,
         }
         attempts.append(attempt)
         if log:

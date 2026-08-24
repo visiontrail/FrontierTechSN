@@ -45,6 +45,13 @@ function formatCreated(iso: string): string {
   }).format(new Date(iso))
 }
 
+function formatDuration(seconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(totalSeconds / 60)
+  const remainder = totalSeconds % 60
+  return `${minutes}:${String(remainder).padStart(2, '0')}`
+}
+
 export default function TaskList() {
   const navigate = useNavigate()
   const { data: tasks, isLoading } = useQuery({
@@ -104,7 +111,7 @@ export default function TaskList() {
                   <th scope="col">Status</th>
                   <th scope="col">Format</th>
                   <th scope="col">Origin</th>
-                  <th scope="col">Target</th>
+                  <th scope="col">Length</th>
                   <th scope="col">Start</th>
                   <th scope="col">Created</th>
                   <th scope="col"><span className="sr-only">Open task</span></th>
@@ -155,7 +162,12 @@ export default function TaskList() {
                           </span>
                         ) : <span className="table-muted">Manual</span>}
                       </td>
-                      <td><span className="table-value">{task.config.target_duration_minutes || '—'} min</span></td>
+                      <td>
+                        <span className="task-length-cell">
+                          <strong>{task.duration_seconds !== null ? `${formatDuration(task.duration_seconds)} actual` : 'Not rendered'}</strong>
+                          <small>{task.config.target_duration_minutes || '—'} min target</small>
+                        </span>
+                      </td>
                       <td>
                         {parked ? (
                           <span className="schedule-cell">

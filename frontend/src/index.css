@@ -2692,6 +2692,7 @@ video {
 }
 
 .task-source-copy,
+.task-length-cell,
 .schedule-cell,
 .created-cell {
   display: flex;
@@ -2710,6 +2711,7 @@ video {
 }
 
 .task-source-copy code,
+.task-length-cell small,
 .schedule-cell small,
 .created-cell small {
   color: var(--text-faint);
@@ -2720,6 +2722,7 @@ video {
 
 .table-value,
 .table-muted,
+.task-length-cell strong,
 .schedule-cell strong,
 .created-cell strong {
   color: var(--text-dim);
@@ -3503,8 +3506,9 @@ video {
 }
 
 .detail-facts {
-  display: flex;
+  display: grid;
   min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 10px;
 }
 
@@ -3517,7 +3521,7 @@ video {
 }
 
 .detail-facts div:last-child {
-  flex: 1;
+  grid-column: span 2;
 }
 
 .detail-facts dt {
@@ -3534,6 +3538,11 @@ video {
   color: var(--text);
   font-size: 13px;
   font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.detail-facts dd.duration-mismatch {
+  color: var(--accent-red);
 }
 
 .detail-body {

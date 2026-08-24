@@ -66,6 +66,19 @@ function retainedVideoWarning(status: string, publicationSafetyHold: boolean): s
   return 'This task is still processing. The download remains the last validated cut until the task completes.'
 }
 
+function formatDuration(seconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(totalSeconds / 60)
+  const remainder = totalSeconds % 60
+  return `${minutes}m ${String(remainder).padStart(2, '0')}s`
+}
+
+function isDurationMismatch(actualSeconds: number | null, targetMinutes: number): boolean {
+  if (actualSeconds === null) return false
+  const targetSeconds = targetMinutes * 60
+  return actualSeconds < targetSeconds * 0.8 || actualSeconds > targetSeconds * 1.2
+}
+
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -91,6 +104,10 @@ export default function TaskDetail() {
   const [draftOverride, setDraftOverride] = useState<string | null>(null)
   const draft = draftOverride ?? scriptText ?? ''
   const dirty = draftOverride !== null && draftOverride !== scriptText
+  const durationMismatch = isDurationMismatch(
+    task?.duration_seconds ?? null,
+    task?.config.target_duration_minutes ?? 0,
+  )
 
   const [startOverride, setStartOverride] = useState<string | null>(null)
   const [titleCopied, setTitleCopied] = useState(false)
@@ -246,7 +263,15 @@ export default function TaskDetail() {
         </div>
         <dl className="detail-facts">
           <div>
-            <dt>Duration</dt>
+            <dt>{task.video_artifact_state === 'retained' ? 'Retained duration' : 'Actual duration'}</dt>
+            <dd className={durationMismatch ? 'duration-mismatch' : undefined}>
+              {task.duration_seconds !== null
+                ? `${formatDuration(task.duration_seconds)}${durationMismatch ? ' · outside target' : ''}`
+                : 'Not rendered'}
+            </dd>
+          </div>
+          <div>
+            <dt>Target duration</dt>
             <dd>{task.config.target_duration_minutes} min</dd>
           </div>
           <div>

@@ -28,7 +28,7 @@ from backend.daily_news.research import (
     run_research,
 )
 from backend.daily_news.review import review_daily_script
-from backend.daily_news.scriptwriter import generate_daily_script
+from backend.daily_news.scriptwriter import generate_daily_script, narration_duration_report
 from backend.pipeline.extractors.base import ExtractedContent
 
 logger = logging.getLogger(__name__)
@@ -175,6 +175,25 @@ async def _after_audio(
 ):
     """Either pause for audio review or, when the task opted out, continue
     straight into the compose stage."""
+    if task.source_type == SourceType.NEWS_DAILY:
+        narration_seconds = await _probe_duration(Path(audio_path))
+        duration_contract = narration_duration_report(
+            narration_seconds,
+            task.config.target_duration_minutes,
+        )
+        task_log(
+            f"{prefix}Narration duration contract: actual "
+            f"{narration_seconds / 60:.2f} min, target "
+            f"{task.config.target_duration_minutes} min"
+        )
+        if not duration_contract["passed"]:
+            raise RuntimeError(
+                "Daily-news narration duration is outside target tolerance: "
+                f"target {task.config.target_duration_minutes} min, actual "
+                f"{narration_seconds / 60:.2f} min; required "
+                f"{duration_contract['minimum_seconds'] / 60:.2f}-"
+                f"{duration_contract['maximum_seconds'] / 60:.2f} min"
+            )
     if not task.config.auto_render:
         await update_task(task.id, status=TaskStatus.AWAITING_REVIEW.value)
         task_log(f"{prefix}Audio ready, awaiting review before video render")
@@ -296,6 +315,7 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
             ai_endpoint=ai_endpoint,
             ai_model=ai_model,
             provider_id=provider_id,
+            target_duration_minutes=task.config.target_duration_minutes,
             log=task_log,
         )
         script = reviewed.script
@@ -537,6 +557,7 @@ async def run_daily_review_resume(task: TaskResponse, log: LogCallback | None = 
         ai_endpoint=task.config.ai_endpoint,
         ai_model=task.config.ai_model,
         provider_id=task.config.provider_id,
+        target_duration_minutes=task.config.target_duration_minutes,
         log=task_log,
     )
     script_path = task_dir / "script.txt"
