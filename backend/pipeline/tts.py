@@ -186,6 +186,12 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("3", "m"): "3m",
     ("multi", "modal"): "multimodal",
     ("a", "p", "i"): "api",
+    # Provider-only phonetics for the Chinese personal name Zhu Yi. Keep this
+    # equivalence scoped to the complete two-token name so an unrelated "Joo"
+    # or "Yee" remains distinct and positional completeness still applies.
+    ("zhu", "yi"): "zhuyi",
+    ("joo", "yee"): "zhuyi",
+    ("jew", "yee"): "zhuyi",
 }
 NUMBER_SCALES = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
 DANGLING_CHUNK_WORDS = {
@@ -1181,6 +1187,17 @@ def _orpheus_prompt_text(text: str) -> str:
     stripped = re.sub(
         r"(?<![\w-])Qianwen(?![\w-])",
         "Chien-Wen",
+        stripped,
+    )
+    # The English Orpheus voice repeatedly realized the live attribution
+    # "Zhu Yi, co-founder of Prana Labs" as "Su Yi" and merged the company
+    # name into "Pranilabs". Give only this evidenced transition an explicit
+    # pinyin target and articulation boundaries. The canonical script stays
+    # unchanged, and ASR verification still requires the full person and
+    # company names in their original positions.
+    stripped = re.sub(
+        r"\bZhu Yi,\s+co-founder of Prana Labs\b",
+        "Joo Yee. Co-founder of Prana. Labs",
         stripped,
     )
     # The speech LM can parse the CamelCase publication name as "two-bit AI".

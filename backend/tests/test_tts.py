@@ -230,6 +230,56 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             "Qwenish pre-Qwen qianwen.",
         )
 
+    def test_orpheus_prompt_articulates_zhu_yi_and_separates_prana_labs(self):
+        text = (
+            "DeepTech China published a conversation with Zhu Yi, "
+            "co-founder of Prana Labs,"
+        )
+
+        self.assertEqual(
+            tts._orpheus_prompt_text(text),
+            "DeepTech China published a conversation with Joo Yee. "
+            "Co-founder of Prana. Labs.",
+        )
+
+    def test_orpheus_transcript_accepts_only_contextual_zhu_yi_phonetics(self):
+        expected = (
+            "DeepTech China published a conversation with Zhu Yi, "
+            "co-founder of Prana Labs,"
+        )
+
+        def verified(observed: str) -> bool:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return bool(tts._orpheus_transcript_report(expected, words)["verified"])
+
+        self.assertTrue(
+            verified(
+                "Deep Tech China published a conversation with Joo Yee "
+                "co-founder of Prana Labs"
+            )
+        )
+        self.assertTrue(
+            verified(
+                "Deep Tech China published a conversation with Jew Yee "
+                "co-founder of Prana Labs"
+            )
+        )
+        self.assertFalse(
+            verified(
+                "Deep Tech China published a conversation with Su Yi "
+                "co-founder of Prana Labs"
+            )
+        )
+        self.assertFalse(
+            verified(
+                "Deep Tech China published a conversation with Joo Lee "
+                "co-founder of Prana Labs"
+            )
+        )
+
     def test_orpheus_prompt_articulates_brem_possessive_vowel(self):
         self.assertEqual(
             tts._orpheus_prompt_text("Brem's research indicates a result"),
