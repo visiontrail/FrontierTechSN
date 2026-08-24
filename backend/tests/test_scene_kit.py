@@ -161,10 +161,8 @@ def test_inline_news_image_is_part_of_the_text_flow_with_seekable_motion():
 
     assert validate_scene_html(html, "scene-01") == []
     assert 'class="stage news-inline-stage"' in html
-    assert (
-        '<div class="news-inline-window" id="scene-01-image-frame" '
-        'data-layout-allow-overflow>'
-    ) in html
+    assert '<div class="news-inline-window" id="scene-01-image-frame">' in html
+    assert '<div class="news-inline-media-crop" data-layout-allow-overflow>' in html
     assert 'src="../news_images/nvidia.png"' in html
     assert 'id="scene-01-body"' in html
     assert 'class="news-inline-items"' in html

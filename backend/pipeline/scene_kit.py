@@ -1044,9 +1044,11 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
   #{plan.id} .news-inline-rule {{ width:190px; height:4px; border-radius:3px; background:{accent}; }}
   #{plan.id} .news-inline-visual {{ width:48%; height:690px; display:flex; align-items:center; position:relative;
       perspective:1400px; z-index:2; }}
-  #{plan.id} .news-inline-window {{ position:relative; width:100%; height:620px; overflow:hidden;
+  #{plan.id} .news-inline-window {{ position:relative; width:100%; height:620px; overflow:visible;
       border:3px solid {_rgba(accent, .72)}; border-radius:24px; background:{media_background};
       box-shadow:0 34px 100px {_rgba(plan.theme.bg, .45)}; transform-style:preserve-3d; }}
+  #{plan.id} .news-inline-media-crop {{ position:absolute; inset:0; overflow:hidden;
+      border-radius:20px; background:{media_background}; }}
   #{plan.id} .news-inline-media {{ display:block; width:100%; height:100%; object-fit:{plan.news_image_fit};
       object-position:{object_position}; padding:{image_padding}; box-sizing:border-box; }}
   #{plan.id} .news-inline-credit {{ position:absolute; left:22px; right:22px; bottom:20px; z-index:4;
@@ -1103,10 +1105,11 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
         + items_markup
         + '      </div>\n'
         + f'      <div class="news-inline-visual" id="{plan.id}-visual" data-layout-allow-overflow>\n'
-        + f'        <div class="news-inline-window" id="{plan.id}-image-frame" '
-        + 'data-layout-allow-overflow>\n'
-        + f'          <img class="news-inline-media" id="{plan.id}-image" src="{_esc(plan.news_image_src)}" '
+        + f'        <div class="news-inline-window" id="{plan.id}-image-frame">\n'
+        + '          <div class="news-inline-media-crop" data-layout-allow-overflow>\n'
+        + f'            <img class="news-inline-media" id="{plan.id}-image" src="{_esc(plan.news_image_src)}" '
         + f'alt="{_esc(plan.news_image_caption)}" crossorigin="anonymous">\n'
+        + '          </div>\n'
         + (f'          <div class="news-inline-credit" id="{plan.id}-credit">{_esc(plan.news_image_credit)}</div>\n' if plan.news_image_credit else "")
         + '        </div>\n'
         + f'        <div class="news-inline-index" id="{plan.id}-index">IMG</div>\n'
