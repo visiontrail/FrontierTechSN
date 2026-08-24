@@ -3614,6 +3614,18 @@ def attach_news_images(
         mode = str(image.get("display_mode") or "inline")
         if mode not in PLAN_MODES:
             mode = "inline"
+        # A fullscreen logo replaces the original scene composition.  For a
+        # structured stat/list scene that discards the strongest narrated
+        # evidence and can leave a sparse transparent mark filling the frame.
+        # Keep the logo as an inline source card so the verified stat/items
+        # remain visible; other photo-rich/fullscreen scenes preserve the
+        # required placement-mode mix.
+        if (
+            mode == "fullscreen"
+            and str(image.get("kind") or "") == "logo"
+            and (plan.get("stat") or plan.get("items"))
+        ):
+            mode = "inline"
         plan.update(
             {
                 "news_image": True,

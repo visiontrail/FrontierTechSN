@@ -2041,6 +2041,55 @@ def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(
     assert plans[1]["news_image_original_archetype"] == "topic"
 
 
+def test_attach_news_images_keeps_structured_logo_scene_inline(tmp_path: Path):
+    data = board()
+    data["scenes"] = data["scenes"][:1]
+    plans = visual_plan.fallback_plan(data)
+    plans[0].update(
+        {
+            "archetype": "stat",
+            "stat": "18m × 18m",
+            "stat_label": "Reflective mirror aboard the test satellite",
+        }
+    )
+    asset_dir = tmp_path / "news_images"
+    asset_dir.mkdir()
+    payload = _image_bytes("PNG", "structured-logo")
+    (asset_dir / "image-01.png").write_bytes(payload)
+    manifest = {
+        "manifest_version": news_images.MANIFEST_VERSION,
+        "query_semantics_version": news_images.QUERY_SEMANTICS_VERSION,
+        "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+        "status": "ready",
+        "storyboard_sha256": news_images.storyboard_fingerprint(data),
+        "license_policy": "open_only",
+        "requested_image_count": 1,
+        "planned_image_count": 1,
+        "eligible_scene_count": 1,
+        "eligible_scene_ids": ["scene-01"],
+        "excluded_scene_ids": [],
+        "placement_modes": {"inline": 0, "fullscreen": 1},
+        "images": [
+            _grounded_image_record(
+                data["scenes"][0],
+                local_path="news_images/image-01.png",
+                payload=payload,
+                source="https://commons.example/nvidia-stat",
+                subject="NVIDIA",
+                kind="logo",
+                mode="fullscreen",
+            )
+        ],
+    }
+
+    summary = news_images.attach_news_images(plans, data, manifest, tmp_path)
+
+    assert summary == {"attached": 1, "placement_modes": {"inline": 1, "fullscreen": 0}}
+    assert plans[0]["archetype"] == "stat"
+    assert plans[0]["news_image_mode"] == "inline"
+    assert plans[0]["stat"] == "18m × 18m"
+
+
 @pytest.mark.parametrize(
     ("manifest_mutation", "image_mutation"),
     [
