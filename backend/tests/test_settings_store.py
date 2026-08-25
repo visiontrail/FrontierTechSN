@@ -87,13 +87,6 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertNotIn("RENDER_FPS", self.stored())
         self.assertEqual(config.RENDER_FPS, default_fps)
 
-    def test_blank_restores_the_default_for_a_field_that_cannot_be_blank(self):
-        settings_store.update({"AI_ENDPOINT": "http://example.test/v1/chat/completions"})
-        settings_store.update({"AI_ENDPOINT": "   "})
-
-        self.assertNotIn("AI_ENDPOINT", self.stored())
-        self.assertEqual(config.AI_ENDPOINT, settings_store.defaults()["AI_ENDPOINT"])
-
     def test_clearing_a_number_or_choice_restores_its_default(self):
         # The Admin form sends "" when a number input is emptied; that reads as
         # "put it back", not as an invalid number.
@@ -109,13 +102,6 @@ class SettingsStoreTests(unittest.TestCase):
         settings_store.apply_saved()
         # A second apply must not promote the saved override into the default.
         self.assertNotEqual(settings_store.defaults()["RENDER_FPS"], 24)
-
-    def test_blank_is_stored_for_a_field_that_allows_it(self):
-        settings_store.update({"ANTHROPIC_BASE_URL": "https://api.example.test/anthropic"})
-        self.assertEqual(config.ANTHROPIC_BASE_URL, "https://api.example.test/anthropic")
-
-        settings_store.update({"ANTHROPIC_BASE_URL": ""})
-        self.assertEqual(config.ANTHROPIC_BASE_URL, "")
 
     def test_rejects_unusable_values_without_touching_config(self):
         before = config.RENDER_FPS
@@ -232,16 +218,6 @@ class SettingsStoreTests(unittest.TestCase):
             ["DB_PATH"],
         )
 
-    def test_schema_masks_secrets_and_never_returns_them(self):
-        settings_store.update({"AI_API_KEY": "sk-abcdefghijklmnop"})
-        field = self.field("AI_API_KEY")
-
-        self.assertEqual(field["value"], "")
-        self.assertEqual(field["masked"], "sk-a...mnop")
-        self.assertTrue(field["is_set"])
-        self.assertTrue(field["is_overridden"])
-        self.assertNotIn("sk-abcdefghijklmnop", json.dumps(settings_store.schema()))
-
     def test_schema_reports_defaults_and_dynamic_options(self):
         settings_store.update({"RENDER_FPS": 24})
         fps = self.field("RENDER_FPS")
@@ -311,6 +287,43 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(self.stored()["RENDER_QUALITY"], "high")
         with self.assertRaises(AssertionError):
             self.field("ORPHEUS_TTS_SPEED_PERCENT")
+
+    def test_provider_routing_settings_are_pruned_from_system_admin(self):
+        provider_keys = {
+            "AI_ENDPOINT",
+            "AI_API_KEY",
+            "AI_MODEL",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        }
+        self.store.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "values": {
+                        "AI_ENDPOINT": "https://stale.example/v1/chat/completions",
+                        "AI_API_KEY": "stale-secret",
+                        "AI_MODEL": "stale-model",
+                        "ANTHROPIC_MODEL": "stale-sdk-model",
+                        "RENDER_QUALITY": "high",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        settings_store.apply_saved()
+
+        schema_keys = {
+            field["key"]
+            for group in settings_store.schema()
+            for field in group["fields"]
+        }
+        self.assertTrue(provider_keys.isdisjoint(schema_keys))
+        self.assertTrue(provider_keys.isdisjoint(self.stored()))
+        self.assertEqual(self.stored()["RENDER_QUALITY"], "high")
 
     def test_corrupt_store_file_falls_back_to_defaults(self):
         self.store.write_text("{not json", encoding="utf-8")

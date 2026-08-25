@@ -28,7 +28,18 @@ from typing import Any, Callable, Iterable, Mapping
 _STORE_VERSION = 1
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off", ""}
-_RETIRED_KEYS = {"ORPHEUS_TTS_SPEED_PERCENT"}
+_RETIRED_KEYS = {
+    "ORPHEUS_TTS_SPEED_PERCENT",
+    # Provider routing is owned by Admin -> Models. Prune the former System
+    # overrides so hidden settings cannot keep winning after the fields move.
+    "AI_ENDPOINT",
+    "AI_API_KEY",
+    "AI_MODEL",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+}
 
 
 class SettingsError(ValueError):
@@ -88,14 +99,14 @@ GROUPS: tuple[SettingGroup, ...] = (
     SettingGroup(
         "ai",
         "AI Engine",
-        "The gateway that digests sources and writes scripts. A task may pick a "
-        "provider from the Models tab; these are the process-wide fallbacks.",
+        "Execution policy for the provider selected in the Models tab: transport, "
+        "retry limits, and HTTP fallback behavior.",
     ),
     SettingGroup(
         "agent_sdk",
         "Claude Agent SDK",
-        "Anthropic-protocol routing for the `claude` CLI the SDK spawns. Leave "
-        "blank to derive everything from the AI engine settings above.",
+        "Process and timeout controls for the `claude` CLI spawned by the SDK. "
+        "Provider endpoint, credentials, and model are managed in the Models tab.",
     ),
     SettingGroup(
         "tts",
@@ -224,25 +235,6 @@ SPECS: tuple[SettingSpec, ...] = (
                     "protocol; http is the direct OpenAI-compatible client.",
     ),
     SettingSpec(
-        "AI_ENDPOINT", "ai", "Endpoint", "string",
-        placeholder="https://gateway.example.com/v1/chat/completions",
-        description="OpenAI-compatible chat-completions URL. Seeds the default "
-                    "provider the first time the database is created.",
-        allow_blank=False,
-    ),
-    SettingSpec(
-        "AI_API_KEY", "ai", "API key", "secret",
-        placeholder="sk-…",
-        description="Sent as the bearer token, and as the Anthropic auth token "
-                    "when no dedicated one is set below.",
-    ),
-    SettingSpec(
-        "AI_MODEL", "ai", "Model", "string",
-        placeholder="glm-4.6-chat",
-        description="Model id used when a task does not select a provider.",
-        allow_blank=False,
-    ),
-    SettingSpec(
         "AI_TIMEOUT", "ai", "Request timeout", "int", unit="seconds",
         minimum=1, maximum=3600,
         description="Per-request ceiling for the http backend. The Agent SDK "
@@ -271,26 +263,6 @@ SPECS: tuple[SettingSpec, ...] = (
                     "failing the stage.",
     ),
     # ── Claude Agent SDK ─────────────────────────────────────────────────
-    SettingSpec(
-        "ANTHROPIC_BASE_URL", "agent_sdk", "Anthropic base URL", "string",
-        placeholder="https://api.deepseek.com/anthropic",
-        description="Only needed when the gateway's Anthropic route is not at "
-                    "the host root. Blank derives it from the endpoint.",
-    ),
-    SettingSpec(
-        "ANTHROPIC_AUTH_TOKEN", "agent_sdk", "Anthropic auth token", "secret",
-        description="Blank reuses the resolved provider's API key.",
-    ),
-    SettingSpec(
-        "ANTHROPIC_MODEL", "agent_sdk", "Anthropic model", "string",
-        description="Overrides the task/provider model for SDK calls. Blank "
-                    "uses whichever model the task resolved.",
-    ),
-    SettingSpec(
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "agent_sdk", "Background (haiku) model", "string",
-        description="Cheap model the CLI uses for titles and summaries. Blank "
-                    "reuses the main model — set it when the gateway has no haiku tier.",
-    ),
     SettingSpec(
         "CLAUDE_CLI_PATH", "agent_sdk", "claude CLI path", "string",
         placeholder="/usr/local/bin/claude",

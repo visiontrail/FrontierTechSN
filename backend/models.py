@@ -458,15 +458,6 @@ class ProviderTestResponse(BaseModel):
     latency_ms: Optional[int] = None
 
 
-class SettingsResponse(BaseModel):
-    ai_endpoint: str
-    ai_model: str
-    tts_device: str
-    default_voice_1: str
-    default_voice_2: str
-    available_voices: dict
-
-
 class VoiceOption(BaseModel):
     name: str
     gender: str
@@ -482,12 +473,6 @@ class TtsModelOption(BaseModel):
     provider: str
     single_speaker: bool
     is_default: bool
-
-
-class SettingsUpdate(BaseModel):
-    ai_endpoint: Optional[str] = None
-    ai_api_key: Optional[str] = None
-    ai_model: Optional[str] = None
 
 
 class SettingField(BaseModel):

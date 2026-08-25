@@ -1,11 +1,9 @@
 from fastapi import APIRouter, HTTPException
 
-from backend import config, settings_store
+from backend import settings_store
 from backend.models import (
     SettingsResetRequest,
-    SettingsResponse,
     SettingsSchemaResponse,
-    SettingsUpdate,
     SettingsValuesUpdate,
 )
 
@@ -47,34 +45,3 @@ async def reset_settings_values(body: SettingsResetRequest):
     except settings_store.SettingsError as exc:
         raise HTTPException(400, str(exc))
     return _schema(restart_required)
-
-
-@router.get("", response_model=SettingsResponse)
-async def get_settings():
-    return SettingsResponse(
-        ai_endpoint=config.AI_ENDPOINT,
-        ai_model=config.AI_MODEL,
-        tts_device=config.TTS_DEVICE,
-        default_voice_1=config.TTS_DEFAULT_VOICE_1,
-        default_voice_2=config.TTS_DEFAULT_VOICE_2,
-        available_voices=config.AVAILABLE_VOICES,
-    )
-
-
-@router.put("", response_model=SettingsResponse)
-async def update_settings(body: SettingsUpdate):
-    """Legacy narrow update. Routes through the store so it now persists."""
-    submitted = {
-        key: value
-        for key, value in (
-            ("AI_ENDPOINT", body.ai_endpoint),
-            ("AI_API_KEY", body.ai_api_key),
-            ("AI_MODEL", body.ai_model),
-        )
-        if value is not None
-    }
-    try:
-        settings_store.update(submitted)
-    except settings_store.SettingsError as exc:
-        raise HTTPException(400, str(exc))
-    return await get_settings()

@@ -160,15 +160,6 @@ export interface FootageManifest {
   publication_blockers?: string[];
 }
 
-export interface Settings {
-  ai_endpoint: string;
-  ai_model: string;
-  tts_device: string;
-  default_voice_1: string;
-  default_voice_2: string;
-  available_voices: Record<string, { gender: string; lang: string }>;
-}
-
 export interface DailyAutomationSettings {
   enabled: boolean;
   generation_time: string;
@@ -381,11 +372,6 @@ export async function scheduleTask(taskId: string, scheduledAt: string | null): 
 export async function deleteTask(id: string): Promise<void> {
   const res = await fetch(`${BASE}/api/tasks/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(await res.text());
-}
-
-export async function fetchSettings(): Promise<Settings> {
-  const res = await fetch(`${BASE}/api/settings`);
-  return res.json();
 }
 
 // ── Runtime settings ─────────────────────────────────────────────────
