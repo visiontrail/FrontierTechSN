@@ -57,7 +57,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 1
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 2
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -201,6 +201,11 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     # Hyphenation is not audible; Whisper may split the source compound.
     ("semi", "annual"): "semiannual",
     ("skunk", "works"): "skunkworks",
+    # Whisper tokenizes the spoken compound "fivefold" as the consecutive
+    # words "five" and "-fold". Number-word normalization has already mapped
+    # the first token to "5" here, so collapse only that exact morpheme pair;
+    # different multipliers or an extra intervening word remain hard failures.
+    ("5", "fold"): "fivefold",
     ("3", "m"): "3m",
     ("multi", "modal"): "multimodal",
     ("a", "p", "i"): "api",
