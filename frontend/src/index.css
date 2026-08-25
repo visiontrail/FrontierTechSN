@@ -16,6 +16,8 @@
   --text-faint: rgba(26, 74, 58, 0.46);
   --accent: #1a4a3a;
   --accent-2: #e5c158;
+  --accent-foreground: #fdfbf7;
+  --accent-2-foreground: #1a4a3a;
   --accent-3: #d4af37;
   --accent-red: #b4493d;
   --accent-green: #1f7a4d;
@@ -59,8 +61,10 @@
     --text: #ffffff;
     --text-dim: #9ca3af;
     --text-faint: rgba(156, 163, 175, 0.64);
-    --accent: #25254d;
-    --accent-2: #25254d;
+    --accent: #8b8bf0;
+    --accent-2: #8b8bf0;
+    --accent-foreground: #111115;
+    --accent-2-foreground: #111115;
     --accent-3: #ffffff;
     --accent-red: #ff6478;
     --accent-green: #4ade80;
@@ -100,8 +104,10 @@
   --text: #ffffff;
   --text-dim: #9ca3af;
   --text-faint: rgba(156, 163, 175, 0.64);
-  --accent: #25254d;
-  --accent-2: #25254d;
+  --accent: #8b8bf0;
+  --accent-2: #8b8bf0;
+  --accent-foreground: #111115;
+  --accent-2-foreground: #111115;
   --accent-3: #ffffff;
   --accent-red: #ff6478;
   --accent-green: #4ade80;
@@ -634,22 +640,22 @@ small {
   border-radius: var(--radius-pill);
   padding: 10px 18px;
   background: var(--accent);
-  color: var(--bg);
+  color: var(--accent-foreground);
   font-size: 14px;
   font-weight: 500;
   line-height: 1.2;
 }
 
 :root:not([data-theme='dark']) .btn-primary:hover {
-  color: var(--bg);
+  color: var(--accent-foreground);
 }
 
 :root[data-theme='dark'] .btn-primary {
-  color: #ffffff;
+  color: var(--accent-foreground);
 }
 
 :root[data-theme='dark'] .btn-primary:hover {
-  color: #ffffff;
+  color: var(--accent-foreground);
 }
 
 .btn-danger {
@@ -1738,7 +1744,7 @@ video {
   border-radius: var(--radius-pill);
   vertical-align: middle;
 }
-.badge-accent { background: var(--accent-2); color: var(--bg-strong); }
+.badge-accent { background: var(--accent-2); color: var(--accent-2-foreground); }
 .badge-muted { background: var(--surface-muted); color: var(--text-dim); }
 .badge-warn { background: var(--accent-yellow); color: var(--bg-strong); }
 .file-chip {
@@ -2665,7 +2671,7 @@ video {
   border: 1px solid var(--accent);
   border-radius: var(--radius-pill);
   background: var(--accent);
-  color: var(--bg);
+  color: var(--accent-foreground);
   padding: 11px 19px;
   font-weight: 600;
   letter-spacing: 0.2px;
@@ -2673,14 +2679,14 @@ video {
 }
 
 .tasks-new:hover {
-  color: var(--bg);
+  color: var(--accent-foreground);
   box-shadow: var(--shadow-card);
   transform: translateY(-2px);
 }
 
 :root[data-theme='dark'] .tasks-new,
 :root[data-theme='dark'] .tasks-new:hover {
-  color: #fff;
+  color: var(--accent-foreground);
 }
 
 .tasks-new span {
