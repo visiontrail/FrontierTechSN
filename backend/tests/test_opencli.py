@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from backend import config
+from backend import config, settings_store
 from backend.pipeline import opencli as opencli_module
 from backend.pipeline.opencli import OpenCLIError, first_json
 from backend.pipeline.opencli_rate_limit import (
@@ -65,16 +65,30 @@ class OpenCLIRateLimitTests(unittest.TestCase):
         self.assertFalse(is_rate_limited_command(["doctor"]))
         self.assertFalse(is_rate_limited_command(["youtube", "search", "query"]))
 
-    def test_interval_is_clamped_to_ten_through_thirty_seconds(self):
-        self.assertEqual(normalize_interval(1), 10)
-        self.assertEqual(normalize_interval(17), 17)
-        self.assertEqual(normalize_interval(90), 30)
-        self.assertEqual(normalize_interval("invalid"), 10)
+    def test_interval_is_clamped_to_three_through_ten_minutes(self):
+        self.assertEqual(normalize_interval(1), 180)
+        self.assertEqual(normalize_interval(240), 240)
+        self.assertEqual(normalize_interval(900), 600)
+        self.assertEqual(normalize_interval("invalid"), 180)
+
+    def test_admin_setting_accepts_only_three_through_ten_minutes(self):
+        spec = next(
+            item
+            for item in settings_store.SPECS
+            if item.key == "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS"
+        )
+
+        self.assertEqual(settings_store.coerce(spec, 180), 180)
+        self.assertEqual(settings_store.coerce(spec, 600), 600)
+        with self.assertRaises(settings_store.SettingsError):
+            settings_store.coerce(spec, 179)
+        with self.assertRaises(settings_store.SettingsError):
+            settings_store.coerce(spec, 601)
 
     def test_persistent_slot_waits_between_immediate_requests(self):
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "limiter-state"
-            now = [100.0]
+            now = [1_000.0]
             sleeps: list[float] = []
 
             def clock() -> float:
@@ -86,7 +100,7 @@ class OpenCLIRateLimitTests(unittest.TestCase):
 
             first_delay = wait_for_opencli_web_slot(
                 "chatgpt",
-                interval=10,
+                interval=180,
                 state_path=state_path,
                 clock=clock,
                 sleeper=sleeper,
@@ -94,7 +108,7 @@ class OpenCLIRateLimitTests(unittest.TestCase):
             )
             second_delay = wait_for_opencli_web_slot(
                 "gemini",
-                interval=10,
+                interval=180,
                 state_path=state_path,
                 clock=clock,
                 sleeper=sleeper,
@@ -102,9 +116,9 @@ class OpenCLIRateLimitTests(unittest.TestCase):
             )
 
             self.assertEqual(first_delay, 0)
-            self.assertEqual(second_delay, 10)
-            self.assertEqual(sleeps, [10])
-            self.assertEqual(float(state_path.read_text().strip()), 110)
+            self.assertEqual(second_delay, 180)
+            self.assertEqual(sleeps, [180])
+            self.assertEqual(float(state_path.read_text().strip()), 1180)
 
 
 class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -122,7 +136,7 @@ class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "create_subprocess_exec",
                 AsyncMock(return_value=SuccessfulProcess()),
             ) as create_process,
-            patch.object(config, "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", 17),
+            patch.object(config, "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", 240),
         ):
             result = await opencli_module.run_opencli(
                 ["chatgpt", "status"], timeout=5
@@ -132,7 +146,7 @@ class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
         to_thread.assert_awaited_once_with(
             wait_for_opencli_web_slot,
             "chatgpt",
-            interval=17,
+            interval=240,
         )
         self.assertEqual(
             create_process.await_args.kwargs["env"][

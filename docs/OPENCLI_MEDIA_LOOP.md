@@ -42,8 +42,9 @@ back to the existing silence/word estimate and delivery continues with an explic
 6. In **Morning Desk**, enable Public footage and set its clip budget. Thumbnail generation remains part of the fixed automated-edition contract.
 
 Every `chatgpt` or `gemini` command through the project wrapper participates in
-a cross-process start limiter. The default interval is 10 seconds and the supported
-range is 10–30 seconds (`OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`, also available under
+a cross-process start limiter. The default interval is 3 minutes and the supported
+range is 3–10 minutes (`OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`, expressed as 180–600
+seconds and also available under
 **Admin → System → Footage Sources**). The limiter covers retries, concurrent backend
 tasks, and direct `scripts/opencli.sh` calls; unrelated OpenCLI sites are not delayed.
 

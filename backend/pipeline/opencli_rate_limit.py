@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Callable
 
 
-MIN_INTERVAL_SECONDS = 10.0
-MAX_INTERVAL_SECONDS = 30.0
+MIN_INTERVAL_SECONDS = 3 * 60.0
+MAX_INTERVAL_SECONDS = 10 * 60.0
 DEFAULT_INTERVAL_SECONDS = MIN_INTERVAL_SECONDS
 RATE_LIMITED_SITES = frozenset({"chatgpt", "gemini"})
 
@@ -22,7 +22,7 @@ def is_rate_limited_command(args: list[str] | tuple[str, ...]) -> bool:
 
 
 def normalize_interval(value: object | None) -> float:
-    """Coerce an interval and fail safe inside the supported 10–30s range."""
+    """Coerce an interval and fail safe inside the supported 3–10 minute range."""
     if value is None:
         value = os.getenv(
             "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS",
