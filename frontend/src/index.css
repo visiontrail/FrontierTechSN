@@ -3649,12 +3649,109 @@ video {
 }
 
 .detail-progress {
-  display: grid;
   flex: 0 0 auto;
+  margin: clamp(16px, 2vw, 26px) 0;
+}
+
+.detail-progress-toggle {
+  display: flex;
+  min-height: 50px;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  padding: 10px 14px;
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+  transition: border-color .18s ease, background .18s ease;
+}
+
+.detail-progress-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.detail-progress-toggle:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.detail-progress-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+  outline-offset: 2px;
+}
+
+.detail-progress[open] .detail-progress-toggle {
+  margin-bottom: 10px;
+}
+
+.detail-progress-title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.detail-progress-title strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.detail-progress-title span {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.detail-progress-state {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+
+.detail-progress-disclosure {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.detail-progress-disclosure svg {
+  width: 15px;
+  height: 15px;
+  transition: transform .18s ease;
+}
+
+.detail-progress-hide {
+  display: none;
+}
+
+.detail-progress[open] .detail-progress-show {
+  display: none;
+}
+
+.detail-progress[open] .detail-progress-hide {
+  display: inline;
+}
+
+.detail-progress[open] .detail-progress-disclosure svg {
+  transform: rotate(90deg);
+}
+
+.detail-progress-content {
+  display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
   gap: 10px;
-  margin: clamp(16px, 2vw, 26px) 0;
 }
 
 .detail-progress .pipeline-stages {
@@ -3950,10 +4047,6 @@ video {
     max-height: 46vh;
   }
 
-  .detail-progress {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .detail-facts {
     flex-wrap: wrap;
   }
@@ -3986,6 +4079,22 @@ video {
 
   .detail-progress .pipeline-stages {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .detail-progress-toggle {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 5px 10px;
+  }
+
+  .detail-progress-state {
+    width: 100%;
+    margin-left: 0;
+    order: 3;
+  }
+
+  .detail-progress-disclosure {
+    margin-left: auto;
   }
 
   .detail-quick-actions button {

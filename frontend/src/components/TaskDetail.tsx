@@ -19,7 +19,7 @@ import {
 import LogPanel from './LogPanel'
 import FootagePanel from './FootagePanel'
 import PublicationPanel from './PublicationPanel'
-import { IconChevronLeft } from './Icons'
+import { IconChevronLeft, IconChevronRight } from './Icons'
 import { countdown, formatStart, isPendingStart, localInputToIso, toLocalInputValue } from '../schedule'
 
 const STAGES = ['researching', 'digesting', 'reviewing', 'sourcing', 'tts', 'music', 'composing', 'publishing', 'complete'] as const
@@ -253,57 +253,74 @@ export default function TaskDetail() {
         </div>
       )}
 
-      <div className="detail-progress">
-        <div className="pipeline-stages">
-          {STAGES.map((s) => (
-            <div key={s} className={`stage ${stageState(task.status, s)}`}>
-              {STAGE_LABELS[s]}
+      <details key={task.id} className="detail-progress">
+        <summary className="detail-progress-toggle">
+          <span className="detail-progress-title">
+            <strong>Execution flow</strong>
+            <span>Configuration basics</span>
+          </span>
+          <span className="detail-progress-state">
+            {STAGES.length} stages &middot; {STAGE_LABELS[task.status] || task.status.replaceAll('_', ' ')}
+          </span>
+          <span className="detail-progress-disclosure" aria-hidden="true">
+            <span className="detail-progress-show">Show details</span>
+            <span className="detail-progress-hide">Hide details</span>
+            <IconChevronRight />
+          </span>
+        </summary>
+
+        <div className="detail-progress-content">
+          <div className="pipeline-stages">
+            {STAGES.map((s) => (
+              <div key={s} className={`stage ${stageState(task.status, s)}`}>
+                {STAGE_LABELS[s]}
+              </div>
+            ))}
+          </div>
+          <dl className="detail-facts">
+            <div>
+              <dt>{task.video_artifact_state === 'retained' ? 'Retained duration' : 'Actual duration'}</dt>
+              <dd className={durationMismatch ? 'duration-mismatch' : undefined}>
+                {task.duration_seconds !== null
+                  ? `${formatDuration(task.duration_seconds)}${durationMismatch ? ' · outside target' : ''}`
+                  : 'Not rendered'}
+              </dd>
             </div>
-          ))}
+            <div>
+              <dt>Target duration</dt>
+              <dd>{task.config.target_duration_minutes} min</dd>
+            </div>
+            <div>
+              <dt>Voices</dt>
+              <dd>{task.config.voice_1} + {task.config.voice_2}</dd>
+            </div>
+            <div>
+              <dt>Character</dt>
+              <dd>{task.config.include_character ? 'On' : 'Off'}</dd>
+            </div>
+            <div>
+              <dt>Captions</dt>
+              <dd>{task.config.captions_enabled !== false ? 'On · single line' : 'Off'}</dd>
+            </div>
+            <div>
+              <dt>Origin</dt>
+              <dd>{task.origin_type === 'content_plan' ? 'Content plan' : task.origin_type === 'daily_news' ? 'Morning desk' : 'Manual task'}</dd>
+            </div>
+            <div>
+              <dt>Target release</dt>
+              <dd>{task.planned_publish_at ? formatStart(task.planned_publish_at) : 'Not planned'}</dd>
+            </div>
+            <div>
+              <dt>Delivery</dt>
+              <dd>{task.origin_type === 'daily_news' && task.config.auto_publish ? 'Automatic · identity gated' : 'Manual review'}</dd>
+            </div>
+            <div>
+              <dt>Spoken ending</dt>
+              <dd title={task.config.closing_remarks}>{task.config.closing_remarks || 'Default close'}</dd>
+            </div>
+          </dl>
         </div>
-        <dl className="detail-facts">
-          <div>
-            <dt>{task.video_artifact_state === 'retained' ? 'Retained duration' : 'Actual duration'}</dt>
-            <dd className={durationMismatch ? 'duration-mismatch' : undefined}>
-              {task.duration_seconds !== null
-                ? `${formatDuration(task.duration_seconds)}${durationMismatch ? ' · outside target' : ''}`
-                : 'Not rendered'}
-            </dd>
-          </div>
-          <div>
-            <dt>Target duration</dt>
-            <dd>{task.config.target_duration_minutes} min</dd>
-          </div>
-          <div>
-            <dt>Voices</dt>
-            <dd>{task.config.voice_1} + {task.config.voice_2}</dd>
-          </div>
-          <div>
-            <dt>Character</dt>
-            <dd>{task.config.include_character ? 'On' : 'Off'}</dd>
-          </div>
-          <div>
-            <dt>Captions</dt>
-            <dd>{task.config.captions_enabled !== false ? 'On · single line' : 'Off'}</dd>
-          </div>
-          <div>
-            <dt>Origin</dt>
-            <dd>{task.origin_type === 'content_plan' ? 'Content plan' : task.origin_type === 'daily_news' ? 'Morning desk' : 'Manual task'}</dd>
-          </div>
-          <div>
-            <dt>Target release</dt>
-            <dd>{task.planned_publish_at ? formatStart(task.planned_publish_at) : 'Not planned'}</dd>
-          </div>
-          <div>
-            <dt>Delivery</dt>
-            <dd>{task.origin_type === 'daily_news' && task.config.auto_publish ? 'Automatic · identity gated' : 'Manual review'}</dd>
-          </div>
-          <div>
-            <dt>Spoken ending</dt>
-            <dd title={task.config.closing_remarks}>{task.config.closing_remarks || 'Default close'}</dd>
-          </div>
-        </dl>
-      </div>
+      </details>
 
       <div className="detail-body">
         <section className="detail-column detail-main">
