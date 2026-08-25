@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 
 from backend import config
+from backend.pipeline.opencli_browser_runtime import runtime_subprocess_environment
 
 
 class OpenCodeError(RuntimeError):
@@ -97,6 +98,7 @@ async def _run_agent(
     env: dict[str, str],
     timeout: int,
 ) -> OpenCodeResult:
+    env = runtime_subprocess_environment(env)
     process = await asyncio.create_subprocess_exec(
         config.OPENCODE_BIN,
         "run",

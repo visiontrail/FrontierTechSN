@@ -42,6 +42,39 @@ cp .env.example .env
 ./scripts/start.sh
 ```
 
+### Isolated headless OpenCLI browser
+
+The existing signed-in Chrome Browser Bridge remains the default. To run web
+automation without creating or focusing any window in the operator's Chrome,
+configure the opt-in `isolated-headless` runtime under **Admin → System →
+Footage Sources**. It starts a separate Chrome for Testing/Chromium process,
+uses an ignored project-local user-data directory, loads a separate OpenCLI
+extension instance, and pins every command to its exact Browser Bridge profile.
+It fails closed when any isolation boundary is unavailable and never falls back
+to the human profile.
+
+One visible bootstrap is required to discover the dedicated profile and sign in:
+
+```bash
+# First configure the isolated Chrome binary, user-data directory, and unpacked
+# OpenCLI extension path in Admin. Chrome for Testing is recommended because
+# current normal Chrome releases ignore command-line unpacked extensions.
+./scripts/opencli-browser-runtime.sh bootstrap
+./scripts/opencli.sh profile list
+./scripts/opencli.sh profile rename <context-id> frontiertechsn-headless
+
+# Sign into Gemini, ChatGPT, YouTube, and X in the dedicated bootstrap window.
+# Save frontiertechsn-headless as OPENCLI_ISOLATED_PROFILE, then stop it.
+./scripts/opencli-browser-runtime.sh stop
+```
+
+After saving `OPENCLI_BROWSER_RUNTIME=isolated-headless` and restarting the app,
+the first OpenCLI command starts the same dedicated profile in headless mode.
+Use `./scripts/opencli-browser-runtime.sh status` to inspect it and `stop` for a
+controlled shutdown. The profile directory is retained across restarts; the
+manager never deletes it. Keep `bridge` selected until a complete production
+run, including uploads and publishing, passes against the isolated accounts.
+
 Open [http://localhost:8101](http://localhost:8101). The production launcher builds the frontend and serves the UI/API/outputs from one port. Override with `PORT` only when needed.
 
 With no saved desk configuration, the next edition runs automatically at 05:30 Asia/Singapore, publishes to YouTube and X through the accounts signed into Chrome, and updates the Apple Podcasts RSS feed. YouTube production visibility defaults to `public`. A first launch later than the two-hour morning window waits for the next scheduled edition instead of publishing stale news.

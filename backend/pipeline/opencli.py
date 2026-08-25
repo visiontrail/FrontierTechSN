@@ -20,6 +20,13 @@ from backend.pipeline.opencli_rate_limit import (
     is_rate_limited_command,
     wait_for_opencli_web_slot,
 )
+from backend.pipeline.opencli_browser_runtime import (
+    ISOLATED_HEADLESS_RUNTIME,
+    OpenCLIBrowserRuntimeError,
+    ensure_isolated_headless_browser,
+    runtime_mode,
+    runtime_subprocess_environment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +44,7 @@ class OpenCLIResult:
 
 
 def _environment(*, site_session_namespace: str | None = None) -> dict[str, str]:
-    env = os.environ.copy()
+    env = runtime_subprocess_environment()
     path_parts = [
         str(config.PROJECT_ROOT / ".venv" / "bin"),
         str(config.PROJECT_ROOT / "tools" / "opencli" / "node_modules" / ".bin"),
@@ -49,7 +56,11 @@ def _environment(*, site_session_namespace: str | None = None) -> dict[str, str]
     env["OPENCLI_SITE_SESSION_NAMESPACE"] = (
         site_session_namespace or config.OPENCLI_SITE_SESSION_NAMESPACE
     )
-    if config.OPENCLI_PROFILE:
+    if runtime_mode() == ISOLATED_HEADLESS_RUNTIME:
+        # Never let an isolated run auto-select among connected profiles. The
+        # dedicated context id/alias is a fail-closed isolation boundary.
+        env["OPENCLI_PROFILE"] = config.OPENCLI_ISOLATED_PROFILE
+    elif config.OPENCLI_PROFILE:
         env["OPENCLI_PROFILE"] = config.OPENCLI_PROFILE
     return env
 
@@ -68,8 +79,20 @@ async def run_opencli(
             f"Run npm install --prefix {config.PROJECT_ROOT / 'tools' / 'opencli'}"
         )
 
+    try:
+        mode = runtime_mode()
+    except OpenCLIBrowserRuntimeError as exc:
+        raise OpenCLIError(f"OpenCLI browser runtime is invalid: {exc}") from exc
+    if mode == ISOLATED_HEADLESS_RUNTIME:
+        try:
+            await asyncio.to_thread(ensure_isolated_headless_browser)
+        except OpenCLIBrowserRuntimeError as exc:
+            raise OpenCLIError(f"Isolated OpenCLI browser is not ready: {exc}") from exc
+
     command = [str(binary), *[str(arg) for arg in args]]
     env = _environment(site_session_namespace=site_session_namespace)
+    if mode == ISOLATED_HEADLESS_RUNTIME:
+        env["OPENCLI_ISOLATED_RUNTIME_READY"] = "1"
     if is_rate_limited_command(args):
         # Pace before starting the subprocess so the provider-command timeout
         # measures the web operation, not time intentionally spent in queue.

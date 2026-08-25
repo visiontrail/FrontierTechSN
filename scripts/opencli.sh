@@ -16,6 +16,31 @@ if [ ! -x "$OPENCLI_BIN" ]; then
   exit 127
 fi
 
+# Backend calls export the live Admin selection; agent/direct wrapper calls can
+# opt in through the same environment variable. The default bridge path never
+# starts or probes another browser. Isolated mode must return an exact dedicated
+# profile or this command fails before OpenCLI can auto-select operator Chrome.
+if [ "${OPENCLI_BROWSER_RUNTIME:-bridge}" = "isolated-headless" ] \
+  && [ "${OPENCLI_ISOLATED_RUNTIME_READY:-0}" != "1" ]; then
+  if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+    RUNTIME_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    RUNTIME_PYTHON="$(command -v python3)"
+  else
+    echo "Python 3 is required for the isolated OpenCLI browser." >&2
+    exit 127
+  fi
+  ISOLATED_PROFILE="$(
+    cd "$PROJECT_ROOT"
+    "$RUNTIME_PYTHON" -m backend.pipeline.opencli_browser_runtime prepare
+  )"
+  if [ -z "$ISOLATED_PROFILE" ]; then
+    echo "Isolated OpenCLI profile is empty; refusing browser auto-selection." >&2
+    exit 78
+  fi
+  export OPENCLI_PROFILE="$ISOLATED_PROFILE"
+fi
+
 # Gemini and ChatGPT are browser-backed and enforce burst limits. Gate every
 # project-wrapper invocation, including calls made outside the backend. Backend
 # calls reserve their slot before their command timeout starts and mark the

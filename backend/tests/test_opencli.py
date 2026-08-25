@@ -57,6 +57,23 @@ class OpenCLISessionIsolationTests(unittest.TestCase):
         self.assertIn("OPENCLI_SITE_SESSION_NAMESPACE", patcher.read_text(encoding="utf-8"))
         self.assertIn("OPENCLI_SITE_SESSION_NAMESPACE", runtime.read_text(encoding="utf-8"))
 
+    def test_isolated_runtime_settings_are_explicit_and_restart_bound(self):
+        specs = {item.key: item for item in settings_store.SPECS}
+
+        runtime = specs["OPENCLI_BROWSER_RUNTIME"]
+        self.assertEqual(runtime.options, ("bridge", "isolated-headless"))
+        self.assertTrue(runtime.restart_required)
+        self.assertEqual(config.OPENCLI_BROWSER_RUNTIME, "bridge")
+        for key in (
+            "OPENCLI_ISOLATED_CHROME_BIN",
+            "OPENCLI_ISOLATED_USER_DATA_DIR",
+            "OPENCLI_ISOLATED_EXTENSION_PATH",
+            "OPENCLI_ISOLATED_PROFILE",
+            "OPENCLI_ISOLATED_DEBUG_PORT",
+            "OPENCLI_ISOLATED_START_TIMEOUT",
+        ):
+            self.assertTrue(specs[key].restart_required)
+
 
 class OpenCLIRateLimitTests(unittest.TestCase):
     def test_only_gemini_and_chatgpt_commands_are_rate_limited(self):

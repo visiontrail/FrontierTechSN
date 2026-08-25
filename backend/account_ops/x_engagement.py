@@ -12,6 +12,7 @@ from backend.account_ops.opencode import run_operational_agent
 from backend.models import AccountAutomationExecutor, AccountAutomationResponse
 from backend.pipeline.agent import build_agent_env
 from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
+from backend.pipeline.opencli_browser_runtime import runtime_subprocess_environment
 
 _STATUS_URL = re.compile(
     r"^https://(?:x\.com|twitter\.com)/(?P<handle>[^/]+)/status/\d+(?:\?.*)?$"
@@ -389,7 +390,9 @@ async def _run_claude_agent(*, model: str, prompt: str) -> OperationalAgentResul
         query,
     )
 
-    env = build_agent_env(model, config.AI_ENDPOINT, config.AI_API_KEY, 8000)
+    env = runtime_subprocess_environment(
+        build_agent_env(model, config.AI_ENDPOINT, config.AI_API_KEY, 8000)
+    )
     options = ClaudeAgentOptions(
         system_prompt=(
             "You are the restricted X account operator for this repository. Follow the "

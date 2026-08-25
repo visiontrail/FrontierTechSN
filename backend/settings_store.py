@@ -555,6 +555,58 @@ SPECS: tuple[SettingSpec, ...] = (
         description="Optional Browser Bridge profile alias. Blank auto-selects the only connected profile.",
     ),
     SettingSpec(
+        "OPENCLI_BROWSER_RUNTIME", "footage", "OpenCLI browser runtime", "choice",
+        options=("bridge", "isolated-headless"),
+        description="Bridge preserves the existing operator Chrome behavior. "
+                    "Isolated-headless explicitly starts a dedicated Chrome for "
+                    "Testing/Chromium profile and never falls back to operator Chrome.",
+        allow_blank=False,
+        restart_required=True,
+    ),
+    SettingSpec(
+        "OPENCLI_ISOLATED_CHROME_BIN", "footage", "Isolated Chrome binary", "string",
+        placeholder="/path/to/Google Chrome for Testing",
+        description="Executable for the dedicated runtime. Use Chrome for Testing "
+                    "or Chromium because normal Chrome no longer accepts unpacked "
+                    "extensions from command-line flags.",
+        restart_required=True,
+    ),
+    SettingSpec(
+        "OPENCLI_ISOLATED_USER_DATA_DIR", "footage", "Isolated Chrome data", "path",
+        placeholder="data/opencli-isolated-browser",
+        description="Dedicated ignored user-data directory. Human Chrome profile "
+                    "directories are rejected.",
+        allow_blank=False,
+        restart_required=True,
+    ),
+    SettingSpec(
+        "OPENCLI_ISOLATED_EXTENSION_PATH", "footage", "OpenCLI extension directory", "string",
+        placeholder="/path/to/unpacked/opencli-extension",
+        description="Unpacked extension directory containing OpenCLI's manifest.json.",
+        restart_required=True,
+    ),
+    SettingSpec(
+        "OPENCLI_ISOLATED_PROFILE", "footage", "Isolated OpenCLI profile", "string",
+        placeholder="frontiertechsn-headless",
+        description="Exact Browser Bridge context id or local alias discovered "
+                    "during bootstrap. Required in isolated mode so commands can "
+                    "never auto-select a human browser profile.",
+        restart_required=True,
+    ),
+    SettingSpec(
+        "OPENCLI_ISOLATED_DEBUG_PORT", "footage", "Isolated Chrome debug port", "int",
+        unit="port", minimum=1024, maximum=65535,
+        description="Loopback-only port used for readiness and process ownership checks.",
+        restart_required=True,
+    ),
+    SettingSpec(
+        "OPENCLI_ISOLATED_START_TIMEOUT", "footage", "Isolated Chrome startup", "int",
+        unit="seconds", minimum=5, maximum=120,
+        description="Maximum wait for both Chrome and the exact isolated Browser "
+                    "Bridge profile to become ready.",
+        restart_required=True,
+    ),
+    SettingSpec(
         "OPENCLI_TIMEOUT", "footage", "OpenCLI command timeout", "int", unit="seconds",
         minimum=10, maximum=1800,
     ),

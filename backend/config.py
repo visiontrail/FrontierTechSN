@@ -69,6 +69,24 @@ NEWS_IMAGE_SEARCH_TIMEOUT = int(os.getenv("NEWS_IMAGE_SEARCH_TIMEOUT", "60"))
 # upgrading this feature never changes the operator's global Claude Code setup.
 OPENCLI_BIN = resolve_project_path(os.getenv("OPENCLI_BIN", "scripts/opencli.sh"))
 OPENCLI_PROFILE = os.getenv("OPENCLI_PROFILE", "").strip()
+OPENCLI_BROWSER_RUNTIME = (
+    os.getenv("OPENCLI_BROWSER_RUNTIME", "bridge").strip().lower() or "bridge"
+)
+# The isolated runtime is strictly opt-in. It uses a different Chromium binary,
+# profile, and extension instance, then pins every OpenCLI command to the exact
+# Browser Bridge context id/alias below. Defaults never launch another browser.
+OPENCLI_ISOLATED_CHROME_BIN = os.getenv("OPENCLI_ISOLATED_CHROME_BIN", "").strip()
+OPENCLI_ISOLATED_USER_DATA_DIR = resolve_project_path(
+    os.getenv("OPENCLI_ISOLATED_USER_DATA_DIR", "data/opencli-isolated-browser")
+)
+OPENCLI_ISOLATED_EXTENSION_PATH = os.getenv(
+    "OPENCLI_ISOLATED_EXTENSION_PATH", ""
+).strip()
+OPENCLI_ISOLATED_PROFILE = os.getenv("OPENCLI_ISOLATED_PROFILE", "").strip()
+OPENCLI_ISOLATED_DEBUG_PORT = int(os.getenv("OPENCLI_ISOLATED_DEBUG_PORT", "19242"))
+OPENCLI_ISOLATED_START_TIMEOUT = int(
+    os.getenv("OPENCLI_ISOLATED_START_TIMEOUT", "30")
+)
 OPENCLI_SITE_SESSION_NAMESPACE = (
     os.getenv("OPENCLI_SITE_SESSION_NAMESPACE", "frontiertechsn").strip()
     or "frontiertechsn"
