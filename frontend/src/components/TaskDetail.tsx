@@ -111,6 +111,7 @@ export default function TaskDetail() {
 
   const [startOverride, setStartOverride] = useState<string | null>(null)
   const [titleCopied, setTitleCopied] = useState(false)
+  const [expandedLogTaskId, setExpandedLogTaskId] = useState<string | null>(null)
   const resumableFailedTts = task?.status === 'failed'
     && !task.publication_safety_hold
     && !!task.script_path
@@ -171,6 +172,7 @@ export default function TaskDetail() {
   const parked = task.status === 'queued' && isPendingStart(task.scheduled_at)
   const startDraft = startOverride ?? (task.scheduled_at ? toLocalInputValue(new Date(task.scheduled_at)) : '')
   const startMoved = !!startOverride && localInputToIso(startDraft) !== task.scheduled_at
+  const logsExpanded = expandedLogTaskId === task.id
 
   return (
     <div className="detail-workspace">
@@ -322,7 +324,7 @@ export default function TaskDetail() {
         </div>
       </details>
 
-      <div className="detail-body">
+      <div className={`detail-body${logsExpanded ? '' : ' is-log-collapsed'}`}>
         <section className="detail-column detail-main">
           {task.origin_type === 'content_plan' && (
             <div className="task-origin-banner">
@@ -536,7 +538,13 @@ export default function TaskDetail() {
         </section>
 
         <aside className="detail-column detail-rail">
-          <LogPanel taskId={task.id} taskStatus={task.status} fill />
+          <LogPanel
+            taskId={task.id}
+            taskStatus={task.status}
+            fill
+            expanded={logsExpanded}
+            onExpandedChange={(expanded) => setExpandedLogTaskId(expanded ? task.id : null)}
+          />
         </aside>
       </div>
     </div>

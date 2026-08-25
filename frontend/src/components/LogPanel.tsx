@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Task } from '../api'
 import { logsStreamUrl } from '../api'
-import { IconCheck, IconCopy } from './Icons'
+import { IconCheck, IconChevronLeft, IconChevronRight, IconCopy } from './Icons'
 
 type TaskStatus = Task['status']
 
@@ -10,6 +10,8 @@ interface LogPanelProps {
   taskStatus: TaskStatus
   /** Stretch the body to the height of its container instead of capping it. */
   fill?: boolean
+  expanded?: boolean
+  onExpandedChange?: (expanded: boolean) => void
 }
 
 const FINAL_STATUSES: TaskStatus[] = ['complete', 'failed', 'awaiting_review']
@@ -37,13 +39,20 @@ async function writeClipboard(text: string) {
   if (!ok) throw new Error('Copy rejected')
 }
 
-export default function LogPanel({ taskId, taskStatus, fill = false }: LogPanelProps) {
-  const [expanded, setExpanded] = useState(true)
+export default function LogPanel({
+  taskId,
+  taskStatus,
+  fill = false,
+  expanded: controlledExpanded,
+  onExpandedChange,
+}: LogPanelProps) {
+  const [internalExpanded, setInternalExpanded] = useState(false)
   const [lines, setLines] = useState<string[]>([])
   const [streamStatus, setStreamStatus] = useState<TaskStatus | null>(null)
   const [connectionState, setConnectionState] = useState<'connecting' | 'live' | 'closed' | 'error'>('connecting')
   const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle')
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const expanded = controlledExpanded ?? internalExpanded
 
   useEffect(() => {
     const source = new EventSource(logsStreamUrl(taskId))
@@ -113,36 +122,48 @@ export default function LogPanel({ taskId, taskStatus, fill = false }: LogPanelP
           ? 'Reconnecting'
           : effectiveStatus
 
+  const toggleExpanded = () => {
+    const nextExpanded = !expanded
+    if (controlledExpanded === undefined) setInternalExpanded(nextExpanded)
+    onExpandedChange?.(nextExpanded)
+  }
+
   return (
-    <section className={`log-panel${fill ? ' is-fill' : ''}`}>
+    <section className={`log-panel${fill ? ' is-fill' : ''}${expanded ? '' : ' is-collapsed'}`}>
       <div className="log-panel-head">
         <button
           type="button"
           className="log-panel-toggle"
           aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} pipeline logs`}
+          title={`${expanded ? 'Collapse' : 'Expand'} pipeline logs`}
+          onClick={toggleExpanded}
         >
-          <span>{expanded ? '-' : '+'}</span>
+          <span className="log-panel-chevron" aria-hidden="true">
+            {expanded ? <IconChevronRight /> : <IconChevronLeft />}
+          </span>
           <strong>Pipeline Logs</strong>
           <em>{stateLabel}</em>
         </button>
-        <button
-          type="button"
-          className={`log-copy-btn${copied === 'done' ? ' is-done' : ''}`}
-          disabled={!lines.length}
-          title={lines.length ? 'Copy all log lines' : 'Nothing to copy yet'}
-          aria-label="Copy logs to clipboard"
-          onClick={copyLogs}
-        >
-          {copied === 'done' ? <IconCheck /> : <IconCopy />}
-          <span>
-            {copied === 'done'
-              ? `Copied ${lines.length}`
-              : copied === 'failed'
-                ? 'Copy failed'
-                : 'Copy'}
-          </span>
-        </button>
+        {expanded && (
+          <button
+            type="button"
+            className={`log-copy-btn${copied === 'done' ? ' is-done' : ''}`}
+            disabled={!lines.length}
+            title={lines.length ? 'Copy all log lines' : 'Nothing to copy yet'}
+            aria-label="Copy logs to clipboard"
+            onClick={copyLogs}
+          >
+            {copied === 'done' ? <IconCheck /> : <IconCopy />}
+            <span>
+              {copied === 'done'
+                ? `Copied ${lines.length}`
+                : copied === 'failed'
+                  ? 'Copy failed'
+                  : 'Copy'}
+            </span>
+          </button>
+        )}
       </div>
 
       {expanded && (

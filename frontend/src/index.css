@@ -3804,6 +3804,11 @@ video {
   flex: 1;
   grid-template-columns: minmax(0, 1fr) clamp(340px, 30vw, 520px);
   gap: clamp(16px, 1.8vw, 26px);
+  transition: grid-template-columns .22s ease;
+}
+
+.detail-body.is-log-collapsed {
+  grid-template-columns: minmax(0, 1fr) 52px;
 }
 
 .detail-column {
@@ -3822,6 +3827,7 @@ video {
 /* The rail never scrolls itself — the log body inside it does. */
 .detail-rail {
   display: flex;
+  justify-content: flex-end;
   overflow: hidden;
 }
 
@@ -4019,12 +4025,60 @@ video {
   min-height: 0;
   flex-direction: column;
   margin-top: 0;
+  transition: width .22s ease;
 }
 
 .log-panel.is-fill .log-panel-body {
   min-height: 0;
   flex: 1;
   max-height: none;
+}
+
+.log-panel.is-fill.is-collapsed {
+  width: 52px;
+}
+
+.log-panel.is-collapsed .log-panel-head {
+  height: 100%;
+  align-items: stretch;
+  padding-right: 0;
+}
+
+.log-panel.is-collapsed .log-panel-toggle {
+  display: flex;
+  width: 52px;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 8px;
+  text-align: center;
+}
+
+.log-panel-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.log-panel-chevron svg {
+  width: 15px;
+  height: 15px;
+}
+
+.log-panel.is-collapsed .log-panel-toggle strong,
+.log-panel.is-collapsed .log-panel-toggle em {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+}
+
+.log-panel.is-collapsed .log-panel-toggle strong {
+  letter-spacing: .3px;
+}
+
+.log-panel.is-collapsed .log-panel-toggle em {
+  margin-top: auto;
+  font-size: 9px;
+  letter-spacing: .7px;
 }
 
 /* Stacked layout: the canvas scrolls, so the log column gets a cap back. */
@@ -4037,6 +4091,10 @@ video {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .detail-body.is-log-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .detail-main,
   .detail-rail {
     overflow: visible;
@@ -4045,6 +4103,29 @@ video {
 
   .log-panel.is-fill .log-panel-body {
     max-height: 46vh;
+  }
+
+  .log-panel.is-fill.is-collapsed {
+    width: 100%;
+  }
+
+  .log-panel.is-collapsed .log-panel-head {
+    height: auto;
+  }
+
+  .log-panel.is-collapsed .log-panel-toggle {
+    display: grid;
+    width: 100%;
+    grid-template-columns: auto 1fr auto;
+    padding: 12px 14px;
+    text-align: left;
+  }
+
+  .log-panel.is-collapsed .log-panel-toggle strong,
+  .log-panel.is-collapsed .log-panel-toggle em {
+    margin-top: 0;
+    transform: none;
+    writing-mode: horizontal-tb;
   }
 
   .detail-facts {
