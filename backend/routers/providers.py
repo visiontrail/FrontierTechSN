@@ -6,9 +6,11 @@ from backend.models import (
     ProviderUpdate,
     ProviderResponse,
     ProviderListResponse,
+    ProviderCatalogResponse,
     ProviderTestRequest,
     ProviderTestResponse,
 )
+from backend.provider_catalog import describe_provider_catalog
 from backend.pipeline import digester
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
@@ -19,9 +21,15 @@ async def get_providers():
     return ProviderListResponse(providers=await database.list_providers())
 
 
+@router.get("/catalog", response_model=ProviderCatalogResponse)
+async def get_provider_catalog():
+    return ProviderCatalogResponse(providers=describe_provider_catalog())
+
+
 @router.post("", response_model=ProviderResponse)
 async def add_provider(body: ProviderCreate):
     return await database.create_provider(
+        provider_type=body.provider_type,
         name=body.name,
         endpoint=body.endpoint,
         api_key=body.api_key,
@@ -67,7 +75,12 @@ async def test_provider(body: ProviderTestRequest):
 
 @router.put("/{provider_id}", response_model=ProviderResponse)
 async def edit_provider(provider_id: int, body: ProviderUpdate):
-    provider = await database.update_provider(provider_id, **body.model_dump(exclude_unset=True))
+    updates = body.model_dump(exclude_unset=True)
+    # The edit form never receives the stored secret. A blank field means
+    # "leave unchanged", matching the UI copy and the pre-save test behaviour.
+    if not updates.get("api_key"):
+        updates.pop("api_key", None)
+    provider = await database.update_provider(provider_id, **updates)
     if provider is None:
         raise HTTPException(status_code=404, detail="Provider not found")
     return provider

@@ -22,7 +22,7 @@ import os
 import time
 from collections import deque
 from collections.abc import Callable
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from backend import config, skills_admin
 
@@ -71,17 +71,21 @@ def _diagnostic_tail(sink: deque[str]) -> str:
 def _derive_base_url(endpoint: str | None) -> str:
     """Map an OpenAI-style endpoint to an Anthropic base URL.
 
-    The Anthropic client appends ``/v1/messages``, so the base must be the host
-    root (scheme://netloc) with any ``/v1/chat/completions`` suffix stripped.
-    ``ANTHROPIC_BASE_URL`` overrides this entirely when set (e.g. for gateways
-    that expose the Anthropic route on a sub-path)."""
+    The Anthropic client appends ``/v1/messages``. Strip an OpenAI chat suffix,
+    but preserve provider-specific Anthropic prefixes such as ``/anthropic`` or
+    ``/apps/anthropic``. ``ANTHROPIC_BASE_URL`` still overrides this entirely."""
     if config.ANTHROPIC_BASE_URL:
         return config.ANTHROPIC_BASE_URL
     if not endpoint:
         return ""
     parts = urlsplit(endpoint)
     if parts.scheme and parts.netloc:
-        return f"{parts.scheme}://{parts.netloc}"
+        path = parts.path.rstrip("/")
+        for suffix in ("/v1/chat/completions", "/chat/completions"):
+            if path.endswith(suffix):
+                path = path.removesuffix(suffix)
+                break
+        return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
     return endpoint
 
 

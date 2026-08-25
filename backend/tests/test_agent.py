@@ -42,6 +42,28 @@ def fake_sdk(query):
     )
 
 
+class ProviderBaseUrlTests(unittest.TestCase):
+    def test_openai_chat_suffix_is_removed_for_the_agent_sdk(self):
+        with patch.object(config, "ANTHROPIC_BASE_URL", ""):
+            self.assertEqual(
+                agent._derive_base_url("http://oneapi.example/v1/chat/completions"),
+                "http://oneapi.example",
+            )
+
+    def test_anthropic_provider_subpath_is_preserved(self):
+        with patch.object(config, "ANTHROPIC_BASE_URL", ""):
+            self.assertEqual(
+                agent._derive_base_url("https://api.deepseek.com/anthropic"),
+                "https://api.deepseek.com/anthropic",
+            )
+            self.assertEqual(
+                agent._derive_base_url(
+                    "https://workspace.example/apps/anthropic/v1/chat/completions"
+                ),
+                "https://workspace.example/apps/anthropic",
+            )
+
+
 class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
     async def test_safe_permission_mode_and_provider_environment(self):
         captured = {}

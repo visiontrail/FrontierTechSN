@@ -45,6 +45,7 @@ export interface TaskConfig {
 
 export interface Provider {
   id: number;
+  provider_type: string;
   name: string;
   endpoint: string;
   api_key_masked: string;
@@ -54,11 +55,22 @@ export interface Provider {
 }
 
 export interface ProviderInput {
+  provider_type: string;
   name: string;
   endpoint: string;
   api_key?: string;
   model: string;
   is_default?: boolean;
+}
+
+export interface ProviderCatalogEntry {
+  id: string;
+  label: string;
+  default_endpoint: string;
+  default_model: string;
+  models: string[];
+  notes: string;
+  endpoint_needs_input: boolean;
 }
 
 export interface ProviderTestRequest {
@@ -440,6 +452,13 @@ export async function fetchVoices(ttsModel?: string): Promise<VoiceOption[]> {
 
 export async function fetchProviders(): Promise<Provider[]> {
   const res = await fetch(`${BASE}/api/providers`);
+  const data = await res.json();
+  return data.providers;
+}
+
+export async function fetchProviderCatalog(): Promise<ProviderCatalogEntry[]> {
+  const res = await fetch(`${BASE}/api/providers/catalog`);
+  if (!res.ok) throw new Error('Failed to load provider catalog');
   const data = await res.json();
   return data.providers;
 }

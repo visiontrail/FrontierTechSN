@@ -22,6 +22,7 @@ from backend.models import (
     new_content_id,
     new_task_id,
 )
+from backend.provider_catalog import infer_provider_type
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -88,6 +89,7 @@ CREATE TABLE IF NOT EXISTS content_plan_items (
 
 CREATE TABLE IF NOT EXISTS providers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_type TEXT NOT NULL DEFAULT 'custom',
     name TEXT NOT NULL,
     endpoint TEXT NOT NULL,
     api_key TEXT,
@@ -335,6 +337,30 @@ async def _migrate_content_planning(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _migrate_providers(db: aiosqlite.Connection) -> None:
+    """Add provider catalogue metadata without rewriting endpoint credentials."""
+    rows = await db.execute_fetchall("PRAGMA table_info(providers)")
+    columns = {row["name"] for row in rows}
+    if "provider_type" not in columns:
+        await db.execute(
+            "ALTER TABLE providers ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'custom'"
+        )
+
+    provider_rows = await db.execute_fetchall(
+        "SELECT id, provider_type, endpoint, model FROM providers"
+    )
+    for row in provider_rows:
+        if (row["provider_type"] or "custom") != "custom":
+            continue
+        inferred = infer_provider_type(row["endpoint"], row["model"])
+        if inferred != "custom":
+            await db.execute(
+                "UPDATE providers SET provider_type = ? WHERE id = ?",
+                (inferred, row["id"]),
+            )
+    await db.commit()
+
+
 async def init_db():
     db = await get_db()
     try:
@@ -342,6 +368,7 @@ async def init_db():
         await db.commit()
         await _migrate_tasks(db)
         await _migrate_content_planning(db)
+        await _migrate_providers(db)
         await _migrate_account_operations(db)
         await _retire_legacy_account_automations(db)
         # Seed the default provider from the AI engine settings if none exist yet.
@@ -349,9 +376,17 @@ async def init_db():
         if rows[0]["c"] == 0 and config.AI_ENDPOINT:
             now = datetime.now(timezone.utc).isoformat()
             await db.execute(
-                """INSERT INTO providers (name, endpoint, api_key, model, is_default, created_at)
-                   VALUES (?, ?, ?, ?, 1, ?)""",
-                ("Default (settings)", config.AI_ENDPOINT, config.AI_API_KEY, config.AI_MODEL, now),
+                """INSERT INTO providers
+                   (provider_type, name, endpoint, api_key, model, is_default, created_at)
+                   VALUES (?, ?, ?, ?, ?, 1, ?)""",
+                (
+                    infer_provider_type(config.AI_ENDPOINT, config.AI_MODEL),
+                    "Default (settings)",
+                    config.AI_ENDPOINT,
+                    config.AI_API_KEY,
+                    config.AI_MODEL,
+                    now,
+                ),
             )
             await db.commit()
     except BaseException:
@@ -364,6 +399,7 @@ async def init_db():
 def _row_to_provider(row: aiosqlite.Row) -> ProviderResponse:
     return ProviderResponse(
         id=row["id"],
+        provider_type=row["provider_type"],
         name=row["name"],
         endpoint=row["endpoint"],
         api_key_masked=_mask_key(row["api_key"]),
@@ -399,15 +435,23 @@ async def get_provider_raw(provider_id: int | None) -> aiosqlite.Row | None:
     return rows[0] if rows else None
 
 
-async def create_provider(name: str, endpoint: str, api_key: str | None, model: str, is_default: bool) -> ProviderResponse:
+async def create_provider(
+    provider_type: str,
+    name: str,
+    endpoint: str,
+    api_key: str | None,
+    model: str,
+    is_default: bool,
+) -> ProviderResponse:
     now = datetime.now(timezone.utc).isoformat()
     db = await get_db()
     if is_default:
         await db.execute("UPDATE providers SET is_default = 0")
     cursor = await db.execute(
-        """INSERT INTO providers (name, endpoint, api_key, model, is_default, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (name, endpoint, api_key, model, 1 if is_default else 0, now),
+        """INSERT INTO providers
+           (provider_type, name, endpoint, api_key, model, is_default, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (provider_type, name, endpoint, api_key, model, 1 if is_default else 0, now),
     )
     await db.commit()
     rows = await db.execute_fetchall("SELECT * FROM providers WHERE id = ?", (cursor.lastrowid,))

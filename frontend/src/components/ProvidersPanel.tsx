@@ -2,14 +2,34 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchProviders,
+  fetchProviderCatalog,
   createProvider,
   updateProvider,
   deleteProvider,
   testProvider,
 } from '../api'
-import type { Provider, ProviderInput, ProviderTestRequest, ProviderTestResult } from '../api'
+import type {
+  Provider,
+  ProviderCatalogEntry,
+  ProviderInput,
+  ProviderTestRequest,
+  ProviderTestResult,
+} from '../api'
+
+const CUSTOM_MODEL = '__custom__'
+const ENDPOINT_PLACEHOLDER = /\{[^{}]+\}/
+const CUSTOM_PROFILE: ProviderCatalogEntry = {
+  id: 'custom',
+  label: 'Custom Anthropic-compatible endpoint',
+  default_endpoint: '',
+  default_model: '',
+  models: [],
+  notes: 'Enter the endpoint and model ID manually.',
+  endpoint_needs_input: false,
+}
 
 const EMPTY_FORM: ProviderInput = {
+  provider_type: 'custom',
   name: '',
   endpoint: '',
   api_key: '',
@@ -23,6 +43,15 @@ export default function ProvidersPanel() {
     queryKey: ['providers'],
     queryFn: fetchProviders,
   })
+  const {
+    data: loadedCatalog = [],
+    isError: catalogIsError,
+  } = useQuery({
+    queryKey: ['provider-catalog'],
+    queryFn: fetchProviderCatalog,
+    staleTime: Infinity,
+  })
+  const catalog = loadedCatalog.length ? loadedCatalog : [CUSTOM_PROFILE]
 
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState<ProviderInput>(EMPTY_FORM)
@@ -77,21 +106,53 @@ export default function ProvidersPanel() {
 
   function startEdit(p: Provider) {
     setEditingId(p.id)
-    setForm({ name: p.name, endpoint: p.endpoint, api_key: '', model: p.model, is_default: p.is_default })
+    setForm({
+      provider_type: p.provider_type,
+      name: p.name,
+      endpoint: p.endpoint,
+      api_key: '',
+      model: p.model,
+      is_default: p.is_default,
+    })
     setShowForm(true)
   }
 
-  const canSave = form.name.trim() && form.endpoint.trim() && form.model.trim()
-  const canTestForm = form.endpoint.trim() && form.model.trim()
+  const selectedProfile = catalog.find((profile) => profile.id === form.provider_type)
+    ?? CUSTOM_PROFILE
+  const selectedModelPreset = selectedProfile.models.includes(form.model)
+    ? form.model
+    : CUSTOM_MODEL
+
+  function selectProvider(providerType: string) {
+    const nextProfile = catalog.find((profile) => profile.id === providerType) ?? CUSTOM_PROFILE
+    const nameWasGenerated = !form.name.trim() || form.name === selectedProfile.label
+    setForm({
+      ...form,
+      provider_type: nextProfile.id,
+      name: nameWasGenerated ? nextProfile.label : form.name,
+      endpoint: nextProfile.default_endpoint,
+      model: nextProfile.default_model,
+    })
+  }
+
+  function startAdd() {
+    setForm(EMPTY_FORM)
+    setEditingId(null)
+    setShowForm(true)
+  }
+
+  const endpointReady = Boolean(form.endpoint.trim()) && !ENDPOINT_PLACEHOLDER.test(form.endpoint)
+  const canSave = Boolean(form.name.trim() && endpointReady && form.model.trim())
+  const canTestForm = Boolean(endpointReady && form.model.trim())
 
   function renderTestResult(key: string) {
     if (testing === key) {
-      return <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>Testing…</span>
+      return <span className="provider-test-result is-testing">Testing…</span>
     }
     const r = testResults[key]
     if (!r) return null
     return (
-      <span style={{ fontSize: 12, color: r.ok ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+      <span className={`provider-test-result ${r.ok ? 'is-ok' : 'is-fail'}`}>
         {r.ok
           ? `✓ ${r.message}${r.latency_ms != null ? ` (${r.latency_ms} ms)` : ''}`
           : `✗ ${r.message}`}
@@ -105,11 +166,19 @@ export default function ProvidersPanel() {
         <div>
           <h2 className="panel-title">Models &amp; Providers</h2>
           <p className="panel-sub">
-            The AI gateways (endpoint + model + key) that drive summarization and scriptwriting.
-            The <strong>default</strong> provider is used when a task doesn&apos;t pick one.
+            Add independent AI gateways from the RavenAIService provider catalog. Choosing a
+            provider fills its endpoint and links the matching model presets; custom values remain
+            editable. The <strong>default</strong> row is used when a task doesn&apos;t pick one.
           </p>
+          <p className="provider-routing-note">Independent provider rows · no primary/backup routing</p>
         </div>
       </div>
+
+      {catalogIsError && (
+        <div className="provider-catalog-warning" role="status">
+          The provider catalog could not be loaded. Manual provider configuration remains available.
+        </div>
+      )}
 
       {isLoading ? (
         <p>Loading…</p>
@@ -123,6 +192,9 @@ export default function ProvidersPanel() {
               <div className="provider-info">
                 <div style={{ fontWeight: 600 }}>
                   {p.name}{' '}
+                  <span className="badge badge-muted">
+                    {catalog.find((profile) => profile.id === p.provider_type)?.label ?? p.provider_type}
+                  </span>{' '}
                   {p.is_default && (
                     <span className="badge badge-accent">default</span>
                   )}
@@ -151,47 +223,116 @@ export default function ProvidersPanel() {
       )}
 
       {showForm ? (
-        <div className="card" style={{ padding: 16 }}>
-          <h3 style={{ marginBottom: 12, fontSize: 15 }}>
-            {editingId === null ? 'Add Provider' : 'Edit Provider'}
-          </h3>
-          <div className="form-group">
-            <label>Name</label>
-            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Local Ollama" />
+        <div className="card provider-form-card">
+          <div className="provider-form-head">
+            <div>
+              <span className="provider-form-kicker">Catalog-linked configuration</span>
+              <h3>{editingId === null ? 'Add Provider' : 'Edit Provider'}</h3>
+            </div>
+            <span className="provider-form-index">{editingId === null ? 'NEW' : `#${editingId}`}</span>
           </div>
+
+          <div className="grid-2 provider-form-grid">
+            <div className="form-group">
+              <label htmlFor="provider-type">Provider</label>
+              <select
+                id="provider-type"
+                value={form.provider_type}
+                onChange={(event) => selectProvider(event.target.value)}
+              >
+                {catalog.map((profile) => (
+                  <option value={profile.id} key={profile.id}>{profile.label} · {profile.id}</option>
+                ))}
+              </select>
+              <small>{selectedProfile.notes}</small>
+            </div>
+            <div className="form-group">
+              <label htmlFor="provider-name">Display name</label>
+              <input
+                id="provider-name"
+                value={form.name}
+                onChange={(event) => setForm({ ...form, name: event.target.value })}
+                placeholder="DeepSeek — production"
+              />
+              <small>Name this credential or gateway instance.</small>
+            </div>
+          </div>
+
           <div className="form-group">
-            <label>Endpoint</label>
+            <label htmlFor="provider-endpoint">Endpoint / Base URL</label>
             <input
+              id="provider-endpoint"
               value={form.endpoint}
               onChange={(e) => setForm({ ...form, endpoint: e.target.value })}
-              placeholder="http://localhost:11434/v1/chat/completions"
+              placeholder={selectedProfile.default_endpoint || 'http://localhost:11434'}
             />
+            {selectedProfile.endpoint_needs_input ? (
+              <small className="provider-field-warning">
+                Replace the endpoint placeholder with your workspace-specific value before testing.
+              </small>
+            ) : (
+              <small>The preset remains editable for proxies and private gateways.</small>
+            )}
           </div>
-          <div className="grid-2">
+
+          <div className="grid-2 provider-form-grid">
             <div className="form-group">
-              <label>Model</label>
-              <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="llama3" />
+              <label htmlFor="provider-model-preset">Model preset</label>
+              {selectedProfile.models.length ? (
+                <select
+                  id="provider-model-preset"
+                  value={selectedModelPreset}
+                  onChange={(event) => {
+                    if (event.target.value !== CUSTOM_MODEL) {
+                      setForm({ ...form, model: event.target.value })
+                    }
+                  }}
+                >
+                  {selectedProfile.models.map((model) => (
+                    <option value={model} key={model}>{model}</option>
+                  ))}
+                  <option value={CUSTOM_MODEL}>Custom model ID…</option>
+                </select>
+              ) : (
+                <div className="provider-manual-field">Manual model ID</div>
+              )}
+              <small>Known models are shortcuts, not a whitelist.</small>
             </div>
             <div className="form-group">
-              <label>API Key {editingId !== null && '(leave blank to keep)'}</label>
+              <label htmlFor="provider-model">Model ID</label>
               <input
-                type="password"
-                value={form.api_key ?? ''}
-                onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                placeholder="sk-…"
+                id="provider-model"
+                value={form.model}
+                onChange={(event) => setForm({ ...form, model: event.target.value })}
+                placeholder={selectedProfile.default_model || 'model-id'}
               />
+              <small>Edit directly when the provider ships a newer model.</small>
             </div>
           </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14, marginBottom: 12 }}>
+
+          <div className="form-group">
+            <label htmlFor="provider-key">API Key {editingId !== null && '(leave blank to keep)'}</label>
+            <input
+              id="provider-key"
+              type="password"
+              value={form.api_key ?? ''}
+              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+              placeholder="sk-…"
+              autoComplete="new-password"
+            />
+            <small>The key is stored server-side and only returned in masked form.</small>
+          </div>
+
+          <label className="provider-default-toggle">
             <input
               type="checkbox"
               checked={form.is_default ?? false}
               onChange={(e) => setForm({ ...form, is_default: e.target.checked })}
-              style={{ width: 'auto' }}
             />
             Set as default provider
           </label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+
+          <div className="provider-form-actions">
             <button className="btn-primary" disabled={!canSave || saveMutation.isPending} onClick={() => saveMutation.mutate()}>
               {saveMutation.isPending ? 'Saving…' : 'Save'}
             </button>
@@ -209,14 +350,14 @@ export default function ProvidersPanel() {
               Test
             </button>
             <button onClick={resetForm}>Cancel</button>
-            <span style={{ marginLeft: 'auto' }}>{renderTestResult('form')}</span>
+            <span className="provider-form-test-status">{renderTestResult('form')}</span>
           </div>
           {saveMutation.isError && (
             <div className="error-box" style={{ marginTop: 12 }}>{(saveMutation.error as Error).message}</div>
           )}
         </div>
       ) : (
-        <button className="btn-primary" onClick={() => { setForm(EMPTY_FORM); setEditingId(null); setShowForm(true) }}>
+        <button className="btn-primary" onClick={startAdd}>
           + Add Provider
         </button>
       )}
