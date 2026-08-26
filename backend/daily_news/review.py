@@ -332,10 +332,10 @@ For EACH numbered story, check whether the full script covers it accurately and 
 
 {_mandatory_web_review_rules()}
 
-Reply with exactly ONE ASCII token beginning with W. For each story in order, write its number followed by P, or by all applicable error codes in alphabetical order plus @ and the exact failed claim IDs separated by commas:
+Reply with exactly ONE ASCII token beginning with W. For each story in order, write its number followed by P, or by all applicable error codes in alphabetical order plus @ and the exact failed claim IDs separated by commas. Separate story verdicts with semicolons:
 A missing story coverage; B wrong name/entity; C wrong number/date; D unsupported extrapolation; E missing attribution/uncertainty; F contradiction or stale framing.
 Use claim <story>.0 only for missing coverage. Do not return a failure without claim IDs.
-Unrelated format example for stories 91 and 92: W91P92D@92.3
+Unrelated format example for stories 91 and 92: W91P;92D@92.3
 
 Do not emit explanations, citations, URLs, JSON, markdown, or spaces.
 
@@ -421,22 +421,90 @@ def _batch_payload(
         raise ValueError("review response did not confirm mandatory live web search")
     if web_searched:
         clean = clean[1:]
-    matches = list(
-        re.finditer(
-            r"(\d+)(P|[A-F]{1,6})(?:@((?:\d+\.\d+)(?:,\d+\.\d+)*))?",
-            clean,
-        )
+    segment_pattern = re.compile(
+        r"(\d+)(P|[A-F]{1,6})(?:@((?:\d+\.\d+)(?:,\d+\.\d+)*))?"
     )
-    if "".join(match.group(0) for match in matches) != clean:
-        raise ValueError("batch review response contained invalid characters")
-    indices = [int(match.group(1)) for match in matches]
+
+    def legacy_segments(offset: int, expected_index: int) -> list[tuple[int, str, list[str]]] | None:
+        """Parse the pre-semicolon protocol without confusing `1.1` + `2E` for `1.12`.
+
+        Story numbers provide the only safe boundary in legacy concatenated
+        tokens. Backtracking is bounded by the configured story count and the
+        tiny response token, and unknown claim IDs are still rejected below.
+        """
+        if expected_index == len(expected):
+            return [] if offset == len(clean) else None
+        story_number = expected[expected_index]
+        story_prefix = str(story_number)
+        if not clean.startswith(story_prefix, offset):
+            return None
+        cursor = offset + len(story_prefix)
+        if cursor >= len(clean):
+            return None
+        if clean[cursor] == "P":
+            remainder = legacy_segments(cursor + 1, expected_index + 1)
+            return (
+                [(story_number, "P", []), *remainder]
+                if remainder is not None
+                else None
+            )
+        code_match = re.match(r"([A-F]{1,6})@", clean[cursor:])
+        if not code_match:
+            return None
+        codes = code_match.group(1)
+        claims_start = cursor + code_match.end()
+        if expected_index + 1 == len(expected):
+            boundaries = [len(clean)]
+        else:
+            next_prefix = str(expected[expected_index + 1])
+            boundaries = [
+                boundary
+                for boundary in range(claims_start + 1, len(clean))
+                if clean.startswith(next_prefix, boundary)
+            ]
+        for boundary in boundaries:
+            claim_text = clean[claims_start:boundary]
+            if not re.fullmatch(r"(?:\d+\.\d+)(?:,\d+\.\d+)*", claim_text):
+                continue
+            remainder = legacy_segments(boundary, expected_index + 1)
+            if remainder is not None:
+                return [
+                    (story_number, codes, claim_text.split(",")),
+                    *remainder,
+                ]
+        return None
+
+    if ";" in clean:
+        raw_segments = clean.split(";")
+        matches = [segment_pattern.fullmatch(segment) for segment in raw_segments]
+        if any(match is None for match in matches):
+            raise ValueError("batch review response contained invalid characters")
+        parsed_segments = [
+            (
+                int(match.group(1)),
+                match.group(2),
+                match.group(3).split(",") if match.group(3) else [],
+            )
+            for match in matches
+            if match is not None
+        ]
+    else:
+        parsed_segments = legacy_segments(0, 0) or []
+        if not parsed_segments and claim_catalog is None:
+            # Compatibility for pre-claim-ID reports and their parser tests.
+            legacy_matches = list(re.finditer(r"(\d+)(P|[A-F]{1,6})", clean))
+            if "".join(match.group(0) for match in legacy_matches) == clean:
+                parsed_segments = [
+                    (int(match.group(1)), match.group(2), [])
+                    for match in legacy_matches
+                ]
+        if not parsed_segments:
+            raise ValueError("batch review response contained invalid characters")
+    indices = [story_number for story_number, _codes, _ids in parsed_segments]
     if indices != expected:
         raise ValueError("batch review response omitted or reordered a story")
     story_payloads: list[dict[str, Any]] = []
-    for match in matches:
-        story_number = int(match.group(1))
-        codes = match.group(2)
-        referenced_ids = match.group(3).split(",") if match.group(3) else []
+    for story_number, codes, referenced_ids in parsed_segments:
         if codes == "P" and referenced_ids:
             raise ValueError("passing story review unexpectedly cited failed claims")
         if codes != "P" and claim_catalog is not None and not referenced_ids:

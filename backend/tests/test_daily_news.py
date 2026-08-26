@@ -168,6 +168,40 @@ def test_web_claim_protocol_requires_search_and_preserves_exact_failed_claims():
         )
 
 
+def test_web_claim_protocol_disambiguates_multiple_failed_story_segments():
+    claims = {
+        1: {
+            "1.1": "The acquisition was reported.",
+            "1.2": "The startup raised a seed round.",
+        },
+        2: {
+            "2.1": "The robot watched one demonstration.",
+            "2.2": "The task lasted ten minutes.",
+            "2.4": "The success rate was 66 percent.",
+        },
+    }
+
+    separated = review._batch_payload(
+        "W1E@1.1;2E@2.2,2.4",
+        [1, 2],
+        claim_catalog=claims,
+        require_web=True,
+    )
+    legacy_live_response = review._batch_payload(
+        "W1E@1.12E\n@2.2,2.4",
+        [1, 2],
+        claim_catalog=claims,
+        require_web=True,
+    )
+
+    for payload in (separated, legacy_live_response):
+        assert payload["approved"] is False
+        assert [issue["claim_ids"] for issue in payload["issues"]] == [
+            ["1.1"],
+            ["2.2", "2.4"],
+        ]
+
+
 def test_review_prompt_requires_live_search_and_carries_full_evidence():
     article = research.NewsArticle(
         id="robot",
