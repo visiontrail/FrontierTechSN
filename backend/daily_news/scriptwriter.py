@@ -204,6 +204,66 @@ def enforce_script_contract(
     return final
 
 
+def _script_paragraphs(
+    script: str,
+    *,
+    story_count: int,
+    context: str,
+) -> list[str]:
+    """Return the software-owned opening/story/closing paragraph sequence."""
+    paragraphs = _spoken_lines(script)
+    expected_count = story_count + 2
+    if len(paragraphs) != expected_count:
+        raise RuntimeError(
+            f"Daily-news {context} must contain exactly {expected_count} nonblank "
+            f"paragraphs (opening + {story_count} stories + closing); found "
+            f"{len(paragraphs)}"
+        )
+    return paragraphs
+
+
+def _parse_story_corrections(raw: str, story_numbers: list[int]) -> dict[int, str]:
+    """Parse a correction response without letting it replace the whole script."""
+    start = raw.find("{")
+    if start < 0:
+        raise RuntimeError(
+            "Daily-news audit correction did not return the required JSON object"
+        )
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(raw[start:])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Daily-news audit correction returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "Daily-news audit correction JSON must be an object keyed by story number"
+        )
+
+    expected_keys = {str(number) for number in story_numbers}
+    actual_keys = {str(key) for key in payload}
+    if actual_keys != expected_keys:
+        raise RuntimeError(
+            "Daily-news audit correction JSON must contain exactly story keys "
+            f"{sorted(expected_keys)}; found {sorted(actual_keys)}"
+        )
+
+    corrections: dict[int, str] = {}
+    for number in story_numbers:
+        value = payload[str(number)]
+        if not isinstance(value, str):
+            raise RuntimeError(
+                f"Daily-news audit correction for story {number} must be a string"
+            )
+        paragraph = re.sub(r"\s+", " ", value).strip()
+        if not paragraph:
+            raise RuntimeError(
+                f"Daily-news audit correction for story {number} was empty"
+            )
+        corrections[number] = paragraph
+    return corrections
+
+
 def _preferred_spoken_source(article) -> str:
     """Choose the evidence-bound source name suitable for a spoken prefix."""
     _identity, expected_label, _accepted = _publication_attribution(article)
@@ -259,6 +319,11 @@ async def fit_daily_script_duration(
     log: LogCallback | None = None,
 ) -> tuple[str, dict]:
     """Repair a materially short/long script before independent fact review."""
+    _script_paragraphs(
+        script,
+        story_count=len(dossier.selected),
+        context="script before duration correction",
+    )
     report = daily_script_duration_report(script, target_duration_minutes, language)
     if report["passed"]:
         return script, report
@@ -503,28 +568,40 @@ async def revise_daily_script(
         int(number)
         for issue in issues
         for number in issue.get("evidence_story_numbers", [])
-        if str(number).isdigit()
+        if str(number).isdigit() and 1 <= int(number) <= len(dossier.selected)
     })
+    if not failed_story_numbers:
+        raise RuntimeError(
+            "Daily-news audit correction had no valid failed story numbers"
+        )
+    current_paragraphs = _script_paragraphs(
+        script,
+        story_count=len(dossier.selected),
+        context="script before audit correction",
+    )
+    failed_paragraphs = "\n".join(
+        f"Story {number}: {current_paragraphs[number]}"
+        for number in failed_story_numbers
+    )
+    correction_shape = json.dumps(
+        {str(number): "corrected spoken paragraph" for number in failed_story_numbers}
+    )
     system_prompt = f"""You are the correction editor for Frontier Tech Daily.
-Rewrite the complete spoken script to fix every blocking audit directive below.
+Rewrite only the failed story paragraphs to fix every blocking audit directive below.
 Use only the supplied evidence dossier. Remove unsupported precision instead of guessing.
-Preserve the story order, natural broadcast tone, exact opening, and exact closing.
-Edit ONLY the paragraphs for failed story numbers {failed_story_numbers}. Copy every paragraph for all other stories word-for-word from CURRENT SCRIPT. Never remove, merge, reorder, or rewrite a passing story.
+Preserve the natural broadcast tone.
+Edit ONLY failed story numbers {failed_story_numbers}. The software will preserve and merge every passing story, the opening, and the closing; do not output any of them.
 Every blocking issue carries claim_ids and claim_texts from the reviewed script. Modify only those cited claims inside a failed story paragraph. Preserve every uncited claim in that paragraph word-for-word unless changing punctuation is necessary to remove a cited sentence. Never discard an entire paragraph merely because one claim failed.
 Treat each audit code as a mechanical edit requirement. For D, remove the cited unsupported interpretation or replace only that claim with a direct paraphrase or translation of full article evidence. For C, correct or remove only the cited unsupported number or date. For B, correct or omit only the cited disputed name. For E, add source/company attribution or uncertainty to the cited claim. For F, update or remove only the cited contradiction or stale framing. For A with claim <story>.0, add exactly one concise evidence-backed paragraph.
 Do not rely on the title alone unless the same claim is also present in the feed summary or full article evidence.
 The independent reviewer used mandatory live web search, but the complete local EVIDENCE DOSSIER remains the editing boundary: do not introduce facts found only on the web and do not invent a replacement.
-Output exactly {len(dossier.selected) + 2} nonblank paragraphs: opening, one paragraph for each of the {len(dossier.selected)} stories in dossier order, then closing.
-Output spoken prose only with no markdown, labels, citations section, or explanation.
+Output only one valid JSON object shaped exactly like {correction_shape}. Each value must be one complete spoken paragraph. Do not output markdown, commentary, an opening, a closing, passing stories, or extra keys.
 For an English edition, output no Chinese, Japanese, or Korean characters.
-
-Exact opening: {opening}
-Exact closing: {closing_remarks}
 """
     user_content = "\n\n".join(
         [
             "AUDIT DIRECTIVES\n" + json.dumps(issues, ensure_ascii=False),
-            "CURRENT SCRIPT\n" + script,
+            "CURRENT FAILED STORY PARAGRAPHS\n" + failed_paragraphs,
             "EVIDENCE DOSSIER\n" + dossier_markdown(dossier),
         ]
     )
@@ -539,24 +616,17 @@ Exact closing: {closing_remarks}
         max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
         enable_skills=False,
     )
-    if language == "en" and NON_ENGLISH_RE.search(raw):
-        raw = await _chat(
-            "Rewrite this broadcast script in English only. Preserve all facts, numbers, uncertainty, opening, and closing. Output spoken prose only.",
-            raw,
-            endpoint,
-            edit_model,
-            api_key,
-            log,
-            "Daily news audit correction translation",
-            max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
-            enable_skills=False,
+    corrections = _parse_story_corrections(raw, failed_story_numbers)
+    if language == "en" and any(
+        NON_ENGLISH_RE.search(paragraph) for paragraph in corrections.values()
+    ):
+        raise RuntimeError(
+            "Daily-news audit correction contains CJK text in an English edition"
         )
-    revised = enforce_script_contract(
-        raw,
-        opening=opening,
-        closing=closing_remarks,
-        language=language,
-    )
+    revised_paragraphs = list(current_paragraphs)
+    for story_number, paragraph in corrections.items():
+        revised_paragraphs[story_number] = paragraph
+    revised = "\n".join(revised_paragraphs)
     # Old saved review reports predate claim identifiers. Preserve their
     # conservative first-sentence fallback, but never apply that paragraph-wide
     # trim to the new claim-targeted protocol.
@@ -621,6 +691,13 @@ def script_contract_report(
         failures.append("fixed closing remarks are missing or modified")
     if language == "en" and NON_ENGLISH_RE.search(script):
         failures.append("English script contains CJK text")
+    paragraph_count = len(_spoken_lines(script))
+    expected_paragraph_count = len(dossier.selected) + 2
+    if paragraph_count != expected_paragraph_count:
+        failures.append(
+            "script paragraph contract changed: expected "
+            f"{expected_paragraph_count}, found {paragraph_count}"
+        )
     if len(script.split()) < 120:
         failures.append("script is implausibly short")
     duration_contract = None

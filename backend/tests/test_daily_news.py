@@ -304,11 +304,12 @@ def test_d_only_audit_rewrites_from_evidence_before_trimming():
         "DeepTech China reports that robotics has entered a scaling era.",
         closing,
     ])
-    corrected = "\n".join([
-        opening,
-        "DeepTech China reports that a robot was tested on folding clothes in late 2024. This proves robotics can scale predictably.",
-        closing,
-    ])
+    corrected = json.dumps({
+        "1": (
+            "DeepTech China reports that a robot was tested on folding clothes in "
+            "late 2024. This proves robotics can scale predictably."
+        ),
+    })
     issues = [{
         "claim": "Web audit codes D for story 1",
         "evidence_story_numbers": [1],
@@ -340,7 +341,109 @@ def test_d_only_audit_rewrites_from_evidence_before_trimming():
         "DeepTech China reports that a robot was tested on folding clothes in late 2024."
     )
     assert "Do not rely on the title alone" in chat.await_args.args[0]
+    assert "CURRENT FAILED STORY PARAGRAPHS" in chat.await_args.args[1]
+    assert "CURRENT SCRIPT" not in chat.await_args.args[1]
     assert chat.await_args.args[3] == "yinhe-chat"
+
+
+def test_audit_correction_cannot_duplicate_passing_story_paragraphs():
+    edition = date(2026, 8, 26)
+    opening = morning_opening(edition, "en")
+    closing = "Thanks for listening."
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-25T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in range(1, 7)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, articles, articles, [],
+    )
+    original_story_lines = [
+        f"Source {index} reports the original paragraph for story {index}."
+        for index in range(1, 7)
+    ]
+    original = "\n".join([opening, *original_story_lines, closing])
+    issues = [{
+        "claim": "Web audit codes B for story 3 at claim 3.1",
+        "evidence_story_numbers": [3],
+        "claim_ids": ["3.1"],
+        "claim_texts": [original_story_lines[2]],
+    }]
+    response = json.dumps({
+        "3": "Source 3 reports the corrected paragraph for story 3.",
+    })
+
+    with (
+        patch.object(
+            scriptwriter,
+            "_resolve_provider",
+            AsyncMock(return_value=("https://example.com", "yinhe-chat", "key")),
+        ),
+        patch.object(scriptwriter, "_chat", AsyncMock(return_value=response)),
+    ):
+        revised = asyncio.run(
+            scriptwriter.revise_daily_script(
+                original,
+                dossier,
+                issues,
+                edition,
+                language="en",
+                closing_remarks=closing,
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+            )
+        )
+
+    revised_lines = revised.splitlines()
+    assert len(revised_lines) == 8
+    assert revised_lines[1:3] == original_story_lines[:2]
+    assert revised_lines[3] == "Source 3 reports the corrected paragraph for story 3."
+    assert revised_lines[4:7] == original_story_lines[3:]
+    assert revised.count(original_story_lines[0]) == 1
+    assert revised.count(original_story_lines[1]) == 1
+
+
+def test_contract_rejects_observed_duplicate_story_paragraphs():
+    dossier = _attribution_dossier()
+    opening = morning_opening(date(2026, 8, 24), "en")
+    closing = "Thanks for listening."
+    stories = [
+        "Axios reports growing data-center opposition.",
+        "QbitAI reports a robot coffee shop.",
+        "DeepTech China reports progress in coding agents.",
+        "Bloomberg reports that a foldable phone prototype is being tested.",
+    ]
+    duplicated = "\n".join([
+        opening,
+        stories[0],
+        stories[1],
+        stories[0],
+        stories[1],
+        stories[2],
+        stories[3],
+        closing,
+    ])
+
+    report = script_contract_report(
+        duplicated,
+        dossier,
+        date(2026, 8, 24),
+        language="en",
+        closing_remarks=closing,
+    )
+
+    assert report["passed"] is False
+    assert "script paragraph contract changed: expected 6, found 8" in report["failures"]
 
 
 def test_duration_repair_restores_evidence_only_story_paragraphs():
@@ -588,7 +691,10 @@ def _attribution_script(*paragraphs: str) -> str:
     opening = morning_opening(date(2026, 8, 24), "en")
     closing = "Thanks for listening."
     filler = " ".join(["evidence"] * 125)
-    return "\n".join([opening, *paragraphs, filler, closing])
+    stories = list(paragraphs)
+    if stories:
+        stories[-1] = f"{stories[-1]} {filler}"
+    return "\n".join([opening, *stories, closing])
 
 
 def test_contract_accepts_original_publications_carried_by_techmeme_credit():
@@ -657,6 +763,9 @@ def test_d_only_trim_preserves_every_selected_publication_attribution():
     ]
 
     revised = _minimalize_unsupported_paragraphs(script, issues, dossier)
+    revised_lines = revised.splitlines()
+    revised_lines[-2] += " " + " ".join(["evidence"] * 125)
+    revised = "\n".join(revised_lines)
     report = script_contract_report(
         revised,
         dossier,
