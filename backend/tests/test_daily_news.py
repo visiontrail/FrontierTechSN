@@ -1171,7 +1171,10 @@ def test_chatgpt_fallback_retries_transient_model_picker_failure():
             )
         raise AssertionError(args)
 
-    with patch.object(review, "run_opencli", AsyncMock(side_effect=command)):
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
         payload, raw, url, provider = asyncio.run(
             review._web_story_review(
                 "audit",
@@ -1186,6 +1189,7 @@ def test_chatgpt_fallback_retries_transient_model_picker_failure():
     assert model_attempts == 2
     assert "[CHATGPT MODEL ERROR 1/2]" in raw
     assert any("model selection attempt 1/2 failed" in message for message in messages)
+    sleep.assert_any_await(review._MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
 
 def test_chatgpt_fallback_recovers_the_target_conversation_after_route_drift():

@@ -28,6 +28,7 @@ _CHATGPT_CONVERSATION_URL_RE = re.compile(
     re.I,
 )
 _RECOVERY_POLL_INTERVAL_SECONDS = 1.0
+_MODEL_SELECTION_RETRY_DELAY_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -828,6 +829,8 @@ async def _web_story_review(
                     "ChatGPT fallback model selection attempt "
                     f"{model_attempt}/{chatgpt_model_attempts} failed; retrying: {exc}"
                 )
+            if model_attempt < chatgpt_model_attempts:
+                await asyncio.sleep(_MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
     conversation_url = ""
     if chatgpt_error is None:
