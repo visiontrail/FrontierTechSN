@@ -14,11 +14,10 @@ from backend import config
 from backend.daily_news.research import ResearchDossier
 from backend.daily_news.scriptwriter import (
     fit_daily_script_duration,
-    morning_opening,
     revise_daily_script,
     script_contract_report,
 )
-from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
+from backend.pipeline.opencli import first_json, run_opencli
 
 LogCallback = Callable[[str], None]
 
@@ -163,10 +162,28 @@ def _compact_article_evidence(script: str, article, index: int) -> str:
             f"STORY {index}",
             f"Title: {article.title}",
             f"Source: {article.source_name}",
+            f"Original URL: {article.url}",
             f"Published: {article.published_at}",
             f"Feed summary lead: {(article.summary[:350] if article.summary else 'none')}",
             "Claim-relevant article evidence:",
             excerpt,
+        ]
+    )
+
+
+def _full_article_evidence(article, index: int) -> str:
+    """Return the complete locally captured evidence for final web review."""
+    evidence = str(article.evidence_text or "").strip()
+    return "\n".join(
+        [
+            f"STORY {index}",
+            f"Title: {article.title}",
+            f"Source: {article.source_name}",
+            f"Original URL: {article.url}",
+            f"Published: {article.published_at}",
+            f"Feed summary lead: {(article.summary or 'none')}",
+            "Full locally captured article evidence:",
+            evidence or article.summary or article.title,
         ]
     )
 
@@ -228,6 +245,43 @@ def _matched_script_claims(script: str, dossier: ResearchDossier) -> dict[int, s
     return matched
 
 
+def _claim_catalog(script: str, dossier: ResearchDossier) -> dict[int, dict[str, str]]:
+    """Give every reviewable sentence a stable story-scoped claim identifier."""
+    matched = _matched_script_claims(script, dossier)
+    catalog: dict[int, dict[str, str]] = {}
+    for story_number in range(1, len(dossier.selected) + 1):
+        paragraph = matched.get(story_number, "").strip()
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])\s+", paragraph)
+            if sentence.strip()
+        ]
+        if not sentences:
+            catalog[story_number] = {f"{story_number}.0": "NO MATCHED COVERAGE"}
+            continue
+        catalog[story_number] = {
+            f"{story_number}.{claim_number}": sentence
+            for claim_number, sentence in enumerate(sentences, 1)
+        }
+    return catalog
+
+
+def _numbered_claims(
+    claim_catalog: dict[int, dict[str, str]],
+    story_numbers: list[int],
+) -> str:
+    return "\n".join(
+        f"CLAIM {claim_id}: {claim_text}"
+        for story_number in story_numbers
+        for claim_id, claim_text in claim_catalog[story_number].items()
+    )
+
+
+def _mandatory_web_review_rules() -> str:
+    return """MANDATORY LIVE-WEB VERIFICATION
+You MUST use live internet search before returning any judgment. Open the supplied original URL when accessible, search the exact title and disputed claims, and corroborate material facts with current primary or credible independent sources. Do not judge from the supplied dossier alone and do not rely on memory. Treat search snippets as leads, not proof. If live web search is unavailable or you did not actually perform it, reply with exactly N instead of a verdict. A verdict beginning with W certifies that live web search was performed."""
+
+
 def _review_prompt(
     script: str,
     dossier: ResearchDossier,
@@ -235,23 +289,27 @@ def _review_prompt(
     story_index: int,
 ) -> str:
     article = dossier.selected[story_index - 1]
+    claims = _claim_catalog(script, dossier)[story_index]
     return f"""You are the independent final fact-checker for STORY {story_index} in a technology broadcast dated {edition_date.isoformat()}.
 Check whether the full script accurately covers this selected story and whether every script claim about it is supported by the story evidence. Missing coverage, wrong names, wrong numbers, stale framing, unsupported extrapolation, or company claims stated as independent fact must fail.
 
-Reply with exactly ONE ASCII token:
-- P when every claim is supported and the selected story is covered.
-- Otherwise concatenate every applicable error code in alphabetical order, with no separator:
+{_mandatory_web_review_rules()}
+
+Reply with exactly ONE ASCII token beginning with W:
+- W{story_index}P when every claim is supported and the selected story is covered.
+- Otherwise write W{story_index}, every applicable error code in alphabetical order, @, and the exact failed claim IDs separated by commas:
   A missing story coverage; B wrong name/entity; C wrong number/date; D unsupported extrapolation;
   E missing attribution/uncertainty; F contradiction or stale framing.
-Example failure response: CD
+Use claim {story_index}.0 only for missing coverage. Do not return a failure without claim IDs.
+Unrelated format example for story 91: W91D@91.3
 
-Do not browse. Do not emit explanations, citations, URLs, JSON, markdown, spaces, or punctuation.
+Do not emit explanations, citations, URLs, JSON, markdown, or spaces.
 
-FULL SCRIPT
-{script}
+NUMBERED SCRIPT CLAIMS
+{_numbered_claims({story_index: claims}, [story_index])}
 
-STORY EVIDENCE
-{_compact_article_evidence(script, article, story_index)}
+FULL STORY EVIDENCE
+{_full_article_evidence(article, story_index)}
 """
 
 
@@ -262,35 +320,38 @@ def _batch_review_prompt(
     story_numbers: list[int] | None = None,
 ) -> str:
     numbers = story_numbers or list(range(1, len(dossier.selected) + 1))
-    example = "".join(f"{index}P" for index in numbers)
     evidence = "\n\n".join(
-        _compact_article_evidence(script, dossier.selected[index - 1], index)
+        _full_article_evidence(dossier.selected[index - 1], index)
         for index in numbers
     )
-    matched_claims = _matched_script_claims(script, dossier)
-    claims = "\n".join(
-        f"STORY {index} SCRIPT CLAIMS: {matched_claims.get(index, 'NO MATCHED COVERAGE')}"
-        for index in numbers
-    )
+    claims = _claim_catalog(script, dossier)
     return f"""You are the independent final fact-checker for stories {numbers} in a technology broadcast dated {edition_date.isoformat()}.
 For EACH numbered story, check whether the full script covers it accurately and whether every related claim is supported by that story's evidence. Missing coverage, wrong names, wrong numbers, stale framing, unsupported extrapolation, or company claims stated as independent fact must fail.
 
-Reply with exactly ONE ASCII token. For each story in order, write its number followed by P, or by all applicable error codes in alphabetical order:
+{_mandatory_web_review_rules()}
+
+Reply with exactly ONE ASCII token beginning with W. For each story in order, write its number followed by P, or by all applicable error codes in alphabetical order plus @ and the exact failed claim IDs separated by commas:
 A missing story coverage; B wrong name/entity; C wrong number/date; D unsupported extrapolation; E missing attribution/uncertainty; F contradiction or stale framing.
-Example all-pass response: {example}
-Example mixed response for stories 1 and 2: 1P2D
+Use claim <story>.0 only for missing coverage. Do not return a failure without claim IDs.
+Unrelated format example for stories 91 and 92: W91P92D@92.3
 
-Do not browse. Do not emit explanations, citations, URLs, JSON, markdown, spaces, or punctuation.
+Do not emit explanations, citations, URLs, JSON, markdown, or spaces.
 
-SCRIPT CLAIMS FOR REVIEWED STORIES
-{claims}
+NUMBERED SCRIPT CLAIMS
+{_numbered_claims(claims, numbers)}
 
-STORY EVIDENCE
+FULL STORY EVIDENCE
 {evidence}
 """
 
 
-def _single_line_payload(text: str, story_number: int) -> dict[str, Any]:
+def _single_line_payload(
+    text: str,
+    story_number: int,
+    *,
+    claim_ids: list[str] | None = None,
+    claim_texts: list[str] | None = None,
+) -> dict[str, Any]:
     clean = _normalized_review_token(text)
     if clean == "P":
         return {
@@ -300,18 +361,25 @@ def _single_line_payload(text: str, story_number: int) -> dict[str, Any]:
             "issues": [],
             "corrected_script": "",
         }
-    if not re.fullmatch(r"[A-F]{1,6}", clean) or len(set(clean)) != len(clean):
+    if (
+        not re.fullmatch(r"[A-F]{1,6}", clean)
+        or len(set(clean)) != len(clean)
+        or clean != "".join(sorted(clean))
+    ):
         raise ValueError("review response did not contain the complete single-line protocol")
     directives = {
         "A": "Add concise coverage of this selected story using only its evidence.",
         "B": "Correct every name and entity for this story to match the evidence. If dossier fields conflict on a spelling, omit that disputed proper name rather than choosing one.",
         "C": "Correct or remove every unsupported number and date for this story.",
-        "D": "Delete every interpretive, significance, trend, or extrapolative sentence for this story; retain only directly evidenced reporting.",
+        "D": "Remove or rewrite only the cited unsupported or extrapolative sentence or claim; preserve the story's other directly evidenced reporting.",
         "E": "Attribute company or source claims and preserve uncertainty language.",
         "F": "Remove contradictions and stale framing; align the story strictly to the dated evidence.",
     }
     codes = clean
     correction = " ".join(directives[code] for code in codes)
+    cited_ids = list(claim_ids or [])
+    cited_texts = list(claim_texts or [])
+    claim_suffix = f" at claims {','.join(cited_ids)}" if cited_ids else ""
     return {
         "approved": False,
         "confidence": 100,
@@ -319,9 +387,11 @@ def _single_line_payload(text: str, story_number: int) -> dict[str, Any]:
         "issues": [
             {
                 "severity": "blocking",
-                "claim": f"Web audit codes {codes} for story {story_number}",
+                "claim": f"Web audit codes {codes} for story {story_number}{claim_suffix}",
                 "verdict": correction,
                 "evidence_story_numbers": [story_number],
+                "claim_ids": cited_ids,
+                "claim_texts": cited_texts,
                 "correction": correction,
             }
         ],
@@ -329,23 +399,61 @@ def _single_line_payload(text: str, story_number: int) -> dict[str, Any]:
     }
 
 
-def _batch_payload(text: str, story_numbers: int | list[int]) -> dict[str, Any]:
+def _batch_payload(
+    text: str,
+    story_numbers: int | list[int],
+    *,
+    claim_catalog: dict[int, dict[str, str]] | None = None,
+    require_web: bool = False,
+) -> dict[str, Any]:
     expected = (
         list(range(1, story_numbers + 1))
         if isinstance(story_numbers, int)
         else story_numbers
     )
     clean = _normalized_review_token(text)
-    matches = list(re.finditer(r"(\d+)(P|[A-F]{1,6})", clean))
+    if clean == "N":
+        raise ValueError("reviewer reported that mandatory live web search was unavailable")
+    web_searched = clean.startswith("W")
+    if require_web and not web_searched:
+        raise ValueError("review response did not confirm mandatory live web search")
+    if web_searched:
+        clean = clean[1:]
+    matches = list(
+        re.finditer(
+            r"(\d+)(P|[A-F]{1,6})(?:@((?:\d+\.\d+)(?:,\d+\.\d+)*))?",
+            clean,
+        )
+    )
     if "".join(match.group(0) for match in matches) != clean:
         raise ValueError("batch review response contained invalid characters")
     indices = [int(match.group(1)) for match in matches]
     if indices != expected:
         raise ValueError("batch review response omitted or reordered a story")
-    story_payloads = [
-        _single_line_payload(match.group(2), int(match.group(1)))
-        for match in matches
-    ]
+    story_payloads: list[dict[str, Any]] = []
+    for match in matches:
+        story_number = int(match.group(1))
+        codes = match.group(2)
+        referenced_ids = match.group(3).split(",") if match.group(3) else []
+        if codes == "P" and referenced_ids:
+            raise ValueError("passing story review unexpectedly cited failed claims")
+        if codes != "P" and claim_catalog is not None and not referenced_ids:
+            raise ValueError("failed story review omitted exact claim IDs")
+        known_claims = (claim_catalog or {}).get(story_number, {})
+        if referenced_ids and any(claim_id not in known_claims for claim_id in referenced_ids):
+            raise ValueError("story review cited an unknown or cross-story claim ID")
+        if codes != "P" and "A" in codes and referenced_ids != [f"{story_number}.0"]:
+            raise ValueError("missing-coverage review must cite only the story-level .0 claim")
+        if codes != "P" and "A" not in codes and f"{story_number}.0" in referenced_ids:
+            raise ValueError("non-coverage review cannot cite the story-level .0 claim")
+        story_payloads.append(
+            _single_line_payload(
+                codes,
+                story_number,
+                claim_ids=referenced_ids,
+                claim_texts=[known_claims[claim_id] for claim_id in referenced_ids],
+            )
+        )
     issues = [issue for payload in story_payloads for issue in payload["issues"]]
     return {
         "approved": not issues,
@@ -353,6 +461,7 @@ def _batch_payload(text: str, story_numbers: int | list[int]) -> dict[str, Any]:
         "summary": f"{len(expected) - len(issues)}/{len(expected)} story audits passed.",
         "issues": issues,
         "corrected_script": "",
+        "web_searched": web_searched,
     }
 
 
@@ -405,6 +514,7 @@ async def _web_story_review(
     *,
     story_number: int | None = None,
     story_numbers: list[int] | None = None,
+    claim_catalog: dict[int, dict[str, str]] | None = None,
     site_session_namespace: str | None = None,
     log: LogCallback | None,
 ) -> tuple[dict[str, Any], str, str, str]:
@@ -414,9 +524,35 @@ async def _web_story_review(
 
     def parse_response(value: str) -> dict[str, Any]:
         if story_numbers is not None:
-            return _batch_payload(value, story_numbers)
+            return _batch_payload(
+                value,
+                story_numbers,
+                claim_catalog=claim_catalog,
+                require_web=True,
+            )
         assert story_number is not None
-        return _single_line_payload(value, story_number)
+        clean = _normalized_review_token(value)
+        if clean == "N":
+            raise ValueError("reviewer reported that mandatory live web search was unavailable")
+        match = re.fullmatch(
+            rf"W{story_number}(P|[A-F]{{1,6}})(?:@((?:{story_number}\.\d+)(?:,{story_number}\.\d+)*))?",
+            clean,
+        )
+        if not match:
+            raise ValueError("single-story review did not confirm web search or follow the claim protocol")
+        codes = match.group(1)
+        referenced_ids = match.group(2).split(",") if match.group(2) else []
+        known_claims = (claim_catalog or {}).get(story_number, {})
+        if codes != "P" and not referenced_ids:
+            raise ValueError("failed story review omitted exact claim IDs")
+        if any(claim_id not in known_claims for claim_id in referenced_ids):
+            raise ValueError("story review cited an unknown claim ID")
+        return _single_line_payload(
+            codes,
+            story_number,
+            claim_ids=referenced_ids,
+            claim_texts=[known_claims[claim_id] for claim_id in referenced_ids],
+        )
 
     timeout = config.DAILY_NEWS_WEB_REVIEW_TIMEOUT
     request_id = uuid4().hex
@@ -725,11 +861,19 @@ async def review_daily_script(
     review_dir.mkdir(parents=True, exist_ok=True)
     attempts: list[dict[str, Any]] = []
     candidate = script
-    max_cycles = 5
+    protected_story_numbers: set[int] = set()
+    max_corrections = 3
+    correction_count = 0
+    audit_round = 0
+    repeated_issue_counts: dict[tuple, int] = {}
+    failure_reason = ""
     review_session_namespace = (
         f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{uuid4().hex}"
     )
-    for cycle in range(1, max_cycles + 1):
+    all_numbers = list(range(1, len(dossier.selected) + 1))
+    review_numbers = list(all_numbers)
+    while audit_round < max_corrections * 2 + 1:
+        audit_round += 1
         length_contract = None
         if target_duration_minutes is not None:
             prior_candidate = candidate
@@ -743,10 +887,11 @@ async def review_daily_script(
                 ai_endpoint=ai_endpoint,
                 ai_model=ai_model,
                 provider_id=provider_id,
+                protected_story_numbers=set(protected_story_numbers),
                 log=log,
             )
             if candidate != prior_candidate:
-                (review_dir / f"candidate-duration-cycle-{cycle}.txt").write_text(
+                (review_dir / f"candidate-duration-cycle-{audit_round}.txt").write_text(
                     candidate,
                     encoding="utf-8",
                 )
@@ -765,21 +910,22 @@ async def review_daily_script(
                 "Deterministic script audit failed before web review: "
                 + "; ".join(contract["failures"])
             )
+        claims = _claim_catalog(candidate, dossier)
         group_results: list[dict[str, Any]] = []
-        all_numbers = list(range(1, len(dossier.selected) + 1))
-        for group_index, start in enumerate(range(0, len(all_numbers), 2), 1):
-            story_numbers = all_numbers[start : start + 2]
+        for group_index, start in enumerate(range(0, len(review_numbers), 2), 1):
+            story_numbers = review_numbers[start : start + 2]
             prompt = _batch_review_prompt(candidate, dossier, edition_date, story_numbers)
-            (review_dir / f"story-review-prompt-{cycle}-group-{group_index}.txt").write_text(
+            (review_dir / f"story-review-prompt-{audit_round}-group-{group_index}.txt").write_text(
                 prompt, encoding="utf-8"
             )
             group_payload, raw, conversation_url, provider = await _web_story_review(
                 prompt,
                 story_numbers=story_numbers,
+                claim_catalog={number: claims[number] for number in story_numbers},
                 site_session_namespace=review_session_namespace,
                 log=log,
             )
-            (review_dir / f"story-review-response-{cycle}-group-{group_index}.txt").write_text(
+            (review_dir / f"story-review-response-{audit_round}-group-{group_index}.txt").write_text(
                 raw, encoding="utf-8"
             )
             group_results.append({
@@ -792,10 +938,19 @@ async def review_daily_script(
             for result in group_results
             for issue in result["payload"].get("issues", [])
         ]
+        failed_story_numbers = sorted({
+            int(number)
+            for issue in issues
+            for number in issue.get("evidence_story_numbers", [])
+            if str(number).isdigit()
+        })
         payload = {
             "approved": not issues,
             "confidence": 100,
-            "summary": f"{len(all_numbers) - len(issues)}/{len(all_numbers)} story audits passed.",
+            "summary": (
+                f"{len(review_numbers) - len(failed_story_numbers)}/"
+                f"{len(review_numbers)} story audits passed."
+            ),
             "issues": issues,
         }
         conversation_url = ", ".join(
@@ -819,7 +974,9 @@ async def review_daily_script(
         ]
         approved = bool(payload.get("approved")) and not blocking
         attempt = {
-            "cycle": cycle,
+            "cycle": audit_round,
+            "scope": "full" if review_numbers == all_numbers else "targeted",
+            "story_numbers": list(review_numbers),
             "reviewer": reviewer,
             "providers": providers,
             "conversation_url": conversation_url,
@@ -833,10 +990,19 @@ async def review_daily_script(
         attempts.append(attempt)
         if log:
             log(
-                f"Web accuracy review cycle {cycle}: "
+                f"Web accuracy review cycle {audit_round} "
+                f"({'full' if review_numbers == all_numbers else 'targeted'}): "
                 f"{'approved' if approved else f'{len(blocking)} blocking issue(s)'}"
             )
         if approved:
+            if review_numbers != all_numbers:
+                if log:
+                    log(
+                        "Targeted correction review passed; running one final full-story "
+                        "web review before approval"
+                    )
+                review_numbers = list(all_numbers)
+                continue
             report = {
                 "passed": True,
                 "reviewed_at": datetime.now(timezone.utc).isoformat(),
@@ -846,6 +1012,7 @@ async def review_daily_script(
                 ),
                 "attempts": attempts,
                 "final_contract": contract,
+                "correction_count": correction_count,
             }
             (review_dir / "fact_check_report.json").write_text(
                 json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -853,8 +1020,30 @@ async def review_daily_script(
             (review_dir / "approved_script.txt").write_text(candidate, encoding="utf-8")
             return ScriptReviewResult(candidate, report)
 
-        if cycle == max_cycles:
+        issue_signature = tuple(sorted(
+            (
+                tuple(issue.get("evidence_story_numbers", [])),
+                str(issue.get("claim", "")),
+                tuple(issue.get("claim_ids", [])),
+            )
+            for issue in blocking
+        ))
+        repeated_issue_counts[issue_signature] = repeated_issue_counts.get(issue_signature, 0) + 1
+        if repeated_issue_counts[issue_signature] >= 2:
+            failure_reason = (
+                "The same claim-level blocking verdict recurred after correction; "
+                "automatic rewriting stopped to prevent a review loop."
+            )
             break
+        if correction_count >= max_corrections:
+            failure_reason = (
+                f"The script still had blocking claim-level findings after "
+                f"{max_corrections} bounded correction passes."
+            )
+            break
+        # A duration edit must not silently rewrite any paragraph that just
+        # received a claim-level factual correction, regardless of error code.
+        protected_story_numbers.update(failed_story_numbers)
         candidate = await revise_daily_script(
             candidate,
             dossier,
@@ -867,9 +1056,11 @@ async def review_daily_script(
             provider_id=provider_id,
             log=log,
         )
-        (review_dir / f"candidate-cycle-{cycle + 1}.txt").write_text(
+        correction_count += 1
+        (review_dir / f"candidate-cycle-{correction_count + 1}.txt").write_text(
             candidate, encoding="utf-8"
         )
+        review_numbers = failed_story_numbers
 
     report = {
         "passed": False,
@@ -880,10 +1071,14 @@ async def review_daily_script(
             "chatgpt" in prior.get("providers", []) for prior in attempts
         ),
         "attempts": attempts,
+        "correction_count": correction_count,
+        "manual_review_required": True,
+        "failure_reason": failure_reason or "The bounded web-review loop did not approve the script.",
     }
     (review_dir / "fact_check_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     raise RuntimeError(
-        f"Web accuracy review did not approve the daily script after {max_cycles} correction cycles"
+        "Web accuracy review did not approve the daily script: "
+        + report["failure_reason"]
     )

@@ -10,12 +10,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend import config
-from backend.daily_news import scheduler
+from backend.daily_news import scheduler, scriptwriter
 from backend.daily_news.scheduler import _is_due, create_daily_task, next_run_at
 from backend.daily_news import research, review
 from backend.daily_news.scriptwriter import (
     SOURCE_SPOKEN_ALIASES,
-    _issues_are_unsupported_only,
     _minimalize_unsupported_paragraphs,
     daily_script_duration_report,
     enforce_script_contract,
@@ -124,6 +123,87 @@ def test_batch_review_token_preserves_per_story_error_codes():
     assert "extrapolative sentence" in payload["issues"][0]["correction"]
 
 
+def test_web_claim_protocol_requires_search_and_preserves_exact_failed_claims():
+    claims = {
+        1: {"1.1": "Story one is supported."},
+        2: {
+            "2.1": "The robot played table tennis.",
+            "2.2": "It was the first autonomous complete match.",
+        },
+    }
+
+    payload = review._batch_payload(
+        "W1P2D@2.2",
+        [1, 2],
+        claim_catalog=claims,
+        require_web=True,
+    )
+
+    assert payload["approved"] is False
+    assert payload["web_searched"] is True
+    assert payload["issues"][0]["claim_ids"] == ["2.2"]
+    assert payload["issues"][0]["claim_texts"] == [
+        "It was the first autonomous complete match."
+    ]
+    with pytest.raises(ValueError, match="mandatory live web search"):
+        review._batch_payload(
+            "1P2D@2.2",
+            [1, 2],
+            claim_catalog=claims,
+            require_web=True,
+        )
+    with pytest.raises(ValueError, match="unavailable"):
+        review._batch_payload(
+            "N",
+            [1, 2],
+            claim_catalog=claims,
+            require_web=True,
+        )
+    with pytest.raises(ValueError, match="unknown or cross-story"):
+        review._batch_payload(
+            "W1P2D@1.1",
+            [1, 2],
+            claim_catalog=claims,
+            require_web=True,
+        )
+
+
+def test_review_prompt_requires_live_search_and_carries_full_evidence():
+    article = research.NewsArticle(
+        id="robot",
+        source_id="qbitai",
+        source_name="量子位 QbitAI",
+        language="zh",
+        title="人形机器人自主乒乓球完整对局",
+        url="https://example.com/robot",
+        published_at="2026-08-26T03:02:34+00:00",
+        summary="现场爆满",
+        evidence_text=(
+            "机器人完成了公开演示。\n"
+            "真·人类史上首场人形机器人自主乒乓球完整对局！"
+        ),
+    )
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, [article], [article], [],
+    )
+    script = "Opening.\nQbitAI reports the first autonomous complete humanoid table-tennis match.\nClosing."
+
+    prompt = review._batch_review_prompt(
+        script,
+        dossier,
+        date(2026, 8, 26),
+        [1],
+    )
+
+    assert "MUST use live internet search" in prompt
+    assert "If live web search is unavailable" in prompt
+    assert "Original URL: https://example.com/robot" in prompt
+    assert "CLAIM 1.1:" in prompt
+    assert "真·人类史上首场人形机器人自主乒乓球完整对局" in prompt
+    assert "Do not browse" not in prompt
+    assert "W1P2D" not in prompt
+
+
 def test_bilingual_claim_matcher_preserves_dossier_order_for_translated_evidence():
     articles = [
         research.NewsArticle(
@@ -167,16 +247,191 @@ def test_repeated_d_audit_keeps_only_the_direct_lead_sentence():
     assert revised.splitlines()[1] == "QbitAI reports that MyContext is open source."
 
 
-def test_only_pure_d_audits_can_bypass_the_writing_model():
-    assert _issues_are_unsupported_only([
-        {"claim": "Web audit codes D for story 3"},
-    ]) is True
-    assert _issues_are_unsupported_only([
-        {"claim": "Web audit codes DE for story 3"},
-    ]) is False
-    assert _issues_are_unsupported_only([
-        {"claim": "unstructured reviewer note"},
-    ]) is False
+def test_d_only_audit_rewrites_from_evidence_before_trimming():
+    edition = date(2026, 8, 26)
+    opening = morning_opening(edition, "en")
+    closing = "Thanks for listening."
+    article = research.NewsArticle(
+        id="robot",
+        source_id="deeptech_china",
+        source_name="DeepTech 深科技",
+        language="zh",
+        title="机器人尚未进入可预测阶段",
+        url="https://example.com/robot",
+        published_at="2026-08-25T12:57:50+00:00",
+        summary="2024 年末，实验室里一台机器人正在接受叠衣服测试。",
+        evidence_text="2024 年末，实验室里一台机器人正在接受叠衣服测试。",
+    )
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, [article], [article], [],
+    )
+    original = "\n".join([
+        opening,
+        "DeepTech China reports that robotics has entered a scaling era.",
+        closing,
+    ])
+    corrected = "\n".join([
+        opening,
+        "DeepTech China reports that a robot was tested on folding clothes in late 2024. This proves robotics can scale predictably.",
+        closing,
+    ])
+    issues = [{
+        "claim": "Web audit codes D for story 1",
+        "evidence_story_numbers": [1],
+    }]
+
+    with (
+        patch.object(
+            scriptwriter,
+            "_resolve_provider",
+            AsyncMock(return_value=("https://example.com", "yinhe-thinking", "key")),
+        ),
+        patch.object(scriptwriter, "_chat", AsyncMock(return_value=corrected)) as chat,
+    ):
+        revised = asyncio.run(
+            scriptwriter.revise_daily_script(
+                original,
+                dossier,
+                issues,
+                edition,
+                language="en",
+                closing_remarks=closing,
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+            )
+        )
+
+    assert revised.splitlines()[1] == (
+        "DeepTech China reports that a robot was tested on folding clothes in late 2024."
+    )
+    assert "Do not rely on the title alone" in chat.await_args.args[0]
+    assert chat.await_args.args[3] == "yinhe-chat"
+
+
+def test_duration_repair_restores_evidence_only_story_paragraphs():
+    edition = date(2026, 8, 26)
+    opening = morning_opening(edition, "en")
+    closing = "Thanks for listening."
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-25T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, articles, articles, [],
+    )
+    protected = "Source 2 reports direct evidence for story two."
+    original = "\n".join([opening, "Too short.", protected, closing])
+    expanded = "\n".join([
+        opening,
+        " ".join(["evidence"] * 410) + ".",
+        "Source 2 reports an unsupported replacement.",
+        closing,
+    ])
+
+    with (
+        patch.object(
+            scriptwriter,
+            "_resolve_provider",
+            AsyncMock(return_value=("https://example.com", "yinhe-thinking", "key")),
+        ),
+        patch.object(scriptwriter, "_chat", AsyncMock(return_value=expanded)) as chat,
+    ):
+        repaired, report = asyncio.run(
+            scriptwriter.fit_daily_script_duration(
+                original,
+                dossier,
+                edition,
+                target_duration_minutes=3,
+                language="en",
+                closing_remarks=closing,
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+                protected_story_numbers={2},
+            )
+        )
+
+    assert repaired.splitlines()[2] == protected
+    assert report["passed"] is True
+    assert "Story paragraphs [2]" in chat.await_args.args[0]
+    assert chat.await_args.args[3] == "yinhe-chat"
+    assert chat.await_args.kwargs["max_tokens"] == scriptwriter.DAILY_NEWS_EDIT_MAX_TOKENS
+
+
+def test_duration_repair_closes_remaining_gap_after_protected_restore():
+    edition = date(2026, 8, 26)
+    opening = morning_opening(edition, "en")
+    closing = "Thanks for listening."
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-25T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, articles, articles, [],
+    )
+    protected = "Source 2 reports direct evidence for story two."
+    original = "\n".join([opening, "Too short.", protected, closing])
+
+    def candidate(words: int) -> str:
+        return "\n".join([
+            opening,
+            " ".join(["evidence"] * words) + ".",
+            "Source 2 reports an unsupported replacement.",
+            closing,
+        ])
+
+    with (
+        patch.object(
+            scriptwriter,
+            "_resolve_provider",
+            AsyncMock(return_value=("https://example.com", "yinhe-thinking", "key")),
+        ),
+        patch.object(
+            scriptwriter,
+            "_chat",
+            AsyncMock(side_effect=[candidate(380), candidate(470)]),
+        ) as chat,
+    ):
+        repaired, report = asyncio.run(
+            scriptwriter.fit_daily_script_duration(
+                original,
+                dossier,
+                edition,
+                target_duration_minutes=3,
+                language="en",
+                closing_remarks=closing,
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+                protected_story_numbers={2},
+            )
+        )
+
+    assert chat.await_count == 2
+    assert repaired.splitlines()[2] == protected
+    assert report["passed"] is True
+    assert "A prior edit still measured" in chat.await_args_list[1].args[0]
 
 
 def test_fixed_morning_opening_and_contract_are_software_owned():
@@ -659,7 +914,7 @@ def test_story_review_uses_gemini_primary_without_touching_chatgpt():
         return_value=OpenCLIResult(
             ("gemini", "ask"),
             0,
-            '[{"response":"💬 P"}]',
+            '[{"response":"💬 W1P"}]',
             "",
         )
     )
@@ -702,7 +957,7 @@ def test_gemini_late_recovery_accepts_only_its_owned_turn():
                 {"Index": 1, "Role": "Assistant", "Text": "What's the vibe, Leo?"},
                 {"Index": 2, "Role": "User", "Text": owned_prompt},
                 {"Index": 3, "Role": "User", "Text": "split evidence fragment"},
-                {"Index": 4, "Role": "Assistant", "Text": "💬 `1P2P`"},
+                {"Index": 4, "Role": "Assistant", "Text": "💬 `W1P2P`"},
             ]
             return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
         raise AssertionError(args)
@@ -732,7 +987,7 @@ def test_unowned_gemini_greeting_is_rejected_before_fresh_retry():
         nonlocal gemini_asks
         if args[:2] == ["gemini", "ask"]:
             gemini_asks += 1
-            response = "[NO RESPONSE]" if gemini_asks == 1 else "1P2P"
+            response = "[NO RESPONSE]" if gemini_asks == 1 else "W1P2P"
             return OpenCLIResult(
                 tuple(args),
                 0,
@@ -785,7 +1040,7 @@ def test_gemini_late_recovery_polls_before_resubmitting_the_owned_request():
             gemini_reads += 1
             turns = [{"Role": "User", "Text": owned_prompt}]
             if gemini_reads == 3:
-                turns.append({"Role": "Assistant", "Text": "1P2P"})
+                turns.append({"Role": "Assistant", "Text": "W1P2P"})
             return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
         raise AssertionError(args)
 
@@ -831,7 +1086,7 @@ def test_story_review_falls_back_to_fresh_chatgpt_after_gemini_exhaustion():
             return OpenCLIResult(
                 tuple(args),
                 0,
-                '[{"response":"1P2P","conversationUrl":"https://chatgpt.com/c/fallback"}]',
+                '[{"response":"W1P2P","conversationUrl":"https://chatgpt.com/c/fallback"}]',
                 "",
             )
         raise AssertionError(args)
@@ -877,7 +1132,7 @@ def test_chatgpt_fallback_retries_transient_model_picker_failure():
             return OpenCLIResult(
                 tuple(args),
                 0,
-                '[{"response":"1P2P","conversationUrl":"https://chatgpt.com/c/retry"}]',
+                '[{"response":"W1P2P","conversationUrl":"https://chatgpt.com/c/retry"}]',
                 "",
             )
         raise AssertionError(args)
@@ -920,7 +1175,7 @@ def test_chatgpt_fallback_recovers_the_target_conversation_after_route_drift():
         if args[:2] == ["chatgpt", "detail"]:
             turns = [
                 {"Index": 1, "Role": "User", "Text": chatgpt_prompt},
-                {"Index": 2, "Role": "Assistant", "Text": "1P2P"},
+                {"Index": 2, "Role": "Assistant", "Text": "W1P2P"},
             ]
             return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
         raise AssertionError(args)
@@ -956,7 +1211,7 @@ def test_gemini_retry_uses_current_flash_when_model_picker_is_missing():
             gemini_asks += 1
             if gemini_asks == 1:
                 raise OpenCLIError("Gemini model picker button was not found")
-            return OpenCLIResult(tuple(args), 0, '[{"response":"1P2P"}]', "")
+            return OpenCLIResult(tuple(args), 0, '[{"response":"W1P2P"}]', "")
         if args[:2] == ["gemini", "read"]:
             return OpenCLIResult(tuple(args), 0, "[]", "")
         raise AssertionError(args)
@@ -1120,3 +1375,152 @@ def test_review_fits_script_to_target_before_web_accuracy_audit(tmp_path: Path):
     assert result.report["attempts"][0]["duration_contract"]["passed"] is True
     assert fit.await_args.kwargs["target_duration_minutes"] == 3
     assert (tmp_path / "review" / "candidate-duration-cycle-1.txt").exists()
+
+
+def test_review_protects_d_corrected_story_during_next_duration_fit(tmp_path: Path):
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-25T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, articles, articles, [],
+    )
+    candidate = "Opening.\nStory one.\nStory two.\nClosing."
+
+    async def fit(script, *_args, **_kwargs):
+        return script, {"passed": True}
+
+    web_review = AsyncMock(side_effect=[
+        (
+            {
+                "approved": False,
+                "issues": [{
+                    "severity": "blocking",
+                    "claim": "Web audit codes D for story 2 at claims 2.1",
+                    "evidence_story_numbers": [2],
+                    "claim_ids": ["2.1"],
+                    "claim_texts": ["Story two."],
+                }],
+            },
+            "W1P2D@2.1",
+            "",
+            "gemini",
+        ),
+        (
+            {"approved": True, "issues": []},
+            "W2P",
+            "",
+            "gemini",
+        ),
+        (
+            {"approved": True, "issues": []},
+            "W1P2P",
+            "",
+            "gemini",
+        ),
+    ])
+    duration_fit = AsyncMock(side_effect=fit)
+
+    with (
+        patch.object(review, "fit_daily_script_duration", duration_fit),
+        patch.object(
+            review,
+            "script_contract_report",
+            return_value={"passed": True, "failures": []},
+        ),
+        patch.object(review, "_web_story_review", web_review),
+        patch.object(review, "revise_daily_script", AsyncMock(return_value=candidate)),
+    ):
+        result = asyncio.run(
+            review.review_daily_script(
+                candidate,
+                dossier,
+                date(2026, 8, 26),
+                tmp_path,
+                language="en",
+                closing_remarks="Closing.",
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+                target_duration_minutes=3,
+            )
+        )
+
+    assert result.report["passed"] is True
+    assert duration_fit.await_args_list[0].kwargs["protected_story_numbers"] == set()
+    assert duration_fit.await_args_list[1].kwargs["protected_story_numbers"] == {2}
+    assert duration_fit.await_args_list[2].kwargs["protected_story_numbers"] == {2}
+    assert web_review.await_args_list[1].kwargs["story_numbers"] == [2]
+    assert web_review.await_args_list[2].kwargs["story_numbers"] == [1, 2]
+
+
+def test_review_stops_when_the_same_claim_failure_repeats_after_correction(tmp_path: Path):
+    article = research.NewsArticle(
+        id="robot",
+        source_id="qbitai",
+        source_name="量子位 QbitAI",
+        language="en",
+        title="Robot demo",
+        url="https://example.com/robot",
+        published_at="2026-08-26T00:00:00+00:00",
+        summary="A robot demo.",
+        evidence_text="A robot demo.",
+    )
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, [article], [article], [],
+    )
+    candidate = "Opening.\nQbitAI reports a robot demo.\nClosing."
+    issue = {
+        "severity": "blocking",
+        "claim": "Web audit codes D for story 1 at claims 1.1",
+        "evidence_story_numbers": [1],
+        "claim_ids": ["1.1"],
+        "claim_texts": ["QbitAI reports a robot demo."],
+    }
+    web_review = AsyncMock(
+        side_effect=[
+            ({"approved": False, "issues": [issue]}, "W1D@1.1", "", "gemini"),
+            ({"approved": False, "issues": [issue]}, "W1D@1.1", "", "gemini"),
+        ]
+    )
+    revise = AsyncMock(return_value=candidate)
+
+    with (
+        patch.object(
+            review,
+            "script_contract_report",
+            return_value={"passed": True, "failures": []},
+        ),
+        patch.object(review, "_web_story_review", web_review),
+        patch.object(review, "revise_daily_script", revise),
+    ):
+        with pytest.raises(RuntimeError, match="same claim-level blocking verdict"):
+            asyncio.run(
+                review.review_daily_script(
+                    candidate,
+                    dossier,
+                    date(2026, 8, 26),
+                    tmp_path,
+                    language="en",
+                    closing_remarks="Closing.",
+                    ai_endpoint=None,
+                    ai_model=None,
+                    provider_id=None,
+                )
+            )
+
+    assert web_review.await_count == 2
+    assert revise.await_count == 1
+    report = json.loads((tmp_path / "review" / "fact_check_report.json").read_text())
+    assert report["manual_review_required"] is True
+    assert report["correction_count"] == 1

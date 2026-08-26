@@ -17,6 +17,13 @@ DAILY_NEWS_ENGLISH_WORDS_PER_MINUTE = 180
 DAILY_NEWS_CHINESE_CHARACTERS_PER_MINUTE = 280
 DAILY_NEWS_DURATION_LOWER_RATIO = 0.8
 DAILY_NEWS_DURATION_UPPER_RATIO = 1.2
+DAILY_NEWS_EDIT_MAX_TOKENS = 8192
+DAILY_NEWS_EDIT_MODEL_ALIASES = {
+    # The reasoning variant can spend its entire output allowance on hidden
+    # thought for constrained copy edits. The sibling chat model emits the
+    # requested prose directly while using the same configured gateway/key.
+    "yinhe-thinking": "yinhe-chat",
+}
 SOURCE_SPOKEN_ALIASES = {
     "机器之心 AI Daily": ("Machine Heart", "Jiqizhixin"),
     "量子位 QbitAI": ("QbitAI",),
@@ -67,6 +74,10 @@ def daily_script_duration_report(
         "target_units": target_units,
         "maximum_units": maximum_units,
     }
+
+
+def _daily_news_edit_model(model: str) -> str:
+    return DAILY_NEWS_EDIT_MODEL_ALIASES.get(model.casefold(), model)
 
 
 def narration_duration_report(
@@ -233,23 +244,6 @@ def _minimalize_unsupported_paragraphs(
     return "\n".join(lines)
 
 
-def _issues_are_unsupported_only(issues: list[dict]) -> bool:
-    """Return true when every reviewer directive is exactly audit code D."""
-    if not issues:
-        return False
-    code_sets: list[set[str]] = []
-    for issue in issues:
-        match = re.search(
-            r"audit codes?\s+([A-F]+)",
-            str(issue.get("claim", "")),
-            re.I,
-        )
-        if not match:
-            return False
-        code_sets.append(set(match.group(1).upper()))
-    return all(codes == {"D"} for codes in code_sets)
-
-
 async def fit_daily_script_duration(
     script: str,
     dossier: ResearchDossier,
@@ -261,6 +255,7 @@ async def fit_daily_script_duration(
     ai_endpoint: str | None,
     ai_model: str | None,
     provider_id: int | None,
+    protected_story_numbers: set[int] | None = None,
     log: LogCallback | None = None,
 ) -> tuple[str, dict]:
     """Repair a materially short/long script before independent fact review."""
@@ -269,52 +264,120 @@ async def fit_daily_script_duration(
         return script, report
 
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
+    edit_model = _daily_news_edit_model(model)
+    if log and edit_model != model:
+        log(
+            "Daily news duration correction: using direct-output model "
+            f"{edit_model} instead of reasoning model {model}"
+        )
     opening = morning_opening(edition_date, language)
-    direction = "expand" if report["spoken_units"] < report["minimum_units"] else "condense"
     language_rule = (
         "Use natural broadcast Mandarin Chinese."
         if language == "zh"
         else "Use natural broadcast English and no Chinese, Japanese, or Korean characters."
     )
-    system_prompt = f"""You are the length editor for Frontier Tech Daily.
+    protected = sorted({
+        int(number)
+        for number in (protected_story_numbers or set())
+        if 1 <= int(number) <= len(dossier.selected)
+    })
+    protected_rule = (
+        f"Story paragraphs {protected} already passed through an evidence-only audit "
+        "correction. Copy each of those paragraphs word-for-word from CURRENT SCRIPT. "
+        "Reach the duration target only by editing other story paragraphs."
+        if protected
+        else ""
+    )
+    protected_lines = _spoken_lines(script)
+    working_script = script
+    working_report = report
+    repaired = script
+    repaired_report = report
+    max_edit_passes = 2
+    for edit_pass in range(1, max_edit_passes + 1):
+        direction = (
+            "expand"
+            if working_report["spoken_units"] < working_report["minimum_units"]
+            else "condense"
+        )
+        retry_rule = (
+            ""
+            if edit_pass == 1
+            else (
+                "A prior edit still measured "
+                f"{working_report['spoken_units']} {working_report['unit_label']} after "
+                "software restored the protected paragraphs. Correct that exact remaining "
+                f"shortfall or overage and aim for {working_report['target_units']} "
+                f"{working_report['unit_label']}."
+            )
+        )
+        system_prompt = f"""You are the length editor for Frontier Tech Daily.
 {direction.capitalize()} the complete spoken script to fit a {target_duration_minutes}-minute edition.
-The final script must contain between {report['minimum_units']} and {report['maximum_units']} {report['unit_label']} (target {report['target_units']}).
+The final script must contain between {working_report['minimum_units']} and {working_report['maximum_units']} {working_report['unit_label']} (target {working_report['target_units']}).
 Use only facts already present in CURRENT SCRIPT or the supplied EVIDENCE DOSSIER. Never add generic commentary, repetition, speculation, invented transitions, or unsupported significance merely to reach the length.
 Preserve the exact story order and output exactly {len(dossier.selected) + 2} nonblank paragraphs: the exact opening, one paragraph for each selected story, and the exact closing.
 Attribute reported claims aloud. Preserve every number, name, uncertainty word, and factual limitation.
+{protected_rule}
+{retry_rule}
 {language_rule}
 Output spoken prose only with no markdown, labels, citations section, or explanation.
 
 Exact opening: {opening}
 Exact closing: {closing_remarks}
 """
-    raw = await _chat(
-        system_prompt,
-        "\n\n".join(
-            [
-                "CURRENT SCRIPT\n" + script,
-                "EVIDENCE DOSSIER\n" + dossier_markdown(dossier),
-            ]
-        ),
-        endpoint,
-        model,
-        api_key,
-        log,
-        "Daily news duration correction",
-        max_tokens=max(4096, min(8192, report["target_units"] * 3)),
-        enable_skills=False,
-    )
-    repaired = enforce_script_contract(
-        raw,
-        opening=opening,
-        closing=closing_remarks,
-        language=language,
-    )
-    repaired_report = daily_script_duration_report(
-        repaired,
-        target_duration_minutes,
-        language,
-    )
+        raw = await _chat(
+            system_prompt,
+            "\n\n".join(
+                [
+                    "CURRENT SCRIPT\n" + working_script,
+                    "EVIDENCE DOSSIER\n" + dossier_markdown(dossier),
+                ]
+            ),
+            endpoint,
+            edit_model,
+            api_key,
+            log,
+            "Daily news duration correction",
+            max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
+            enable_skills=False,
+        )
+        repaired = enforce_script_contract(
+            raw,
+            opening=opening,
+            closing=closing_remarks,
+            language=language,
+        )
+        if protected:
+            repaired_lines = _spoken_lines(repaired)
+            expected_line_count = len(dossier.selected) + 2
+            if (
+                len(protected_lines) != expected_line_count
+                or len(repaired_lines) != expected_line_count
+            ):
+                raise RuntimeError(
+                    "Daily-news duration correction could not preserve evidence-only "
+                    "story paragraphs because the paragraph contract changed"
+                )
+            for story_number in protected:
+                repaired_lines[story_number] = protected_lines[story_number]
+            repaired = "\n".join(repaired_lines)
+        repaired_report = daily_script_duration_report(
+            repaired,
+            target_duration_minutes,
+            language,
+        )
+        if repaired_report["passed"]:
+            break
+        if edit_pass < max_edit_passes:
+            if log:
+                log(
+                    "Daily news duration correction: protected-paragraph restore left "
+                    f"{repaired_report['spoken_units']} {repaired_report['unit_label']}; "
+                    "requesting one exact follow-up edit"
+                )
+            working_script = repaired
+            working_report = repaired_report
+
     if not repaired_report["passed"]:
         raise RuntimeError(
             "Daily-news script length contract failed after correction: "
@@ -429,25 +492,13 @@ async def revise_daily_script(
 ) -> str:
     """Apply independent-review directives using the evidence-bound writing model."""
     opening = morning_opening(edition_date, language)
-    # D means the paragraph already covers the selected story but extends
-    # beyond its evidence. The safest correction is mechanical: retain only
-    # the first attributed lead sentence and send that smaller claim back to
-    # the independent reviewer. This also keeps a slow yhroot gateway from
-    # blocking an otherwise deterministic edit. Names, numbers, attribution,
-    # contradictions, and missing coverage still require the writing model.
-    if _issues_are_unsupported_only(issues):
-        revised = _minimalize_unsupported_paragraphs(script, issues, dossier)
-        if revised != script:
-            if log:
-                log("Daily news audit correction: applied deterministic D-only evidence trim")
-            return enforce_script_contract(
-                revised,
-                opening=opening,
-                closing=closing_remarks,
-                language=language,
-            )
-
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
+    edit_model = _daily_news_edit_model(model)
+    if log and edit_model != model:
+        log(
+            "Daily news audit correction: using direct-output model "
+            f"{edit_model} instead of reasoning model {model}"
+        )
     failed_story_numbers = sorted({
         int(number)
         for issue in issues
@@ -459,7 +510,10 @@ Rewrite the complete spoken script to fix every blocking audit directive below.
 Use only the supplied evidence dossier. Remove unsupported precision instead of guessing.
 Preserve the story order, natural broadcast tone, exact opening, and exact closing.
 Edit ONLY the paragraphs for failed story numbers {failed_story_numbers}. Copy every paragraph for all other stories word-for-word from CURRENT SCRIPT. Never remove, merge, reorder, or rewrite a passing story.
-Treat each audit code as a mechanical edit requirement. For D, discard the entire failed paragraph and replace it with at most two short sentences containing only the safest facts stated directly in that story's title or feed-summary lead; do not retain analysis, significance, trend language, rankings, stars, survey figures, or promotional framing. For C, remove every number not directly present in the dossier. For B, omit any disputed proper name. For E, attribute every reported claim aloud. For A, add exactly one concise paragraph from that story's direct evidence.
+Every blocking issue carries claim_ids and claim_texts from the reviewed script. Modify only those cited claims inside a failed story paragraph. Preserve every uncited claim in that paragraph word-for-word unless changing punctuation is necessary to remove a cited sentence. Never discard an entire paragraph merely because one claim failed.
+Treat each audit code as a mechanical edit requirement. For D, remove the cited unsupported interpretation or replace only that claim with a direct paraphrase or translation of full article evidence. For C, correct or remove only the cited unsupported number or date. For B, correct or omit only the cited disputed name. For E, add source/company attribution or uncertainty to the cited claim. For F, update or remove only the cited contradiction or stale framing. For A with claim <story>.0, add exactly one concise evidence-backed paragraph.
+Do not rely on the title alone unless the same claim is also present in the feed summary or full article evidence.
+The independent reviewer used mandatory live web search, but the complete local EVIDENCE DOSSIER remains the editing boundary: do not introduce facts found only on the web and do not invent a replacement.
 Output exactly {len(dossier.selected) + 2} nonblank paragraphs: opening, one paragraph for each of the {len(dossier.selected)} stories in dossier order, then closing.
 Output spoken prose only with no markdown, labels, citations section, or explanation.
 For an English edition, output no Chinese, Japanese, or Korean characters.
@@ -478,11 +532,11 @@ Exact closing: {closing_remarks}
         system_prompt,
         user_content,
         endpoint,
-        model,
+        edit_model,
         api_key,
         log,
         "Daily news audit correction",
-        max_tokens=8192,
+        max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
         enable_skills=False,
     )
     if language == "en" and NON_ENGLISH_RE.search(raw):
@@ -490,11 +544,11 @@ Exact closing: {closing_remarks}
             "Rewrite this broadcast script in English only. Preserve all facts, numbers, uncertainty, opening, and closing. Output spoken prose only.",
             raw,
             endpoint,
-            model,
+            edit_model,
             api_key,
             log,
             "Daily news audit correction translation",
-            max_tokens=8192,
+            max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
             enable_skills=False,
         )
     revised = enforce_script_contract(
@@ -503,7 +557,21 @@ Exact closing: {closing_remarks}
         closing=closing_remarks,
         language=language,
     )
-    revised = _minimalize_unsupported_paragraphs(revised, issues, dossier)
+    # Old saved review reports predate claim identifiers. Preserve their
+    # conservative first-sentence fallback, but never apply that paragraph-wide
+    # trim to the new claim-targeted protocol.
+    legacy_d_issues = [
+        issue
+        for issue in issues
+        if re.search(r"audit codes [A-F]*D", str(issue.get("claim", "")), re.I)
+        and not issue.get("claim_ids")
+    ]
+    if legacy_d_issues:
+        revised = _minimalize_unsupported_paragraphs(
+            revised,
+            legacy_d_issues,
+            dossier,
+        )
     return enforce_script_contract(
         revised,
         opening=opening,
