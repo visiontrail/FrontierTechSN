@@ -11,6 +11,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,11 @@ from backend.pipeline.opencli_browser_runtime import (
 
 logger = logging.getLogger(__name__)
 
+_SITE_SESSION_COMPONENT_RE = re.compile(r"[^a-z0-9._-]+", re.IGNORECASE)
+CLOSE_ADAPTER_SESSIONS_SCRIPT = (
+    config.PROJECT_ROOT / "tools" / "opencli" / "close-adapter-sessions.mjs"
+)
+
 
 class OpenCLIError(RuntimeError):
     """An OpenCLI command could not produce a usable result."""
@@ -41,6 +48,19 @@ class OpenCLIResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+def _site_session_name(namespace: str, site: str) -> str:
+    """Mirror OpenCLI's project namespace normalization exactly."""
+    normalized = _SITE_SESSION_COMPONENT_RE.sub("-", str(namespace).strip())
+    normalized = normalized.strip("-")[:64]
+    if not normalized:
+        raise OpenCLIError("OpenCLI site-session namespace is empty after normalization")
+    normalized_site = _SITE_SESSION_COMPONENT_RE.sub("-", str(site).strip())
+    normalized_site = normalized_site.strip("-")
+    if not normalized_site:
+        raise OpenCLIError("OpenCLI site name is empty after normalization")
+    return f"site:{normalized}:{normalized_site}"
 
 
 def _environment(*, site_session_namespace: str | None = None) -> dict[str, str]:
@@ -167,6 +187,62 @@ async def run_opencli_with_retries(
                 delay = min(45.0, config.OPENCLI_RETRY_BASE_SECONDS * 2 ** (attempt - 1))
                 await asyncio.sleep(delay)
     raise OpenCLIError(f"{label} failed after {total} attempts: {last_error}") from last_error
+
+
+async def close_opencli_site_sessions(
+    site_session_namespace: str,
+    *,
+    sites: tuple[str, ...] = ("gemini", "chatgpt"),
+    timeout: int = 30,
+) -> tuple[str, ...]:
+    """Release persistent adapter tabs owned by one completed logical run.
+
+    OpenCLI's public ``browser close`` command targets the interactive browser
+    surface, so it cannot release adapter leases. This small project-local
+    bridge command addresses the adapter surface explicitly and runs after the
+    multi-command review has finished using its isolated provider sessions.
+    """
+    if not CLOSE_ADAPTER_SESSIONS_SCRIPT.is_file():
+        raise OpenCLIError(
+            "OpenCLI adapter-session cleanup script is missing at "
+            f"{CLOSE_ADAPTER_SESSIONS_SCRIPT}"
+        )
+
+    env = _environment(site_session_namespace=site_session_namespace)
+    node = shutil.which("node", path=env.get("PATH"))
+    if not node:
+        raise OpenCLIError("Node.js is required to close OpenCLI adapter sessions")
+
+    sessions = tuple(
+        _site_session_name(site_session_namespace, site)
+        for site in dict.fromkeys(sites)
+    )
+    process = await asyncio.create_subprocess_exec(
+        node,
+        str(CLOSE_ADAPTER_SESSIONS_SCRIPT),
+        *sessions,
+        cwd=str(config.PROJECT_ROOT),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            process.communicate(), timeout=timeout
+        )
+    except TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        raise OpenCLIError(
+            f"OpenCLI adapter-session cleanup timed out after {timeout}s"
+        ) from exc
+
+    stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
+    stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+    if process.returncode:
+        detail = (stderr or stdout or "unknown cleanup failure")[-1200:]
+        raise OpenCLIError(f"OpenCLI adapter-session cleanup failed: {detail}")
+    return sessions
 
 
 def first_json(value: str) -> Any:

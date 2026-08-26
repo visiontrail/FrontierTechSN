@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import unicodedata
 from collections.abc import Callable
@@ -18,7 +19,11 @@ from backend.daily_news.scriptwriter import (
     revise_daily_script,
     script_contract_report,
 )
-from backend.pipeline.opencli import first_json, run_opencli
+from backend.pipeline.opencli import (
+    close_opencli_site_sessions,
+    first_json,
+    run_opencli,
+)
 
 LogCallback = Callable[[str], None]
 
@@ -918,7 +923,7 @@ async def _web_story_review(
     ) from chatgpt_error
 
 
-async def review_daily_script(
+async def _review_daily_script(
     script: str,
     dossier: ResearchDossier,
     edition_date: date,
@@ -929,6 +934,7 @@ async def review_daily_script(
     ai_endpoint: str | None,
     ai_model: str | None,
     provider_id: int | None,
+    review_session_namespace: str,
     target_duration_minutes: int | None = None,
     log: LogCallback | None = None,
 ) -> ScriptReviewResult:
@@ -942,9 +948,6 @@ async def review_daily_script(
     audit_round = 0
     repeated_issue_counts: dict[tuple, int] = {}
     failure_reason = ""
-    review_session_namespace = (
-        f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{uuid4().hex}"
-    )
     all_numbers = list(range(1, len(dossier.selected) + 1))
     review_numbers = list(all_numbers)
     while audit_round < max_corrections * 2 + 1:
@@ -1157,3 +1160,49 @@ async def review_daily_script(
         "Web accuracy review did not approve the daily script: "
         + report["failure_reason"]
     )
+
+
+async def review_daily_script(
+    script: str,
+    dossier: ResearchDossier,
+    edition_date: date,
+    output_dir: Path,
+    *,
+    language: str,
+    closing_remarks: str,
+    ai_endpoint: str | None,
+    ai_model: str | None,
+    provider_id: int | None,
+    target_duration_minutes: int | None = None,
+    log: LogCallback | None = None,
+) -> ScriptReviewResult:
+    """Review a daily script and always release its isolated browser tabs."""
+    review_session_namespace = (
+        f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{uuid4().hex}"
+    )
+    try:
+        return await _review_daily_script(
+            script,
+            dossier,
+            edition_date,
+            output_dir,
+            language=language,
+            closing_remarks=closing_remarks,
+            ai_endpoint=ai_endpoint,
+            ai_model=ai_model,
+            provider_id=provider_id,
+            review_session_namespace=review_session_namespace,
+            target_duration_minutes=target_duration_minutes,
+            log=log,
+        )
+    finally:
+        try:
+            await close_opencli_site_sessions(review_session_namespace)
+            if log:
+                log("Released completed OpenCLI Gemini/ChatGPT browser sessions")
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask review outcome
+            message = f"OpenCLI browser-session cleanup failed: {exc}"
+            if log:
+                log(message)
+            else:
+                logging.getLogger(__name__).warning(message)

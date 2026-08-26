@@ -1321,6 +1321,9 @@ def test_review_report_records_gemini_primary_and_chatgpt_fallback(
     with (
         patch.object(review, "_web_story_review", web_review),
         patch.object(review, "script_contract_report", return_value=contract),
+        patch.object(
+            review, "close_opencli_site_sessions", AsyncMock()
+        ) as close_sessions,
     ):
         result = asyncio.run(
             review.review_daily_script(
@@ -1341,8 +1344,47 @@ def test_review_report_records_gemini_primary_and_chatgpt_fallback(
     assert web_review.await_args.kwargs["site_session_namespace"].startswith(
         "frontiertechsn-review-"
     )
+    close_sessions.assert_awaited_once_with(
+        web_review.await_args.kwargs["site_session_namespace"]
+    )
     assert (tmp_path / "review" / "story-review-prompt-1-group-1.txt").exists()
     assert (tmp_path / "review" / "story-review-response-1-group-1.txt").exists()
+
+
+def test_review_cleanup_failure_does_not_mask_the_review_failure(tmp_path: Path):
+    review_failure = RuntimeError("review failed")
+    messages: list[str] = []
+
+    with (
+        patch.object(
+            review,
+            "_review_daily_script",
+            AsyncMock(side_effect=review_failure),
+        ),
+        patch.object(
+            review,
+            "close_opencli_site_sessions",
+            AsyncMock(side_effect=OpenCLIError("bridge unavailable")),
+        ) as close_sessions,
+    ):
+        with pytest.raises(RuntimeError, match="review failed"):
+            asyncio.run(
+                review.review_daily_script(
+                    "Opening.\nClosing.",
+                    object(),
+                    date(2026, 8, 26),
+                    tmp_path,
+                    language="en",
+                    closing_remarks="Closing.",
+                    ai_endpoint=None,
+                    ai_model=None,
+                    provider_id=None,
+                    log=messages.append,
+                )
+            )
+
+    close_sessions.assert_awaited_once()
+    assert any("browser-session cleanup failed" in message for message in messages)
 
 
 def test_review_fits_script_to_target_before_web_accuracy_audit(tmp_path: Path):
@@ -1393,6 +1435,7 @@ def test_review_fits_script_to_target_before_web_accuracy_audit(tmp_path: Path):
             return_value={"passed": True, "failures": []},
         ),
         patch.object(review, "_web_story_review", web_review),
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()),
     ):
         result = asyncio.run(
             review.review_daily_script(
@@ -1478,6 +1521,7 @@ def test_review_protects_d_corrected_story_during_next_duration_fit(tmp_path: Pa
         ),
         patch.object(review, "_web_story_review", web_review),
         patch.object(review, "revise_daily_script", AsyncMock(return_value=candidate)),
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()),
     ):
         result = asyncio.run(
             review.review_daily_script(
@@ -1541,6 +1585,9 @@ def test_review_stops_when_the_same_claim_failure_repeats_after_correction(tmp_p
         ),
         patch.object(review, "_web_story_review", web_review),
         patch.object(review, "revise_daily_script", revise),
+        patch.object(
+            review, "close_opencli_site_sessions", AsyncMock()
+        ) as close_sessions,
     ):
         with pytest.raises(RuntimeError, match="same claim-level blocking verdict"):
             asyncio.run(
@@ -1559,6 +1606,7 @@ def test_review_stops_when_the_same_claim_failure_repeats_after_correction(tmp_p
 
     assert web_review.await_count == 2
     assert revise.await_count == 1
+    close_sessions.assert_awaited_once()
     report = json.loads((tmp_path / "review" / "fact_check_report.json").read_text())
     assert report["manual_review_required"] is True
     assert report["correction_count"] == 1

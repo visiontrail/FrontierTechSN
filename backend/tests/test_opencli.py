@@ -76,6 +76,60 @@ class OpenCLISessionIsolationTests(unittest.TestCase):
             self.assertTrue(specs[key].restart_required)
 
 
+class OpenCLISessionCleanupTests(unittest.IsolatedAsyncioTestCase):
+    def test_site_session_name_matches_patched_opencli_namespace(self):
+        self.assertEqual(
+            opencli_module._site_session_name(
+                " FrontierTechSN review/request ", "ChatGPT"
+            ),
+            "site:FrontierTechSN-review-request:ChatGPT",
+        )
+
+    def test_cleanup_bridge_targets_the_adapter_surface(self):
+        source = opencli_module.CLOSE_ADAPTER_SESSIONS_SCRIPT.read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("sendCommand('close-window'", source)
+        self.assertIn("surface: 'adapter'", source)
+
+    async def test_cleanup_targets_adapter_surface_sessions_in_one_process(self):
+        class SuccessfulProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"closed":["gemini","chatgpt"],"errors":[]}', b""
+
+        with (
+            patch.object(opencli_module.shutil, "which", return_value="/usr/bin/node"),
+            patch.object(
+                opencli_module.asyncio,
+                "create_subprocess_exec",
+                AsyncMock(return_value=SuccessfulProcess()),
+            ) as create_process,
+        ):
+            sessions = await opencli_module.close_opencli_site_sessions(
+                "frontiertechsn-review-request"
+            )
+
+        self.assertEqual(
+            sessions,
+            (
+                "site:frontiertechsn-review-request:gemini",
+                "site:frontiertechsn-review-request:chatgpt",
+            ),
+        )
+        args = create_process.await_args.args
+        self.assertEqual(args[0], "/usr/bin/node")
+        self.assertEqual(
+            args[-2:],
+            (
+                "site:frontiertechsn-review-request:gemini",
+                "site:frontiertechsn-review-request:chatgpt",
+            ),
+        )
+
+
 class OpenCLIRateLimitTests(unittest.TestCase):
     def test_only_gemini_and_chatgpt_commands_are_rate_limited(self):
         self.assertTrue(is_rate_limited_command(["chatgpt", "ask", "prompt"]))
