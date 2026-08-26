@@ -145,6 +145,41 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
                     api_key="test-key",
                 )
 
+    async def test_retry_log_does_not_name_an_unselected_provider(self):
+        attempts = 0
+        logs: list[str] = []
+
+        async def query(*, prompt, options):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise Exception("temporary failure")
+            yield FakeAssistantMessage([FakeTextBlock("pong")])
+
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(config, "AI_MAX_RETRIES", 1),
+            patch.object(config, "AI_RETRY_BASE_SECONDS", 0),
+            patch.object(config, "AI_RETRY_MAX_SECONDS", 0),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names", return_value=([], [])),
+        ):
+            result = await agent.agent_complete(
+                "Reply pong.",
+                "ping",
+                model="deepseek-v4-flash",
+                endpoint="https://api.deepseek.com/anthropic",
+                api_key="test-key",
+                log=logs.append,
+            )
+
+        self.assertEqual(result, "pong")
+        retry_log = next(line for line in logs if "retrying" in line)
+        self.assertIn("retrying same provider turn", retry_log)
+        self.assertNotIn("yhroot", retry_log)
+
     async def test_one_shot_call_can_skip_project_skills(self):
         captured = {}
 

@@ -290,10 +290,10 @@ async def agent_complete(
             ) + _diagnostic_tail(diagnostics)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
             # A hard turn timeout is still a provider failure. Treat it like
-            # every other bounded failure so yhroot receives the configured
-            # ten total chances. The long worst-case duration is intentional:
-            # daytime gateway stalls are common, while the daily worker can
-            # safely keep trying in the background.
+            # every other bounded failure so the selected provider receives
+            # the configured number of chances. The long worst-case duration
+            # is intentional: daytime gateway stalls are common, while the
+            # daily worker can safely keep trying in the background.
             last_error = RuntimeError(detail)
         except Exception as e:  # noqa: BLE001 - surface any SDK/transport failure
             # Preserve the SDK callback's stderr in the error returned by the
@@ -309,7 +309,7 @@ async def agent_complete(
             )
             _log(
                 log,
-                f"{label}: retrying yhroot/provider turn in {delay:.0f}s "
+                f"{label}: retrying same provider turn in {delay:.0f}s "
                 f"({attempt + 2}/{config.AI_MAX_RETRIES + 1})",
             )
             await asyncio.sleep(delay)

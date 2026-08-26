@@ -248,7 +248,7 @@ async def _chat_http(
                 )
                 _dlog(
                     log,
-                    f"{label}: retrying yhroot/provider call in {delay:.0f}s "
+                    f"{label}: retrying same provider call in {delay:.0f}s "
                     f"({attempt + 2}/{config.AI_MAX_RETRIES + 1})",
                 )
                 await asyncio.sleep(delay)

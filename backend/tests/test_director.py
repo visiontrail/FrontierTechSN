@@ -187,7 +187,9 @@ def test_untouched_drafts_are_not_counted_as_authored(tmp_path, monkeypatch):
     assert outcome.failures
 
 
-def test_director_retries_yhroot_until_a_later_attempt_succeeds(tmp_path, monkeypatch):
+def test_director_retries_selected_provider_until_a_later_attempt_succeeds(
+    tmp_path, monkeypatch
+):
     attempts = 0
     logs: list[str] = []
 
@@ -217,3 +219,4 @@ def test_director_retries_yhroot_until_a_later_attempt_succeeds(tmp_path, monkey
     assert error is None
     assert attempts == 3
     assert any("attempt 3/3" in line for line in logs)
+    assert all("yhroot" not in line for line in logs)

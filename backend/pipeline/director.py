@@ -378,7 +378,7 @@ async def _run_agent(
     label: str = "authoring",
     system_prompt: str = SYSTEM_PROMPT,
 ) -> tuple[list[str], str | None]:
-    """Run one crew with the same ten-attempt yhroot policy as text stages."""
+    """Run one crew with the same configured-provider retry policy as text stages."""
     ids = list(ids)
     maximum_attempts = max(1, int(config.AI_MAX_RETRIES) + 1)
     if log:
@@ -389,7 +389,7 @@ async def _run_agent(
     for attempt in range(1, maximum_attempts + 1):
         if log and maximum_attempts > 1:
             log(
-                f"Director crew {batch_no}/{batch_total}: yhroot attempt "
+                f"Director crew {batch_no}/{batch_total}: provider attempt "
                 f"{attempt}/{maximum_attempts}"
             )
         turns, error = await _run_agent_attempt(
@@ -422,7 +422,7 @@ async def _run_agent(
             )
             if log:
                 log(
-                    f"Director crew {batch_no}/{batch_total}: retrying yhroot in "
+                    f"Director crew {batch_no}/{batch_total}: retrying same provider in "
                     f"{delay:.0f}s ({attempt + 1}/{maximum_attempts})"
                 )
             await asyncio.sleep(delay)
