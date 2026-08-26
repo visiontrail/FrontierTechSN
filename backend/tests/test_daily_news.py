@@ -1349,6 +1349,67 @@ def test_chatgpt_fallback_recovers_the_target_conversation_after_route_drift():
     assert detail.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 15
 
 
+def test_chatgpt_fallback_retries_target_conversation_until_protocol_is_stable():
+    chatgpt_prompt = ""
+    detail_reads = 0
+    target_url = "https://chatgpt.com/c/6a8efd33-7908-83ec-af9a-5f2f74befe0b"
+
+    async def command(args, **kwargs):
+        nonlocal chatgpt_prompt, detail_reads
+        if args[:2] == ["gemini", "ask"]:
+            raise OpenCLIError("Gemini browser lease failed")
+        if args[:2] == ["gemini", "read"]:
+            return OpenCLIResult(tuple(args), 0, "[]", "")
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_prompt = args[2]
+            response = [{
+                "response": "W2P;6D@6.2[citation loading]",
+                "conversationUrl": target_url,
+            }]
+            return OpenCLIResult(tuple(args), 0, json.dumps(response), "")
+        if args[:2] == ["chatgpt", "detail"]:
+            detail_reads += 1
+            answer = (
+                "W2P;6D@6.2[citation loading]"
+                if detail_reads == 1
+                else "W2P;6D@6.2"
+            )
+            turns = [
+                {"Index": 1, "Role": "User", "Text": chatgpt_prompt},
+                {"Index": 2, "Role": "Assistant", "Text": answer},
+            ]
+            return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
+        raise AssertionError(args)
+
+    command_mock = AsyncMock(side_effect=command)
+    with (
+        patch.object(review, "run_opencli", command_mock),
+        patch.object(review.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        payload, raw, url, provider = asyncio.run(
+            review._web_story_review(
+                "audit",
+                story_numbers=[2, 6],
+                claim_catalog={
+                    2: {"2.1": "Story two claim."},
+                    6: {"6.2": "Story six unsupported claim."},
+                },
+                log=None,
+            )
+        )
+
+    assert payload["approved"] is False
+    assert payload["issues"][0]["evidence_story_numbers"] == [6]
+    assert payload["issues"][0]["claim_ids"] == ["6.2"]
+    assert provider == "chatgpt"
+    assert url == target_url
+    assert detail_reads == 2
+    assert "[CHATGPT RECOVERY]\nW2P;6D@6.2" in raw
+    sleep.assert_any_await(review._RECOVERY_POLL_INTERVAL_SECONDS)
+
+
 def test_gemini_retry_uses_current_flash_when_model_picker_is_missing():
     gemini_asks = 0
 

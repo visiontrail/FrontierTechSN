@@ -673,7 +673,10 @@ async def _web_story_review(
                 "json",
             ]
         )
-        recovery_attempts = 3 if provider == "gemini" else 1
+        # Both sites can expose a transient assistant snapshot immediately
+        # after generation. Keep parsing strict, but allow the owned page to
+        # settle to its final protocol token before failing the whole review.
+        recovery_attempts = 3
         last_error: Exception | None = None
         for recovery_attempt in range(1, recovery_attempts + 1):
             try:
