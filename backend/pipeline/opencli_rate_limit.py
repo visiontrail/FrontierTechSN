@@ -1,4 +1,4 @@
-"""Cross-process pacing for Gemini and ChatGPT OpenCLI commands."""
+"""Cross-process pacing for Gemini and ChatGPT generation requests."""
 
 from __future__ import annotations
 
@@ -14,11 +14,21 @@ MIN_INTERVAL_SECONDS = 3 * 60.0
 MAX_INTERVAL_SECONDS = 10 * 60.0
 DEFAULT_INTERVAL_SECONDS = MIN_INTERVAL_SECONDS
 RATE_LIMITED_SITES = frozenset({"chatgpt", "gemini"})
+RATE_LIMITED_ACTIONS = frozenset({"ask", "image"})
 
 
 def is_rate_limited_command(args: list[str] | tuple[str, ...]) -> bool:
-    """Return whether an OpenCLI command targets a rate-sensitive web app."""
-    return bool(args) and str(args[0]).strip().lower() in RATE_LIMITED_SITES
+    """Return whether an OpenCLI command starts a rate-sensitive generation.
+
+    Page reads, conversation-detail recovery, status checks, and model selection
+    do not submit a prompt. Charging those commands a generation slot turns a
+    bounded recovery poll into several minutes of artificial delay.
+    """
+    return (
+        len(args) >= 2
+        and str(args[0]).strip().lower() in RATE_LIMITED_SITES
+        and str(args[1]).strip().lower() in RATE_LIMITED_ACTIONS
+    )
 
 
 def normalize_interval(value: object | None) -> float:
@@ -100,9 +110,8 @@ def wait_for_opencli_web_slot(
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 1 or args[0].strip().lower() not in RATE_LIMITED_SITES:
-        print("usage: opencli_rate_limit.py {chatgpt|gemini}", file=sys.stderr)
-        return 2
+    if not is_rate_limited_command(args):
+        return 0
     wait_for_opencli_web_slot(args[0].strip().lower())
     return 0
 

@@ -41,17 +41,18 @@ if [ "${OPENCLI_BROWSER_RUNTIME:-bridge}" = "isolated-headless" ] \
   export OPENCLI_PROFILE="$ISOLATED_PROFILE"
 fi
 
-# Gemini and ChatGPT are browser-backed and enforce burst limits. Gate every
-# project-wrapper invocation, including calls made outside the backend. Backend
-# calls reserve their slot before their command timeout starts and mark the
-# child so this wrapper does not reserve the same request twice.
+# Gemini and ChatGPT generation requests are browser-backed and enforce burst
+# limits. Gate prompt/image submissions made outside the backend too, but let
+# page reads, recovery, model selection, and status checks run immediately.
+# Backend calls reserve their slot before their command timeout starts and mark
+# the child so this wrapper does not reserve the same request twice.
 case "${1:-}" in
   chatgpt|gemini)
     if [ "${OPENCLI_WEB_REQUEST_SLOT_RESERVED:-0}" != "1" ]; then
       if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
-        "$PROJECT_ROOT/.venv/bin/python" "$RATE_LIMITER" "$1"
+        "$PROJECT_ROOT/.venv/bin/python" "$RATE_LIMITER" "$@"
       elif command -v python3 >/dev/null 2>&1; then
-        python3 "$RATE_LIMITER" "$1"
+        python3 "$RATE_LIMITER" "$@"
       else
         echo "Python 3 is required for OpenCLI Gemini/ChatGPT request pacing." >&2
         exit 127

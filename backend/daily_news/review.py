@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import unicodedata
@@ -26,6 +27,7 @@ _CHATGPT_CONVERSATION_URL_RE = re.compile(
     r"https://chatgpt\.com/c/[0-9a-z-]+",
     re.I,
 )
+_RECOVERY_POLL_INTERVAL_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -599,7 +601,7 @@ async def _web_story_review(
         )
         recovery_attempts = 3 if provider == "gemini" else 1
         last_error: Exception | None = None
-        for _ in range(recovery_attempts):
+        for recovery_attempt in range(1, recovery_attempts + 1):
             try:
                 read_result = await run_opencli(
                     command,
@@ -620,6 +622,8 @@ async def _web_story_review(
                 return payload, assistant_text
             except Exception as exc:  # noqa: BLE001 - bounded late-response poll
                 last_error = exc
+                if recovery_attempt < recovery_attempts:
+                    await asyncio.sleep(_RECOVERY_POLL_INTERVAL_SECONDS)
         assert last_error is not None
         raise last_error
 
