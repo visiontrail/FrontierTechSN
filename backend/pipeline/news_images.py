@@ -38,7 +38,7 @@ LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 MANIFEST_VERSION = 12
-QUERY_SEMANTICS_VERSION = 6
+QUERY_SEMANTICS_VERSION = 7
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
 NEWS_IMAGE_MAX_PIXELS = 16_000_000
@@ -859,6 +859,11 @@ def _subject_semantic_role(subject: object, scene: dict) -> tuple[str, str]:
         return "", "shot subject was only a numeric value or version"
     if subject_words and numeric_identity_re.fullmatch(subject_words[0]):
         return "", "versioned product subject lacked its leading brand identity"
+    if (
+        len(subject_words) == 1
+        and re.fullmatch(r"[a-z][0-9]{1,2}", subject_words[0])
+    ):
+        return "", "ambiguous short product code lacked its leading brand identity"
     raw_subject_tokens = ENTITY_PHRASE_TOKEN_RE.findall(normalized)
     if any(token.casefold().endswith(("'s", "’s")) for token in raw_subject_tokens[:-1]):
         return "", "shot subject combined a possessive owner with a separate identity"

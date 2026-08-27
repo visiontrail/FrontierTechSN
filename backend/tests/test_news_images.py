@@ -996,6 +996,44 @@ def test_calendar_fragments_cannot_become_logo_subjects(subject):
     assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is False
 
 
+def test_ambiguous_short_product_code_requires_leading_brand_identity():
+    scene = {
+        "text": (
+            "QbitAI reports that matching S1's single-demonstration performance "
+            "through traditional post-training would require 380 demonstrations."
+        ),
+        "keywords": [],
+    }
+    shot = {"expected_subject": "S1", "kind": "logo"}
+    candidate = {
+        "title": "S1 logo black.png",
+        "description": "s1_logo_black",
+        "object_name": "S1 logo black",
+    }
+
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is False
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+    assert evidence["grounding_passed"] is False
+    assert evidence["grounding_reason"] == (
+        "ambiguous short product code lacked its leading brand identity"
+    )
+
+
+def test_short_product_code_is_grounded_when_brand_is_part_of_identity():
+    scene = {
+        "text": "Skild AI S1 learns a new task from one human demonstration.",
+        "keywords": [],
+    }
+    shot = {"expected_subject": "Skild AI S1", "kind": "logo"}
+    candidate = {
+        "title": "Skild AI S1 logo.svg",
+        "description": "Official logo for Skild AI S1",
+    }
+
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is True
+    assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is True
+
+
 @pytest.mark.parametrize(
     "subject",
     ["April Robotics", "June Oven", "March Networks", "May Mobility"],
