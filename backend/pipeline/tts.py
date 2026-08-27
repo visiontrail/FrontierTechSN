@@ -948,6 +948,31 @@ def _reattach_fragile_video_prompt_context(chunks: list[str]) -> list[str]:
     return adjusted
 
 
+def _separate_fragile_positioning_clause(chunks: list[str]) -> list[str]:
+    """Keep ``positions the release as`` in one grammatical utterance."""
+    adjusted = list(chunks)
+    index = 0
+    pattern = re.compile(
+        r"^(.*?[,;])\s+"
+        r"(and positions)\s+"
+        r"(the release as a lower-priced platform)\s+"
+        r"(aimed at .+)$",
+        re.IGNORECASE,
+    )
+    while index < len(adjusted) - 1:
+        match = pattern.match(f"{adjusted[index]} {adjusted[index + 1]}")
+        if match is None:
+            index += 1
+            continue
+        adjusted[index:index + 2] = [
+            match.group(1),
+            f"{match.group(2)} {match.group(3)}",
+            match.group(4),
+        ]
+        index += 3
+    return adjusted
+
+
 def _separate_fragile_battle_ready_sequence(chunks: list[str]) -> list[str]:
     """Keep an observed compound phrase intact in shorter utterances."""
     adjusted = list(chunks)
@@ -993,10 +1018,12 @@ def _separate_fragile_moderation_sequence(chunks: list[str]) -> list[str]:
 def _stabilize_orpheus_chunks(chunks: list[str]) -> list[str]:
     return _separate_fragile_moderation_sequence(
         _separate_fragile_battle_ready_sequence(
-            _reattach_fragile_video_prompt_context(
-                _reattach_fragile_orpheus_continuations(
-                    _separate_repeated_adjective_items(
-                        _separate_repeated_clause_openings(chunks)
+            _separate_fragile_positioning_clause(
+                _reattach_fragile_video_prompt_context(
+                    _reattach_fragile_orpheus_continuations(
+                        _separate_repeated_adjective_items(
+                            _separate_repeated_clause_openings(chunks)
+                        )
                     )
                 )
             )
