@@ -223,6 +223,16 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("tech", "meme's"): "techmeme's",
     ("ear", "en", "dill"): "earendil",
     ("ear", "endil"): "earendil",
+    # NERVA is conventionally spoken as a word, while the non-rhotic Leah
+    # voice can make the final ``r`` in Rover acoustically surface as ROVA in
+    # Whisper. Keep that spelling equivalence constrained to the complete pair
+    # of historical program names; the unrelated tokens remain distinct.
+    ("nerva", "and", "rover"): "nervaandrover",
+    ("nerva", "and", "rova"): "nervaandrover",
+    ("nervah", "and", "rover"): "nervaandrover",
+    ("nervah", "and", "rova"): "nervaandrover",
+    ("ner", "vuh", "and", "rover"): "nervaandrover",
+    ("ner", "vuh", "and", "rova"): "nervaandrover",
     # Provider-only phonetics for the Chinese personal name Zhu Yi. Keep this
     # equivalence scoped to the complete two-token name so an unrelated "Joo"
     # or "Yee" remains distinct and positional completeness still applies.
@@ -1450,6 +1460,15 @@ def _orpheus_prompt_text(text: str) -> str:
     stripped = re.sub(
         r"(?<![\w-])Qianwen(?![\w-])",
         "Chien-Wen",
+        stripped,
+    )
+    # Uppercase NERVA was repeatedly realized as the unrelated word "NAL" at
+    # normal, 0.8x, and 0.7x ASR playback. Expose its conventional two-syllable
+    # pronunciation only to the provider; the canonical script and acoustic
+    # verification still require the complete NERVA-and-Rover name pair.
+    stripped = re.sub(
+        r"(?<![\w-])NERVA(?=\s+and\s+Rover\b)",
+        "Ner-vuh",
         stripped,
     )
     # The English Orpheus voice repeatedly realized the live attribution
