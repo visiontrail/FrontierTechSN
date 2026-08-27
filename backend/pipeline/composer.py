@@ -1023,10 +1023,16 @@ async def compose_video(
         if attached_images >= 2 and (
             not image_modes.get("inline") or not image_modes.get("fullscreen")
         ):
-            raise RuntimeError(
-                "News-image placement incomplete: both inline and fullscreen modes "
-                "are required when at least two eligible scenes exist"
+            mode_warning = (
+                "News-image placement retained only one display mode after preserving "
+                "structured scene evidence"
             )
+            if manifest_status == "ready":
+                raise RuntimeError(
+                    f"{mode_warning}; both inline and fullscreen modes are required "
+                    "when at least two eligible scenes exist"
+                )
+            emit(f"{mode_warning}; continuing with the verified partial inventory")
         news_image_quality = {
             "enabled": True,
             "complete": attached_images == required_count,
