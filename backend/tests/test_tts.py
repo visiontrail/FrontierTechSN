@@ -2050,6 +2050,57 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(process.await_count, 1)
         self.assertIn("corroborated", " ".join(messages))
 
+    async def test_orpheus_verifier_corroborates_phonetic_spelling_at_opening_edge(self):
+        expected = (
+            "Skild was founded in 2023 by Carnegie Mellon robotics researchers "
+            "Deepak Pathak and Abhinav Gupta."
+        )
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        transcript = words(
+            "Skilled was founded in 2023 by Carnegie Mellon robotics researchers "
+            "Deepak Pathak and Abhinav Gupta"
+        )
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (transcript, {"passed": True}),
+                    (transcript, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "skild-opening.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=messages.append,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertTrue(report["leading_anchor"])
+        self.assertFalse(report["exact_leading_anchor"])
+        self.assertTrue(report["exact_trailing_anchor"])
+        self.assertEqual(
+            report["verification_mode"],
+            "corroborated_phonetic_substitution",
+        )
+        self.assertEqual(transcriber.await_count, 2)
+        self.assertEqual(process.await_count, 1)
+        self.assertIn("corroborated", " ".join(messages))
+
     async def test_orpheus_verifier_rejects_uncorroborated_phonetic_spelling(self):
         expected = (
             "North American robotics startup Skild AI has released a new robot "

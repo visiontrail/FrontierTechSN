@@ -60,7 +60,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 5
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 6
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -1377,9 +1377,9 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     Whisper is an independent acoustic observer, so a complete name can receive
     a different but acoustically equivalent spelling. The primary path remains
     exact. A bounded fallback permits one aligned phonetic spelling substitution
-    only when exact coverage is at least 90%, word count is unchanged, and both
-    utterance edges remain exact. The caller must corroborate that fallback by
-    transcribing the same waveform at another playback speed.
+    only when exact coverage is at least 90% and word count is unchanged. That
+    substitution may positionally anchor an utterance edge, but the caller must
+    corroborate it by transcribing the same waveform at another playback speed.
     """
     expected = _lexical_tokens(text)
     observed, observed_word_indexes = _transcript_tokens(words)
@@ -1396,9 +1396,6 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     matched_expected = {left for left, _ in pairs}
     exact_coverage = len(matched_expected) / max(1, len(expected))
     word_ratio = len(observed) / max(1, len(expected))
-    edge = min(ORPHEUS_EXACT_EDGE_ANCHOR_WORDS, len(expected))
-    leading_anchor = expected[:edge] == observed[:edge]
-    trailing_anchor = expected[-edge:] == observed[-edge:]
     speech_end = max((float(word.get("end") or 0) for word in words), default=0.0)
     repetition_start = _repetition_start(observed, expected)
     repeat_start_seconds = None
@@ -1407,6 +1404,24 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         repeat_start_seconds = max(0.0, float(words[repeat_word_index].get("start") or 0))
 
     phonetic_substitutions = _aligned_phonetic_substitutions(expected, observed)
+    substitution_indexes = {
+        int(item["expected_index"])
+        for item in phonetic_substitutions or []
+    }
+    edge = min(ORPHEUS_EXACT_EDGE_ANCHOR_WORDS, len(expected))
+    exact_leading_anchor = expected[:edge] == observed[:edge]
+    exact_trailing_anchor = expected[-edge:] == observed[-edge:]
+
+    def position_is_anchored(index: int) -> bool:
+        return index < len(observed) and (
+            expected[index] == observed[index] or index in substitution_indexes
+        )
+
+    leading_anchor = all(position_is_anchored(index) for index in range(edge))
+    trailing_anchor = all(
+        position_is_anchored(index)
+        for index in range(max(0, len(expected) - edge), len(expected))
+    )
     matched_acoustic_words = len(matched_expected)
     if phonetic_substitutions:
         matched_acoustic_words += len(phonetic_substitutions)
@@ -1454,6 +1469,8 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         "transcript_word_ratio": round(word_ratio, 4),
         "leading_anchor": leading_anchor,
         "trailing_anchor": trailing_anchor,
+        "exact_leading_anchor": exact_leading_anchor,
+        "exact_trailing_anchor": exact_trailing_anchor,
         "speech_end_seconds": round(speech_end, 3),
         "repeat_start_seconds": (
             round(repeat_start_seconds, 3) if repeat_start_seconds is not None else None
