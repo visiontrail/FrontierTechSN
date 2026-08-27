@@ -206,6 +206,31 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["options"].max_turns, 1)
         skill_names.assert_not_called()
 
+    async def test_constrained_one_shot_call_can_disable_hidden_thinking(self):
+        captured = {}
+
+        async def query(*, prompt, options):
+            captured["options"] = options
+            yield FakeAssistantMessage([FakeTextBlock("edited text")])
+
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names") as skill_names,
+        ):
+            result = await agent.agent_complete(
+                "Return edited text.",
+                "content",
+                enable_skills=False,
+                disable_thinking=True,
+            )
+
+        self.assertEqual(result, "edited text")
+        self.assertEqual(captured["options"].thinking, {"type": "disabled"})
+        skill_names.assert_not_called()
+
     async def test_cli_debug_chatter_is_dropped_from_the_failure_detail(self):
         async def query(*, prompt, options):
             options.stderr("2026-01-01T00:00:00Z [DEBUG] CA certs: system store returned empty")

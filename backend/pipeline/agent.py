@@ -146,6 +146,7 @@ async def agent_complete(
     api_key: str | None = None,
     max_tokens: int | None = None,
     enable_skills: bool = True,
+    disable_thinking: bool = False,
     log: LogCallback | None = None,
     label: str = "AI call",
 ) -> str:
@@ -192,6 +193,13 @@ async def agent_complete(
         "env": env,
         "extra_args": {"debug-to-stderr": None},
     }
+    if disable_thinking:
+        # Constrained one-shot transforms need the requested text, not a long
+        # hidden reasoning trace. DeepSeek V4 enables thinking by default and
+        # can otherwise consume the entire output allowance before emitting
+        # any text; the Anthropic-compatible API supports this standard
+        # explicit disable control.
+        base_options["thinking"] = {"type": "disabled"}
     # Newer SDK releases support an initialize-time Skill context filter.
     # Keep compatibility with the vendored SDK while using the stronger filter
     # automatically after it is upgraded.
@@ -210,6 +218,7 @@ async def agent_complete(
         f"{label}: Claude Agent SDK (model={resolved_model or 'default'}, "
         f"base={env.get('ANTHROPIC_BASE_URL', 'default')}, "
         f"skills={skills_summary}, "
+        f"thinking={'off' if disable_thinking else 'default'}, "
         f"~{len(user_content.split())} words in, "
         f"request/turn ceiling {config.AGENT_REQUEST_TIMEOUT}s/{config.AGENT_TURN_TIMEOUT}s)",
     )

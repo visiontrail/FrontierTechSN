@@ -50,6 +50,7 @@ class TitleAgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(complete.await_args.kwargs["label"], "Title agent")
             self.assertEqual(complete.await_args.kwargs["max_tokens"], 1024)
             self.assertFalse(complete.await_args.kwargs["enable_skills"])
+            self.assertTrue(complete.await_args.kwargs["disable_thinking"])
 
     async def test_falls_back_to_http_when_the_title_cli_exits(self):
         with tempfile.TemporaryDirectory() as directory:

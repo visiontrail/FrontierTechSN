@@ -122,6 +122,7 @@ async def generate_title(
             # emitting a short title. A 256-token ceiling made the CLI exit 1.
             max_tokens=1024,
             enable_skills=False,
+            disable_thinking=True,
             log=log,
             label="Title agent",
         )

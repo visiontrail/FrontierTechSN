@@ -73,6 +73,7 @@ async def _chat(
     label: str = "AI call",
     max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     enable_skills: bool = True,
+    disable_thinking: bool = False,
 ) -> str:
     """Single completion for a (system prompt, user content) pair.
 
@@ -91,6 +92,7 @@ async def _chat(
                 api_key=api_key if api_key is not None else config.AI_API_KEY,
                 max_tokens=max_tokens,
                 enable_skills=enable_skills,
+                disable_thinking=disable_thinking,
                 log=log,
                 label=label,
             )

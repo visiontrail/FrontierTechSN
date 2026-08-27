@@ -613,6 +613,7 @@ def test_visual_planner_does_not_load_unrelated_project_skills(monkeypatch):
     plans = asyncio.run(visual_plan.plan_scene_visuals(board(1)))
 
     assert observed["enable_skills"] is False
+    assert observed["disable_thinking"] is True
     assert observed["max_tokens"] == visual_plan.VISUAL_PLAN_MAX_TOKENS
     assert len(plans) == 1
 
