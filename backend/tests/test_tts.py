@@ -1114,6 +1114,61 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manifest["chunk_count"], len(posts))
             self.assertEqual(manifest["integrity"]["verified_source_coverage"], 1.0)
 
+    async def test_orpheus_reuses_verified_audio_after_chunk_renumbering(self):
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(500)
+
+        original_client = httpx.AsyncClient
+
+        def client_factory(**kwargs):
+            return original_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = root / "script.txt"
+            script.write_text("One two three. Four five six.")
+            output_dir = root / "audio"
+            output_dir.mkdir()
+            cached = (
+                ("One two three.", 800, 8),
+                ("Four five six.", 900, 9),
+            )
+            for text, frames, old_index in cached:
+                path = output_dir / f"tts_input_part_{old_index:03d}_generated.wav"
+                write_wav(path, frames=frames)
+                tts._write_orpheus_part_metadata(
+                    path,
+                    text,
+                    job_id=f"old-job-{old_index}",
+                    request_token_budget=512,
+                    integrity=self.verified_report(None, text, None),
+                )
+            messages = []
+
+            with (
+                patch.object(config, "ORPHEUS_TTS_API_KEY", "test-secret"),
+                patch.object(config, "ORPHEUS_TTS_CHUNK_WORDS", 3),
+                patch.object(tts.httpx, "AsyncClient", client_factory),
+            ):
+                result = await tts.generate_tts(
+                    str(script),
+                    str(output_dir),
+                    ["tara"],
+                    "orpheus-en",
+                    log=messages.append,
+                )
+
+            current_parts = sorted(output_dir.glob("tts_input_part_00[12]_generated.wav"))
+            result_frame_count = tts._read_pcm_wav(Path(result)).frame_count
+
+        self.assertEqual(requests, [])
+        self.assertEqual(len(current_parts), 2)
+        self.assertEqual(result_frame_count, 1_700)
+        self.assertTrue(any("after chunk renumbering" in item for item in messages))
+
     async def test_verified_orpheus_audio_reaching_ceiling_gets_acoustic_check(self):
         requests = []
         audio = wav_bytes(frames=12 * 24_000)

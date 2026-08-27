@@ -2145,6 +2145,77 @@ def _load_cached_orpheus_part(path: Path, text: str) -> dict | None:
     return metadata
 
 
+def _snapshot_reusable_orpheus_parts(
+    output_dir: Path,
+    chunks: list[str],
+) -> dict[str, tuple[bytes, bytes, str]]:
+    """Retain exact verified audio even when a revised script renumbers chunks.
+
+    ``_write_chunk_inputs`` rewrites the numbered text files, while verified WAV
+    sidecars from an earlier attempt remain available.  Snapshot only artifacts
+    whose text hash occurs in the current script and whose sidecar still passes
+    the current verifier/cache contract.  Keeping the bytes in memory prevents
+    an earlier destination number from overwriting a source needed later.
+    """
+    chunks_by_hash: dict[str, str] = {}
+    for chunk in chunks:
+        chunks_by_hash.setdefault(
+            hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
+            chunk,
+        )
+
+    reusable: dict[str, tuple[bytes, bytes, str]] = {}
+    for metadata_path in sorted(output_dir.glob("tts_input*_generated.json")):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        text_sha256 = metadata.get("text_sha256")
+        if not isinstance(text_sha256, str) or text_sha256 not in chunks_by_hash:
+            continue
+        wav_path = metadata_path.with_suffix(".wav")
+        if _load_cached_orpheus_part(wav_path, chunks_by_hash[text_sha256]) is None:
+            continue
+        try:
+            reusable.setdefault(
+                text_sha256,
+                (wav_path.read_bytes(), metadata_path.read_bytes(), wav_path.name),
+            )
+        except OSError:
+            continue
+    return reusable
+
+
+def _restore_reusable_orpheus_part(
+    path: Path,
+    text: str,
+    reusable: dict[str, tuple[bytes, bytes, str]],
+) -> tuple[dict, str] | None:
+    text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    snapshot = reusable.get(text_sha256)
+    if snapshot is None:
+        return None
+    wav_bytes, metadata_bytes, source_name = snapshot
+    staged_wav = path.with_suffix(".cache.tmp.wav")
+    staged_metadata = _part_metadata_path(path).with_suffix(".cache.tmp.json")
+    try:
+        staged_wav.write_bytes(wav_bytes)
+        staged_metadata.write_bytes(metadata_bytes)
+        os.replace(staged_wav, path)
+        os.replace(staged_metadata, _part_metadata_path(path))
+    finally:
+        staged_wav.unlink(missing_ok=True)
+        staged_metadata.unlink(missing_ok=True)
+    metadata = _load_cached_orpheus_part(path, text)
+    if metadata is None:
+        path.unlink(missing_ok=True)
+        _part_metadata_path(path).unlink(missing_ok=True)
+        return None
+    return metadata, source_name
+
+
 def _write_orpheus_part_metadata(
     path: Path,
     text: str,
@@ -2263,6 +2334,11 @@ async def _generate_orpheus(
         output_dir_path,
         max_words=chunk_words,
     )
+    reusable_parts = (
+        _snapshot_reusable_orpheus_parts(output_dir_path, chunks)
+        if verify_text
+        else {}
+    )
     emit(f"TTS input: stripped speaker labels -> {output_dir_path / 'tts_input.txt'}")
     if len(input_paths) > 1:
         emit(
@@ -2285,6 +2361,21 @@ async def _generate_orpheus(
                 if cached is not None:
                     emit(
                         f"{name}: reusing acoustically verified Orpheus audio "
+                        f"({cached['word_count']} source words)"
+                    )
+                    wav_parts.append(expected_part)
+                    part_metadata.append(cached)
+                    continue
+                restored = _restore_reusable_orpheus_part(
+                    expected_part,
+                    chunk,
+                    reusable_parts,
+                )
+                if restored is not None:
+                    cached, source_name = restored
+                    emit(
+                        f"{name}: reusing acoustically verified Orpheus audio "
+                        f"from {source_name} after chunk renumbering "
                         f"({cached['word_count']} source words)"
                     )
                     wav_parts.append(expected_part)
