@@ -2394,6 +2394,38 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report("Qwen three eight Max A P I pricing reported")["verified"])
         self.assertFalse(report("Qwen three point eight Max A I pricing reported")["verified"])
 
+    def test_orpheus_transcript_normalizes_qwen_four_prompt_homophones(self):
+        expected = "billion parameters built on its next-generation Qwen 4 architecture."
+
+        def report(observed: str) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        queue_when = report(
+            "billion parameters built on its next generation queue when four architecture"
+        )
+        q_went = report(
+            "billion parameters built on its next generation Q went for architecture"
+        )
+
+        self.assertTrue(queue_when["verified"])
+        self.assertTrue(q_went["verified"])
+        self.assertEqual(queue_when["matched_exact_words"], 10)
+        self.assertEqual(q_went["matched_exact_words"], 10)
+        self.assertFalse(
+            report(
+                "billion parameters built on its next generation Q went five architecture"
+            )["verified"]
+        )
+        self.assertFalse(
+            report(
+                "billion parameters built on its next generation Q went for architects"
+            )["verified"]
+        )
+
     def test_orpheus_transcript_normalizes_each_spoken_decimal_digit(self):
         expected = "revenue of 2.751 billion yuan"
         observed = "revenue of two point seven five one billion yuan".split()

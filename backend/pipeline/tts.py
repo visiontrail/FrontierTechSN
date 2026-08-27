@@ -60,7 +60,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 8
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 9
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -755,6 +755,45 @@ def _normalize_currency_adjective_asr_tokens(
             if raw_scale == [scale]:
                 normalized[unit_index] = "dollar"
     return normalized
+
+
+def _normalize_qwen_model_number_asr_tokens(
+    expected: list[str],
+    observed: list[str],
+    observed_word_indexes: list[int],
+) -> tuple[list[str], list[int]]:
+    """Recover evidenced ASR homophones for the provider hint ``Qwen 4``.
+
+    Orpheus receives ``cue-when 4`` for the canonical product name. Whisper
+    transcribed two complete live realizations as ``queue when four`` and
+    ``Q went for``. Accept those phrases only when they occupy the exact source
+    position of the consecutive canonical tokens ``qwen`` and ``4``; an
+    unrelated ``went`` or ``for`` remains untouched.
+    """
+    accepted = {
+        ("queue", "when", "4"),
+        ("q", "went", "for"),
+    }
+    normalized: list[str] = []
+    normalized_indexes: list[int] = []
+    cursor = 0
+    while cursor < len(observed):
+        expected_index = len(normalized)
+        phrase = tuple(observed[cursor:cursor + 3])
+        phrase_indexes = observed_word_indexes[cursor:cursor + 3]
+        if (
+            expected[expected_index:expected_index + 2] == ["qwen", "4"]
+            and phrase in accepted
+            and _word_indexes_are_contiguous(phrase_indexes)
+        ):
+            normalized.extend(("qwen", "4"))
+            normalized_indexes.extend((phrase_indexes[0], phrase_indexes[-1]))
+            cursor += 3
+            continue
+        normalized.append(observed[cursor])
+        normalized_indexes.append(observed_word_indexes[cursor])
+        cursor += 1
+    return normalized, normalized_indexes
 
 
 def _subsequence_starts(haystack: list[str], needle: list[str]) -> list[int]:
@@ -1461,6 +1500,11 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     expected = _lexical_tokens(text)
     observed, observed_word_indexes = _transcript_tokens(words)
     observed, observed_word_indexes = _collapse_expected_name_splits(
+        expected,
+        observed,
+        observed_word_indexes,
+    )
+    observed, observed_word_indexes = _normalize_qwen_model_number_asr_tokens(
         expected,
         observed,
         observed_word_indexes,
