@@ -282,6 +282,16 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             "AV4-Flash remains unchanged.",
         )
 
+    def test_orpheus_prompt_uses_ascii_jalapeno_provider_spelling(self):
+        self.assertEqual(
+            tts._orpheus_prompt_text("the chip is named Jalapeño"),
+            "the chip is named Jalapeno.",
+        )
+        self.assertEqual(
+            tts._orpheus_prompt_text("Jalapeñorama stays unchanged"),
+            "Jalapeñorama stays unchanged.",
+        )
+
     def test_orpheus_prompt_articulates_zhu_yi_and_separates_prana_labs(self):
         text = (
             "DeepTech China published a conversation with Zhu Yi, "

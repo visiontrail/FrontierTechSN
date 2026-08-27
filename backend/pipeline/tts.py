@@ -1398,6 +1398,12 @@ def _orpheus_prompt_text(text: str) -> str:
     """Give every short LM request an explicit speech termination boundary."""
     stripped = text.rstrip()
     stripped = re.sub(
+        r"\bJalapeño\b",
+        "Jalapeno",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    stripped = re.sub(
         r"(?<![\w-])V4-Flash(?![\w-])",
         "V four Flash",
         stripped,
