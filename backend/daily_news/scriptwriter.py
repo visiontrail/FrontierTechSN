@@ -268,6 +268,138 @@ def _parse_story_corrections(raw: str, story_numbers: list[int]) -> dict[int, st
     return corrections
 
 
+_SPOKEN_NUMBER_OR_DATE_TOKENS = {
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "hundred", "thousand", "million",
+    "billion", "trillion", "percent", "january", "february", "march", "april",
+    "may", "june", "july", "august", "september", "october", "november",
+    "december",
+}
+
+
+def _number_or_date_markers(text: str) -> set[str]:
+    markers = set(re.findall(r"\d+(?:[.,]\d+)?", text.casefold()))
+    markers.update(
+        token
+        for token in re.findall(r"[a-z]+", text.casefold())
+        if token in _SPOKEN_NUMBER_OR_DATE_TOKENS
+    )
+    return markers
+
+
+def _remove_persisting_cited_numeric_claims(
+    corrections: dict[int, str],
+    issues: list[dict],
+) -> dict[int, str]:
+    """Drop a C-blocked sentence only when its disputed markers survived.
+
+    The model is still allowed to correct a cited number or date. This guard
+    acts only when the returned sentence remains recognisably the same claim
+    and retains at least one exact number/date marker from the rejected text.
+    Processing by best sentence overlap avoids relying on shifted sentence
+    indices after the model removes another cited claim.
+    """
+    cleaned = dict(corrections)
+    for issue in issues:
+        if not re.search(r"audit codes [A-F]*C", str(issue.get("claim", "")), re.I):
+            continue
+        claim_ids = [str(value) for value in issue.get("claim_ids", [])]
+        claim_texts = [str(value) for value in issue.get("claim_texts", [])]
+        for claim_id, blocked_text in zip(claim_ids, claim_texts, strict=False):
+            match = re.fullmatch(r"(\d+)\.(\d+)", claim_id)
+            if match is None:
+                continue
+            story_number = int(match.group(1))
+            paragraph = cleaned.get(story_number)
+            blocked_markers = _number_or_date_markers(blocked_text)
+            if not paragraph or not blocked_markers:
+                continue
+            sentences = [
+                sentence.strip()
+                for sentence in re.split(r"(?<=[.!?])\s+", paragraph)
+                if sentence.strip()
+            ]
+            blocked_tokens = set(re.findall(r"[a-z0-9]+", blocked_text.casefold()))
+            best_index = -1
+            best_overlap = 0.0
+            for index, sentence in enumerate(sentences):
+                sentence_tokens = set(re.findall(r"[a-z0-9]+", sentence.casefold()))
+                denominator = min(len(blocked_tokens), len(sentence_tokens))
+                overlap = (
+                    len(blocked_tokens & sentence_tokens) / denominator
+                    if denominator
+                    else 0.0
+                )
+                if overlap > best_overlap:
+                    best_index = index
+                    best_overlap = overlap
+            if (
+                best_index >= 0
+                and best_overlap >= 0.5
+                and blocked_markers & _number_or_date_markers(sentences[best_index])
+            ):
+                sentences.pop(best_index)
+                cleaned[story_number] = " ".join(sentences)
+    return cleaned
+
+
+def _ensure_persisting_company_claim_attribution(
+    corrections: dict[int, str],
+    issues: list[dict],
+) -> dict[int, str]:
+    """Add company-claim attribution when an E-blocked pattern survives.
+
+    This intentionally handles only the auditable ``source reports COMPANY
+    has...`` form carried in the rejected claim text. It does not guess a
+    speaker from arbitrary prose or rewrite already attributed statements.
+    """
+    cleaned = dict(corrections)
+    for issue in issues:
+        if not re.search(r"audit codes [A-F]*E", str(issue.get("claim", "")), re.I):
+            continue
+        claim_ids = [str(value) for value in issue.get("claim_ids", [])]
+        claim_texts = [str(value) for value in issue.get("claim_texts", [])]
+        for claim_id, blocked_text in zip(claim_ids, claim_texts, strict=False):
+            id_match = re.fullmatch(r"(\d+)\.(\d+)", claim_id)
+            subject_match = re.search(
+                r"\breports(?:\s+that)?\s+"
+                r"([A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){0,3})\s+"
+                r"(has|have|is|are|will)\b",
+                blocked_text,
+            )
+            if id_match is None or subject_match is None:
+                continue
+            story_number = int(id_match.group(1))
+            paragraph = cleaned.get(story_number)
+            if not paragraph:
+                continue
+            subject = subject_match.group(1)
+            if re.search(
+                rf"\b{re.escape(subject)}\s+"
+                r"(?:says|said|reports|reported|claims|claimed|argues|argued|announces|announced)\b",
+                paragraph,
+                re.I,
+            ):
+                continue
+            replacements = {
+                "has": "says it has",
+                "have": "says it has",
+                "is": "says it is",
+                "are": "says they are",
+                "will": "says it will",
+            }
+            pattern = re.compile(
+                rf"\b{re.escape(subject)}\s+(has|have|is|are|will)\b",
+                re.I,
+            )
+            cleaned[story_number] = pattern.sub(
+                lambda match: f"{subject} {replacements[match.group(1).casefold()]}",
+                paragraph,
+                count=1,
+            )
+    return cleaned
+
+
 def _preferred_spoken_source(article) -> str:
     """Choose the evidence-bound source name suitable for a spoken prefix."""
     _identity, expected_label, _accepted = _publication_attribution(article)
@@ -597,6 +729,9 @@ Preserve the natural broadcast tone.
 Edit ONLY failed story numbers {failed_story_numbers}. The software will preserve and merge every passing story, the opening, and the closing; do not output any of them.
 Every blocking issue carries claim_ids and claim_texts from the reviewed script. Modify only those cited claims inside a failed story paragraph. Preserve every uncited claim in that paragraph word-for-word unless changing punctuation is necessary to remove a cited sentence. Never discard an entire paragraph merely because one claim failed.
 Treat each audit code as a mechanical edit requirement. For D, remove the cited unsupported interpretation or replace only that claim with a direct paraphrase or translation of full article evidence. For C, correct or remove only the cited unsupported number or date. For B, correct or omit only the cited disputed name. For E, add source/company attribution or uncertainty to the cited claim. For F, update or remove only the cited contradiction or stale framing. For A with claim <story>.0, add exactly one concise evidence-backed paragraph.
+You MUST NOT copy a cited blocked sentence back unchanged. Apply the directive to that exact sentence or remove the sentence while preserving uncited claims.
+When a cited number, date, name, contradiction, or stale framing is ambiguous or internally inconsistent in the dossier, remove the disputed detail instead of choosing one version.
+For E findings, distinguish source attribution from claim attribution: state both who reported the statement and that the named company or person says, reports, argues, or claims it. A publication prefix alone does not make a company statement independently verified.
 Do not rely on the title alone unless the same claim is also present in the feed summary or full article evidence.
 The independent reviewer used mandatory live web search, but the complete local EVIDENCE DOSSIER remains the editing boundary: do not introduce facts found only on the web and do not invent a replacement.
 Output only one valid JSON object shaped exactly like {correction_shape}. Each value must be one complete spoken paragraph. Do not output markdown, commentary, an opening, a closing, passing stories, or extra keys.
@@ -622,6 +757,8 @@ For an English edition, output no Chinese, Japanese, or Korean characters.
         disable_thinking=True,
     )
     corrections = _parse_story_corrections(raw, failed_story_numbers)
+    corrections = _remove_persisting_cited_numeric_claims(corrections, issues)
+    corrections = _ensure_persisting_company_claim_attribution(corrections, issues)
     if language == "en" and any(
         NON_ENGLISH_RE.search(paragraph) for paragraph in corrections.values()
     ):

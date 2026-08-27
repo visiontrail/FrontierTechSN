@@ -436,10 +436,66 @@ def test_d_only_audit_rewrites_from_evidence_before_trimming():
         "DeepTech China reports that a robot was tested on folding clothes in late 2024."
     )
     assert "Do not rely on the title alone" in chat.await_args.args[0]
+    assert "MUST NOT copy a cited blocked sentence back unchanged" in chat.await_args.args[0]
+    assert "distinguish source attribution from claim attribution" in chat.await_args.args[0]
     assert "CURRENT FAILED STORY PARAGRAPHS" in chat.await_args.args[1]
     assert "CURRENT SCRIPT" not in chat.await_args.args[1]
     assert chat.await_args.args[3] == "yinhe-chat"
     assert chat.await_args.kwargs["disable_thinking"] is True
+
+
+def test_c_audit_removes_a_rewritten_sentence_that_keeps_disputed_numbers():
+    corrections = {
+        2: (
+            "Skild says S1 learns from one demonstration. "
+            "QbitAI reports tasks over ten minutes and 66 percent success. "
+            "The report describes traditional post-training as more expensive."
+        )
+    }
+    issues = [{
+        "claim": "Web audit codes C for story 2 at claims 2.2",
+        "claim_ids": ["2.2"],
+        "claim_texts": [
+            "QbitAI reports tasks over ten minutes, with 66 percent success versus 9 percent."
+        ],
+        "evidence_story_numbers": [2],
+    }]
+
+    cleaned = scriptwriter._remove_persisting_cited_numeric_claims(
+        corrections,
+        issues,
+    )
+
+    assert cleaned[2] == (
+        "Skild says S1 learns from one demonstration. "
+        "The report describes traditional post-training as more expensive."
+    )
+
+
+def test_e_audit_attributes_the_company_claim_not_only_the_publication():
+    corrections = {
+        3: (
+            "Luz Ding of Bloomberg reports Alibaba has released Qwen3.8-Flash. "
+            "The company says the model is lower-priced."
+        )
+    }
+    issues = [{
+        "claim": "Web audit codes E for story 3 at claims 3.1",
+        "claim_ids": ["3.1"],
+        "claim_texts": [
+            "Bloomberg reports Alibaba has released Qwen3.8-Flash."
+        ],
+        "evidence_story_numbers": [3],
+    }]
+
+    cleaned = scriptwriter._ensure_persisting_company_claim_attribution(
+        corrections,
+        issues,
+    )
+
+    assert cleaned[3].startswith(
+        "Luz Ding of Bloomberg reports Alibaba says it has released Qwen3.8-Flash."
+    )
 
 
 def test_audit_correction_cannot_duplicate_passing_story_paragraphs():
