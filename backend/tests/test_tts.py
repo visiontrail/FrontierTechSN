@@ -1169,6 +1169,61 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result_frame_count, 1_700)
         self.assertTrue(any("after chunk renumbering" in item for item in messages))
 
+    async def test_orpheus_revalidates_stale_audio_after_chunk_renumbering(self):
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(500)
+
+        original_client = httpx.AsyncClient
+
+        def client_factory(**kwargs):
+            return original_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = root / "script.txt"
+            text = "Revalidate this exact chunk."
+            script.write_text(text)
+            output_dir = root / "audio"
+            output_dir.mkdir()
+            old_path = output_dir / "tts_input_part_009_generated.wav"
+            write_wav(old_path, frames=900)
+            stale = tts._write_orpheus_part_metadata(
+                old_path,
+                text,
+                job_id="old-job",
+                request_token_budget=512,
+                integrity=self.verified_report(None, text, None),
+            )
+            stale["integrity_verifier_version"] -= 1
+            tts._part_metadata_path(old_path).write_text(json.dumps(stale))
+            verifier = AsyncMock(side_effect=self.verified_report)
+            messages = []
+
+            with (
+                patch.object(config, "ORPHEUS_TTS_API_KEY", "test-secret"),
+                patch.object(tts.httpx, "AsyncClient", client_factory),
+                patch.object(tts, "_verify_orpheus_part", verifier),
+            ):
+                result = await tts.generate_tts(
+                    str(script),
+                    str(output_dir),
+                    ["tara"],
+                    "orpheus-en",
+                    log=messages.append,
+                )
+                refreshed = json.loads(
+                    tts._part_metadata_path(Path(result)).read_text()
+                )
+
+        self.assertEqual(requests, [])
+        verifier.assert_awaited_once()
+        self.assertEqual(refreshed["integrity_verifier_version"], 10)
+        self.assertEqual(refreshed["job_id"], "recovered-local-output")
+        self.assertTrue(any("revalidating exact-text" in item for item in messages))
+
     async def test_verified_orpheus_audio_reaching_ceiling_gets_acoustic_check(self):
         requests = []
         audio = wav_bytes(frames=12 * 24_000)
