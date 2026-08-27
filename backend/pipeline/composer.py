@@ -701,6 +701,7 @@ def _quality_warnings(
     alignment: dict,
     visual_grounding: dict,
     multimodal: dict | None = None,
+    news_image_inventory: dict | None = None,
 ) -> list[str]:
     """Summarize A/V quality-gate failures for the final delivery report."""
     warnings: list[str] = []
@@ -750,6 +751,15 @@ def _quality_warnings(
                 + "; ".join(details)
                 + "."
             )
+    if (
+        news_image_inventory
+        and news_image_inventory.get("enabled")
+        and not news_image_inventory.get("complete")
+    ):
+        warnings.append(
+            str(news_image_inventory.get("warning") or "").strip()
+            or "Licensed news-image inventory was incomplete; grounded template visuals were used."
+        )
     return warnings
 
 
@@ -768,7 +778,12 @@ def _finalize_quality_report(
         and visual_grounding.get("passed") is True
         and multimodal_passed
     )
-    warnings = _quality_warnings(alignment, visual_grounding, multimodal)
+    warnings = _quality_warnings(
+        alignment,
+        visual_grounding,
+        multimodal,
+        report.get("news_images"),
+    )
     report.update(
         {
             "passed": quality_passed,
@@ -951,11 +966,22 @@ async def compose_video(
             )
 
     news_image_inventory = {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
+    news_image_quality = {
+        "enabled": bool(news_images_enabled),
+        "complete": not news_images_enabled,
+        "requested": 0,
+        "attached": 0,
+        "manifest_status": "disabled" if not news_images_enabled else "not_needed",
+        "missing_scene_ids": [],
+        "warning": "",
+    }
     eligible_image_scene_ids = {
         str(plan.get("id") or "")
         for plan in plans
         if not plan.get("collage_broll") and plan.get("archetype") != "footage"
     }
+    if not eligible_image_scene_ids:
+        news_image_quality["complete"] = True
     if news_images_enabled and eligible_image_scene_ids:
         image_manifest = await news_images.acquire_news_images(
             board,
@@ -975,21 +1001,41 @@ async def compose_video(
         required_count = min(news_image_count, len(eligible_image_scene_ids))
         attached_images = int(news_image_inventory["attached"])
         image_modes = news_image_inventory["placement_modes"]
+        manifest_images = image_manifest.get("images") or []
+        acquired_images = len(manifest_images) if isinstance(manifest_images, list) else 0
+        manifest_status = str(image_manifest.get("status") or "unknown")
+        missing_scene_ids = [
+            str(scene_id) for scene_id in image_manifest.get("missing_scene_ids") or []
+        ]
+        shortfall = ""
         if attached_images != required_count:
-            raise RuntimeError(
-                _news_image_placement_error(
-                    image_manifest,
-                    attached_images=attached_images,
-                    required_count=required_count,
-                )
+            shortfall = _news_image_placement_error(
+                image_manifest,
+                attached_images=attached_images,
+                required_count=required_count,
             )
-        if required_count >= 2 and (
+            if manifest_status == "ready" or attached_images != acquired_images:
+                raise RuntimeError(shortfall)
+            emit(
+                f"{shortfall}; continuing with grounded template visuals for "
+                "the missing scenes"
+            )
+        if attached_images >= 2 and (
             not image_modes.get("inline") or not image_modes.get("fullscreen")
         ):
             raise RuntimeError(
                 "News-image placement incomplete: both inline and fullscreen modes "
                 "are required when at least two eligible scenes exist"
             )
+        news_image_quality = {
+            "enabled": True,
+            "complete": attached_images == required_count,
+            "requested": required_count,
+            "attached": attached_images,
+            "manifest_status": manifest_status,
+            "missing_scene_ids": missing_scene_ids,
+            "warning": shortfall,
+        }
     emit(
         "Final B-roll inventory: "
         f"{final_public_footage} public footage clip(s), "
@@ -1005,7 +1051,11 @@ async def compose_video(
         "passed": bool(board["alignment"].get("passed")) and visual_grounding["passed"],
         "quality_status": "pending",
         "delivery_status": "pending",
-        "warnings": _quality_warnings(board["alignment"], visual_grounding),
+        "warnings": _quality_warnings(
+            board["alignment"],
+            visual_grounding,
+            news_image_inventory=news_image_quality,
+        ),
         "narration": {
             "provider": config.tts_provider_label(tts_model),
             "model": tts_model or config.TTS_DEFAULT_MODEL,
@@ -1021,6 +1071,7 @@ async def compose_video(
         "visual_grounding": visual_grounding,
         "multimodal": {"status": "pending", "passed": False},
         "background_music": {"enabled": bool(background_music_path), "passed": None},
+        "news_images": news_image_quality,
     }
     quality_report_path = output_dir_path / "av_sync_report.next.json"
     quality_report_path.unlink(missing_ok=True)

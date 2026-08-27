@@ -342,6 +342,20 @@ def test_partial_news_image_error_reports_acquired_attached_and_missing_scenes()
     assert "0/7 reached final scenes" in message
 
 
+def test_partial_news_images_are_reported_as_delivery_warning():
+    warnings = composer._quality_warnings(
+        {"passed": True},
+        {"passed": True, "scenes": []},
+        news_image_inventory={
+            "enabled": True,
+            "complete": False,
+            "warning": "Licensed image shortfall: 5/8 attached.",
+        },
+    )
+
+    assert warnings == ["Licensed image shortfall: 5/8 attached."]
+
+
 def test_quality_failures_become_final_delivery_warnings():
     warnings = composer._quality_warnings(
         {

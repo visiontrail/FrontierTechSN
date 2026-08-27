@@ -1673,7 +1673,7 @@ def _cached_manifest(
         or manifest.get("query_semantics_version") != QUERY_SEMANTICS_VERSION
         or manifest.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
         or manifest.get("cache_contract_sha256") != contract_sha256
-        or manifest.get("status") != "ready"
+        or manifest.get("status") not in {"ready", "partial"}
         or manifest.get("license_policy") != "open_only"
     ):
         return None
@@ -1687,12 +1687,12 @@ def _cached_manifest(
     eligible_count = manifest.get("eligible_scene_count")
     if any(type(value) is not int for value in (planned, requested, eligible_count)):
         return None
-    if not images or len(images) != planned:
+    if not images or len(images) > planned:
         return None
     modes = _placement_mode_counts(images)
     if manifest.get("placement_modes") != modes:
         return None
-    if planned >= 2 and (not modes["inline"] or not modes["fullscreen"]):
+    if len(images) >= 2 and (not modes["inline"] or not modes["fullscreen"]):
         return None
     raw_eligible = manifest.get("eligible_scene_ids") or []
     raw_excluded = manifest.get("excluded_scene_ids") or []
@@ -1716,6 +1716,23 @@ def _cached_manifest(
         or planned != min(max(0, requested), len(eligible))
         or len(set(eligible)) != len(eligible)
         or excluded & set(eligible)
+    ):
+        return None
+    status = str(manifest.get("status") or "")
+    image_scene_ids = [str(image.get("scene_id") or "") for image in images]
+    raw_missing = manifest.get("missing_scene_ids") or []
+    if not isinstance(raw_missing, list):
+        return None
+    missing = [str(item) for item in raw_missing]
+    if status == "ready":
+        if len(images) != planned or missing:
+            return None
+    elif (
+        len(images) >= planned
+        or len(missing) != planned - len(images)
+        or len(set(missing)) != len(missing)
+        or not set(missing).issubset(eligible)
+        or set(missing) & set(image_scene_ids)
     ):
         return None
     scenes_by_id = {
@@ -3511,7 +3528,7 @@ def attach_news_images(
     """Attach exact-scene images without displacing existing moving B-roll."""
     if (
         not manifest
-        or manifest.get("status") != "ready"
+        or manifest.get("status") not in {"ready", "partial"}
         or manifest.get("manifest_version") != MANIFEST_VERSION
         or manifest.get("query_semantics_version") != QUERY_SEMANTICS_VERSION
         or manifest.get("grounding_policy_version") != QUERY_SEMANTICS_VERSION
@@ -3547,10 +3564,31 @@ def attach_news_images(
         or eligible != expected_eligible
         or eligible_count != len(eligible)
         or planned != min(max(0, requested), len(eligible))
-        or len(images) != planned
+        or len(images) > planned
         or manifest.get("placement_modes") != inventory_modes
-        or (planned >= 2 and (not inventory_modes["inline"] or not inventory_modes["fullscreen"]))
+        or (
+            len(images) >= 2
+            and (not inventory_modes["inline"] or not inventory_modes["fullscreen"])
+        )
     ):
+        return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
+    status = str(manifest.get("status") or "")
+    image_scene_ids = [str(image.get("scene_id") or "") for image in images]
+    raw_missing = manifest.get("missing_scene_ids") or []
+    if not isinstance(raw_missing, list):
+        return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
+    missing = [str(item) for item in raw_missing]
+    if status == "ready":
+        valid_status_shape = len(images) == planned and not missing
+    else:
+        valid_status_shape = (
+            len(images) < planned
+            and len(missing) == planned - len(images)
+            and len(set(missing)) == len(missing)
+            and set(missing).issubset(eligible)
+            and not (set(missing) & set(image_scene_ids))
+        )
+    if not valid_status_shape:
         return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
     by_id = {str(plan.get("id") or ""): plan for plan in plans}
     scenes_by_id = {

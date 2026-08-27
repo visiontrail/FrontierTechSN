@@ -2041,6 +2041,47 @@ def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(
     assert plans[1]["news_image_original_archetype"] == "topic"
 
 
+def test_attach_news_images_accepts_verified_partial_inventory(tmp_path: Path):
+    data = board()
+    plans = visual_plan.fallback_plan(data)
+    asset_dir = tmp_path / "news_images"
+    asset_dir.mkdir()
+    payload = _image_bytes("PNG", "partial-nvidia")
+    (asset_dir / "image-01.png").write_bytes(payload)
+    manifest = {
+        "manifest_version": news_images.MANIFEST_VERSION,
+        "query_semantics_version": news_images.QUERY_SEMANTICS_VERSION,
+        "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+        "status": "partial",
+        "storyboard_sha256": news_images.storyboard_fingerprint(data),
+        "license_policy": "open_only",
+        "requested_image_count": 2,
+        "planned_image_count": 2,
+        "eligible_scene_count": 2,
+        "eligible_scene_ids": ["scene-01", "scene-02"],
+        "excluded_scene_ids": [],
+        "missing_scene_ids": ["scene-02"],
+        "placement_modes": {"inline": 1, "fullscreen": 0},
+        "images": [
+            _grounded_image_record(
+                data["scenes"][0],
+                local_path="news_images/image-01.png",
+                payload=payload,
+                source="https://commons.example/nvidia-partial",
+                subject="NVIDIA",
+                kind="logo",
+                mode="inline",
+            )
+        ],
+    }
+
+    summary = news_images.attach_news_images(plans, data, manifest, tmp_path)
+
+    assert summary == {"attached": 1, "placement_modes": {"inline": 1, "fullscreen": 0}}
+    assert plans[0]["news_image"] is True
+    assert not plans[1].get("news_image")
+
+
 def test_attach_news_images_keeps_structured_logo_scene_inline(tmp_path: Path):
     data = board()
     data["scenes"] = data["scenes"][:1]
@@ -2900,6 +2941,21 @@ def test_cached_manifest_rejects_duplicate_identity_stale_policy_and_bad_hash(
 
     write()
     assert _cached_news_manifest(tmp_path, data, fingerprint, contract, requested_count=2) == manifest
+
+    partial = json.loads(json.dumps(baseline))
+    partial["status"] = "partial"
+    partial["images"] = partial["images"][:1]
+    partial["missing_scene_ids"] = ["scene-02"]
+    partial["placement_modes"] = {"inline": 1, "fullscreen": 0}
+    write(partial)
+    assert _cached_news_manifest(
+        tmp_path,
+        data,
+        fingerprint,
+        contract,
+        requested_count=2,
+    ) == partial
+    write()
 
     manifest["images"][1]["source_page_url"] = manifest["images"][0]["source_page_url"]
     write()
@@ -3779,13 +3835,10 @@ async def test_acquisition_remains_partial_after_all_reserves_are_exhausted(
         eligible_scene_ids=["scene-01", "scene-02", "scene-03", "scene-04"],
         excluded_scene_ids=set(),
     )
-    assert (
-        _cached_news_manifest(
-            tmp_path,
-            extended_board(),
-            fingerprint,
-            contract,
-            requested_count=2,
-        )
-        is None
-    )
+    assert _cached_news_manifest(
+        tmp_path,
+        extended_board(),
+        fingerprint,
+        contract,
+        requested_count=2,
+    ) == manifest
