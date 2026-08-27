@@ -2410,9 +2410,13 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         q_went = report(
             "billion parameters built on its next generation Q went for architecture"
         )
+        joined = report(
+            "billion parameters built on its next generation queue Wen4 architecture"
+        )
 
         self.assertTrue(queue_when["verified"])
         self.assertTrue(q_went["verified"])
+        self.assertTrue(joined["verified"])
         self.assertEqual(queue_when["matched_exact_words"], 10)
         self.assertEqual(q_went["matched_exact_words"], 10)
         self.assertFalse(
@@ -2423,6 +2427,11 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             report(
                 "billion parameters built on its next generation Q went for architects"
+            )["verified"]
+        )
+        self.assertFalse(
+            report(
+                "billion parameters built on its next generation queue Wen5 architecture"
             )["verified"]
         )
 

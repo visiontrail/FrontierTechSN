@@ -773,26 +773,33 @@ def _normalize_qwen_model_number_asr_tokens(
     accepted = {
         ("queue", "when", "4"),
         ("q", "went", "for"),
+        ("queue", "wen4"),
     }
     normalized: list[str] = []
     normalized_indexes: list[int] = []
     cursor = 0
     while cursor < len(observed):
         expected_index = len(normalized)
-        phrase = tuple(observed[cursor:cursor + 3])
-        phrase_indexes = observed_word_indexes[cursor:cursor + 3]
-        if (
-            expected[expected_index:expected_index + 2] == ["qwen", "4"]
-            and phrase in accepted
-            and _word_indexes_are_contiguous(phrase_indexes)
-        ):
-            normalized.extend(("qwen", "4"))
-            normalized_indexes.extend((phrase_indexes[0], phrase_indexes[-1]))
-            cursor += 3
+        for width in (3, 2):
+            phrase = tuple(observed[cursor:cursor + width])
+            phrase_indexes = observed_word_indexes[cursor:cursor + width]
+            if (
+                expected[expected_index:expected_index + 2] == ["qwen", "4"]
+                and phrase in accepted
+                and _word_indexes_are_contiguous(phrase_indexes)
+            ):
+                normalized.extend(("qwen", "4"))
+                normalized_indexes.extend(
+                    (phrase_indexes[0], phrase_indexes[-1])
+                )
+                cursor += width
+                break
+        else:
+            normalized.append(observed[cursor])
+            normalized_indexes.append(observed_word_indexes[cursor])
+            cursor += 1
             continue
-        normalized.append(observed[cursor])
-        normalized_indexes.append(observed_word_indexes[cursor])
-        cursor += 1
+        continue
     return normalized, normalized_indexes
 
 
