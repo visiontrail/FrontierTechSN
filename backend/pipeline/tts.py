@@ -809,6 +809,23 @@ def _reattach_fragile_orpheus_continuations(chunks: list[str]) -> list[str]:
     return adjusted
 
 
+def _reattach_fragile_video_prompt_context(chunks: list[str]) -> list[str]:
+    """Keep ``video prompts`` together so Orpheus retains the plural /s/."""
+    adjusted = list(chunks)
+    for index in range(len(adjusted) - 1):
+        left = adjusted[index]
+        right = adjusted[index + 1]
+        context = re.search(r"(?i)\b(with video)$", left)
+        if context is None or re.match(r"(?i)prompts,\s+extending\b", right) is None:
+            continue
+        prefix = left[: context.start(1)].rstrip()
+        if not prefix:
+            continue
+        adjusted[index] = prefix
+        adjusted[index + 1] = f"{context.group(1)} {right}"
+    return adjusted
+
+
 def _separate_fragile_battle_ready_sequence(chunks: list[str]) -> list[str]:
     """Keep an observed compound phrase intact in shorter utterances."""
     adjusted = list(chunks)
@@ -854,9 +871,11 @@ def _separate_fragile_moderation_sequence(chunks: list[str]) -> list[str]:
 def _stabilize_orpheus_chunks(chunks: list[str]) -> list[str]:
     return _separate_fragile_moderation_sequence(
         _separate_fragile_battle_ready_sequence(
-            _reattach_fragile_orpheus_continuations(
-                _separate_repeated_adjective_items(
-                    _separate_repeated_clause_openings(chunks)
+            _reattach_fragile_video_prompt_context(
+                _reattach_fragile_orpheus_continuations(
+                    _separate_repeated_adjective_items(
+                        _separate_repeated_clause_openings(chunks)
+                    )
                 )
             )
         )

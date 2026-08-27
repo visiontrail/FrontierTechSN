@@ -205,6 +205,23 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(" ".join(" ".join(chunks).split()), text)
 
+    def test_split_tts_text_keeps_video_with_opening_prompts_inflection(self):
+        text = (
+            "Chinese tech outlet QbitAI reports that S1 uses in-context learning "
+            "with video prompts, extending the task length to as long as 10 minutes."
+        )
+
+        chunks = tts._split_tts_text(text, max_words=12)
+
+        self.assertEqual(
+            chunks,
+            [
+                "Chinese tech outlet QbitAI reports that S1 uses in-context learning",
+                "with video prompts, extending the task length to as long as 10 minutes.",
+            ],
+        )
+        self.assertEqual(" ".join(" ".join(chunks).split()), text)
+
     def test_orpheus_prompt_adds_only_unspoken_terminal_punctuation(self):
         self.assertEqual(tts._orpheus_prompt_text("A short open phrase"), "A short open phrase.")
         self.assertEqual(tts._orpheus_prompt_text("Already complete!"), "Already complete!")
