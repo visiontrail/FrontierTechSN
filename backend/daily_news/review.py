@@ -582,6 +582,47 @@ def _cached_batch_review(
     return None
 
 
+def _saved_full_review_candidate(
+    output_dir: Path,
+    dossier: ResearchDossier,
+    edition_date: date,
+) -> str | None:
+    """Recover the exact candidate already used for a complete first audit.
+
+    The candidate is accepted only when every two-story prompt can be rebuilt
+    byte-for-byte from current dossier data and every matching saved response
+    still passes the strict claim protocol. This closes the recovery gap before
+    ``_cached_batch_review``: starting again from the model-written draft could
+    produce a different duration edit and invalidate otherwise reusable reviews.
+    """
+    review_dir = output_dir / "review"
+    candidate_path = review_dir / "candidate-duration-cycle-1.txt"
+    try:
+        candidate = candidate_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+    claims = _claim_catalog(candidate, dossier)
+    all_numbers = list(range(1, len(dossier.selected) + 1))
+    for group_index, start in enumerate(range(0, len(all_numbers), 2), 1):
+        story_numbers = all_numbers[start : start + 2]
+        prompt = _batch_review_prompt(
+            candidate,
+            dossier,
+            edition_date,
+            story_numbers,
+        )
+        cached = _cached_batch_review(
+            review_dir / f"story-review-prompt-1-group-{group_index}.txt",
+            review_dir / f"story-review-response-1-group-{group_index}.txt",
+            prompt,
+            story_numbers,
+            {number: claims[number] for number in story_numbers},
+        )
+        if cached is None:
+            return None
+    return candidate
+
+
 def _protocol_payload(text: str) -> dict[str, Any]:
     # Accept valid legacy JSON too, but prefer the deliberately short protocol.
     try:
@@ -985,7 +1026,12 @@ async def _review_daily_script(
     review_dir = output_dir / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
     attempts: list[dict[str, Any]] = []
-    candidate = script
+    candidate = _saved_full_review_candidate(output_dir, dossier, edition_date) or script
+    if candidate != script and log:
+        log(
+            "Review resume: recovered the exact saved duration candidate and "
+            "its complete prompt-matched first-round Web reviews"
+        )
     protected_story_numbers: set[int] = set()
     max_corrections = 3
     correction_count = 0

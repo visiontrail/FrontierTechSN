@@ -240,6 +240,63 @@ def test_saved_web_review_is_reused_only_for_the_exact_prompt(tmp_path: Path):
     ) is None
 
 
+def test_saved_duration_candidate_requires_a_complete_prompt_matched_audit(tmp_path: Path):
+    articles = [
+        research.NewsArticle(
+            id=f"story-{number}",
+            source_id=f"source-{number}",
+            source_name=f"Source {number}",
+            language="en",
+            title=f"Evidence title {number}",
+            url=f"https://example.com/{number}",
+            published_at="2026-08-26T00:00:00+00:00",
+            summary=f"Supported summary {number}.",
+            evidence_text=f"Supported evidence {number}.",
+        )
+        for number in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, articles, articles, [],
+    )
+    candidate = (
+        "Opening.\n"
+        "Source 1 reports supported evidence 1.\n"
+        "Source 2 reports supported evidence 2.\n"
+        "Closing."
+    )
+    review_dir = tmp_path / "review"
+    review_dir.mkdir()
+    (review_dir / "candidate-duration-cycle-1.txt").write_text(
+        candidate,
+        encoding="utf-8",
+    )
+    prompt = review._batch_review_prompt(
+        candidate,
+        dossier,
+        date(2026, 8, 26),
+        [1, 2],
+    )
+    prompt_path = review_dir / "story-review-prompt-1-group-1.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    (review_dir / "story-review-response-1-group-1.txt").write_text(
+        "[CHATGPT FALLBACK]\nW1P;2P",
+        encoding="utf-8",
+    )
+
+    assert review._saved_full_review_candidate(
+        tmp_path,
+        dossier,
+        date(2026, 8, 26),
+    ) == candidate
+
+    prompt_path.write_text(prompt + " changed", encoding="utf-8")
+    assert review._saved_full_review_candidate(
+        tmp_path,
+        dossier,
+        date(2026, 8, 26),
+    ) is None
+
+
 def test_review_prompt_requires_live_search_and_carries_full_evidence():
     article = research.NewsArticle(
         id="robot",
