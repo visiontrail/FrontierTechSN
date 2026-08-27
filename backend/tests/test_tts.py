@@ -1237,7 +1237,10 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(requests, [])
         verifier.assert_awaited_once()
-        self.assertEqual(refreshed["integrity_verifier_version"], 10)
+        self.assertEqual(
+            refreshed["integrity_verifier_version"],
+            tts.ORPHEUS_INTEGRITY_VERIFIER_VERSION,
+        )
         self.assertEqual(refreshed["job_id"], "recovered-local-output")
         self.assertTrue(any("revalidating exact-text" in item for item in messages))
 

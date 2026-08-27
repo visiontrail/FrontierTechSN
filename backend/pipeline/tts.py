@@ -60,7 +60,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 10
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 11
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -223,12 +223,14 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("tech", "meme's"): "techmeme's",
     ("ear", "en", "dill"): "earendil",
     ("ear", "endil"): "earendil",
-    # NERVA is conventionally spoken as a word, while the non-rhotic Leah
-    # voice can make the final ``r`` in Rover acoustically surface as ROVA in
-    # Whisper. Keep that spelling equivalence constrained to the complete pair
-    # of historical program names; the unrelated tokens remain distinct.
+    # NERVA is conventionally spoken as a word. The provider pronunciation
+    # hint produced NERV at normal-speed ASR but exact NERVA at both 0.8x and
+    # 0.7x; the non-rhotic Leah voice can also surface Rover as ROVA in Whisper.
+    # Keep those evidenced spelling equivalents constrained to the complete
+    # pair of historical program names; unrelated tokens remain distinct.
     ("nerva", "and", "rover"): "nervaandrover",
     ("nerva", "and", "rova"): "nervaandrover",
+    ("nerv", "and", "rover"): "nervaandrover",
     ("nervah", "and", "rover"): "nervaandrover",
     ("nervah", "and", "rova"): "nervaandrover",
     ("ner", "vuh", "and", "rover"): "nervaandrover",
