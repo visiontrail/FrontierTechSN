@@ -471,7 +471,7 @@ def test_duration_repair_restores_evidence_only_story_paragraphs():
     original = "\n".join([opening, "Too short.", protected, closing])
     expanded = "\n".join([
         opening,
-        " ".join(["evidence"] * 410) + ".",
+        " ".join(["evidence"] * 390) + ".",
         "Source 2 reports an unsupported replacement.",
         closing,
     ])
@@ -547,7 +547,7 @@ def test_duration_repair_closes_remaining_gap_after_protected_restore():
         patch.object(
             scriptwriter,
             "_chat",
-            AsyncMock(side_effect=[candidate(380), candidate(470)]),
+                AsyncMock(side_effect=[candidate(250), candidate(350)]),
         ) as chat,
     ):
         repaired, report = asyncio.run(
@@ -590,15 +590,17 @@ def test_fixed_morning_opening_and_contract_are_software_owned():
 
 def test_daily_duration_contract_rejects_the_observed_two_minute_eight_minute_mismatch():
     short_script = " ".join(["word"] * 390)
-    on_target_script = " ".join(["word"] * 540)
+    on_target_script = " ".join(["word"] * 360)
 
     short = daily_script_duration_report(short_script, 8, "en")
     on_target = daily_script_duration_report(on_target_script, 3, "en")
     narration_short = narration_duration_report(125.760792, 8)
 
     assert short["passed"] is False
-    assert short["estimated_duration_minutes"] == pytest.approx(2.167, abs=0.001)
+    assert short["estimated_duration_minutes"] == pytest.approx(3.25, abs=0.001)
     assert on_target["passed"] is True
+    assert on_target["target_units"] == 360
+    assert on_target["maximum_units"] == 432
     assert narration_short["passed"] is False
     assert narration_duration_report(180.0, 3)["passed"] is True
 
@@ -1580,7 +1582,7 @@ def test_review_fits_script_to_target_before_web_accuracy_audit(tmp_path: Path):
         articles,
         [],
     )
-    repaired = "Opening.\n" + " ".join(["word"] * 540) + "\nClosing."
+    repaired = "Opening.\n" + " ".join(["word"] * 360) + "\nClosing."
     duration_contract = daily_script_duration_report(repaired, 3, "en")
     fit = AsyncMock(return_value=(repaired, duration_contract))
     web_review = AsyncMock(

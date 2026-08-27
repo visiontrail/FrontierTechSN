@@ -13,7 +13,11 @@ LogCallback = Callable[[str], None]
 NON_ENGLISH_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]")
 ENGLISH_SPOKEN_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’.-][A-Za-z0-9]+)*")
 CHINESE_SPOKEN_CHARACTER_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
-DAILY_NEWS_ENGLISH_WORDS_PER_MINUTE = 180
+# Orpheus' natural English delivery in a verified live Daily News artifact was
+# 559 spoken words in 270.848 seconds (about 124 WPM). Use a conservative 120
+# WPM planning rate so the script-length gate prevents expensive narration from
+# overshooting the real duration contract.
+DAILY_NEWS_ENGLISH_WORDS_PER_MINUTE = 120
 DAILY_NEWS_CHINESE_CHARACTERS_PER_MINUTE = 280
 DAILY_NEWS_DURATION_LOWER_RATIO = 0.8
 DAILY_NEWS_DURATION_UPPER_RATIO = 1.2
