@@ -272,6 +272,16 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             "Alibaba released cue-when 3.8-Flash and cue-when 4.",
         )
 
+    def test_orpheus_prompt_articulates_v4_flash_model_prefix(self):
+        self.assertEqual(
+            tts._orpheus_prompt_text("The model rivals V4-Flash"),
+            "The model rivals V four Flash.",
+        )
+        self.assertEqual(
+            tts._orpheus_prompt_text("AV4-Flash remains unchanged"),
+            "AV4-Flash remains unchanged.",
+        )
+
     def test_orpheus_prompt_articulates_zhu_yi_and_separates_prana_labs(self):
         text = (
             "DeepTech China published a conversation with Zhu Yi, "
@@ -2452,6 +2462,27 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             report(
                 "billion parameters built on its next generation queue Wen5 architecture"
             )["verified"]
+        )
+
+    def test_orpheus_transcript_normalizes_spoken_v4_model_prefix(self):
+        expected = "The company says the model rivals V4-Flash."
+
+        def report(observed: str) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        spoken = report("The company says the model rivals V four Flash")
+
+        self.assertTrue(spoken["verified"])
+        self.assertEqual(spoken["matched_exact_words"], 8)
+        self.assertFalse(
+            report("The company says the model rivals V five Flash")["verified"]
+        )
+        self.assertFalse(
+            report("The company says the model rivals the Flash")["verified"]
         )
 
     def test_orpheus_transcript_normalizes_each_spoken_decimal_digit(self):

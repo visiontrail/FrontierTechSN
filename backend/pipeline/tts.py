@@ -60,7 +60,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 9
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 10
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -195,6 +195,9 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("deep", "tech"): "deeptech",
     ("qbit", "ai"): "qbitai",
     ("qubit", "ai"): "qbitai",
+    # Provider articulation spells the compact model prefix V4 as its letter
+    # and number. Preserve the canonical source token after exact ASR recovery.
+    ("v", "4"): "v4",
     # A live Nikkei Asia utterance was transcribed as "Nikke" at normal
     # speed but recovered the publication's spelling at both 0.8x and 0.7x.
     # Scope the exact ASR spelling drift to the full publication name so an
@@ -1394,6 +1397,11 @@ def _orpheus_request_token_budget(text: str, maximum: int) -> int:
 def _orpheus_prompt_text(text: str) -> str:
     """Give every short LM request an explicit speech termination boundary."""
     stripped = text.rstrip()
+    stripped = re.sub(
+        r"(?<![\w-])V4-Flash(?![\w-])",
+        "V four Flash",
+        stripped,
+    )
     # The live speech model twice realized Qwen as the one-syllable surname
     # "Khan". Expose the intended two-part pronunciation to the provider;
     # canonical verification still requires Qwen in the ASR result.
