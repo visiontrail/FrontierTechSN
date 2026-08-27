@@ -619,6 +619,7 @@ For an English edition, output no Chinese, Japanese, or Korean characters.
         "Daily news audit correction",
         max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
         enable_skills=False,
+        disable_thinking=True,
     )
     corrections = _parse_story_corrections(raw, failed_story_numbers)
     if language == "en" and any(

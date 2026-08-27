@@ -202,6 +202,44 @@ def test_web_claim_protocol_disambiguates_multiple_failed_story_segments():
         ]
 
 
+def test_saved_web_review_is_reused_only_for_the_exact_prompt(tmp_path: Path):
+    prompt_path = tmp_path / "prompt.txt"
+    response_path = tmp_path / "response.txt"
+    prompt = "exact dated prompt with numbered claims"
+    claims = {
+        1: {"1.1": "Story one is supported."},
+        2: {"2.1": "Story two needs attribution."},
+    }
+    prompt_path.write_text(prompt, encoding="utf-8")
+    response_path.write_text(
+        "[GEMINI 1]\nN\n\n--- PROVIDER ATTEMPT ---\n\n"
+        "[CHATGPT FALLBACK]\nW1P;2E@2.1",
+        encoding="utf-8",
+    )
+
+    cached = review._cached_batch_review(
+        prompt_path,
+        response_path,
+        prompt,
+        [1, 2],
+        claims,
+    )
+
+    assert cached is not None
+    payload, raw, conversation_url, provider = cached
+    assert payload["issues"][0]["claim_ids"] == ["2.1"]
+    assert "CHATGPT FALLBACK" in raw
+    assert conversation_url == ""
+    assert provider == "chatgpt"
+    assert review._cached_batch_review(
+        prompt_path,
+        response_path,
+        prompt + " changed",
+        [1, 2],
+        claims,
+    ) is None
+
+
 def test_review_prompt_requires_live_search_and_carries_full_evidence():
     article = research.NewsArticle(
         id="robot",
@@ -344,6 +382,7 @@ def test_d_only_audit_rewrites_from_evidence_before_trimming():
     assert "CURRENT FAILED STORY PARAGRAPHS" in chat.await_args.args[1]
     assert "CURRENT SCRIPT" not in chat.await_args.args[1]
     assert chat.await_args.args[3] == "yinhe-chat"
+    assert chat.await_args.kwargs["disable_thinking"] is True
 
 
 def test_audit_correction_cannot_duplicate_passing_story_paragraphs():

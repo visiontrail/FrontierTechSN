@@ -541,6 +541,47 @@ def _batch_payload(
     }
 
 
+def _cached_batch_review(
+    prompt_path: Path,
+    response_path: Path,
+    prompt: str,
+    story_numbers: list[int],
+    claim_catalog: dict[int, dict[str, str]],
+) -> tuple[dict[str, Any], str, str, str] | None:
+    """Reuse only a persisted verdict proven to belong to the exact prompt.
+
+    Browser review is deliberately rate-limited and each completed group is
+    already written to disk before later correction calls run. A provider
+    failure after those writes must not force the same live-web searches to run
+    again. The byte-for-byte prompt match prevents a verdict from being reused
+    after any script, evidence, date, story order, or claim-ID change; the
+    normal strict protocol parser then validates the saved final token again.
+    """
+    try:
+        if prompt_path.read_text(encoding="utf-8") != prompt:
+            return None
+        raw = response_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+
+    for line in reversed(raw.splitlines()):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            payload = _batch_payload(
+                candidate,
+                story_numbers,
+                claim_catalog=claim_catalog,
+                require_web=True,
+            )
+        except ValueError:
+            continue
+        provider = "chatgpt" if "[CHATGPT" in raw.upper() else "gemini"
+        return payload, raw, "", provider
+    return None
+
+
 def _protocol_payload(text: str) -> dict[str, Any]:
     # Accept valid legacy JSON too, but prefer the deliberately short protocol.
     try:
@@ -996,19 +1037,32 @@ async def _review_daily_script(
         for group_index, start in enumerate(range(0, len(review_numbers), 2), 1):
             story_numbers = review_numbers[start : start + 2]
             prompt = _batch_review_prompt(candidate, dossier, edition_date, story_numbers)
-            (review_dir / f"story-review-prompt-{audit_round}-group-{group_index}.txt").write_text(
-                prompt, encoding="utf-8"
-            )
-            group_payload, raw, conversation_url, provider = await _web_story_review(
+            prompt_path = review_dir / f"story-review-prompt-{audit_round}-group-{group_index}.txt"
+            response_path = review_dir / f"story-review-response-{audit_round}-group-{group_index}.txt"
+            cached = _cached_batch_review(
+                prompt_path,
+                response_path,
                 prompt,
-                story_numbers=story_numbers,
-                claim_catalog={number: claims[number] for number in story_numbers},
-                site_session_namespace=review_session_namespace,
-                log=log,
+                story_numbers,
+                {number: claims[number] for number in story_numbers},
             )
-            (review_dir / f"story-review-response-{audit_round}-group-{group_index}.txt").write_text(
-                raw, encoding="utf-8"
-            )
+            if cached is not None:
+                group_payload, raw, conversation_url, provider = cached
+                if log:
+                    log(
+                        f"Reusing exact prompt-matched saved Web review for stories "
+                        f"{story_numbers}"
+                    )
+            else:
+                prompt_path.write_text(prompt, encoding="utf-8")
+                group_payload, raw, conversation_url, provider = await _web_story_review(
+                    prompt,
+                    story_numbers=story_numbers,
+                    claim_catalog={number: claims[number] for number in story_numbers},
+                    site_session_namespace=review_session_namespace,
+                    log=log,
+                )
+                response_path.write_text(raw, encoding="utf-8")
             group_results.append({
                 "payload": group_payload,
                 "conversation_url": conversation_url,
