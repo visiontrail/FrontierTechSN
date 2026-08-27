@@ -1324,6 +1324,7 @@ def _orpheus_prompt_text(text: str) -> str:
     # The live speech model twice realized Qwen as the one-syllable surname
     # "Khan". Expose the intended two-part pronunciation to the provider;
     # canonical verification still requires Qwen in the ASR result.
+    stripped = re.sub(r"(?<![\w-])Qwen(?=\d)", "cue-when ", stripped)
     stripped = re.sub(
         r"(?<![\w-])Qwen(?![\w-])",
         "cue-when",

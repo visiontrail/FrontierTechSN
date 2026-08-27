@@ -246,6 +246,12 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             tts._orpheus_prompt_text("Qwenish pre-Qwen qianwen"),
             "Qwenish pre-Qwen qianwen.",
         )
+        self.assertEqual(
+            tts._orpheus_prompt_text(
+                "Alibaba released Qwen3.8-Flash and Qwen 4"
+            ),
+            "Alibaba released cue-when 3.8-Flash and cue-when 4.",
+        )
 
     def test_orpheus_prompt_articulates_zhu_yi_and_separates_prana_labs(self):
         text = (
