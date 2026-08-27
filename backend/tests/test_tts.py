@@ -1930,6 +1930,29 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["transcript_words"], 12)
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
 
+    def test_orpheus_transcript_normalizes_skild_company_name(self):
+        expected = (
+            "North American robotics startup Skild AI has released a new robot "
+            "foundation."
+        )
+
+        def report(company_name: str) -> dict:
+            observed = (
+                "North American robotics startup "
+                f"{company_name} AI has released a new robot foundation"
+            ).split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        accepted = report("Skilled")
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report("Skill")["verified"])
+        self.assertFalse(report("Skillet")["verified"])
+
     def test_orpheus_transcript_normalizes_world_possessive_spelling(self):
         expected = (
             "QbitAI reports that Perfect World's 2026 semiannual report, "

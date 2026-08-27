@@ -57,7 +57,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 2
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 4
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -162,6 +162,10 @@ ACOUSTIC_EQUIVALENTS = {
     # unrelated near-matches remain rejected.
     "suarcese": "scorsese",
     "sorsese": "scorsese",
+    # The robotics company name "Skild" is pronounced exactly like the common
+    # word "skilled". Whisper used that dictionary spelling in all three live
+    # attempts while retaining every other word and both utterance edges.
+    "skilled": "skild",
     # Singular possessive "Techmeme's" and plural possessive "TechMemes'"
     # have the same /z/ ending. Whisper used the latter spelling for a live,
     # otherwise exact utterance; TechMean remains intentionally distinct.
