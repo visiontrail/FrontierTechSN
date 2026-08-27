@@ -7,6 +7,7 @@ import vm from 'node:vm'
 
 import { selectChatGPTModel } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import {
+  attachGeminiFile,
   sendGeminiMessage,
   waitForGeminiResponse,
 } from './node_modules/@jackwener/opencli/clis/gemini/utils.js'
@@ -25,6 +26,58 @@ function videoFrameFixture(t, names = ['first-frame.png']) {
     return file
   })
 }
+
+function geminiAttachmentPage(nativeError) {
+  const actions = []
+  return {
+    actions,
+    async goto(url, options) {
+      actions.push(['goto', url, options])
+    },
+    async wait(seconds) {
+      actions.push(['wait', seconds])
+    },
+    async click(selector) {
+      actions.push(['click', selector])
+    },
+    async setFileInput(files, selector) {
+      actions.push(['setFileInput', files, selector])
+      throw new Error(nativeError)
+    },
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app'
+      if (script.includes("input: !!document.querySelector('input[name=\"Filedata\"]')")) {
+        return { input: true, button: true, expanded: true }
+      }
+      if (script.includes('const transfer = new DataTransfer()')) {
+        actions.push(['DataTransfer'])
+        return { ok: true }
+      }
+      if (script.includes('const candidates = Array.from')) return { ready: true }
+      throw new Error(`Unexpected Gemini attachment script: ${String(script).slice(0, 120)}`)
+    },
+  }
+}
+
+test('Gemini ask falls back when Browser Bridge misses fileChooserOpened', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage(
+    'Page.fileChooserOpened not received within 5s — the input may not have opened a file chooser',
+  )
+
+  await assert.doesNotReject(attachGeminiFile(page, image))
+
+  assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
+  assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
+})
+
+test('Gemini ask does not hide unrelated native upload failures', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('Browser target crashed')
+
+  await assert.rejects(attachGeminiFile(page, image), /Browser target crashed/)
+  assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
+})
 
 function videoUploadPage({
   native = 'success',

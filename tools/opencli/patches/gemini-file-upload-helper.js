@@ -88,7 +88,9 @@ export async function attachGeminiFile(page, filePath) {
             uploaded = true;
         } catch (error) {
             const message = String(error?.message || error);
-            if (!/Not allowed|Unknown action|not supported/i.test(message)) throw error;
+            if (!/Not allowed|Unknown action|not supported|fileChooserOpened|file chooser/i.test(message)) {
+                throw error;
+            }
         }
     }
 
