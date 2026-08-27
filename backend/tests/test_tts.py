@@ -168,6 +168,23 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(" ".join(" ".join(chunks).split()), text)
 
+    def test_split_tts_text_moves_which_to_its_relative_clause(self):
+        text = (
+            "The design pairs a nuclear thermal engine with electric thrusters, "
+            "which the engineers say could reduce transit time down to 335 days or less."
+        )
+
+        chunks = tts._split_tts_text(text, max_words=12)
+
+        self.assertEqual(
+            chunks,
+            [
+                "The design pairs a nuclear thermal engine with electric thrusters,",
+                "which the engineers say could reduce transit time down to 335 days or less.",
+            ],
+        )
+        self.assertEqual(" ".join(" ".join(chunks).split()), text)
+
     def test_split_tts_text_separates_mirrored_parallel_clauses(self):
         text = (
             "Japanese go to war prepared to die, "

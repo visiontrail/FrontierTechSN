@@ -951,6 +951,30 @@ def _reattach_fragile_video_prompt_context(chunks: list[str]) -> list[str]:
     return adjusted
 
 
+def _reattach_dangling_relative_pronoun(chunks: list[str]) -> list[str]:
+    """Move a stranded ``which`` onto the clause it grammatically introduces.
+
+    A max-word boundary can leave ``..., which`` as one speech-LM request and
+    begin the next with ``the engineers say could ...``. Orpheus repairs that
+    fragment by inserting ``it``, so the otherwise fluent audio fails exact
+    source coverage. The bounded one-word move preserves every source token and
+    gives both utterances complete grammar.
+    """
+    adjusted = list(chunks)
+    for index in range(len(adjusted) - 1):
+        left = adjusted[index]
+        match = re.search(r"(?i)(?:^|\s)(which)$", left)
+        if match is None:
+            continue
+        prefix = left[: match.start(1)].rstrip()
+        right = adjusted[index + 1].lstrip()
+        if not prefix or not right:
+            continue
+        adjusted[index] = prefix
+        adjusted[index + 1] = f"{match.group(1)} {right}"
+    return adjusted
+
+
 def _separate_fragile_positioning_clause(chunks: list[str]) -> list[str]:
     """Keep ``positions the release as`` in one grammatical utterance."""
     adjusted = list(chunks)
@@ -1023,9 +1047,11 @@ def _stabilize_orpheus_chunks(chunks: list[str]) -> list[str]:
         _separate_fragile_battle_ready_sequence(
             _separate_fragile_positioning_clause(
                 _reattach_fragile_video_prompt_context(
-                    _reattach_fragile_orpheus_continuations(
-                        _separate_repeated_adjective_items(
-                            _separate_repeated_clause_openings(chunks)
+                    _reattach_dangling_relative_pronoun(
+                        _reattach_fragile_orpheus_continuations(
+                            _separate_repeated_adjective_items(
+                                _separate_repeated_clause_openings(chunks)
+                            )
                         )
                     )
                 )
