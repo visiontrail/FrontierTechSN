@@ -38,9 +38,12 @@ ORPHEUS_AUDIO_TOKENS_PER_SECOND = 7 * 24_000 / 2_048
 ORPHEUS_CHUNK_MIN_WPM = 90
 ORPHEUS_CHUNK_SAFETY = 0.80
 ORPHEUS_TOKEN_LIMIT_RATIO = 0.97
-ORPHEUS_MIN_EXACT_ASR_COVERAGE = 1.0
+ORPHEUS_MIN_EXACT_ASR_COVERAGE = 0.90
 ORPHEUS_MIN_ASR_WORD_RATIO = 1.0
 ORPHEUS_MAX_ASR_WORD_RATIO = 1.0
+ORPHEUS_MAX_PHONETIC_SUBSTITUTIONS = 1
+ORPHEUS_MIN_PHONETIC_SPELLING_SIMILARITY = 0.80
+ORPHEUS_EXACT_EDGE_ANCHOR_WORDS = 2
 NARRATION_PACING_POLICY = "natural_speech_visuals_follow_audio"
 NARRATION_SYNTHESIS_SPEED_RATIO = 1.0
 
@@ -57,7 +60,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 4
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 5
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -162,10 +165,6 @@ ACOUSTIC_EQUIVALENTS = {
     # unrelated near-matches remain rejected.
     "suarcese": "scorsese",
     "sorsese": "scorsese",
-    # The robotics company name "Skild" is pronounced exactly like the common
-    # word "skilled". Whisper used that dictionary spelling in all three live
-    # attempts while retaining every other word and both utterance edges.
-    "skilled": "skild",
     # Singular possessive "Techmeme's" and plural possessive "TechMemes'"
     # have the same /z/ ending. Whisper used the latter spelling for a live,
     # otherwise exact utterance; TechMean remains intentionally distinct.
@@ -1356,12 +1355,12 @@ def _orpheus_prompt_text(text: str) -> str:
 def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     """Measure whether a short WAV contains its complete requested utterance.
 
-    Whisper is an independent acoustic observer, so exact-token coverage is not
-    expected to be 100% for numbers, names, or contractions. Completeness is
-    instead fail-closed at the utterance level: high exact coverage, a plausible
-    word count, and acoustic anchors at both ends must all pass. When every
-    source utterance passes, the final manifest records 100% verified source
-    coverage while preserving the raw ASR measurements for audit.
+    Whisper is an independent acoustic observer, so a complete name can receive
+    a different but acoustically equivalent spelling. The primary path remains
+    exact. A bounded fallback permits one aligned phonetic spelling substitution
+    only when exact coverage is at least 90%, word count is unchanged, and both
+    utterance edges remain exact. The caller must corroborate that fallback by
+    transcribing the same waveform at another playback speed.
     """
     expected = _lexical_tokens(text)
     observed, observed_word_indexes = _transcript_tokens(words)
@@ -1378,9 +1377,9 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     matched_expected = {left for left, _ in pairs}
     exact_coverage = len(matched_expected) / max(1, len(expected))
     word_ratio = len(observed) / max(1, len(expected))
-    edge = min(ORPHEUS_EDGE_ANCHOR_WORDS, len(expected))
-    leading_anchor = any(index < edge for index in matched_expected)
-    trailing_anchor = any(index >= len(expected) - edge for index in matched_expected)
+    edge = min(ORPHEUS_EXACT_EDGE_ANCHOR_WORDS, len(expected))
+    leading_anchor = expected[:edge] == observed[:edge]
+    trailing_anchor = expected[-edge:] == observed[-edge:]
     speech_end = max((float(word.get("end") or 0) for word in words), default=0.0)
     repetition_start = _repetition_start(observed, expected)
     repeat_start_seconds = None
@@ -1388,11 +1387,22 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         repeat_word_index = observed_word_indexes[repetition_start]
         repeat_start_seconds = max(0.0, float(words[repeat_word_index].get("start") or 0))
 
+    phonetic_substitutions = _aligned_phonetic_substitutions(expected, observed)
+    matched_acoustic_words = len(matched_expected)
+    if phonetic_substitutions:
+        matched_acoustic_words += len(phonetic_substitutions)
+    acoustic_coverage = matched_acoustic_words / max(1, len(expected))
+
     failures: list[str] = []
     if exact_coverage < ORPHEUS_MIN_EXACT_ASR_COVERAGE:
         failures.append(
             f"exact ASR word coverage {exact_coverage:.1%} is below "
             f"{ORPHEUS_MIN_EXACT_ASR_COVERAGE:.1%}"
+        )
+    elif exact_coverage < 1.0 and not phonetic_substitutions:
+        failures.append(
+            "ASR mismatch is not one aligned high-confidence phonetic spelling "
+            "substitution"
         )
     if word_ratio < ORPHEUS_MIN_ASR_WORD_RATIO:
         failures.append(
@@ -1414,6 +1424,14 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         "transcript_words": len(observed),
         "matched_exact_words": len(matched_expected),
         "exact_asr_word_coverage": round(exact_coverage, 4),
+        "matched_acoustic_words": matched_acoustic_words,
+        "acoustic_asr_word_coverage": round(acoustic_coverage, 4),
+        "phonetic_substitutions": phonetic_substitutions or [],
+        "verification_mode": (
+            "aligned_phonetic_substitution"
+            if phonetic_substitutions
+            else "exact"
+        ),
         "transcript_word_ratio": round(word_ratio, 4),
         "leading_anchor": leading_anchor,
         "trailing_anchor": trailing_anchor,
@@ -1423,6 +1441,78 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         ),
         "failure_reasons": failures,
     }
+
+
+def _english_phonetic_key(token: str) -> str:
+    """Return a conservative grapheme-to-sound key for ASR spelling drift.
+
+    This is intentionally narrower than Soundex: vowel position and audible
+    suffix consonants remain significant, so words such as ``foundation`` and
+    ``foundational`` cannot collapse to the same key.
+    """
+    value = re.sub(r"[^a-z]", "", token.casefold())
+    if not value:
+        return ""
+    value = re.sub(r"^(?:kn|gn|pn)", lambda match: match.group(0)[1:], value)
+    value = re.sub(r"^wr", "r", value)
+    value = re.sub(r"^wh", "w", value)
+    value = value.replace("sch", "sk")
+    value = value.replace("tch", "ch")
+    value = value.replace("ph", "f")
+    value = value.replace("gh", "")
+    value = value.replace("ck", "k")
+    value = value.replace("qu", "kw")
+    value = re.sub(r"c(?=[eiy])", "s", value)
+    value = value.replace("c", "k")
+    value = re.sub(r"g(?=[eiy])", "j", value)
+    value = re.sub(r"(?<![tscw])h", "", value)
+    # The silent spelling vowel before a final inflection is not acoustic.
+    value = re.sub(r"e(?=[ds]$)", "", value)
+    value = re.sub(r"e$", "", value)
+    value = re.sub(r"(.)\1+", r"\1", value)
+    return value
+
+
+def _aligned_phonetic_substitutions(
+    expected: list[str],
+    observed: list[str],
+) -> list[dict] | None:
+    """Return one safe aligned spelling substitution, or ``None``.
+
+    Equal token counts and positional comparison deliberately reject a missing
+    word compensated by an unrelated extra word elsewhere in the utterance.
+    """
+    if len(expected) != len(observed):
+        return None
+    substitutions: list[dict] = []
+    for index, (expected_token, observed_token) in enumerate(zip(expected, observed)):
+        if expected_token == observed_token:
+            continue
+        spelling_similarity = SequenceMatcher(
+            a=expected_token,
+            b=observed_token,
+            autojunk=False,
+        ).ratio()
+        expected_key = _english_phonetic_key(expected_token)
+        observed_key = _english_phonetic_key(observed_token)
+        if (
+            not expected_key
+            or expected_key != observed_key
+            or spelling_similarity < ORPHEUS_MIN_PHONETIC_SPELLING_SIMILARITY
+        ):
+            return None
+        substitutions.append(
+            {
+                "expected_index": index,
+                "expected": expected_token,
+                "observed": observed_token,
+                "phonetic_key": expected_key,
+                "spelling_similarity": round(spelling_similarity, 4),
+            }
+        )
+        if len(substitutions) > ORPHEUS_MAX_PHONETIC_SUBSTITUTIONS:
+            return None
+    return substitutions or None
 
 
 def _collapse_expected_name_splits(
@@ -1560,7 +1650,7 @@ async def _transcribe_orpheus_at_speed(
     speed_label = f"{speed:g}x"
     slowed_path = verification_dir / f"{path.stem}.atempo-{speed_label}.wav"
     returncode, output = await stream_subprocess(
-        name=f"Orpheus name verification ({speed_label})",
+        name=f"Orpheus playback verification ({speed_label})",
         command=[
             "ffmpeg",
             "-hide_banner",
@@ -1637,6 +1727,90 @@ async def _verify_orpheus_part(
             )
         report = _orpheus_transcript_report(text, words)
     if (
+        report["verified"]
+        and report.get("verification_mode") == "aligned_phonetic_substitution"
+    ):
+        normal_speed_report = report
+        expected_substitution_indexes = {
+            int(item["expected_index"])
+            for item in normal_speed_report["phonetic_substitutions"]
+        }
+        corroborated_report: dict | None = None
+        for speed in ORPHEUS_NAME_RECHECK_SPEEDS:
+            try:
+                slower_words, slower_transcription = await _transcribe_orpheus_at_speed(
+                    path,
+                    verification_dir,
+                    speed,
+                    emit=emit,
+                )
+            except Exception as exc:  # noqa: BLE001 - keep the fallback fail-closed
+                emit(
+                    "Orpheus integrity: phonetic corroboration at "
+                    f"{speed:g}x could not run ({type(exc).__name__}: {exc})"
+                )
+                continue
+            if not slower_words:
+                failures = "; ".join(
+                    slower_transcription.get("failure_reasons") or []
+                )
+                emit(
+                    "Orpheus integrity: phonetic corroboration at "
+                    f"{speed:g}x produced no transcript"
+                    f"{': ' + failures if failures else ''}"
+                )
+                continue
+            slower_report = _orpheus_transcript_report(text, slower_words)
+            slower_substitution_indexes = {
+                int(item["expected_index"])
+                for item in slower_report.get("phonetic_substitutions") or []
+            }
+            corroborates = slower_report["verified"] and (
+                slower_report.get("verification_mode") == "exact"
+                or slower_substitution_indexes == expected_substitution_indexes
+            )
+            if not corroborates:
+                emit(
+                    "Orpheus integrity: phonetic corroboration at "
+                    f"{speed:g}x did not confirm the same aligned substitution"
+                )
+                continue
+            slower_report["verification_playback_speed"] = speed
+            slower_report["normal_speed_exact_asr_word_coverage"] = (
+                normal_speed_report["exact_asr_word_coverage"]
+            )
+            slower_report["normal_speed_phonetic_substitutions"] = list(
+                normal_speed_report["phonetic_substitutions"]
+            )
+            slower_report["verification_mode"] = (
+                "corroborated_exact"
+                if slower_report.get("verification_mode") == "exact"
+                else "corroborated_phonetic_substitution"
+            )
+            # The transcript timestamps are from a slowed copy. Convert the
+            # complete speech edge back to the original WAV's time axis.
+            slower_report["speech_end_seconds"] = round(
+                float(slower_report["speech_end_seconds"]) * speed,
+                3,
+            )
+            slower_report["repeat_start_seconds"] = None
+            corroborated_report = slower_report
+            emit(
+                "Orpheus integrity: aligned phonetic substitution corroborated "
+                f"from the same waveform at {speed:g}x playback"
+            )
+            break
+        if corroborated_report is None:
+            normal_speed_report["verified"] = False
+            normal_speed_report["failure_reasons"] = [
+                *normal_speed_report["failure_reasons"],
+                "aligned phonetic substitution was not corroborated by a "
+                "second transcription of the same waveform",
+            ]
+            report = normal_speed_report
+        else:
+            report = corroborated_report
+    if (
         not report["verified"]
         and _needs_name_playback_recheck(text)
         and _has_only_name_transcript_mismatches(text, words)
@@ -1697,11 +1871,24 @@ async def _verify_orpheus_part(
             "Orpheus narration does not match its input utterance: "
             + "; ".join(report["failure_reasons"])
         )
-    emit(
-        "Orpheus integrity: utterance verified "
-        f"({report['matched_exact_words']}/{report['expected_words']} exact ASR words; "
-        "opening and closing anchors present)"
-    )
+    substitutions = report.get("phonetic_substitutions") or []
+    if substitutions:
+        substitution_summary = ", ".join(
+            f"{item['expected']}~{item['observed']}"
+            for item in substitutions
+        )
+        emit(
+            "Orpheus integrity: utterance verified "
+            f"({report['matched_acoustic_words']}/{report['expected_words']} acoustic "
+            f"ASR words; {report['matched_exact_words']} exact; aligned phonetic "
+            f"substitution {substitution_summary}; opening and closing anchors present)"
+        )
+    else:
+        emit(
+            "Orpheus integrity: utterance verified "
+            f"({report['matched_exact_words']}/{report['expected_words']} exact ASR words; "
+            "opening and closing anchors present)"
+        )
     return report
 
 

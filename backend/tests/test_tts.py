@@ -1949,9 +1949,135 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         accepted = report("Skilled")
         self.assertTrue(accepted["verified"])
-        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertEqual(accepted["exact_asr_word_coverage"], 0.9167)
+        self.assertEqual(accepted["acoustic_asr_word_coverage"], 1.0)
+        self.assertEqual(
+            accepted["verification_mode"],
+            "aligned_phonetic_substitution",
+        )
+        self.assertEqual(
+            accepted["phonetic_substitutions"][0]["observed"],
+            "skilled",
+        )
         self.assertFalse(report("Skill")["verified"])
         self.assertFalse(report("Skillet")["verified"])
+
+    def test_orpheus_phonetic_fallback_rejects_compensated_omission(self):
+        expected = (
+            "North American robotics startup Skild AI has released a new robot "
+            "foundation."
+        )
+        observed = (
+            "North American startup modern Skild AI has released a new robot "
+            "foundation"
+        ).split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertFalse(report["verified"])
+        self.assertEqual(report["exact_asr_word_coverage"], 0.9167)
+        self.assertEqual(report["transcript_word_ratio"], 1.0)
+        self.assertIn("not one aligned", " ".join(report["failure_reasons"]))
+
+    async def test_orpheus_verifier_corroborates_unlisted_phonetic_spelling(self):
+        expected = (
+            "North American robotics startup Skild AI has released a new robot "
+            "foundation."
+        )
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        transcript = words(
+            "North American robotics startup Skilled AI has released a new robot "
+            "foundation"
+        )
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (transcript, {"passed": True}),
+                    (transcript, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "skild.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=messages.append,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(
+            report["verification_mode"],
+            "corroborated_phonetic_substitution",
+        )
+        self.assertEqual(report["exact_asr_word_coverage"], 0.9167)
+        self.assertEqual(report["acoustic_asr_word_coverage"], 1.0)
+        self.assertEqual(transcriber.await_count, 2)
+        self.assertEqual(process.await_count, 1)
+        self.assertIn("corroborated", " ".join(messages))
+
+    async def test_orpheus_verifier_rejects_uncorroborated_phonetic_spelling(self):
+        expected = (
+            "North American robotics startup Skild AI has released a new robot "
+            "foundation."
+        )
+
+        def words(company_name: str) -> list[dict]:
+            observed = (
+                "North American robotics startup "
+                f"{company_name} AI has released a new robot foundation"
+            ).split()
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (words("Skilled"), {"passed": True}),
+                    (words("Skill"), {"passed": True}),
+                    (words("Skillet"), {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                with self.assertRaisesRegex(
+                    tts.TtsIntegrityError,
+                    "not corroborated",
+                ):
+                    await tts._verify_orpheus_part(
+                        Path(temp_dir) / "skild.wav",
+                        expected,
+                        Path(temp_dir) / "verification",
+                        emit=lambda _message: None,
+                    )
+
+        self.assertEqual(transcriber.await_count, 3)
+        self.assertEqual(process.await_count, 2)
 
     def test_orpheus_transcript_normalizes_world_possessive_spelling(self):
         expected = (
