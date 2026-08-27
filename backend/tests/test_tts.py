@@ -286,7 +286,7 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             tts._orpheus_prompt_text(
                 "Alibaba released Qwen3.8-Flash and Qwen 4"
             ),
-            "Alibaba released cue-when 3.8-Flash and cue-when 4.",
+            "Alibaba released cue-when 3.8-Flash and cue-when four.",
         )
 
     def test_orpheus_prompt_articulates_v4_flash_model_prefix(self):

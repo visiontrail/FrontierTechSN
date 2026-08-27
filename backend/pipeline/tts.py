@@ -60,7 +60,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 11
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 12
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -779,14 +779,18 @@ def _normalize_qwen_model_number_asr_tokens(
 ) -> tuple[list[str], list[int]]:
     """Recover evidenced ASR homophones for the provider hint ``Qwen 4``.
 
-    Orpheus receives ``cue-when 4`` for the canonical product name. Whisper
-    transcribed two complete live realizations as ``queue when four`` and
-    ``Q went for``. Accept those phrases only when they occupy the exact source
-    position of the consecutive canonical tokens ``qwen`` and ``4``; an
-    unrelated ``went`` or ``for`` remains untouched.
+    Orpheus receives ``cue-when four`` for the canonical product name. Whisper
+    has transcribed complete live realizations as ``queue when four``,
+    ``Q went for``, and ``Q when for``. Accept those phrases only when they
+    occupy the exact source position of the consecutive canonical tokens
+    ``qwen`` and ``4``; unrelated ``went`` or ``for`` tokens remain untouched.
     """
     accepted = {
         ("queue", "when", "4"),
+        ("q", "when", "4"),
+        ("q", "when", "for"),
+        ("cue", "when", "4"),
+        ("cue", "when", "for"),
         ("q", "went", "for"),
         ("queue", "wen4"),
     }
@@ -1444,6 +1448,14 @@ def _orpheus_prompt_text(text: str) -> str:
     stripped = re.sub(
         r"(?<![\w-])V4-Flash(?![\w-])",
         "V four Flash",
+        stripped,
+    )
+    # Keep the generation number spoken as a word and bind it to the proven
+    # two-syllable Qwen hint. A bare digit produced unstable Q Lune / queue went
+    # realizations across repeated live samples.
+    stripped = re.sub(
+        r"(?<![\w-])Qwen\s+4(?![\w-])",
+        "cue-when four",
         stripped,
     )
     # The live speech model twice realized Qwen as the one-syllable surname
