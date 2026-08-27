@@ -2030,6 +2030,27 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report("Skill")["verified"])
         self.assertFalse(report("Skillet")["verified"])
 
+    def test_orpheus_transcript_normalizes_jalapeno_chip_name(self):
+        expected = (
+            "OpenAI has published the first performance results for its in-house "
+            "AI inference chip, named Jalapeño."
+        )
+
+        def report(chip_name: str) -> dict:
+            observed = (
+                "OpenAI has published the first performance results for its "
+                f"in-house AI inference chip named {chip_name}"
+            ).split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report("Jalapeno")["verified"])
+        self.assertFalse(report("Jalapena")["verified"])
+        self.assertFalse(report("Jalape")["verified"])
+
     def test_orpheus_phonetic_fallback_rejects_compensated_omission(self):
         expected = (
             "North American robotics startup Skild AI has released a new robot "

@@ -60,7 +60,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 7
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 8
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -280,6 +280,16 @@ def _raw_lexical_tokens(text: str) -> list[str]:
     """Normalize individual spellings without collapsing cross-word phrases."""
     normalized: list[str] = []
     lexical_text = _strip_speaker_labels(text)
+    # The published chip name retains its Spanish tilde, while English ASR
+    # conventionally emits the same spoken name as the ASCII spelling
+    # "Jalapeno". Normalize only this evidenced proper noun; unrelated accented
+    # words and different final vowels remain distinct.
+    lexical_text = re.sub(
+        r"\bJalapeño\b",
+        "Jalapeno",
+        lexical_text,
+        flags=re.IGNORECASE,
+    )
     lexical_text = CURRENCY_AMOUNT_RE.sub(
         lambda match: (
             f" {match.group(1)} "
