@@ -6,6 +6,49 @@ import pytest
 
 from backend import config
 from backend.pipeline import music
+from backend.pipeline.opencli import OpenCLIResult
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("more_tools_result", ["opened-more-tools", "no-more-tools"])
+async def test_gemini_music_tool_supports_current_and_legacy_menus(
+    monkeypatch: pytest.MonkeyPatch,
+    more_tools_result: str,
+) -> None:
+    calls: list[list[str]] = []
+    eval_outputs = iter(["clicked-upload-tools", more_tools_result, "selected-music-tool"])
+
+    async def browser(session, args, *, timeout=90, check=True):
+        calls.append(args)
+        output = next(eval_outputs) if args[0] == "eval" else "waited"
+        return OpenCLIResult(tuple(args), 0, output, "")
+
+    monkeypatch.setattr(music, "_browser", browser)
+
+    await music._enable_gemini_music_tool("music-session")
+
+    eval_calls = [args for args in calls if args[0] == "eval"]
+    assert len(eval_calls) == 3
+    wait_calls = [args for args in calls if args[0] == "wait"]
+    assert len(wait_calls) == (2 if more_tools_result == "opened-more-tools" else 1)
+
+
+@pytest.mark.asyncio
+async def test_gemini_prompt_fill_escapes_javascript_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scripts: list[str] = []
+
+    async def browser(session, args, *, timeout=90, check=True):
+        scripts.append(args[1])
+        return OpenCLIResult(tuple(args), 0, "filled-prompt", "")
+
+    monkeypatch.setattr(music, "_browser", browser)
+
+    await music._fill_gemini_prompt("music-session", "Leo's 音乐\nline two")
+
+    assert "Leo's 音乐" in scripts[0]
+    assert "\\nline two" in scripts[0]
 
 
 @pytest.mark.asyncio

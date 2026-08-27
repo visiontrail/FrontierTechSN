@@ -98,6 +98,101 @@ async def _browser(
     )
 
 
+async def _gemini_dom_action(
+    session: str,
+    script: str,
+    expected: str,
+    *,
+    timeout: int = 30,
+) -> str:
+    """Run one Gemini DOM action when OpenCLI's semantic tree is unavailable."""
+    result = await _browser(session, ["eval", script], timeout=timeout)
+    output = result.stdout.strip()
+    if expected not in output:
+        raise OpenCLIError(
+            f"Gemini DOM action did not report {expected!r}: {output[-500:]}"
+        )
+    return output
+
+
+async def _enable_gemini_music_tool(session: str) -> None:
+    await _gemini_dom_action(
+        session,
+        """(() => {
+          const button = document.querySelector('button[aria-label="Upload & tools"]');
+          if (!button) return 'missing-upload-tools';
+          button.click();
+          return 'clicked-upload-tools';
+        })()""",
+        "clicked-upload-tools",
+    )
+    await _browser(session, ["wait", "time", "1", "--timeout", "10000"], timeout=20)
+
+    # Gemini moved Music beneath a second-level "More tools" menu in August
+    # 2026. Keep the old direct-menu shape working when that button is absent.
+    result = await _browser(
+        session,
+        [
+            "eval",
+            """(() => {
+              const buttons = [...document.querySelectorAll('button')];
+              const more = buttons.find((button) =>
+                button.getAttribute('aria-label') === 'More tools' ||
+                (button.innerText || '').trim() === 'More tools'
+              );
+              if (!more) return 'no-more-tools';
+              more.click();
+              return 'opened-more-tools';
+            })()""",
+        ],
+        timeout=30,
+    )
+    if "opened-more-tools" in result.stdout:
+        await _browser(session, ["wait", "time", "1", "--timeout", "10000"], timeout=20)
+    elif "no-more-tools" not in result.stdout:
+        raise OpenCLIError(
+            f"Gemini More tools action returned an unexpected result: {result.stdout[-500:]}"
+        )
+
+    await _gemini_dom_action(
+        session,
+        """(() => {
+          const items = [...document.querySelectorAll('[role="menuitemcheckbox"]')];
+          const music = items.find((item) => {
+            const text = (item.innerText || item.textContent || '').trim();
+            return text === 'Create music' || text === 'Music';
+          });
+          if (!music) return 'missing-music-tool';
+          music.click();
+          return 'selected-music-tool';
+        })()""",
+        "selected-music-tool",
+    )
+
+
+async def _fill_gemini_prompt(session: str, prompt: str) -> None:
+    prompt_json = json.dumps(prompt, ensure_ascii=False)
+    await _gemini_dom_action(
+        session,
+        f"""(() => {{
+          const editor = document.querySelector(
+            '[role="textbox"][aria-label="Enter a prompt for Gemini"]'
+          );
+          if (!editor) return 'missing-prompt-editor';
+          const prompt = {prompt_json};
+          editor.focus();
+          editor.textContent = prompt;
+          editor.dispatchEvent(new InputEvent('input', {{
+            bubbles: true,
+            inputType: 'insertText',
+            data: prompt,
+          }}));
+          return editor.innerText === prompt ? 'filled-prompt' : 'prompt-fill-mismatch';
+        }})()""",
+        "filled-prompt",
+    )
+
+
 def _downloads_snapshot() -> dict[Path, tuple[int, int]]:
     directory = Path.home() / "Downloads"
     if not directory.is_dir():
@@ -144,32 +239,17 @@ async def _gemini_create_music_once(
     before = _downloads_snapshot()
     await _browser(session, ["open", "https://gemini.google.com/app"], timeout=60)
     await _browser(session, ["wait", "time", "2", "--timeout", "10000"], timeout=20)
-    await _browser(
+    await _enable_gemini_music_tool(session)
+    await _fill_gemini_prompt(session, prompt)
+    await _gemini_dom_action(
         session,
-        ["click", "--role", "button", "--name", "Upload & tools"],
-        timeout=30,
-    )
-    await _browser(
-        session,
-        ["click", "--role", "menuitemcheckbox", "--name", "Music"],
-        timeout=30,
-    )
-    await _browser(
-        session,
-        [
-            "fill",
-            "--role",
-            "textbox",
-            "--name",
-            "Enter a prompt for Gemini",
-            prompt,
-        ],
-        timeout=30,
-    )
-    await _browser(
-        session,
-        ["click", "--role", "button", "--name", "Send message"],
-        timeout=30,
+        """(() => {
+          const button = document.querySelector('button[aria-label="Send message"]');
+          if (!button) return 'missing-send-message';
+          button.click();
+          return 'sent-message';
+        })()""",
+        "sent-message",
     )
     deadline = time.monotonic() + timeout
     state = ""
