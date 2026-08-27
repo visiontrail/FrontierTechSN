@@ -1621,6 +1621,20 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             source=expected.replace("300-million-dollar", "300 million dollar"),
         )["verified"])
 
+        decimal_source = "A at a 1.5-billion-dollar valuation"
+        self.assertTrue(report(
+            "A at a $1.5 billion valuation".split(),
+            source=decimal_source,
+        )["verified"])
+        self.assertTrue(report(
+            ["A", "at", "a", "$1", ".5", "billion", "valuation"],
+            source=decimal_source,
+        )["verified"])
+        self.assertFalse(report(
+            "A at a $1.6 billion valuation".split(),
+            source=decimal_source,
+        )["verified"])
+
     def test_orpheus_transcript_normalizes_currency_decimal_split_by_whisper(self):
         expected = (
             "bond sale, equivalent to roughly six point three billion dollars, "

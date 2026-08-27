@@ -705,7 +705,7 @@ def _normalize_currency_adjective_asr_tokens(
     normalized = list(observed)
     for match in CURRENCY_ADJECTIVE_RE.finditer(text):
         phrase = _lexical_tokens(match.group(0))
-        if len(phrase) != 2 or phrase[-1] != "dollar":
+        if len(phrase) < 2 or phrase[-1] != "dollar":
             continue
         scale = match.group(1).casefold()
         width = len(phrase)
@@ -715,7 +715,7 @@ def _normalize_currency_adjective_asr_tokens(
             unit_index = start + width - 1
             if (
                 unit_index >= len(normalized)
-                or normalized[start] != phrase[0]
+                or normalized[start:unit_index] != phrase[:-1]
                 or normalized[unit_index] != "dollars"
                 or unit_index >= len(observed_word_indexes)
             ):
