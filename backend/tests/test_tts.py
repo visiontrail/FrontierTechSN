@@ -1584,6 +1584,43 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(verified("It cost 5 dollars", ["It", "cost", "$5"]))
         self.assertFalse(verified("It cost 5", ["It", "cost", "$5"]))
 
+    def test_orpheus_transcript_normalizes_currency_adjective_shorthand(self):
+        expected = (
+            "The company emerged from stealth in 2024 with a "
+            "300-million-dollar Series"
+        )
+
+        def report(raw_words: list[str], *, source: str = expected) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(raw_words)
+            ]
+            return tts._orpheus_transcript_report(source, words)
+
+        live_whisper_words = (
+            "The company emerged from stealth in 2024 with a $300 million Series"
+        ).split()
+        accepted = report(live_whisper_words)
+
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report([
+            "The", "company", "emerged", "from", "stealth", "in", "2024",
+            "with", "a", "$301", "million", "Series",
+        ])["verified"])
+        self.assertFalse(report([
+            "The", "company", "emerged", "from", "stealth", "in", "2024",
+            "with", "a", "$300", "billion", "Series",
+        ])["verified"])
+        self.assertFalse(report([
+            "The", "company", "emerged", "from", "stealth", "in", "2024",
+            "with", "a", "300", "million", "dollars", "Series",
+        ])["verified"])
+        self.assertFalse(report(
+            live_whisper_words,
+            source=expected.replace("300-million-dollar", "300 million dollar"),
+        )["verified"])
+
     def test_orpheus_transcript_normalizes_currency_decimal_split_by_whisper(self):
         expected = (
             "bond sale, equivalent to roughly six point three billion dollars, "

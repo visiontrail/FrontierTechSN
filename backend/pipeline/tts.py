@@ -60,7 +60,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 6
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 7
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -99,6 +99,10 @@ CURRENCY_TRANSCRIPT_AMOUNT_RE = re.compile(
     r"\s*\$([0-9]+)(?:\.(\d+))?[.,;:!?]?\s*"
 )
 CURRENCY_SCALE_TOKENS = {"hundred", "thousand", "million", "billion", "trillion"}
+CURRENCY_ADJECTIVE_RE = re.compile(
+    r"\b\d+(?:\.\d+)?-(hundred|thousand|million|billion|trillion)-dollar\b",
+    re.IGNORECASE,
+)
 DECIMAL_INTEGER_WORD_RE = re.compile(r"\s*(\d+)\s*")
 DECIMAL_FRACTION_WORD_RE = re.compile(r"\s*\.(\d+)[.,;:!?]?\s*")
 NUMBER_WORDS = {
@@ -679,6 +683,68 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
         word_indexes,
     )
     return _canonicalize_calendar_date_tokens(canonical), canonical_indexes
+
+
+def _normalize_currency_adjective_asr_tokens(
+    text: str,
+    expected: list[str],
+    observed: list[str],
+    observed_word_indexes: list[int],
+    words: list[dict],
+) -> list[str]:
+    """Recover the singular unit encoded by Whisper's ``$amount scale`` form.
+
+    In an attributive phrase such as ``300-million-dollar Series A``, the
+    spoken unit is singular. Whisper conventionally writes the same audio as
+    ``$300 million Series A``; the currency symbol carries the unit while its
+    surface form no longer exposes singular versus plural. Normalize only the
+    source-aligned adjective whose observed unit came from that exact currency
+    shorthand. Explicit ``dollars``, a different amount/scale, or a missing
+    currency symbol remain unchanged and fail the ordinary lexical gate.
+    """
+    normalized = list(observed)
+    for match in CURRENCY_ADJECTIVE_RE.finditer(text):
+        phrase = _lexical_tokens(match.group(0))
+        if len(phrase) != 2 or phrase[-1] != "dollar":
+            continue
+        scale = match.group(1).casefold()
+        width = len(phrase)
+        for start in range(len(expected) - width + 1):
+            if expected[start:start + width] != phrase:
+                continue
+            unit_index = start + width - 1
+            if (
+                unit_index >= len(normalized)
+                or normalized[start] != phrase[0]
+                or normalized[unit_index] != "dollars"
+                or unit_index >= len(observed_word_indexes)
+            ):
+                continue
+            raw_index = observed_word_indexes[unit_index]
+            if raw_index >= len(words):
+                continue
+            raw_currency = CURRENCY_TRANSCRIPT_AMOUNT_RE.fullmatch(
+                str(words[raw_index].get("text") or "")
+            )
+            if raw_currency is None:
+                continue
+            scale_index = raw_index + 1
+            if (
+                raw_currency.group(2) is None
+                and scale_index < len(words)
+                and DECIMAL_FRACTION_WORD_RE.fullmatch(
+                    str(words[scale_index].get("text") or "")
+                )
+            ):
+                scale_index += 1
+            raw_scale = (
+                _raw_lexical_tokens(str(words[scale_index].get("text") or ""))
+                if scale_index < len(words)
+                else []
+            )
+            if raw_scale == [scale]:
+                normalized[unit_index] = "dollar"
+    return normalized
 
 
 def _subsequence_starts(haystack: list[str], needle: list[str]) -> list[int]:
@@ -1387,6 +1453,13 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         expected,
         observed,
         observed_word_indexes,
+    )
+    observed = _normalize_currency_adjective_asr_tokens(
+        text,
+        expected,
+        observed,
+        observed_word_indexes,
+        words,
     )
     matcher = SequenceMatcher(a=expected, b=observed, autojunk=False)
     pairs: list[tuple[int, int]] = []
