@@ -1055,10 +1055,6 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
       font:500 18px {SANS}; line-height:1.3; letter-spacing:.035em; color:#F5F2EA;
       background:rgba(11,13,23,.78); border:1px solid {_rgba(accent, .48)};
       border-radius:999px; padding:11px 18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-  #{plan.id} .news-inline-index {{ position:absolute; right:-18px; top:-24px; z-index:5;
-      width:86px; height:86px; border-radius:50%; display:flex; align-items:center; justify-content:center;
-      font:700 22px {SANS}; letter-spacing:.08em; color:{plan.theme.bg}; background:{accent};
-      border:8px solid {plan.theme.bg}; }}
   #{plan.id} .news-inline-corner {{ position:absolute; left:-18px; bottom:8px; width:94px; height:94px;
       border-left:3px solid {accent}; border-bottom:3px solid {accent}; opacity:.78; }}
 """
@@ -1112,7 +1108,6 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
         + '          </div>\n'
         + (f'          <div class="news-inline-credit" id="{plan.id}-credit">{_esc(plan.news_image_credit)}</div>\n' if plan.news_image_credit else "")
         + '        </div>\n'
-        + f'        <div class="news-inline-index" id="{plan.id}-index">IMG</div>\n'
         + f'        <div class="news-inline-corner" id="{plan.id}-corner"></div>\n'
         + '      </div>\n'
         + '    </div>\n'
@@ -1128,7 +1123,6 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
         inAt("#{plan.id}-items .news-inline-item", {{ x: -24, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .52, ease: "power2.out", stagger: .1 }}, 0.76);
         inAt("#{plan.id}-image-frame", {{ x: {direction * 220}, opacity: 0, rotationY: {direction * -11}, scale: .94 }}, {{ x: 0, opacity: 1, rotationY: 0, scale: 1, duration: .92, ease: "power4.out", transformPerspective: 1400, transformOrigin: "50% 50%" }}, 0.24);
         inAt("#{plan.id}-image", {{ scale: 1.08, x: {direction * -12} }}, {{ scale: 1.02, x: {direction * 12}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.18);
-        inAt("#{plan.id}-index", {{ scale: .35, opacity: 0, rotate: -18 }}, {{ scale: 1, opacity: 1, rotate: 0, duration: .58, ease: "back.out(1.8)", transformOrigin: "50% 50%" }}, 0.78);
         inAt("#{plan.id}-corner", {{ scale: .5, opacity: 0, transformOrigin: "0 100%" }}, {{ scale: 1, opacity: .78, duration: .7, ease: "circ.out" }}, 0.66);
         inAt("#{plan.id}-credit", {{ y: 14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .5, ease: "power1.out" }}, 0.92);
 """

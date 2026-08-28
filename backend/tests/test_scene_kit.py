@@ -166,6 +166,8 @@ def test_inline_news_image_is_part_of_the_text_flow_with_seekable_motion():
     assert 'src="../news_images/nvidia.png"' in html
     assert 'id="scene-01-body"' in html
     assert 'class="news-inline-items"' in html
+    assert 'class="news-inline-index"' not in html
+    assert '>IMG</div>' not in html
     assert "MIT bacteria act as &lt;circuit&gt; boards &amp; living computers" in html
     assert "Perfect World reports &quot;H1&quot; revenue and a net loss" in html
     assert "<circuit>" not in html
