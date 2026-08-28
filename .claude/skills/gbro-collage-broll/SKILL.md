@@ -1,14 +1,14 @@
 ---
 name: gbro-collage-broll
-description: "Automatically turn selected narration beats into premium editorial halftone paper-collage B-roll. Use whenever a FrontierTechSN task enables collage B-roll, chooses the paper-collage opening, or asks for collage/纸拼贴/半调拼贴 B-roll. This project variant is non-interactive: it replaces the original approval gates, Codex image_gen, and GEMINI_API_KEY SDK path with the project Agent SDK plus OpenCLI-driven signed-in ChatGPT Web and Gemini Web."
+description: "Automatically turn selected narration beats into visually diverse editorial collage B-roll. Use whenever a FrontierTechSN task enables collage B-roll, chooses the paper-collage opening, or asks for collage/纸拼贴/混合媒介拼贴 B-roll. This project variant is non-interactive: it replaces the original approval gates, Codex image_gen, and GEMINI_API_KEY SDK path with the project Agent SDK plus OpenCLI-driven signed-in ChatGPT Web and Gemini Web."
 metadata:
   compatibility: "FrontierTechSN project; Claude Agent SDK; project-local OpenCLI and Browser Bridge; signed-in ChatGPT Web and Gemini Web; ffmpeg and ffprobe. No GEMINI_API_KEY or google-genai package."
 ---
 
 # gbro Collage B-roll — FrontierTechSN edition
 
-Turn a narration beat into one sharp visual metaphor, a finished editorial
-paper-collage still, and a single-play assemble-from-empty B-roll clip whose
+Turn a narration beat into one sharp visual metaphor, a finished original
+editorial collage still, and a single-play assemble-from-empty B-roll clip whose
 duration matches the narration scene up to Gemini's configured generation cap.
 
 This is the project-adapted version of
@@ -32,7 +32,7 @@ Use these boundaries:
 4. FFmpeg trims every clip without looping to the shorter of its narration
    scene and Gemini's configured single-generation limit, at 24fps, H.264, and
    with no audio.
-5. HyperFrames mounts successful clips as locked-off, full-bleed scene plates
+5. HyperFrames mounts successful clips as full-bleed scene plates
    that play once and then hold their completed final frame.
 
 If one generated item fails, record the failure and continue with the remaining
@@ -51,46 +51,65 @@ Return a JSON array only. Each item must contain:
 {
   "scene_id": "scene-01",
   "script_meaning": "one concrete audience takeaway",
-  "emotion": "calm | surprise | urgency | clarity | irony",
+  "emotion": "the precise emotional register of this beat",
   "visual_metaphor": "one sentence showing a physical relationship",
   "background_hex": "#D96B35",
-  "accent_colors": ["cream", "cyan"],
+  "accent_colors": ["optional planner swatches; may be empty"],
+  "art_direction": "a distinctive, story-specific visual world",
+  "color_direction": "how color should serve this beat",
+  "composition_direction": "a distinctive spatial strategy",
+  "motion_direction": "how this collage should come alive",
   "elements": [
-    {"what": "film clock", "role": "structure", "motion": "slides in", "placement": "center"}
+    {"what": "film clock", "role": "structure", "motion": "interpret freely", "placement": "choose for the composition"}
   ],
   "assembly_order": ["film clock", "editor", "scissors", "short output strip"],
   "final_frame": "a concise description of the completed composition"
 }
 ```
 
-Use three to six large separable objects. A single beat expresses one metaphor;
-do not illustrate the transcript word by word.
+Use as many or as few visual ingredients as the idea needs, while retaining
+enough separable structure to animate from the empty keyframe. A single beat
+expresses one metaphor; do not illustrate the transcript word by word.
 
 ## Visual language
 
-- Flat, forceful paper color field selected for meaning, not a universal blue.
-- Black-and-white halftone photographic cut-outs as the structural skeleton.
-- Selective colored cardstock accents for hierarchy.
-- Crisp cut edges, thin warm-cream keylines, soft physical shadows, and fine
-  uncoated-paper grain.
-- Generous negative space and a concentrated subject.
-- No typography, letters, numerals, subtitles, logos, watermarks, UI, glossy
-  3D, photoreal environment, or clutter.
+Paper collage is the medium, not a preset aesthetic. Invent a fresh art
+direction for every selected beat. The planner may use torn or precisely cut
+paper, archival photography, contemporary color, photocopy, fabric, tape,
+paint, ink, vellum, diagrams, found ephemera, geometric abstraction,
+surreal photomontage, dimensional layers, or another collage-compatible
+language that serves the narration. These are examples, not a menu or a limit.
 
-Color tendencies: burnt orange/red for labor and urgency; mustard for tools and
-warnings; ink green for cognition; deep purple for rules and memory; teal for
-judgment and collaboration. Vary fields across a batch while preserving the
-same print and paper treatment.
+Do not repeat a default combination of centered subject, flat color field,
+black-and-white halftone, cream keyline, cyan accent, and generous negative
+space. Across a batch, deliberately vary at least the composition strategy,
+material/mark language, palette behavior, density, edge treatment, and motion
+character. Repetition is allowed only when it creates a clear narrative motif.
+
+`background_hex` is a technical color anchor for the empty first keyframe, not
+a command to make the finished composition a flat monochrome field. Integrate
+it naturally into the AI's chosen palette. `elements` and `assembly_order` are
+narrative ingredients and progression hints; reinterpret them rather than
+turning them into a rigid object checklist.
+
+Content exclusions only: no readable typography, letters, numerals,
+subtitles, logos, watermarks, or UI. These exclusions do not constrain the
+overall collage aesthetic.
 
 ## Motion language
 
-Use Image 1 as the exact empty paper field and Image 2 as the exact completed
-composition. Build in a locked shot: foundation first, subject/cards second,
-connectors third, action/result last. Pieces slide, drop, stamp, and snap into
-place with tactile stop-motion timing. Hold the supplied final composition.
+Use Image 1 as the exact empty keyframe and Image 2 as the exact completed
+composition. Let `motion_direction` determine how the collage evolves: pieces
+may tear-reveal, unfold, hinge, ripple, sweep, tumble, stack, peel, stamp,
+jitter, drift, or use another material-appropriate behavior. Vary rhythm,
+overlap, depth, and local movement across the batch. These examples are not a
+required vocabulary.
 
-No cuts, camera motion, zoom, morphing, new objects, text, or sound. The final
-render must match the task orientation directly:
+The motion must make one continuous, non-repeating evolution, then settle into
+and hold the exact supplied final composition. Subtle camera or parallax motion
+is allowed if it resolves to the supplied final framing. No cuts, unrelated new
+objects, readable text, or sound. The final render must match the task
+orientation directly:
 
 - landscape task: 16:9 media, normalized to 1280x720;
 - portrait task: 9:16 media, normalized to 720x1280.

@@ -29,12 +29,36 @@ SOURCE_COMMIT = "a1a4ee2e2abf7d44e460026b706d0c72c2cf8a91"
 CLIP_FPS = 24
 MOTION_SAMPLE_FPS = 4
 CACHE_CONTRACT_VERSION = 1
-SELECTION_POLICY_VERSION = 2
+SELECTION_POLICY_VERSION = 3
 PLAYBACK_POLICY = "play_once_then_hold_last_frame"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _SAFE_SCENE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _COLORS = ("#D96B35", "#D2A928", "#315F4C", "#594080", "#188C85", "#B73D3D")
+_FALLBACK_ART_DIRECTIONS = (
+    "raw archival photomontage with torn newsprint, grease-pencil marks, and uneven deckled edges",
+    "playful hand-built scrapbook with painted paper, fabric scraps, tape, and deliberately irregular silhouettes",
+    "bold geometric cut-paper modernism with oversized shapes, sharp scale contrast, and off-axis balance",
+    "surreal editorial assemblage mixing photographic fragments, hand-drawn marks, and impossible spatial relationships",
+    "quiet translucent layering with vellum, tracing-paper diagrams, botanical fragments, and soft overlapping shadows",
+    "high-energy photocopied zine collage with ripped textures, rough ink, stamps, and dense edge-to-edge rhythm",
+)
+_FALLBACK_COMPOSITIONS = (
+    "an asymmetric diagonal build with a strong visual interruption near one edge",
+    "a loose handmade cluster that leaves breathing room in an unexpected corner",
+    "a monumental foreground shape opposed by several tiny satellite details",
+    "an all-over composition with controlled density and multiple discovery points",
+    "a layered window or portal that reveals depth through overlapping cut surfaces",
+    "a split-field composition whose two visual systems collide at the narrative turning point",
+)
+_FALLBACK_MOTIONS = (
+    "pieces tear open and peel back in staggered layers before settling",
+    "elements unfold, hinge, and tumble into a slightly imperfect handmade arrangement",
+    "large shapes sweep across the frame while smaller details punctuate the rhythm",
+    "fragments emerge from different depths, overlap, and lock into a surreal final relationship",
+    "translucent layers drift, fan open, and align with restrained tactile motion",
+    "photocopied scraps slap, rip-reveal, jitter, and finally freeze into a deliberate zine spread",
+)
 GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE = (
     "OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD"
 )
@@ -621,20 +645,25 @@ def _scene_choices(storyboard: dict, count: int, force_opening: bool) -> list[di
 def _fallback_spec(scene: dict, index: int) -> dict[str, Any]:
     text = str(scene.get("text") or "").strip()
     meaning = re.split(r"(?<=[.!?。！？])\s*", text)[0][:220] or "A hidden process becomes visible"
-    objects = ["central halftone subject", "paper mechanism", "connector pieces", "result card"]
+    objects = ["primary symbolic subject", "supporting found fragment", "physical relationship", "visible consequence"]
+    direction_index = index % len(_FALLBACK_ART_DIRECTIONS)
     return _with_scene_timing({
         "scene_id": scene["id"],
         "script_meaning": meaning,
         "emotion": "clarity",
-        "visual_metaphor": f"A paper mechanism physically reveals how {meaning.rstrip('.。')}.",
+        "visual_metaphor": f"A collage transformation makes visible how {meaning.rstrip('.。')}.",
         "background_hex": _COLORS[index % len(_COLORS)],
-        "accent_colors": ["warm cream", "cyan"],
+        "accent_colors": [],
+        "art_direction": _FALLBACK_ART_DIRECTIONS[direction_index],
+        "color_direction": "choose the palette from the story rather than a fixed house combination",
+        "composition_direction": _FALLBACK_COMPOSITIONS[direction_index],
+        "motion_direction": _FALLBACK_MOTIONS[direction_index],
         "elements": [
-            {"what": item, "role": "metaphor", "motion": "slides and snaps into place", "placement": "center"}
+            {"what": item, "role": "metaphor", "motion": "interpret freely", "placement": "choose for the composition"}
             for item in objects
         ],
         "assembly_order": objects,
-        "final_frame": "A concentrated completed paper mechanism with generous clear color field.",
+        "final_frame": "A resolved, story-specific collage whose visual relationship is clear without relying on a house layout.",
         "planner": "deterministic_fallback",
     }, scene)
 
@@ -644,14 +673,28 @@ def _normalize_spec(raw: dict, scene: dict, index: int) -> dict[str, Any]:
     spec = {**fallback, **raw, "scene_id": scene["id"], "planner": "claude_agent_sdk"}
     color = str(spec.get("background_hex") or "")
     spec["background_hex"] = color.upper() if _HEX.fullmatch(color) else fallback["background_hex"]
-    accents = [str(value)[:40] for value in (spec.get("accent_colors") or []) if str(value).strip()]
-    spec["accent_colors"] = accents[:3] or fallback["accent_colors"]
-    elements = [item for item in (spec.get("elements") or []) if isinstance(item, dict)][:6]
-    spec["elements"] = elements if len(elements) >= 3 else fallback["elements"]
+    raw_accents = spec.get("accent_colors")
+    accents = [
+        str(value)[:80]
+        for value in raw_accents
+        if str(value).strip()
+    ] if isinstance(raw_accents, list) else fallback["accent_colors"]
+    spec["accent_colors"] = accents[:6]
+    elements = [item for item in (spec.get("elements") or []) if isinstance(item, dict)][:8]
+    spec["elements"] = elements or fallback["elements"]
     order = [str(value)[:100] for value in (spec.get("assembly_order") or []) if str(value).strip()]
-    spec["assembly_order"] = order[:6] or [item["what"] for item in spec["elements"]]
-    for key in ("script_meaning", "emotion", "visual_metaphor", "final_frame"):
-        spec[key] = str(spec.get(key) or fallback[key])[:500]
+    spec["assembly_order"] = order[:8] or [item["what"] for item in spec["elements"]]
+    for key in (
+        "script_meaning",
+        "emotion",
+        "visual_metaphor",
+        "art_direction",
+        "color_direction",
+        "composition_direction",
+        "motion_direction",
+        "final_frame",
+    ):
+        spec[key] = str(spec.get(key) or fallback[key])[:800]
     return _with_scene_timing(spec, scene)
 
 
@@ -789,29 +832,35 @@ async def plan_specs(
 
 def image_prompt(spec: dict[str, Any], frame: FrameSpec) -> str:
     elements = "; ".join(str(item.get("what") or "") for item in spec["elements"])
-    accents = ", ".join(spec["accent_colors"])
+    accents = ", ".join(spec["accent_colors"]) or "no mandatory accent swatches"
     return f"""Use case: documentary B-roll.
 Asset type: final still frame for a {frame.aspect_ratio} image-to-video clip.
-Create a finished premium editorial paper-collage expressing this visual metaphor: {spec['visual_metaphor']}
-Scene/backdrop: a perfectly flat {spec['background_hex']} paper field with subtle uncoated-paper fiber.
-Style: sophisticated stop-motion editorial collage; black-and-white halftone photographic cut-outs mixed with selective {accents} colored cardstock.
-Composition: locked {frame.aspect_ratio} frame; one concentrated subject inside the middle 70 percent; generous clean color-field negative space; three to six large separable groups for assemble-from-empty animation.
-Required groups: {elements}.
+Create an original editorial collage expressing this visual metaphor: {spec['visual_metaphor']}
+
+Treat collage as an open medium, not a house style. Exercise broad creative control over the visual era, materials, edge treatment, mark-making, density, scale, depth, and balance. The result may be raw or refined, minimal or maximal, analog or graphic, playful or severe, as the story demands. Do not fall back to a generic centered halftone-paper template.
+
+Art direction: {spec['art_direction']}.
+Color direction: {spec['color_direction']}. The empty animation keyframe uses {spec['background_hex']} as its base color; integrate that anchor naturally rather than letting it dictate the whole palette. Optional planner swatches: {accents}.
+Composition direction: {spec['composition_direction']}.
+Conceptual ingredients: {elements}. Reinterpret, combine, crop, abstract, or subordinate them freely; they are narrative ingredients, not a rigid object checklist.
 Final relationship: {spec['final_frame']}
-Materials: visible printed halftone dots, crisp machine-cut edges, thin warm-cream keylines, soft low-opacity physical shadows.
-Avoid all typography, readable letters, numerals, logos, watermarks, UI, subtitles, glossy 3D, photoreal environments, clutter, frames, and borders."""
+
+Make this frame feel specifically authored for this narration beat and visibly distinct from the other collage shots in the same video. Preserve enough separable visual structure for an assemble-from-empty animation.
+
+Content exclusions only: no readable typography, letters, numerals, logos, watermarks, UI, or subtitles. These exclusions do not otherwise limit the collage aesthetic."""
 
 
 def video_prompt(spec: dict[str, Any], frame: FrameSpec) -> str:
     order = " → ".join(spec["assembly_order"])
     target_duration = _seconds(spec.get("target_duration_seconds"), 8.0)
-    return f"""Paper-collage stop-motion assembly. Image 1 is the exact empty first frame and Image 2 is the exact completed last frame. In one continuous locked-off {frame.aspect_ratio} shot, open on the empty flat {spec['background_hex']} paper field.
+    return f"""Animate an editorial collage from Image 1, the exact empty first frame, to Image 2, the exact completed last frame. Keep one continuous {frame.aspect_ratio} shot and resolve precisely to the supplied Image 2 composition.
 
-Assemble the scene piece by piece with crisp physical stop-motion timing in this exact order: {order}. Pieces slide, drop, stamp, and snap into place exactly once. Pace the single assembly across approximately {target_duration:.3f} seconds, then hold the supplied completed Image 2 composition. Never restart or repeat any motion.
+Motion direction: {spec['motion_direction']}.
+Suggested narrative progression: {order}. Treat it as an expressive story arc, not a mandatory list of identical entrance moves. Freely vary timing, overlaps, reveals, material behavior, depth, and local movement to suit the art direction. Subtle camera or parallax motion is allowed only when it settles back into the exact supplied final framing.
 
-Preserve the exact {frame.aspect_ratio} framing, {spec['background_hex']} color field, colored cardstock accents, uncoated paper grain, halftone dots, cream keylines, crisp cut edges, and soft paper shadows. Restrained tactile 2D paper craft only. Target running time: {target_duration:.3f} seconds.
+Complete one non-repeating evolution across approximately {target_duration:.3f} seconds, then hold the supplied Image 2 composition. Never restart or loop any motion. Preserve the chosen collage language and do not introduce a generic stop-motion preset. Target running time: {target_duration:.3f} seconds.
 
-No scene cuts, camera movement, zoom, morphing, new objects, text, letters, numbers, logos, watermark, UI, or sound."""
+No scene cuts, unrelated new objects, readable text, letters, numbers, logos, watermark, UI, or sound."""
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:

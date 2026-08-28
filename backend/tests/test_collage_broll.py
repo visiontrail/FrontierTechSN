@@ -135,19 +135,61 @@ def test_scene_selection_forces_opening_and_spreads_the_rest():
     assert selected[-1]["id"] == "scene-06"
 
 
-def test_prompts_follow_the_task_orientation_and_keep_media_clean():
-    spec = collage_broll._fallback_spec(_board(1)["scenes"][0], 0)
+def test_prompts_follow_orientation_keep_media_clean_and_leave_style_open():
+    spec = {
+        **collage_broll._fallback_spec(_board(1)["scenes"][0], 0),
+        "art_direction": "surreal torn-photo assemblage with painted interruptions",
+        "color_direction": "acid brights collide with dusty archival neutrals",
+        "composition_direction": "an unstable edge-weighted diagonal",
+        "motion_direction": "layers peel, hinge, and ripple into place",
+    }
 
     still = collage_broll.image_prompt(spec, LANDSCAPE)
     motion = collage_broll.video_prompt(spec, PORTRAIT)
 
     assert "16:9" in still
     assert "9:16" in motion
-    assert "Image 1 is the exact empty first frame" in motion
-    assert "No scene cuts, camera movement, zoom" in motion
+    assert "Treat collage as an open medium, not a house style" in still
+    assert spec["art_direction"] in still
+    assert spec["composition_direction"] in still
+    assert "Reinterpret, combine, crop, abstract, or subordinate them freely" in still
+    assert "Image 1, the exact empty first frame" in motion
+    assert spec["motion_direction"] in motion
+    assert "not a mandatory list of identical entrance moves" in motion
+    assert "No scene cuts" in motion
     assert "Target running time: 6.000 seconds" in motion
-    assert "Never restart or repeat any motion" in motion
-    assert "Avoid all typography" in still
+    assert "Never restart or loop any motion" in motion
+    assert "Content exclusions only" in still
+
+
+def test_normalize_spec_preserves_freeform_ai_art_direction_and_sparse_elements():
+    scene = _board(1)["scenes"][0]
+    raw = {
+        "art_direction": "dense hand-painted maximalist scrapbook",
+        "color_direction": "nearly monochrome oxblood with one electric yellow interruption",
+        "composition_direction": "edge-to-edge layers with no central hero",
+        "motion_direction": "one broad sheet tears open to reveal nested fragments",
+        "accent_colors": [],
+        "elements": [
+            {
+                "what": "one monumental torn sheet",
+                "role": "the entire metaphor",
+                "motion": "tears open",
+                "placement": "edge to edge",
+            }
+        ],
+        "assembly_order": ["one monumental torn sheet"],
+    }
+
+    spec = collage_broll._normalize_spec(raw, scene, 0)
+
+    assert spec["art_direction"] == raw["art_direction"]
+    assert spec["color_direction"] == raw["color_direction"]
+    assert spec["composition_direction"] == raw["composition_direction"]
+    assert spec["motion_direction"] == raw["motion_direction"]
+    assert spec["accent_colors"] == []
+    assert spec["elements"] == raw["elements"]
+    assert spec["assembly_order"] == raw["assembly_order"]
 
 
 def test_clip_duration_matches_script_and_respects_gemini_ceiling():
@@ -710,12 +752,13 @@ def test_agent_selects_beats_from_the_full_timeline():
             {"scene_id": "scene-06", "visual_metaphor": "a bridge locks its final span"},
         ]
     )
+    complete = AsyncMock(return_value=answer)
     with (
         patch(
             "backend.pipeline.digester._resolve_provider",
             AsyncMock(return_value=("https://example.test", "model", "key")),
         ),
-        patch("backend.pipeline.agent.agent_complete", AsyncMock(return_value=answer)),
+        patch("backend.pipeline.agent.agent_complete", complete),
     ):
         specs = asyncio.run(
             collage_broll.plan_specs(
@@ -725,6 +768,11 @@ def test_agent_selects_beats_from_the_full_timeline():
 
     assert [spec["scene_id"] for spec in specs] == ["scene-03", "scene-06"]
     assert all(spec["planner"] == "claude_agent_sdk" for spec in specs)
+    planner_system = complete.await_args.args[0]
+    assert "Paper collage is the medium, not a preset aesthetic" in planner_system
+    assert "deliberately vary at least the composition strategy" in planner_system
+    assert '"art_direction"' in planner_system
+    assert '"motion_direction"' in planner_system
 
 
 def test_agent_reserves_abstract_scene_for_collage_instead_of_grounded_scene():
