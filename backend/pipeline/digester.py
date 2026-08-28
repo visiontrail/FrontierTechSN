@@ -5,18 +5,26 @@ import re
 import time
 import httpx
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, urlunsplit
 from backend import config
 from backend.pipeline.extractors.base import ExtractedContent
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
+RouteSelectedCallback = Callable[[str, str, str], None]
 
 MAX_CHUNK_WORDS = 6000
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
-MAX_SCRIPT_OUTPUT_TOKENS = 8192
+MAX_SCRIPT_OUTPUT_TOKENS = 32_768
+MAX_REASONING_OUTPUT_TOKENS = 32_768
 NON_ENGLISH_SCRIPT_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
 SPEAKER_LINE_RE = re.compile(r"^\s*Speaker\s*(\d+)\s*[:：\-—–]\s*(.+)$", re.IGNORECASE)
+
+
+class ReasoningBudgetExhausted(RuntimeError):
+    """A reasoning model consumed the full adaptive output allowance."""
 
 
 def _dlog(log: LogCallback | None, message: str):
@@ -74,52 +82,107 @@ async def _chat(
     max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     enable_skills: bool = True,
     disable_thinking: bool = False,
+    route_selected: RouteSelectedCallback | None = None,
 ) -> str:
     """Single completion for a (system prompt, user content) pair.
 
     Dispatches to the Claude Agent SDK (default) or the legacy OpenAI-compatible
-    HTTP client based on ``config.AI_BACKEND``. Both honour the same resolved
-    provider config."""
-    if config.AI_BACKEND == "agent_sdk":
-        from backend.pipeline import agent
+    HTTP client based on ``config.AI_BACKEND``. OneAPI receives the full
+    bounded retry ladder before the call moves to the configured DeepSeek
+    backup. Partial output is never exposed between routes."""
+    from backend.pipeline import model_router
 
+    routes = await model_router.resolve_model_routes(
+        endpoint=endpoint or config.AI_ENDPOINT,
+        model=model or config.AI_MODEL,
+        api_key=api_key if api_key is not None else config.AI_API_KEY,
+    )
+    if len(routes) > 1:
+        _dlog(
+            log,
+            f"{label}: model route {routes[0].audit_label} -> {routes[1].audit_label}; "
+            "backup activates only after "
+            f"{model_router.max_retries_for_route(routes[0]) + 1} primary attempts",
+        )
+
+    last_error: Exception | None = None
+    for index, route in enumerate(routes):
         try:
-            return await agent.agent_complete(
+            if config.AI_BACKEND == "agent_sdk":
+                from backend.pipeline import agent
+
+                try:
+                    content = await agent.agent_complete(
+                        system_prompt,
+                        user_content,
+                        model=route.model,
+                        endpoint=route.endpoint,
+                        api_key=route.api_key,
+                        max_tokens=max_tokens,
+                        enable_skills=enable_skills,
+                        disable_thinking=disable_thinking,
+                        log=log,
+                        label=label,
+                        # This dispatcher owns the route so the agent transport
+                        # cannot independently perform the same failover twice.
+                        allow_provider_failover=False,
+                        max_retries=model_router.max_retries_for_route(route),
+                    )
+                    if len(routes) > 1:
+                        _dlog(log, f"{label}: completed via {route.audit_label}")
+                    if route_selected is not None:
+                        route_selected(route.endpoint, route.model, route.api_key)
+                    return content
+                except Exception as exc:
+                    # When a backup exists, move forward after the primary's
+                    # SDK retry ladder. HTTP fallback is reserved for the last
+                    # route so a failed backup never jumps back to OneAPI.
+                    if not config.AI_HTTP_FALLBACK or index + 1 < len(routes):
+                        raise
+                    _dwarn(
+                        log,
+                        f"{label}: Claude Agent SDK failed on {route.audit_label} "
+                        f"({exc}); trying the OpenAI-compatible transport on "
+                        "that same final route",
+                    )
+
+            content = await _chat_http(
                 system_prompt,
                 user_content,
-                model=model or config.AI_MODEL,
-                endpoint=endpoint or config.AI_ENDPOINT,
-                api_key=api_key if api_key is not None else config.AI_API_KEY,
-                max_tokens=max_tokens,
-                enable_skills=enable_skills,
-                disable_thinking=disable_thinking,
+                endpoint=route.endpoint,
+                model=route.model,
+                api_key=route.api_key,
                 log=log,
                 label=label,
+                max_tokens=max_tokens,
+                max_retries=model_router.max_retries_for_route(route),
             )
-        except Exception as e:
-            # The SDK path has a failure mode the HTTP path does not: it depends
-            # on a `claude` CLI subprocess and on the gateway exposing a usable
-            # Anthropic route. Losing a whole extraction + digestion run to that
-            # is a worse outcome than spending one more call on the same
-            # provider's OpenAI-compatible route.
-            if not config.AI_HTTP_FALLBACK:
-                raise
-            _dwarn(
-                log,
-                f"{label}: Claude Agent SDK failed ({e}); falling back to the "
-                f"OpenAI-compatible HTTP client on the same provider",
-            )
+            if len(routes) > 1:
+                _dlog(log, f"{label}: completed via {route.audit_label}")
+            if route_selected is not None:
+                route_selected(route.endpoint, route.model, route.api_key)
+            return content
+        except Exception as exc:  # noqa: BLE001 - provider route boundary
+            last_error = exc
+            next_index = index + 1
+            if next_index < len(routes):
+                next_route = routes[next_index]
+                _dwarn(
+                    log,
+                    f"{label}: {route.audit_label} exhausted its "
+                    f"{model_router.max_retries_for_route(route) + 1} attempts; switching to "
+                    f"{next_route.audit_label}",
+                )
 
-    return await _chat_http(
-        system_prompt,
-        user_content,
-        endpoint=endpoint,
-        model=model,
-        api_key=api_key,
-        log=log,
-        label=label,
-        max_tokens=max_tokens,
-    )
+    if len(routes) > 1:
+        route_labels = " -> ".join(route.audit_label for route in routes)
+        raise model_router.ModelRouteExhausted(
+            f"All configured model routes failed after bounded retries: {route_labels}; "
+            f"last_error={last_error.__class__.__name__ if last_error else 'unknown'}"
+        ) from last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No model route was available")
 
 
 def _chat_completions_url(endpoint: str) -> str:
@@ -139,6 +202,28 @@ def _chat_completions_url(endpoint: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path + suffix, parts.query, ""))
 
 
+def _retry_after_seconds(response: httpx.Response | None) -> float:
+    """Return a bounded Retry-After delay from seconds or an HTTP date."""
+    if response is None:
+        return 0.0
+    raw = response.headers.get("retry-after", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, min(3600.0, float(raw)))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(raw)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(
+                0.0,
+                min(3600.0, (retry_at - datetime.now(timezone.utc)).total_seconds()),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+
 async def _chat_http(
     system_prompt: str,
     user_content: str,
@@ -148,17 +233,26 @@ async def _chat_http(
     log: LogCallback | None = None,
     label: str = "AI call",
     max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    max_retries: int | None = None,
 ) -> str:
     endpoint = _chat_completions_url(endpoint or config.AI_ENDPOINT)
     model = model or config.AI_MODEL
     api_key = api_key if api_key is not None else config.AI_API_KEY
+    retry_limit = max(
+        0,
+        int(config.AI_MAX_RETRIES if max_retries is None else max_retries),
+    )
 
     _dlog(log, f"{label}: POST {endpoint} (model={model}, ~{len(user_content.split())} words in)")
 
     async with httpx.AsyncClient(timeout=config.AI_TIMEOUT) as client:
         current_max_tokens = max_tokens
-        for attempt in range(config.AI_MAX_RETRIES + 1):
+        attempt = 0
+        rate_limit_waits = 0
+        while attempt <= retry_limit:
             start = time.perf_counter()
+            retry_after_delay = 0.0
+            quota_wait_requested = False
             try:
                 prompt = system_prompt
                 if attempt > 0:
@@ -168,6 +262,13 @@ async def _chat_http(
                         "Do not spend tokens on hidden reasoning, analysis, markdown fences, or explanations. "
                         "Start immediately with the requested output."
                     )
+                from backend.pipeline import provider_rate_limit
+
+                await provider_rate_limit.wait_for_request_slot(
+                    endpoint,
+                    log=log,
+                    label=label,
+                )
                 resp = await client.post(
                     endpoint,
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -207,7 +308,24 @@ async def _chat_http(
                     f"reasoning_chars={len(reasoning)})"
                 )
                 _dwarn(log, f"{label} attempt {attempt + 1} failed: {detail}")
-                if attempt == config.AI_MAX_RETRIES:
+                if finish_reason == "length" and reasoning:
+                    expanded_max_tokens = min(
+                        MAX_REASONING_OUTPUT_TOKENS,
+                        current_max_tokens * 2,
+                    )
+                    if attempt < retry_limit and expanded_max_tokens > current_max_tokens:
+                        current_max_tokens = expanded_max_tokens
+                        _dwarn(
+                            log,
+                            f"{label}: hidden reasoning exhausted the output budget; "
+                            f"retrying immediately with max_tokens={current_max_tokens}",
+                        )
+                        continue
+                    raise ReasoningBudgetExhausted(
+                        f"AI request returned {detail}; hidden reasoning exhausted "
+                        "the maximum adaptive output budget"
+                    )
+                if attempt == retry_limit:
                     raise RuntimeError(f"AI request returned {detail}")
             except httpx.HTTPStatusError as e:
                 # raise_for_status()'s message omits the response body, which is
@@ -220,8 +338,25 @@ async def _chat_http(
                     f"response body: {body or '<empty>'}"
                 )
                 _dwarn(log, f"{label} attempt {attempt + 1} failed: {detail}")
+                retry_after_delay = _retry_after_seconds(e.response)
+                if e.response is not None and e.response.status_code == 429:
+                    from backend.pipeline import provider_rate_limit
+
+                    retry_after_delay = max(
+                        retry_after_delay,
+                        await provider_rate_limit.record_rate_limit(
+                            endpoint,
+                            log=log,
+                            label=label,
+                        ),
+                    )
+                    quota_wait_requested = (
+                        retry_after_delay > 0
+                        and rate_limit_waits
+                        < max(0, int(config.AI_PRIMARY_RATE_LIMIT_MAX_WAITS))
+                    )
                 if (
-                    attempt < config.AI_MAX_RETRIES
+                    attempt < retry_limit
                     and current_max_tokens > DEFAULT_MAX_OUTPUT_TOKENS
                     and e.response is not None
                     and e.response.status_code in (400, 422)
@@ -230,30 +365,44 @@ async def _chat_http(
                     current_max_tokens = DEFAULT_MAX_OUTPUT_TOKENS
                     _dwarn(log, f"{label}: retrying with max_tokens={current_max_tokens}")
                     continue
-                if attempt == config.AI_MAX_RETRIES:
+                if attempt == retry_limit and not quota_wait_requested:
                     raise RuntimeError(f"AI request failed: {detail}") from e
             except httpx.RequestError as e:
                 # Connection refused, DNS failure, timeout — no response body.
                 detail = f"{e.__class__.__name__} connecting to {endpoint} (model={model}): {e}"
                 _dwarn(log, f"{label} attempt {attempt + 1} failed: {detail}")
-                if attempt == config.AI_MAX_RETRIES:
+                if attempt == retry_limit:
                     raise RuntimeError(f"AI request failed: {detail}") from e
+            except ReasoningBudgetExhausted:
+                raise
             except Exception as e:
                 _dwarn(log, f"{label} attempt {attempt + 1} failed: {e.__class__.__name__}: {e}")
-                if attempt == config.AI_MAX_RETRIES:
+                if attempt == retry_limit:
                     raise
 
-            if attempt < config.AI_MAX_RETRIES:
+            if quota_wait_requested:
+                rate_limit_waits += 1
+                _dlog(
+                    log,
+                    f"{label}: OneAPI quota wait {rate_limit_waits}/"
+                    f"{config.AI_PRIMARY_RATE_LIMIT_MAX_WAITS}; retrying the primary after "
+                    "the shared cooldown without consuming a provider failure attempt",
+                )
+                continue
+
+            if attempt < retry_limit:
                 delay = min(
                     config.AI_RETRY_MAX_SECONDS,
                     config.AI_RETRY_BASE_SECONDS * 2**attempt,
                 )
+                delay = max(delay, retry_after_delay)
                 _dlog(
                     log,
                     f"{label}: retrying same provider call in {delay:.0f}s "
-                    f"({attempt + 2}/{config.AI_MAX_RETRIES + 1})",
+                    f"({attempt + 2}/{retry_limit + 1})",
                 )
                 await asyncio.sleep(delay)
+            attempt += 1
 
 
 async def test_connection(endpoint: str, model: str, api_key: str) -> int:

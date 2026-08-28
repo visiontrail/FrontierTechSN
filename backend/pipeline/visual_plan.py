@@ -617,6 +617,14 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
                 weighted_terms[term] = max(weighted_terms.get(term, 0), weight)
         distinctive = set(weighted_terms) - common_terms
         excerpt_terms = _terms(clip.get("script_excerpt", "")) - common_terms
+        candidate_metadata_terms = _terms(
+            f"{clip.get('title', '')} {clip.get('description', '')}"
+        ) - common_terms
+        is_commons_clip = (
+            str(clip.get("provider_id") or "").casefold() == "wikimedia"
+            or str(clip.get("provider") or "").casefold()
+            == "wikimedia commons"
+        )
         minimum_excerpt_matches = min(3, len(excerpt_terms))
 
         best_id, best_score, best_matches, best_excerpt_matches = None, 0.0, [], []
@@ -628,6 +636,17 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
                 continue
             matches = sorted(distinctive & scene_terms[plan["id"]])
             if len(matches) < 2:
+                continue
+            # A Commons discovery query and its narration ``purpose`` prove
+            # where the clip was intended to land, but not what the pixels
+            # actually depict.  Require two narration anchors in the source
+            # title/description before a public clip may replace a grounded
+            # card.  This rejects, for example, a robotic arm for a robot-duck
+            # story and a branded NeuroMat lecture for an IEEE-HKN event.
+            candidate_matches = sorted(
+                candidate_metadata_terms & scene_terms[plan["id"]]
+            )
+            if is_commons_clip and len(candidate_matches) < 2:
                 continue
             excerpt_matches = sorted(excerpt_terms & scene_terms[plan["id"]])
             if excerpt_terms and len(excerpt_matches) < minimum_excerpt_matches:
@@ -648,7 +667,17 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
         plan["footage_credit"] = _footage_credit(clip)
         plan["footage_query"] = str(clip.get("query") or "")[:160]
         plan["footage_match_terms"] = best_matches
-        plan["footage_script_match_terms"] = best_excerpt_matches
+        plan["footage_candidate_match_terms"] = sorted(
+            candidate_metadata_terms & scene_terms[best_id]
+        )
+        # Commons clips selected from a user query carry a narration-grounded
+        # ``purpose`` but no web-scout ``script_excerpt``.  Preserve ``None``
+        # for that case: an empty list incorrectly means that an excerpt was
+        # present and matched zero words, causing the final quality gate to
+        # reject otherwise strongly grounded footage.
+        plan["footage_script_match_terms"] = (
+            best_excerpt_matches if excerpt_terms else None
+        )
         plan["footage_match_score"] = best_score
         plan["footage_confidence"] = round(confidence, 3)
         if fallback_excerpt:

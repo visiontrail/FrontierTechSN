@@ -38,7 +38,7 @@ LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 MANIFEST_VERSION = 12
-QUERY_SEMANTICS_VERSION = 7
+QUERY_SEMANTICS_VERSION = 8
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
 NEWS_IMAGE_MAX_PIXELS = 16_000_000
@@ -2448,6 +2448,20 @@ def _grounding_evidence(shot: dict, scene: dict, candidate: dict) -> dict:
     candidate_match = _candidate_identity_match(shot, candidate)
     context_conflicts = _candidate_context_conflicts(scene, candidate)
     semantic_error = _shot_subject_semantic_error(shot, scene)
+    # Some one-word product names are also unrelated, established brands.
+    # A bare Commons identity match is not enough for these names: for example,
+    # a consumer-goods company named Hermes must not illustrate the Hermes AI
+    # coding agent.  Requiring one additional narrated context term rejects the
+    # ambiguity while still allowing a candidate whose metadata says what the
+    # product actually is.
+    ambiguous_context_terms = {
+        "hermes": {"ai", "agent", "code", "coding", "software", "model"},
+    }
+    required_context = ambiguous_context_terms.get(
+        subject_terms[0] if len(subject_terms) == 1 else "",
+        set(),
+    )
+    context_terms = (scene_terms & candidate_terms & required_context)
     passed = True
     reason = "complete subject identity matched narration and one candidate metadata field"
     if semantic_error:
@@ -2462,6 +2476,12 @@ def _grounding_evidence(shot: dict, scene: dict, candidate: dict) -> dict:
     elif candidate_match is None:
         passed = False
         reason = "candidate did not contain the complete identity in one metadata field"
+    elif required_context and not context_terms:
+        passed = False
+        reason = (
+            "ambiguous single-token identity lacked matching AI/product context in "
+            "candidate metadata"
+        )
     elif context_conflicts:
         passed = False
         reason = (

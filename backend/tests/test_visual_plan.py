@@ -390,6 +390,81 @@ def test_visual_grounding_report_requires_every_scene_and_grounded_footage():
     assert report["passed"] is False
 
 
+def test_commons_footage_without_web_excerpt_uses_purpose_grounding(tmp_path):
+    data = board(1)
+    scene = data["scenes"][0]
+    scene["text"] = "Sunflower research tracks fields near Paris."
+    scene["keywords"] = ["sunflower", "research", "paris"]
+    plans = visual_plan.fallback_plan(data)
+    footage_dir = tmp_path / "footage"
+    footage_dir.mkdir()
+    (footage_dir / "sunflower.mp4").write_bytes(b"video")
+    manifest = {
+        "clips": [
+            {
+                "local_path": "footage/sunflower.mp4",
+                "query": "sunflower research",
+                "purpose": scene["text"],
+                "title": "Sunflower research film",
+                "provider": "Wikimedia Commons",
+            }
+        ]
+    }
+
+    assert visual_plan.attach_footage(plans, data, manifest, tmp_path) == 1
+    assert plans[0]["footage_script_match_terms"] is None
+    assert visual_plan.visual_grounding_report(plans, data)["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("scene_text", "query", "title", "description"),
+    [
+        (
+            "DeepTech China reports Hugging Face open-sourced a robot duck that walks, slides, and self-rights.",
+            "robot",
+            "Hand-made robotic arm with Arduino.webm",
+            "A hand-made robotic arm with Arduino.",
+        ),
+        (
+            "IEEE Spectrum says IEEE-HKN's Innovating the Future conference lets student authors present original research.",
+            "student research presentation",
+            "LASCON - a video presentation.webm",
+            "A NeuroMat computational neuroscience school for graduate students.",
+        ),
+    ],
+)
+def test_commons_footage_with_conflicting_subject_metadata_keeps_grounded_card(
+    tmp_path: Path,
+    scene_text: str,
+    query: str,
+    title: str,
+    description: str,
+):
+    data = board(1)
+    scene = data["scenes"][0]
+    scene["text"] = scene_text
+    scene["keywords"] = []
+    plans = visual_plan.fallback_plan(data)
+    footage_dir = tmp_path / "footage"
+    footage_dir.mkdir()
+    (footage_dir / "candidate.mp4").write_bytes(b"video")
+    manifest = {
+        "clips": [
+            {
+                "local_path": "footage/candidate.mp4",
+                "query": query,
+                "purpose": scene_text,
+                "title": title,
+                "description": description,
+                "provider_id": "wikimedia",
+            }
+        ]
+    }
+
+    assert visual_plan.attach_footage(plans, data, manifest, tmp_path) == 0
+    assert plans[0]["archetype"] != "footage"
+
+
 def test_visual_grounding_report_accepts_verified_collage_on_requested_scene():
     data = board(1)
     plans = visual_plan.fallback_plan(data)

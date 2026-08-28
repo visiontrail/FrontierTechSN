@@ -440,6 +440,57 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("violated the requested review rubric", calibration["errors"][0])
             self.assertIn("calibration batch 1", report["errors"][0])
 
+    async def test_unavailable_calibration_retains_complete_initial_match_evidence(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenes = [
+                _scene("scene-01", 0, "Gold reaches a record price."),
+                _scene("scene-02", 8, "Central banks increase reserves."),
+            ]
+            opencli = AsyncMock(
+                side_effect=[
+                    _opencli_result(_matching_payload(scenes, 76)),
+                    OpenCLIResult(
+                        args=(), returncode=0, stdout="not JSON", stderr=""
+                    ),
+                    OpenCLIResult(
+                        args=(), returncode=0, stdout="still not JSON", stderr=""
+                    ),
+                ]
+            )
+            with (
+                patch.object(
+                    multimodal_review,
+                    "extract_scene_frames",
+                    AsyncMock(return_value=_frames(root, scenes)),
+                ),
+                patch.object(multimodal_review, "run_opencli", opencli),
+                patch.object(config, "AV_SYNC_GEMINI_BATCH_SIZE", 8),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_SCENE_SCORE", 70),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
+                patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
+                patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 1),
+            ):
+                report = await multimodal_review.review_video(
+                    root / "video.mp4",
+                    {"title": "Gold", "scenes": scenes},
+                    root,
+                )
+
+            self.assertTrue(report["passed"])
+            self.assertEqual(report["average_score"], 76)
+            self.assertEqual(report["failed_scene_ids"], [])
+            self.assertEqual(report["errors"], [])
+            self.assertEqual(
+                report["release_basis"],
+                "clean_initial_matches_after_calibration_unavailable",
+            )
+            calibration = report["calibration"]
+            self.assertTrue(calibration["attempted"])
+            self.assertTrue(calibration["fallback_to_initial"])
+            self.assertIn("retained the initial review", calibration["fallback_reason"])
+            self.assertEqual(opencli.await_count, 3)
+
     async def test_low_scene_score_rejects_video_even_when_average_is_high(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

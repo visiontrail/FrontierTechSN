@@ -41,6 +41,49 @@ AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "600"))
 AI_MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "9"))
 AI_RETRY_BASE_SECONDS = float(os.getenv("AI_RETRY_BASE_SECONDS", "4"))
 AI_RETRY_MAX_SECONDS = float(os.getenv("AI_RETRY_MAX_SECONDS", "60"))
+# OneAPI currently allows five requests in a rolling minute. Four starts per
+# minute leaves headroom for operator probes and clock jitter, while long model
+# generation itself remains governed by the request/turn ceilings below.
+AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS = float(
+    os.getenv("AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", "15")
+)
+# A 429 means the rolling minute is already full, potentially because another
+# process or operator used the same account. Stop all local OneAPI starts for a
+# complete window instead of merely applying the normal between-call spacing.
+AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS = float(
+    os.getenv("AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS", "65")
+)
+# Quota exhaustion is not a model failure. Let the automation sit through a
+# bounded number of full rolling-minute windows before a 429 begins consuming
+# the primary route's ordinary failure budget and can eventually trigger the
+# paid backup.
+AI_PRIMARY_RATE_LIMIT_MAX_WAITS = int(
+    os.getenv("AI_PRIMARY_RATE_LIMIT_MAX_WAITS", "6")
+)
+# The advertised five-RPM ceiling is a weekday daytime policy. Outside this
+# local window, requests start immediately unless the gateway itself has just
+# returned 429, in which case the explicit cooldown above still applies.
+AI_PRIMARY_RATE_LIMIT_TIMEZONE = os.getenv(
+    "AI_PRIMARY_RATE_LIMIT_TIMEZONE", "Asia/Singapore"
+).strip()
+AI_PRIMARY_RATE_LIMIT_START_HOUR = int(
+    os.getenv("AI_PRIMARY_RATE_LIMIT_START_HOUR", "8")
+)
+AI_PRIMARY_RATE_LIMIT_END_HOUR = int(
+    os.getenv("AI_PRIMARY_RATE_LIMIT_END_HOUR", "20")
+)
+# Automated editions use an ordered provider route.  Unlike RavenAIService's
+# latency-sensitive interactive router, the worker deliberately gives the
+# primary gateway its full timeout/retry ladder before moving on.  Provider
+# types refer to the Admin -> Models catalogue, not mutable display names.
+AI_PROVIDER_FAILOVER_ENABLED = _env_bool("AI_PROVIDER_FAILOVER_ENABLED", "1")
+AI_PRIMARY_PROVIDER_TYPE = os.getenv("AI_PRIMARY_PROVIDER_TYPE", "yinhe").strip()
+AI_BACKUP_PROVIDER_TYPE = os.getenv("AI_BACKUP_PROVIDER_TYPE", "deepseek").strip()
+# Per-route ceilings. Four full OneAPI turns preserve the automation worker's
+# high latency tolerance without letting one node occupy 2.5 hours; the backup
+# gets three independent chances before the task fails closed.
+AI_PRIMARY_MAX_RETRIES = int(os.getenv("AI_PRIMARY_MAX_RETRIES", "3"))
+AI_BACKUP_MAX_RETRIES = int(os.getenv("AI_BACKUP_MAX_RETRIES", "2"))
 
 # Public-footage scouting. Wikimedia Commons needs no key, but asks API clients
 # to identify themselves. The byte ceiling prevents an autonomous scout from
@@ -51,6 +94,13 @@ FOOTAGE_USER_AGENT = os.getenv(
 )
 FOOTAGE_TIMEOUT = int(os.getenv("FOOTAGE_TIMEOUT", "45"))
 FOOTAGE_MAX_BYTES = int(os.getenv("FOOTAGE_MAX_BYTES", str(50 * 1024 * 1024)))
+# Browser renderers are much more reliable with a bounded AVC mezzanine than
+# with arbitrary Commons masters (notably 4K VP9/WebM).  Keep the original
+# download for the rights ledger, but feed HyperFrames this normalized copy.
+FOOTAGE_RENDER_MAX_WIDTH = int(os.getenv("FOOTAGE_RENDER_MAX_WIDTH", "1920"))
+FOOTAGE_RENDER_MAX_HEIGHT = int(os.getenv("FOOTAGE_RENDER_MAX_HEIGHT", "1080"))
+FOOTAGE_RENDER_MAX_SECONDS = int(os.getenv("FOOTAGE_RENDER_MAX_SECONDS", "20"))
+FOOTAGE_RENDER_CRF = int(os.getenv("FOOTAGE_RENDER_CRF", "23"))
 
 # News stills are planned against exact narrated scenes by ChatGPT through
 # OpenCLI, independently researched with Google News/Search through OpenCLI,
@@ -182,19 +232,22 @@ ANTHROPIC_DEFAULT_HAIKU_MODEL = os.getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "").s
 # (bundled with the wheel, else the first `claude` on PATH).
 CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "").strip()
 
-# The SDK spawns a CLI that owns its own retry ladder, so it needs two ceilings
-# rather than the single AI_TIMEOUT the HTTP client uses:
+# The SDK spawns a CLI subprocess, so it needs two ceilings rather than the
+# single AI_TIMEOUT the HTTP client uses:
 #   AGENT_REQUEST_TIMEOUT bounds one /v1/messages call inside the CLI
 #     (API_TIMEOUT_MS). Reasoning models behind a slow gateway routinely need
 #     two minutes for a single digestion turn, and a stall of 30s mid-stream is
 #     normal there — set this too low and every request is aborted just before
 #     it would have finished.
-#   AGENT_TURN_TIMEOUT bounds the whole CLI process. This is the ceiling that
-#     matters operationally: when a request keeps timing out the CLI silently
-#     retries it, so a 120s request budget can and did burn 25 minutes per
-#     attempt before exiting 1.
+#   AGENT_TURN_TIMEOUT bounds the whole CLI process. Internal CLI retries are
+#     disabled below; the outer pipeline performs paced, observable attempts.
 AGENT_REQUEST_TIMEOUT = int(os.getenv("AGENT_REQUEST_TIMEOUT", "600"))
 AGENT_TURN_TIMEOUT = int(os.getenv("AGENT_TURN_TIMEOUT", "900"))
+# Claude Code otherwise performs 11 tightly-spaced HTTP attempts inside one
+# SDK turn. That retry ladder violates OneAPI's five-requests-per-minute limit
+# before this worker can apply its own pacing. Zero means one CLI request; the
+# surrounding pipeline owns the ten long, rate-limited attempts instead.
+AGENT_INTERNAL_MAX_RETRIES = int(os.getenv("AGENT_INTERNAL_MAX_RETRIES", "0"))
 # When the Agent SDK transport fails outright (CLI missing, gateway with no
 # Anthropic route, process dying), fall back to the OpenAI-compatible client on
 # the same provider instead of failing the stage. Costs one extra call on a
@@ -447,6 +500,10 @@ RENDER_FPS = int(os.getenv("RENDER_FPS", "15"))
 RENDER_QUALITY = os.getenv("RENDER_QUALITY", "draft")  # draft | standard | high
 RENDER_WORKERS = os.getenv("RENDER_WORKERS", "2")      # integer or "auto"
 RENDER_RESOLUTION = os.getenv("RENDER_RESOLUTION", "landscape")  # 1920x1080
+# HyperFrames' default five-minute CDP timeout can expire inside one live
+# multi-worker capture call even though the outer render is still progressing.
+# Keep this bounded but long enough for 1080p multi-video scenes on Apple Silicon.
+RENDER_PROTOCOL_TIMEOUT_MS = int(os.getenv("RENDER_PROTOCOL_TIMEOUT_MS", "900000"))
 
 OUTPUTS_DIR = resolve_project_path(os.getenv("OUTPUTS_DIR", "outputs"))
 UPLOADS_DIR = resolve_project_path(os.getenv("UPLOADS_DIR", "uploads"))

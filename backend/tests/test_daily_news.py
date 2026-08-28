@@ -440,7 +440,7 @@ def test_d_only_audit_rewrites_from_evidence_before_trimming():
     assert "distinguish source attribution from claim attribution" in chat.await_args.args[0]
     assert "CURRENT FAILED STORY PARAGRAPHS" in chat.await_args.args[1]
     assert "CURRENT SCRIPT" not in chat.await_args.args[1]
-    assert chat.await_args.args[3] == "yinhe-chat"
+    assert chat.await_args.args[3] == "yinhe-thinking"
     assert chat.await_args.kwargs["disable_thinking"] is True
 
 
@@ -654,8 +654,9 @@ def test_duration_repair_restores_evidence_only_story_paragraphs():
     assert repaired.splitlines()[2] == protected
     assert report["passed"] is True
     assert "Story paragraphs [2]" in chat.await_args.args[0]
-    assert chat.await_args.args[3] == "yinhe-chat"
+    assert chat.await_args.args[3] == "yinhe-thinking"
     assert chat.await_args.kwargs["max_tokens"] == scriptwriter.DAILY_NEWS_EDIT_MAX_TOKENS
+    assert chat.await_args.kwargs["disable_thinking"] is True
 
 
 def test_duration_repair_closes_remaining_gap_after_protected_restore():
@@ -723,6 +724,149 @@ def test_duration_repair_closes_remaining_gap_after_protected_restore():
     assert "A prior edit still measured" in chat.await_args_list[1].args[0]
 
 
+def test_duration_repair_pins_semantic_retry_to_successful_backup_route():
+    edition = date(2026, 8, 28)
+    opening = morning_opening(edition, "en")
+    closing = "Thanks for listening."
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-28T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-28", "now", 36, articles, articles, [],
+    )
+
+    def candidate(words: int) -> str:
+        return "\n".join([
+            opening,
+            "Source 1 reports " + " ".join(["evidence"] * words) + ".",
+            "Source 2 reports " + " ".join(["detail"] * words) + ".",
+            closing,
+        ])
+
+    calls: list[tuple[str, str]] = []
+    prompts: list[str] = []
+
+    async def routed_chat(*args, **kwargs):
+        calls.append((args[2], args[3]))
+        prompts.append(args[0])
+        if len(calls) == 1:
+            kwargs["route_selected"](
+                "https://api.deepseek.com/anthropic",
+                "deepseek-v4-flash",
+                "backup-key",
+            )
+            return candidate(65)
+        return candidate(40)
+
+    with (
+        patch.object(
+            scriptwriter,
+            "_resolve_provider",
+            AsyncMock(return_value=("http://oneapi.example", "yinhe-thinking", "primary-key")),
+        ),
+        patch.object(scriptwriter, "_chat", side_effect=routed_chat),
+    ):
+        repaired, report = asyncio.run(
+            scriptwriter.fit_daily_script_duration(
+                candidate(70),
+                dossier,
+                edition,
+                target_duration_minutes=1,
+                language="en",
+                closing_remarks=closing,
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+            )
+        )
+
+    assert report["passed"] is True
+    assert calls == [
+        ("http://oneapi.example", "yinhe-thinking"),
+        ("https://api.deepseek.com/anthropic", "deepseek-v4-flash"),
+    ]
+    assert all("no more than" in prompt for prompt in prompts)
+    assert len(repaired.splitlines()) == 4
+
+
+def test_duration_repair_retries_a_semantically_invalid_oneapi_response():
+    edition = date(2026, 8, 26)
+    opening = morning_opening(edition, "en")
+    closing = "Thanks for listening."
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-25T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-26", "now", 36, articles, articles, [],
+    )
+    original = "\n".join([opening, "Too short.", "Still too short.", closing])
+    invalid = "\n".join([opening, "中文响应。", "Source 2 reports evidence.", closing])
+    valid = "internal reasoning that must not become narration</think>" + "\n".join(
+        [
+            opening,
+            " ".join(["evidence"] * 155) + ".",
+            " ".join(["detail"] * 155) + ".",
+            closing,
+        ]
+    )
+    messages: list[str] = []
+
+    with (
+        patch.object(
+            scriptwriter,
+            "_resolve_provider",
+            AsyncMock(return_value=("https://example.com", "yinhe-chat", "key")),
+        ),
+        patch.object(
+            scriptwriter,
+            "_chat",
+            AsyncMock(side_effect=[invalid, valid]),
+        ) as chat,
+    ):
+        repaired, report = asyncio.run(
+            scriptwriter.fit_daily_script_duration(
+                original,
+                dossier,
+                edition,
+                target_duration_minutes=3,
+                language="en",
+                closing_remarks=closing,
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+                log=messages.append,
+            )
+        )
+
+    assert chat.await_count == 2
+    assert report["passed"] is True
+    assert "中文" not in repaired
+    assert "previous response was rejected by software" in chat.await_args_list[1].args[0]
+    assert any("rejected semantic response 1/3" in message for message in messages)
+
+
 def test_fixed_morning_opening_and_contract_are_software_owned():
     edition = date(2026, 8, 18)
     opening = morning_opening(edition, "en")
@@ -738,6 +882,73 @@ def test_fixed_morning_opening_and_contract_are_software_owned():
     assert final.endswith(closing)
     assert final.count("Good morning") == 1
     assert SOURCE_SPOKEN_ALIASES["量子位 QbitAI"] == ("QbitAI",)
+
+
+def test_script_generation_retries_missing_paragraph_on_successful_backup_route():
+    edition = date(2026, 8, 28)
+    closing = "Thanks for listening."
+    articles = [
+        research.NewsArticle(
+            id=str(index),
+            source_id=f"source-{index}",
+            source_name=f"Source {index}",
+            language="en",
+            title=f"Story {index}",
+            url=f"https://example.com/{index}",
+            published_at="2026-08-28T00:00:00+00:00",
+            summary=f"Evidence for story {index}.",
+            evidence_text=f"Evidence for story {index}.",
+        )
+        for index in (1, 2)
+    ]
+    dossier = research.ResearchDossier(
+        "2026-08-28", "now", 36, articles, articles, [],
+    )
+    invalid = "Source 1 reports evidence.Source 2 reports separate evidence."
+    valid = "Source 1 reports evidence.\nSource 2 reports separate evidence."
+    calls: list[tuple[str, str, bool]] = []
+    prompts: list[str] = []
+
+    async def routed_chat(*args, **kwargs):
+        calls.append((args[2], args[3], kwargs["disable_thinking"]))
+        prompts.append(args[0])
+        if len(calls) == 1:
+            kwargs["route_selected"](
+                "https://api.deepseek.com/anthropic",
+                "deepseek-v4-flash",
+                "backup-key",
+            )
+            return invalid
+        return valid
+
+    with (
+        patch.object(
+            scriptwriter,
+            "_resolve_provider",
+            AsyncMock(return_value=("http://oneapi.example", "yinhe-thinking", "primary-key")),
+        ),
+        patch.object(scriptwriter, "_chat", side_effect=routed_chat),
+    ):
+        generated = asyncio.run(
+            scriptwriter.generate_daily_script(
+                dossier,
+                edition,
+                target_duration_minutes=1,
+                language="en",
+                closing_remarks=closing,
+                ai_endpoint=None,
+                ai_model=None,
+                provider_id=None,
+            )
+        )
+
+    assert len(generated.splitlines()) == 4
+    assert calls == [
+        ("http://oneapi.example", "yinhe-thinking", False),
+        ("https://api.deepseek.com/anthropic", "deepseek-v4-flash", True),
+    ]
+    assert "exactly 2 nonblank story paragraphs" in prompts[0]
+    assert "previous response was rejected by software" in prompts[1]
 
 
 def test_daily_duration_contract_rejects_the_observed_two_minute_eight_minute_mismatch():
@@ -958,6 +1169,8 @@ def test_daily_desk_defaults_to_unattended_next_run():
     assert settings.publish_targets == ["youtube", "x", "apple_podcast"]
     assert settings.publish_visibility == "public"
     assert settings.news_image_count == 4
+    assert settings.background_music_provider == "local_library"
+    assert settings.background_music_track_id == "morning-blueprint"
 
 
 def test_daily_desk_recipe_validates_tts_model_and_voice_before_saving():
@@ -1048,6 +1261,7 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
         public_footage_enabled=True,
         footage_clip_count=11,
         background_music_provider="local",
+        background_music_track_id="strategic-outlook",
         auto_publish=False,
     )
 
@@ -1073,6 +1287,11 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
     assert task_config.footage_enabled is True
     assert task_config.footage_clip_count == 11
     assert task_config.background_music_provider == "local"
+    assert task_config.background_music_track_id == "strategic-outlook"
+    assert task_config.program_music_pacing_enabled is True
+    assert task_config.program_music_intro_seconds == 2.0
+    assert task_config.program_music_opening_gap_seconds == 3.0
+    assert task_config.program_music_story_gap_seconds == 1.5
     assert task_config.auto_publish is False
 
 
@@ -1403,6 +1622,7 @@ def test_story_review_falls_back_to_fresh_chatgpt_after_gemini_exhaustion():
     assert all(args[0] == "gemini" for args in calls[:first_chatgpt])
     chatgpt_ask = next(args for args in calls if args[:2] == ["chatgpt", "ask"])
     assert chatgpt_ask[chatgpt_ask.index("--new") + 1] == "true"
+    assert chatgpt_ask[chatgpt_ask.index("--window") + 1] == "foreground"
 
 
 def test_chatgpt_fallback_retries_transient_model_picker_failure():
@@ -1453,6 +1673,51 @@ def test_chatgpt_fallback_retries_transient_model_picker_failure():
     assert "[CHATGPT MODEL ERROR 1/2]" in raw
     assert any("model selection attempt 1/2 failed" in message for message in messages)
     sleep.assert_any_await(review._MODEL_SELECTION_RETRY_DELAY_SECONDS)
+
+
+def test_chatgpt_fallback_uses_current_model_when_picker_remains_unavailable():
+    model_attempts = 0
+    chatgpt_asks = 0
+    messages: list[str] = []
+
+    async def command(args, **kwargs):
+        nonlocal model_attempts, chatgpt_asks
+        if args[:2] == ["gemini", "ask"]:
+            return OpenCLIResult(tuple(args), 0, '[{"response":"N"}]', "")
+        if args[:2] == ["gemini", "read"]:
+            return OpenCLIResult(tuple(args), 0, "[]", "")
+        if args[:2] == ["chatgpt", "model"]:
+            model_attempts += 1
+            raise OpenCLIError("Could not find the ChatGPT model selector in the composer")
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_asks += 1
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"response":"W1P2P","conversationUrl":"https://chatgpt.com/c/current"}]',
+                "",
+            )
+        raise AssertionError(args)
+
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review.asyncio, "sleep", AsyncMock()),
+    ):
+        payload, raw, url, provider = asyncio.run(
+            review._web_story_review(
+                "audit",
+                story_numbers=[1, 2],
+                log=messages.append,
+            )
+        )
+
+    assert payload["approved"] is True
+    assert provider == "chatgpt"
+    assert url.endswith("/current")
+    assert model_attempts == 2
+    assert chatgpt_asks == 1
+    assert "[CHATGPT CURRENT MODEL FALLBACK]" in raw
+    assert any("current model" in message for message in messages)
 
 
 def test_chatgpt_fallback_recovers_the_target_conversation_after_route_drift():

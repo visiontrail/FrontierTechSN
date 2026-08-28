@@ -2,10 +2,10 @@ import asyncio
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from backend import config, skills_admin
-from backend.pipeline import agent
+from backend.pipeline import agent, model_router, provider_rate_limit
 
 
 class FakeTextBlock:
@@ -65,6 +65,198 @@ class ProviderBaseUrlTests(unittest.TestCase):
 
 
 class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_primary_429_wait_does_not_consume_attempt_or_use_backup(self):
+        attempts: list[str] = []
+        logs: list[str] = []
+
+        async def query(*, prompt, options):
+            attempts.append(options.env["ANTHROPIC_BASE_URL"])
+            if len(attempts) == 1:
+                options.stderr("[ERROR] API error (attempt 1/1): 429 rate_limit")
+                raise Exception("primary quota full")
+            yield FakeAssistantMessage([FakeTextBlock("primary answer")])
+
+        routes = (
+            model_router.ModelRoute(
+                slot="primary",
+                provider_id=1,
+                provider_type="yinhe",
+                provider_name="OneAPI",
+                endpoint="http://oneapi.example",
+                model="yinhe-thinking",
+                api_key="primary-key",
+            ),
+            model_router.ModelRoute(
+                slot="backup",
+                provider_id=2,
+                provider_type="deepseek",
+                provider_name="DeepSeek",
+                endpoint="https://api.deepseek.com/anthropic",
+                model="deepseek-v4-flash",
+                api_key="backup-key",
+            ),
+        )
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(model_router, "resolve_model_routes", AsyncMock(return_value=routes)),
+            patch.object(config, "AI_PRIMARY_MAX_RETRIES", 0),
+            patch.object(config, "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", 1),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(config, "ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names", return_value=([], [])),
+            patch.object(
+                provider_rate_limit,
+                "wait_for_request_slot",
+                AsyncMock(return_value=0.0),
+            ),
+            patch.object(
+                provider_rate_limit,
+                "record_rate_limit",
+                AsyncMock(return_value=65.0),
+            ) as record_rate_limit,
+        ):
+            result = await agent.agent_complete(
+                "Return text.",
+                "content",
+                endpoint=routes[0].endpoint,
+                model=routes[0].model,
+                api_key="primary-key",
+                log=logs.append,
+            )
+
+        self.assertEqual(result, "primary answer")
+        self.assertEqual(attempts, ["http://oneapi.example", "http://oneapi.example"])
+        record_rate_limit.assert_awaited_once()
+        self.assertTrue(any("without consuming a provider failure" in line for line in logs))
+        self.assertFalse(any("switching" in line for line in logs))
+
+    async def test_primary_exhaustion_switches_to_backup_after_all_retries(self):
+        attempts: list[str] = []
+        logs: list[str] = []
+
+        async def query(*, prompt, options):
+            base = options.env["ANTHROPIC_BASE_URL"]
+            attempts.append(base)
+            if "oneapi" in base:
+                raise Exception("primary unavailable")
+            yield FakeAssistantMessage([FakeTextBlock("backup answer")])
+
+        routes = (
+            model_router.ModelRoute(
+                slot="primary",
+                provider_id=1,
+                provider_type="yinhe",
+                provider_name="OneAPI",
+                endpoint="http://oneapi.example",
+                model="yinhe-thinking",
+                api_key="primary-key",
+            ),
+            model_router.ModelRoute(
+                slot="backup",
+                provider_id=2,
+                provider_type="deepseek",
+                provider_name="DeepSeek",
+                endpoint="https://api.deepseek.com/anthropic",
+                model="deepseek-v4-flash",
+                api_key="backup-key",
+            ),
+        )
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(
+                model_router,
+                "resolve_model_routes",
+                AsyncMock(return_value=routes),
+            ),
+            patch.object(config, "AI_PRIMARY_MAX_RETRIES", 2),
+            patch.object(config, "AI_BACKUP_MAX_RETRIES", 2),
+            patch.object(config, "AI_RETRY_BASE_SECONDS", 0),
+            patch.object(config, "AI_RETRY_MAX_SECONDS", 0),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(config, "ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names", return_value=([], [])),
+        ):
+            result = await agent.agent_complete(
+                "Return text.",
+                "content",
+                model="yinhe-thinking",
+                endpoint="http://oneapi.example",
+                api_key="primary-key",
+                log=logs.append,
+            )
+
+        self.assertEqual(result, "backup answer")
+        self.assertEqual(
+            attempts,
+            ["http://oneapi.example"] * 3 + ["https://api.deepseek.com/anthropic"],
+        )
+        switch_log = next(line for line in logs if "switching" in line)
+        self.assertIn("exhausted its 3 attempts", switch_log)
+        self.assertIn("DeepSeek backup", switch_log)
+        self.assertIn("completed via DeepSeek backup", logs[-1])
+
+    async def test_primary_retry_success_does_not_touch_backup(self):
+        attempts: list[str] = []
+
+        async def query(*, prompt, options):
+            base = options.env["ANTHROPIC_BASE_URL"]
+            attempts.append(base)
+            if len(attempts) == 1:
+                raise Exception("temporary primary failure")
+            yield FakeAssistantMessage([FakeTextBlock("primary answer")])
+
+        routes = (
+            model_router.ModelRoute(
+                slot="primary",
+                provider_id=1,
+                provider_type="yinhe",
+                provider_name="OneAPI",
+                endpoint="http://oneapi.example",
+                model="yinhe-thinking",
+                api_key="primary-key",
+            ),
+            model_router.ModelRoute(
+                slot="backup",
+                provider_id=2,
+                provider_type="deepseek",
+                provider_name="DeepSeek",
+                endpoint="https://api.deepseek.com/anthropic",
+                model="deepseek-v4-flash",
+                api_key="backup-key",
+            ),
+        )
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(
+                model_router,
+                "resolve_model_routes",
+                AsyncMock(return_value=routes),
+            ),
+            patch.object(config, "AI_PRIMARY_MAX_RETRIES", 2),
+            patch.object(config, "AI_BACKUP_MAX_RETRIES", 2),
+            patch.object(config, "AI_RETRY_BASE_SECONDS", 0),
+            patch.object(config, "AI_RETRY_MAX_SECONDS", 0),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(config, "ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names", return_value=([], [])),
+        ):
+            result = await agent.agent_complete(
+                "Return text.",
+                "content",
+                model="yinhe-thinking",
+                endpoint="http://oneapi.example",
+                api_key="primary-key",
+            )
+
+        self.assertEqual(result, "primary answer")
+        self.assertEqual(attempts, ["http://oneapi.example", "http://oneapi.example"])
+
     async def test_safe_permission_mode_and_provider_environment(self):
         captured = {}
 
@@ -118,6 +310,7 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
             captured["options"].env["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
             "yinhe-thinking",
         )
+        self.assertEqual(captured["options"].env["CLAUDE_CODE_MAX_RETRIES"], "0")
 
     async def test_transport_stderr_is_returned_to_the_caller(self):
         async def query(*, prompt, options):

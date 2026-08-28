@@ -34,7 +34,8 @@ export interface TaskConfig {
   news_window_hours?: number;
   news_timezone?: string;
   background_music_enabled?: boolean;
-  background_music_provider?: 'gemini_create_music' | 'local';
+  background_music_provider?: 'local_library' | 'gemini_create_music' | 'local';
+  background_music_track_id?: string;
   background_music_bed_db?: number;
   background_music_duck_db?: number;
   auto_publish?: boolean;
@@ -187,10 +188,21 @@ export interface DailyAutomationSettings {
   news_image_count: number;
   public_footage_enabled: boolean;
   footage_clip_count: number;
-  background_music_provider: 'gemini_create_music' | 'local';
+  background_music_provider: 'local_library' | 'gemini_create_music' | 'local';
+  background_music_track_id: string;
   auto_publish: boolean;
   publish_targets: Array<'youtube' | 'x' | 'apple_podcast'>;
   publish_visibility: 'private' | 'unlisted' | 'public';
+}
+
+export interface ProgramMusicTrack {
+  id: string;
+  title: string;
+  source: 'user' | 'gemini' | string;
+  description: string;
+  duration_seconds: number;
+  sha256: string;
+  is_default: boolean;
 }
 
 export interface DailyAutomationResponse {
@@ -730,6 +742,15 @@ export function updateDailyAutomation(settings: DailyAutomationSettings): Promis
 export async function fetchDailySources(): Promise<DailyNewsSource[]> {
   const payload = await dailyRequest<{ sources: DailyNewsSource[] }>('/sources');
   return payload.sources;
+}
+
+export async function fetchProgramMusicLibrary(): Promise<ProgramMusicTrack[]> {
+  const payload = await dailyRequest<{ tracks: ProgramMusicTrack[] }>('/music-library');
+  return payload.tracks;
+}
+
+export function programMusicAudioUrl(trackId: string): string {
+  return `${BASE}/api/daily-news/music-library/${encodeURIComponent(trackId)}/audio`;
 }
 
 export function runDailyNow(testMode = true, durationMinutes: number | null = 1): Promise<Task> {

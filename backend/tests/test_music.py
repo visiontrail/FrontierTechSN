@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import struct
 import wave
@@ -140,3 +141,100 @@ async def test_music_mix_targets_source_loudness_and_preserves_narration(
     assert report["program_mix_vs_narration_lu"] >= -1.5
     assert report["ducked_music_integrated_lufs"] >= report["minimum_ducked_music_lufs"]
     assert report["failure_reasons"] == []
+
+
+@pytest.mark.asyncio
+async def test_local_library_track_bypasses_gemini_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    source = library / "desk-theme.wav"
+    _tone(source, 2.0, 330, amplitude=1200)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    catalog = library / "catalog.json"
+    catalog.write_text(
+        json.dumps(
+            {
+                "default_track_id": "desk-theme",
+                "tracks": [
+                    {
+                        "id": "desk-theme",
+                        "title": "Desk Theme",
+                        "filename": source.name,
+                        "source": "user",
+                        "duration_seconds": 2.0,
+                        "sha256": digest,
+                    }
+                ],
+            }
+        )
+    )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Gemini must not run for a local library track")
+
+    monkeypatch.setattr(music, "PROGRAM_MUSIC_DIR", library)
+    monkeypatch.setattr(music, "PROGRAM_MUSIC_CATALOG", catalog)
+    monkeypatch.setattr(music, "_gemini_create_music_once", forbidden)
+
+    artifact = await music.generate_background_music(
+        "local-library-task",
+        tmp_path / "task",
+        title="Desk edition",
+        summary={},
+        provider="local_library",
+        track_id="desk-theme",
+    )
+
+    manifest = json.loads(Path(artifact.manifest_path).read_text())
+    assert artifact.provider == "local_library"
+    assert manifest["provider_used"] == "local_library"
+    assert manifest["selected_track_id"] == "desk-theme"
+    assert Path(artifact.audio_path).is_file()
+
+
+@pytest.mark.asyncio
+async def test_program_pacing_inserts_exact_gaps_and_restores_music(
+    tmp_path: Path,
+) -> None:
+    narration = tmp_path / "narration.wav"
+    bed = tmp_path / "bed.wav"
+    _tone(narration, 6.0, 220, amplitude=5000)
+    _tone(bed, 2.0, 440, amplitude=1800)
+    aligned = [
+        {"text": "Opening", "start": 0.0, "duration": 1.5},
+        {"text": "Story one", "start": 1.5, "duration": 1.5},
+        {"text": "Story two", "start": 3.0, "duration": 1.5},
+        {"text": "Closing", "start": 4.5, "duration": 1.5},
+    ]
+
+    paced, pacing = await music.create_paced_narration(
+        narration,
+        tmp_path,
+        aligned,
+        intro_seconds=2.0,
+        opening_gap_seconds=3.0,
+        story_gap_seconds=1.5,
+    )
+
+    assert pacing["passed"] is True
+    assert pacing["paced_duration_seconds"] == pytest.approx(14.0, abs=0.02)
+    assert [gap["duration_seconds"] for gap in pacing["gaps"]] == [3.0, 1.5, 1.5]
+    assert pacing["segments"][0]["program_start"] == pytest.approx(2.0)
+    assert pacing["segments"][1]["program_start"] == pytest.approx(6.5)
+
+    output = await music.mix_narration_and_music(
+        paced,
+        bed,
+        tmp_path,
+        bed_db=-25,
+        duck_db=-11,
+    )
+    report = json.loads((tmp_path / "audio" / "music_mix_report.json").read_text())
+    assert output.is_file()
+    assert report["passed"] is True
+    assert report["ducking_mode"] == "program_timeline_envelope"
+    assert report["measured_gap_lift_db"] >= 8.0
+    assert len(report["window_measurements"]["restored_music_windows"]) == 4

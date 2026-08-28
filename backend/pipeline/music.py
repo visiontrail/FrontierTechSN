@@ -7,6 +7,7 @@ import logging
 import math
 import re
 import shutil
+import statistics
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
@@ -20,6 +21,9 @@ from backend.pipeline.opencli import OpenCLIError, run_opencli
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 MEDIA_SUFFIXES = {".mp4", ".m4a", ".mp3", ".wav", ".webm"}
+PROGRAM_MUSIC_DIR = config.PROJECT_ROOT / "data" / "program_music"
+PROGRAM_MUSIC_CATALOG = PROGRAM_MUSIC_DIR / "catalog.json"
+DEFAULT_PROGRAM_MUSIC_TRACK_ID = "morning-blueprint"
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,77 @@ class MusicArtifact:
     audio_path: str
     manifest_path: str
     fallback_reason: str = ""
+
+
+def _program_music_catalog() -> tuple[str, list[dict[str, Any]]]:
+    """Load and verify the operator-managed local program-music catalog."""
+    if not PROGRAM_MUSIC_CATALOG.is_file():
+        return DEFAULT_PROGRAM_MUSIC_TRACK_ID, []
+    try:
+        payload = json.loads(PROGRAM_MUSIC_CATALOG.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(f"Program-music catalog is unreadable: {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("tracks"), list):
+        raise RuntimeError("Program-music catalog must contain a tracks array")
+
+    root = PROGRAM_MUSIC_DIR.resolve()
+    default_id = str(payload.get("default_track_id") or DEFAULT_PROGRAM_MUSIC_TRACK_ID)
+    tracks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in payload["tracks"]:
+        if not isinstance(raw, dict):
+            raise RuntimeError("Program-music catalog entries must be objects")
+        track_id = str(raw.get("id") or "").strip()
+        filename = str(raw.get("filename") or "").strip()
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", track_id):
+            raise RuntimeError(f"Invalid program-music track id: {track_id!r}")
+        if track_id in seen:
+            raise RuntimeError(f"Duplicate program-music track id: {track_id}")
+        seen.add(track_id)
+        path = (PROGRAM_MUSIC_DIR / filename).resolve()
+        if path.parent != root or path.suffix.lower() not in MEDIA_SUFFIXES:
+            raise RuntimeError(f"Unsafe program-music filename for {track_id}: {filename!r}")
+        if not path.is_file() or path.stat().st_size < 4096:
+            raise RuntimeError(f"Program-music file is missing or empty: {path}")
+        expected_hash = str(raw.get("sha256") or "").strip().lower()
+        actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected_hash and expected_hash != actual_hash:
+            raise RuntimeError(f"Program-music checksum mismatch for {track_id}")
+        tracks.append(
+            {
+                "id": track_id,
+                "title": str(raw.get("title") or track_id).strip(),
+                "description": str(raw.get("description") or "").strip(),
+                "source": str(raw.get("source") or "local").strip(),
+                "duration_seconds": float(raw.get("duration_seconds") or 0),
+                "sha256": actual_hash,
+                "filename": filename,
+                "path": path,
+                "is_default": track_id == default_id,
+            }
+        )
+    if tracks and default_id not in seen:
+        raise RuntimeError(f"Program-music default track is absent: {default_id}")
+    return default_id, tracks
+
+
+def list_program_music_tracks() -> list[dict[str, Any]]:
+    """Return browser-safe metadata for every locally available music bed."""
+    _, tracks = _program_music_catalog()
+    return [
+        {key: value for key, value in track.items() if key not in {"path", "filename"}}
+        for track in tracks
+    ]
+
+
+def resolve_program_music_track(track_id: str | None) -> dict[str, Any]:
+    default_id, tracks = _program_music_catalog()
+    selected = (track_id or default_id).strip()
+    for track in tracks:
+        if track["id"] == selected:
+            return track
+    available = ", ".join(track["id"] for track in tracks) or "none"
+    raise ValueError(f"Unknown program-music track {selected!r}; available: {available}")
 
 
 def _log(log: LogCallback | None, message: str) -> None:
@@ -318,6 +393,7 @@ async def generate_background_music(
     title: str,
     summary: dict | None,
     provider: str,
+    track_id: str | None = None,
     log: LogCallback | None = None,
 ) -> MusicArtifact:
     music_dir = task_dir / "music"
@@ -327,8 +403,20 @@ async def generate_background_music(
     provider_used = provider
     conversation_url = ""
     fallback_reason = ""
+    selected_track: dict[str, Any] | None = None
     original: Path
-    if provider == "gemini_create_music":
+    if provider == "local_library":
+        selected_track = resolve_program_music_track(track_id)
+        provider_used = "local_library"
+        original = selected_track["path"]
+        prompt = f"Local program-music selection: {selected_track['title']}"
+        (music_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        _log(
+            log,
+            "Program music: using local library track "
+            f"{selected_track['title']} ({selected_track['id']}); Gemini generation bypassed",
+        )
+    elif provider == "gemini_create_music":
         session_base = f"ftsn-music-{re.sub(r'[^a-zA-Z0-9-]', '-', task_id)[:32]}"
         active_session = ""
         successful_session = ""
@@ -398,6 +486,9 @@ async def generate_background_music(
         "audio_path": str(audio_path.resolve()),
         "audio_sha256": hashlib.sha256(audio_path.read_bytes()).hexdigest(),
         "fallback_reason": fallback_reason,
+        "selected_track_id": selected_track["id"] if selected_track else None,
+        "selected_track_title": selected_track["title"] if selected_track else None,
+        "selected_track_source_sha256": selected_track["sha256"] if selected_track else None,
     }
     manifest_path = music_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -439,6 +530,217 @@ async def _integrated_loudness(path: Path) -> float | None:
     return float(matches[-1]) if matches else None
 
 
+async def _mean_volume(path: Path, start: float, end: float) -> float | None:
+    duration = max(0.0, end - start)
+    if duration < 0.2:
+        return None
+    _, stderr = await _media_command(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-ss",
+            f"{start:.6f}",
+            "-t",
+            f"{duration:.6f}",
+            "-i",
+            str(path),
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout=max(60, math.ceil(duration * 3)),
+    )
+    match = re.findall(r"mean_volume:\s*(-?[0-9.]+) dB", stderr)
+    return float(match[-1]) if match else None
+
+
+async def create_paced_narration(
+    narration_path: str | Path,
+    output_dir: Path,
+    aligned_segments: list[dict[str, Any]],
+    *,
+    intro_seconds: float = 2.0,
+    opening_gap_seconds: float = 3.0,
+    story_gap_seconds: float = 1.5,
+    log: LogCallback | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    """Insert deterministic full-music windows around daily-news narration.
+
+    ``aligned_segments`` contains one timing row per physical script line: the
+    opening, each story, and the closing. The output keeps every source sample,
+    adding silence only at the requested program boundaries.
+    """
+    source = Path(narration_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Narration is missing: {source}")
+    if not aligned_segments:
+        raise RuntimeError("Program pacing requires at least one aligned script segment")
+
+    audio_dir = output_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    output = audio_dir / "paced_narration.wav"
+    report_path = audio_dir / "program_pacing_report.json"
+    source_duration = await _probe_duration(source)
+    intro = max(0.0, float(intro_seconds))
+    opening_gap = max(0.0, float(opening_gap_seconds))
+    story_gap = max(0.0, float(story_gap_seconds))
+
+    filter_parts: list[str] = []
+    concat_labels: list[str] = []
+    if intro:
+        filter_parts.append(f"anullsrc=r=48000:cl=stereo:d={intro:.6f}[intro]")
+        concat_labels.append("[intro]")
+
+    program_cursor = intro
+    source_cursor = 0.0
+    segments: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = []
+    for index, segment in enumerate(aligned_segments):
+        proposed_end = float(segment.get("start") or 0) + float(segment.get("duration") or 0)
+        source_end = source_duration if index == len(aligned_segments) - 1 else proposed_end
+        source_end = min(source_duration, max(source_cursor + 0.001, source_end))
+        label = f"segment{index}"
+        filter_parts.append(
+            f"[0:a]atrim=start={source_cursor:.6f}:end={source_end:.6f},"
+            "asetpts=PTS-STARTPTS,aresample=48000,"
+            f"aformat=sample_fmts=s16:channel_layouts=stereo[{label}]"
+        )
+        concat_labels.append(f"[{label}]")
+        segment_duration = source_end - source_cursor
+        kind = (
+            "opening"
+            if index == 0
+            else "closing" if index == len(aligned_segments) - 1 else "news"
+        )
+        segment_report = {
+            "index": index,
+            "kind": kind,
+            "text": str(segment.get("text") or ""),
+            "source_start": round(source_cursor, 3),
+            "source_end": round(source_end, 3),
+            "program_start": round(program_cursor, 3),
+            "program_end": round(program_cursor + segment_duration, 3),
+        }
+        segments.append(segment_report)
+        program_cursor += segment_duration
+        source_cursor = source_end
+
+        gap_duration = 0.0
+        gap_kind = ""
+        if index == 0 and len(aligned_segments) > 1:
+            gap_duration = opening_gap
+            gap_kind = "after_opening"
+        elif 0 < index < len(aligned_segments) - 1:
+            gap_duration = story_gap
+            gap_kind = "after_news"
+        if gap_duration:
+            gap_label = f"gap{index}"
+            filter_parts.append(
+                f"anullsrc=r=48000:cl=stereo:d={gap_duration:.6f}[{gap_label}]"
+            )
+            concat_labels.append(f"[{gap_label}]")
+            gaps.append(
+                {
+                    "after_segment_index": index,
+                    "kind": gap_kind,
+                    "source_boundary": round(source_end, 3),
+                    "program_start": round(program_cursor, 3),
+                    "program_end": round(program_cursor + gap_duration, 3),
+                    "duration_seconds": round(gap_duration, 3),
+                }
+            )
+            program_cursor += gap_duration
+
+    filter_parts.append(
+        "".join(concat_labels)
+        + f"concat=n={len(concat_labels)}:v=0:a=1[out]"
+    )
+    await _media_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[out]",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            str(output),
+        ],
+        timeout=max(300, math.ceil(source_duration * 2)),
+    )
+    actual_duration = await _probe_duration(output)
+    expected_duration = source_duration + intro + sum(
+        float(gap["duration_seconds"]) for gap in gaps
+    )
+    drift = abs(actual_duration - expected_duration)
+    report = {
+        "passed": drift <= 0.15,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_narration_path": str(source.resolve()),
+        "paced_narration_path": str(output.resolve()),
+        "source_duration_seconds": round(source_duration, 3),
+        "paced_duration_seconds": round(actual_duration, 3),
+        "expected_duration_seconds": round(expected_duration, 3),
+        "duration_drift_seconds": round(drift, 4),
+        "intro_seconds": round(intro, 3),
+        "opening_gap_seconds": round(opening_gap, 3),
+        "story_gap_seconds": round(story_gap, 3),
+        "segments": segments,
+        "gaps": gaps,
+        "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+    }
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    if not report["passed"]:
+        raise RuntimeError(
+            "Program narration pacing drifted from its deterministic timeline: "
+            f"{actual_duration:.3f}s vs {expected_duration:.3f}s"
+        )
+    _log(
+        log,
+        "Program pacing ready: "
+        f"{intro:.1f}s music intro, {opening_gap:.1f}s after opening, "
+        f"{story_gap:.1f}s after each news segment",
+    )
+    return output, report
+
+
+def shift_word_transcript_for_pacing(
+    word_transcript: list[dict[str, Any]],
+    pacing_report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Shift raw word timestamps onto the silence-extended program clock."""
+    intro = float(pacing_report.get("intro_seconds") or 0)
+    gaps = list(pacing_report.get("gaps") or [])
+    shifted: list[dict[str, Any]] = []
+    for word in word_transcript:
+        try:
+            start = float(word["start"])
+            end = float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            shifted.append(dict(word))
+            continue
+        midpoint = (start + end) / 2
+        offset = intro + sum(
+            float(gap.get("duration_seconds") or 0)
+            for gap in gaps
+            if midpoint >= float(gap.get("source_boundary") or 0)
+        )
+        row = dict(word)
+        row["start"] = round(start + offset, 4)
+        row["end"] = round(end + offset, 4)
+        shifted.append(row)
+    return shifted
+
+
 async def mix_narration_and_music(
     narration_path: str | Path,
     music_path: str | Path,
@@ -455,7 +757,8 @@ async def mix_narration_and_music(
     output = mix_dir / "program_mix.wav"
     music_probe = mix_dir / ".music_bed_probe.wav"
     duration = await _probe_duration(narration)
-    intro_db = min(-16.0, bed_db + 7.0)
+    intro_db = bed_db
+    speech_music_db = bed_db + duck_db
     ratio = max(4.0, min(20.0, abs(duck_db) * 1.2))
     narration_lufs, music_lufs = await asyncio.gather(
         _integrated_loudness(narration),
@@ -464,27 +767,83 @@ async def mix_narration_and_music(
     if music_lufs is None or not math.isfinite(music_lufs) or music_lufs <= -60.0:
         raise RuntimeError("Background music is silent or has no measurable loudness")
 
-    # bed_db and intro_db are program targets, not additional attenuation.
+    # The targets are source-independent loudness goals, not extra attenuation.
     # Generated sources vary widely: the deterministic fallback is deliberately
     # sparse and can measure near -31 LUFS, while downloaded tracks are often
     # much louder. Convert both targets into source-relative gains so either
     # provider lands at the same audible level before narration ducking.
     intro_gain_db = intro_db - music_lufs
     content_gain_db = bed_db - music_lufs
-    volume_expression = (
-        f"if(lt(t,12),pow(10\\,{intro_gain_db}/20),"
-        f"pow(10\\,{content_gain_db}/20))"
-    )
+    speech_gain_db = speech_music_db - music_lufs
+    pacing_path = mix_dir / "program_pacing_report.json"
+    pacing_report: dict[str, Any] | None = None
+    restored_intervals: list[dict[str, Any]] = []
+    speech_intervals: list[dict[str, Any]] = []
+    if pacing_path.is_file():
+        try:
+            candidate = json.loads(pacing_path.read_text(encoding="utf-8"))
+            paced_path = Path(str(candidate.get("paced_narration_path") or ""))
+            if candidate.get("passed") and paced_path.resolve() == narration.resolve():
+                pacing_report = candidate
+        except (json.JSONDecodeError, OSError, RuntimeError, TypeError, ValueError):
+            pacing_report = None
+    if pacing_report:
+        intro_seconds = float(pacing_report.get("intro_seconds") or 0)
+        if intro_seconds > 0:
+            restored_intervals.append(
+                {"kind": "intro", "start": 0.0, "end": min(duration, intro_seconds)}
+            )
+        restored_intervals.extend(
+            {
+                "kind": str(gap.get("kind") or "gap"),
+                "start": float(gap["program_start"]),
+                "end": float(gap["program_end"]),
+            }
+            for gap in pacing_report.get("gaps") or []
+        )
+        speech_intervals = [
+            {
+                "kind": str(segment.get("kind") or "speech"),
+                "start": float(segment["program_start"]),
+                "end": float(segment["program_end"]),
+            }
+            for segment in pacing_report.get("segments") or []
+        ]
+
+    if restored_intervals:
+        condition = "+".join(
+            f"between(t\\,{interval['start']:.6f}\\,{interval['end']:.6f})"
+            for interval in restored_intervals
+        )
+        volume_expression = (
+            f"if(gt({condition}\\,0)\\,pow(10\\,{content_gain_db}/20)\\,"
+            f"pow(10\\,{speech_gain_db}/20))"
+        )
+        music_filter = (
+            f"[1:a]aloop=loop=-1:size=2147483647,atrim=0:{duration:.6f},"
+            f"asetpts=N/SR/TB,volume='{volume_expression}':eval=frame[ducked];"
+        )
+        ducking_mode = "program_timeline_envelope"
+    else:
+        volume_expression = f"pow(10\\,{content_gain_db}/20)"
+        music_filter = (
+            f"[1:a]aloop=loop=-1:size=2147483647,atrim=0:{duration:.6f},"
+            f"asetpts=N/SR/TB,volume='{volume_expression}':eval=frame[music];"
+            f"[music][0:a]sidechaincompress=threshold=0.018:ratio={ratio:.2f}:"
+            "attack=18:release=650:makeup=1[ducked];"
+        )
+        ducking_mode = "sidechain"
     filter_graph = (
-        f"[1:a]aloop=loop=-1:size=2147483647,atrim=0:{duration:.6f},"
-        f"asetpts=N/SR/TB,volume='{volume_expression}':eval=frame[music];"
-        f"[music][0:a]sidechaincompress=threshold=0.018:ratio={ratio:.2f}:"
-        "attack=18:release=650:makeup=1[ducked];"
-        "[ducked]asplit=2[ducked_mix][ducked_probe];"
+        music_filter
+        + "[ducked]asplit=2[ducked_mix][ducked_probe];"
         "[0:a][ducked_mix]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
         "alimiter=limit=0.92[out]"
     )
     music_probe.unlink(missing_ok=True)
+    window_measurements: dict[str, list[dict[str, Any]]] = {
+        "restored_music_windows": [],
+        "speech_ducked_windows": [],
+    }
     try:
         await _media_command(
             [
@@ -527,6 +886,32 @@ async def mix_narration_and_music(
             _integrated_loudness(music_probe),
             _integrated_loudness(output),
         )
+        if restored_intervals:
+            measurement_rows: list[tuple[str, dict[str, Any], float, float]] = []
+            for group, intervals in (
+                ("restored_music_windows", restored_intervals),
+                ("speech_ducked_windows", speech_intervals),
+            ):
+                for interval in intervals:
+                    start = float(interval["start"])
+                    end = min(duration, float(interval["end"]))
+                    padding = min(0.2, max(0.0, (end - start) * 0.1))
+                    measurement_rows.append((group, interval, start + padding, end - padding))
+            values = await asyncio.gather(
+                *(
+                    _mean_volume(music_probe, start, end)
+                    for _, _, start, end in measurement_rows
+                )
+            )
+            for (group, interval, start, end), value in zip(measurement_rows, values):
+                window_measurements[group].append(
+                    {
+                        "kind": interval["kind"],
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "mean_volume_db": value,
+                    }
+                )
     finally:
         music_probe.unlink(missing_ok=True)
 
@@ -546,6 +931,21 @@ async def mix_narration_and_music(
         else None
     )
     minimum_ducked_music_lufs = bed_db + duck_db - 6.0
+    restored_values = [
+        float(row["mean_volume_db"])
+        for row in window_measurements["restored_music_windows"]
+        if row.get("mean_volume_db") is not None
+    ]
+    speech_values = [
+        float(row["mean_volume_db"])
+        for row in window_measurements["speech_ducked_windows"]
+        if row.get("mean_volume_db") is not None
+    ]
+    measured_gap_lift_db = (
+        statistics.median(restored_values) - statistics.median(speech_values)
+        if restored_values and speech_values
+        else None
+    )
     if mix_vs_narration is not None and mix_vs_narration < -1.5:
         failure_reasons.append(
             f"program mix lowered narration by {abs(mix_vs_narration):.1f} LU"
@@ -557,6 +957,13 @@ async def mix_narration_and_music(
         failure_reasons.append(
             "ducked music is below the configured audibility floor "
             f"({ducked_music_lufs:.1f} < {minimum_ducked_music_lufs:.1f} LUFS)"
+        )
+    if restored_intervals and measured_gap_lift_db is None:
+        failure_reasons.append("program music restoration windows could not be measured")
+    elif measured_gap_lift_db is not None and measured_gap_lift_db < 3.0:
+        failure_reasons.append(
+            "program music did not recover clearly during narration gaps "
+            f"({measured_gap_lift_db:.1f} dB measured lift)"
         )
     report = {
         "passed": not failure_reasons,
@@ -570,8 +977,11 @@ async def mix_narration_and_music(
         "content_music_db": bed_db,
         "intro_music_gain_db": round(intro_gain_db, 3),
         "content_music_gain_db": round(content_gain_db, 3),
+        "speech_music_db": speech_music_db,
+        "speech_music_gain_db": round(speech_gain_db, 3),
         "sidechain_duck_target_db": duck_db,
-        "sidechain_ratio": ratio,
+        "ducking_mode": ducking_mode,
+        "sidechain_ratio": ratio if ducking_mode == "sidechain" else None,
         "narration_integrated_lufs": narration_lufs,
         "source_music_integrated_lufs": music_lufs,
         "ducked_music_integrated_lufs": ducked_music_lufs,
@@ -579,6 +989,16 @@ async def mix_narration_and_music(
         "minimum_ducked_music_lufs": minimum_ducked_music_lufs,
         "program_mix_integrated_lufs": mix_lufs,
         "program_mix_vs_narration_lu": mix_vs_narration,
+        "restored_music_median_volume_db": (
+            round(statistics.median(restored_values), 2) if restored_values else None
+        ),
+        "speech_ducked_median_volume_db": (
+            round(statistics.median(speech_values), 2) if speech_values else None
+        ),
+        "measured_gap_lift_db": (
+            round(measured_gap_lift_db, 2) if measured_gap_lift_db is not None else None
+        ),
+        "window_measurements": window_measurements,
         "program_mix_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         "failure_reasons": failure_reasons,
     }
@@ -589,8 +1009,8 @@ async def mix_narration_and_music(
         raise RuntimeError(f"Background-music mix quality failed: {'; '.join(failure_reasons)}")
     _log(
         log,
-        f"Music mix passed: intro target {intro_db:.1f} LUFS, "
-        f"news-bed target {bed_db:.1f} LUFS, ducked bed {ducked_music_lufs:.1f} LUFS, "
+        f"Music mix passed ({ducking_mode}): restored target {bed_db:.1f} LUFS, "
+        f"speech target {speech_music_db:.1f} LUFS, ducked bed {ducked_music_lufs:.1f} LUFS, "
         f"program {mix_lufs:.1f} LUFS",
     )
     return output

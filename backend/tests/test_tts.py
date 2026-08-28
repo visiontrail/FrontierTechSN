@@ -2205,6 +2205,107 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report("Skill")["verified"])
         self.assertFalse(report("Skillet")["verified"])
 
+    def test_orpheus_transcript_accepts_only_evidenced_shein_spelling(self):
+        expected = (
+            "Reuters says Shein pivoted to a Hong Kong IPO after bids failed "
+            "to secure Beijing's approval."
+        )
+
+        def report(brand_name: str) -> dict:
+            observed = (
+                f"Reuters says {brand_name} pivoted to a Hong Kong IPO after bids "
+                "failed to secure Beijing's approval"
+            ).split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        accepted = report("Shane")
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 0.9375)
+        self.assertEqual(accepted["acoustic_asr_word_coverage"], 1.0)
+        self.assertEqual(
+            accepted["verification_mode"],
+            "aligned_phonetic_substitution",
+        )
+        self.assertEqual(
+            accepted["phonetic_substitutions"][0]["phonetic_key"],
+            "evidenced:shein-shane",
+        )
+        self.assertFalse(report("Shawn")["verified"])
+        self.assertFalse(report("Shine")["verified"])
+
+    def test_orpheus_transcript_preserves_polish_l_stroke(self):
+        expected = (
+            "QbitAI says Transformer co-author Łukasz Kaiser will keynote "
+            "November's Singularity Intelligence Conference in Beijing."
+        )
+        observed = (
+            "Qubit AI says Transformer co-author Lukas Kaiser will keynote "
+            "November's Singularity Intelligence Conference in Beijing"
+        ).split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["exact_asr_word_coverage"], 0.9333)
+        self.assertEqual(report["acoustic_asr_word_coverage"], 1.0)
+        self.assertEqual(
+            report["verification_mode"],
+            "aligned_phonetic_substitution",
+        )
+        self.assertEqual(report["expected_words"], 15)
+
+    def test_orpheus_transcript_accepts_rights_writes_homophone(self):
+        expected = (
+            "DeepTech China reports Hugging Face open-sourced a robot duck that "
+            "walks, slides, and self-rights."
+        )
+
+        def report(final_word: str) -> dict:
+            observed = (
+                "Deep Tech China reports Hugging Face open sourced a robot duck "
+                f"that walks slides and self {final_word}"
+            ).split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        accepted = report("writes")
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertTrue(accepted["trailing_anchor"])
+        self.assertFalse(report("rises")["verified"])
+
+    def test_orpheus_transcript_collapses_complete_ox_alpha_and_z_ai_names(self):
+        expected = (
+            "The Rundown AI confirms Ox Alpha is Z AI's GLM-5.3-Flash, priced "
+            "near a tenth of rivals."
+        )
+        observed = (
+            "The Rundown AI confirms OxAlpha is ZAI's GLM 5.3 Flash priced near "
+            "a tenth of rivals"
+        ).split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+        self.assertEqual(report["expected_words"], 16)
+        self.assertEqual(report["transcript_words"], 16)
+
     def test_orpheus_transcript_normalizes_jalapeno_chip_name(self):
         expected = (
             "OpenAI has published the first performance results for its in-house "

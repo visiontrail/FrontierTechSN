@@ -153,6 +153,31 @@ def test_scenes_and_audio_start_immediately_with_no_title_card_gap(tmp_path):
     )
 
 
+def test_program_storyboard_preserves_every_physical_segment_and_music_gap():
+    report = {
+        "passed": True,
+        "paced_duration_seconds": 14.0,
+        "segments": [
+            {"kind": "opening", "text": "Good morning.", "program_start": 2.0, "program_end": 5.0},
+            {"kind": "news", "text": "Reuters says story one.", "program_start": 8.0, "program_end": 10.0},
+            {"kind": "closing", "text": "Thanks.", "program_start": 11.5, "program_end": 14.0},
+        ],
+    }
+
+    board = sb.build_program_storyboard(
+        pacing_report=report,
+        title="Daily",
+        alignment={"passed": True},
+    )
+
+    assert board["program_timeline"] is True
+    assert board["scene_count"] == 3
+    assert [scene["start"] for scene in board["scenes"]] == [0.0, 8.0, 11.5]
+    assert [scene["duration"] for scene in board["scenes"]] == [8.0, 3.5, 2.5]
+    assert board["scenes"][0]["lines"][0]["start"] == 2.0
+    assert board["total_duration"] == 19.0
+
+
 def test_short_trailing_scene_is_folded_into_its_predecessor(tmp_path):
     # A long line followed by a very short one would otherwise leave a stub scene.
     path = write_script(tmp_path, ["word " * 200, "ok"])

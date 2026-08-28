@@ -435,6 +435,21 @@ async def get_provider_raw(provider_id: int | None) -> aiosqlite.Row | None:
     return rows[0] if rows else None
 
 
+async def list_providers_raw() -> list[aiosqlite.Row]:
+    """Return provider rows including secrets for the internal model router.
+
+    API routes must continue using :func:`list_providers`, which masks keys.
+    The ordered failover resolver needs the real key but never serializes or
+    logs it.
+    """
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM providers ORDER BY is_default DESC, created_at ASC"
+    )
+    await db.close()
+    return rows
+
+
 async def create_provider(
     provider_type: str,
     name: str,

@@ -1245,6 +1245,25 @@ def test_bare_commons_filename_rejects_unrelated_description_logo_proof():
     assert evidence["grounding_passed"] is False
 
 
+def test_ambiguous_hermes_company_logo_cannot_illustrate_ai_coding_agent():
+    shot = {"expected_subject": "Hermes", "kind": "logo"}
+    scene = {
+        "text": "Claude, Codex, and Hermes installed unowned code in corporate networks.",
+        "keywords": ["claude", "codex", "hermes", "code"],
+    }
+    candidate = {
+        "title": "LOGO-HERMES.jpg",
+        "description": "Logotyp przedsiębiorstwa",
+        "categories": "Hermes in logos",
+        "object_name": "LOGO-HERMES",
+    }
+
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+
+    assert evidence["grounding_passed"] is False
+    assert "AI/product context" in evidence["grounding_reason"]
+
+
 def test_google_logo_prose_and_categories_do_not_override_exact_authoritative_identity():
     shot = {"expected_subject": "Google", "kind": "logo"}
     scene = {"text": "Google allocates employee time to ideas.", "keywords": []}

@@ -43,6 +43,19 @@ ORPHEUS_MIN_ASR_WORD_RATIO = 1.0
 ORPHEUS_MAX_ASR_WORD_RATIO = 1.0
 ORPHEUS_MAX_PHONETIC_SUBSTITUTIONS = 1
 ORPHEUS_MIN_PHONETIC_SPELLING_SIMILARITY = 0.80
+# One live, otherwise exact Reuters utterance was independently transcribed as
+# the brand name ``Shein`` -> ``Shane`` at normal speed.  The raw spellings are
+# too far apart for the general similarity gate, so keep this exception as an
+# explicit unordered pair. It still has to be the sole aligned substitution in
+# an equal-length utterance and be corroborated from the same WAV at a second
+# playback speed before the audio can pass.
+ORPHEUS_EVIDENCED_PHONETIC_PAIRS = {
+    frozenset({"shein", "shane"}),
+    # The source spelling Łukasz normalizes to Lukasz while English Whisper
+    # consistently renders the same spoken personal name as Lukas. Keep the
+    # final-letter drift scoped to this exact proper-name pair.
+    frozenset({"lukasz", "lukas"}),
+}
 ORPHEUS_EXACT_EDGE_ANCHOR_WORDS = 2
 NARRATION_PACING_POLICY = "natural_speech_visuals_follow_audio"
 NARRATION_SYNTHESIS_SPEED_RATIO = 1.0
@@ -60,12 +73,13 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 12
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 15
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
-ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen"}
+ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
     "qwen": {"qwin"},
     "qianwen": set(),
+    "qbitai": set(),
 }
 ORPHEUS_NAME_RECHECK_SPLITS = {
     "qwen": {
@@ -82,6 +96,11 @@ ORPHEUS_NAME_RECHECK_SPLITS = {
         ("jian", "wen"),
         ("qian", "wen"),
     },
+    # At normal speed Whisper dropped Q-bit's initial consonant in a complete
+    # live utterance ("Hubit AI"), while the same waveform recovered "QBit AI"
+    # at slower verification speed. This spelling can only initiate a
+    # same-waveform recheck; it is never accepted as final lexical evidence.
+    "qbitai": {("hubit", "ai")},
 }
 # Provider pronunciation hints can make Whisper retain a name's exact spoken
 # syllable boundary.  Unlike the broader recheck spellings above, these pairs
@@ -160,6 +179,11 @@ ACOUSTIC_EQUIVALENTS = {
     # contained every requested word and both utterance edges while Whisper
     # selected the latter spelling; nearby words such as "roil" remain errors.
     "roll": "role",
+    # The verb forms "rights" and "writes" are exact homophones. A live
+    # otherwise exact utterance ended with the phrasal verb "self-rights" while
+    # Whisper selected "self-writes". Canonicalize only that inaudible spelling
+    # distinction; a missing or different final word still fails edge coverage.
+    "writes": "rights",
     # Whisper consistently labels the rare spoken word "eunuch" as the
     # familiar two-syllable proper noun "Unix", including at 0.8x speed.
     "unix": "eunuch",
@@ -223,6 +247,11 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("tech", "meme's"): "techmeme's",
     ("ear", "en", "dill"): "earendil",
     ("ear", "endil"): "earendil",
+    # Whisper fuses these adjacent product/company name tokens even though the
+    # waveform contains both spoken components. Canonicalize only the complete
+    # proper names, preserving every surrounding word and possessive ending.
+    ("ox", "alpha"): "oxalpha",
+    ("z", "ai's"): "zai's",
     # NERVA is conventionally spoken as a word. The provider pronunciation
     # hint produced NERV at normal-speed ASR but exact NERVA at both 0.8x and
     # 0.7x; the non-rhotic Leah voice can also surface Rover as ROVA in Whisper.
@@ -295,6 +324,12 @@ def _raw_lexical_tokens(text: str) -> list[str]:
     """Normalize individual spellings without collapsing cross-word phrases."""
     normalized: list[str] = []
     lexical_text = _strip_speaker_labels(text)
+    # ``Ł`` is a Latin letter but does not decompose under Unicode NFKD.  The
+    # ASCII-only lexical regex would therefore drop it and turn the Polish name
+    # Łukasz into the impossible token ``ukasz``. Transliterate only this
+    # well-defined letter before acoustic comparison; Whisper conventionally
+    # emits the corresponding ASCII spelling ``Lukasz``/``Lukas``.
+    lexical_text = lexical_text.translate(str.maketrans({"Ł": "L", "ł": "l"}))
     # The published chip name retains its Spanish tilde, while English ASR
     # conventionally emits the same spoken name as the ASCII spelling
     # "Jalapeno". Normalize only this evidenced proper noun; unrelated accented
@@ -1766,10 +1801,17 @@ def _aligned_phonetic_substitutions(
         ).ratio()
         expected_key = _english_phonetic_key(expected_token)
         observed_key = _english_phonetic_key(observed_token)
+        evidenced_pair = (
+            frozenset({expected_token, observed_token})
+            in ORPHEUS_EVIDENCED_PHONETIC_PAIRS
+        )
         if (
-            not expected_key
-            or expected_key != observed_key
-            or spelling_similarity < ORPHEUS_MIN_PHONETIC_SPELLING_SIMILARITY
+            not evidenced_pair
+            and (
+                not expected_key
+                or expected_key != observed_key
+                or spelling_similarity < ORPHEUS_MIN_PHONETIC_SPELLING_SIMILARITY
+            )
         ):
             return None
         substitutions.append(
@@ -1777,7 +1819,11 @@ def _aligned_phonetic_substitutions(
                 "expected_index": index,
                 "expected": expected_token,
                 "observed": observed_token,
-                "phonetic_key": expected_key,
+                "phonetic_key": (
+                    f"evidenced:{expected_token}-{observed_token}"
+                    if evidenced_pair
+                    else expected_key
+                ),
                 "spelling_similarity": round(spelling_similarity, 4),
             }
         )

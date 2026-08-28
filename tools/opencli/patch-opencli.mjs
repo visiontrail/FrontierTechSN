@@ -902,4 +902,4 @@ if (videoIndex >= 0) manifest[videoIndex] = videoEntry
 else manifest.push(videoEntry)
 fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
-console.log('Applied project ChatGPT/Gemini browser patches to OpenCLI 1.8.6')
+console.log('Applied project ChatGPT/Gemini browser patches to OpenCLI 1.8.7')

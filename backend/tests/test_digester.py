@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend import config
 from backend.pipeline import digester
@@ -60,6 +60,80 @@ class ChatDispatchTests(unittest.IsolatedAsyncioTestCase):
                 await digester._chat("system", "content", endpoint="http://x/v1")
 
         self.assertEqual(chat_http.await_count, 0)
+
+
+class ChatHttpReasoningBudgetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_length_response_doubles_reasoning_budget_immediately(self):
+        exhausted = MagicMock()
+        exhausted.raise_for_status.return_value = None
+        exhausted.json.return_value = {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"content": "", "reasoning_content": "thinking"},
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 4096, "total_tokens": 4196},
+        }
+        completed = MagicMock()
+        completed.raise_for_status.return_value = None
+        completed.json.return_value = {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "final answer"},
+            }],
+        }
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(side_effect=[exhausted, completed])
+
+        with (
+            patch.object(config, "AI_MAX_RETRIES", 2),
+            patch.object(digester.httpx, "AsyncClient", return_value=client),
+            patch.object(digester.asyncio, "sleep", AsyncMock()) as sleep,
+        ):
+            result = await digester._chat_http(
+                "system",
+                "content",
+                endpoint="http://x/v1",
+                model="yinhe-thinking",
+                max_tokens=4096,
+            )
+
+        self.assertEqual(result, "final answer")
+        self.assertEqual(
+            [call.kwargs["json"]["max_tokens"] for call in client.post.await_args_list],
+            [4096, 8192],
+        )
+        self.assertEqual(sleep.await_count, 0)
+
+    async def test_empty_length_response_stops_at_adaptive_budget_ceiling(self):
+        exhausted = MagicMock()
+        exhausted.raise_for_status.return_value = None
+        exhausted.json.return_value = {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"content": "", "reasoning_content": "thinking"},
+            }],
+        }
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(return_value=exhausted)
+
+        with (
+            patch.object(config, "AI_MAX_RETRIES", 9),
+            patch.object(digester.httpx, "AsyncClient", return_value=client),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "maximum adaptive output budget"):
+                await digester._chat_http(
+                    "system",
+                    "content",
+                    endpoint="http://x/v1",
+                    model="yinhe-thinking",
+                    max_tokens=digester.MAX_REASONING_OUTPUT_TOKENS,
+                )
+
+        self.assertEqual(client.post.await_count, 1)
 
 
 class ScriptClosingTests(unittest.IsolatedAsyncioTestCase):

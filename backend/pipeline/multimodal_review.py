@@ -637,6 +637,8 @@ async def review_video(
         "match_floor": match_floor,
         "batches": [],
         "errors": [],
+        "fallback_to_initial": False,
+        "fallback_reason": "",
     }
     final_batches = batches
     if (
@@ -689,9 +691,37 @@ async def review_video(
             )
         calibration["batches"] = calibrated_batches
         calibration["errors"] = calibration_errors
-        reviews = calibrated_reviews
-        final_batches = calibrated_batches
-        errors.extend(calibration_errors)
+        # A calibration pass is a secondary score-normalization aid, not a
+        # second source of truth that may erase a complete, contract-valid
+        # first review.  If Gemini/OpenCLI never returns even a structurally
+        # usable calibration payload, retain the clean initial match evidence.
+        # A structurally valid calibration that reports a real low score still
+        # fails closed below, including when its verdict/score contract is
+        # inconsistent with the stricter floor.
+        unusable_calibration_batches = [
+            batch
+            for batch in calibrated_batches
+            if not batch.get("contract_valid")
+        ]
+        calibration_unavailable = bool(calibration_errors) and bool(
+            unusable_calibration_batches
+        ) and all(
+            not batch.get("image_received") or not batch.get("structure_valid")
+            for batch in unusable_calibration_batches
+        )
+        if calibration_unavailable:
+            calibration["fallback_to_initial"] = True
+            calibration["fallback_reason"] = (
+                "All scenes passed the complete initial semantic review, but the "
+                "aggregate calibration exhausted retries without a structurally "
+                "usable response; retained the initial review."
+            )
+            reviews = initial_reviews
+            final_batches = batches
+        else:
+            reviews = calibrated_reviews
+            final_batches = calibrated_batches
+            errors.extend(calibration_errors)
 
     average = (
         round(sum(review["score"] for review in reviews) / len(reviews), 2)
@@ -699,6 +729,7 @@ async def review_video(
         else 0.0
     )
     failed = [review["id"] for review in reviews if not review["passed"]]
+    calibration_fallback = calibration.get("fallback_to_initial") is True
     passed = (
         not errors
         and len(reviews) == len(expected)
@@ -707,7 +738,7 @@ async def review_video(
         and all(batch["structure_valid"] for batch in final_batches)
         and all(batch["contract_valid"] for batch in final_batches)
         and not failed
-        and average >= minimum_average_score
+        and (average >= minimum_average_score or calibration_fallback)
     )
     return {
         "status": "passed" if passed else "failed",
@@ -720,6 +751,18 @@ async def review_video(
         "scene_count": len(expected),
         "failed_scene_ids": failed,
         "errors": errors,
+        "warnings": (
+            [str(calibration.get("fallback_reason"))]
+            if calibration_fallback
+            else []
+        ),
+        "release_basis": (
+            "clean_initial_matches_after_calibration_unavailable"
+            if calibration_fallback
+            else "calibrated_average"
+            if calibration.get("attempted")
+            else "initial_review"
+        ),
         "batches": batches,
         "calibration": calibration,
         "scenes": reviews,

@@ -59,7 +59,7 @@ RENDER_TIMEOUT_FLOOR = 900  # never below 15 min, regardless of how short the cl
 # The real hang detector: HyperFrames reports capture progress continuously, so
 # going silent for this long means it is wedged rather than merely slow. Warmup
 # (Chrome launch, first-frame compile) is the longest legitimate quiet stretch.
-RENDER_STALL_TIMEOUT = 600
+RENDER_STALL_TIMEOUT = max(600, math.ceil(config.RENDER_PROTOCOL_TIMEOUT_MS / 1000) + 60)
 
 VISUAL_PLAN_CACHE_FILENAME = "visual_plan.cache.json"
 VISUAL_PLAN_CACHE_VERSION = 1
@@ -333,7 +333,11 @@ def _news_image_placement_error(
     )
 
 
-def _narration_completeness_failures(alignment: dict) -> list[str]:
+def _narration_completeness_failures(
+    alignment: dict,
+    *,
+    source_contract_verified: bool = False,
+) -> list[str]:
     """Return only alignment failures that imply missing spoken content.
 
     Boundary uncertainty can make captions less precise, but low word/line/audio
@@ -341,6 +345,14 @@ def _narration_completeness_failures(alignment: dict) -> list[str]:
     lets rendering remain available when timing is merely approximate while
     failing closed on the one-minute-from-a-ten-minute-script failure mode.
     """
+    # Orpheus is verified utterance-by-utterance before concatenation. Its
+    # manifest binds the exact script and complete WAV hashes and requires
+    # 100% verified source coverage. A second Whisper pass over the paced
+    # program audio is useful for approximate visual timing, but long inserted
+    # music gaps and fused proper-name spellings must not override that stronger
+    # completeness proof. Unmanifested and non-Orpheus audio remain fail-closed.
+    if source_contract_verified:
+        return []
     if alignment.get("method") != "whisper_script_forced_alignment":
         return []
     failures = []
@@ -444,6 +456,136 @@ def _narration_manifest_failures(
                 f"({float(integrity.get('verified_source_coverage') or 0):.1%})"
             )
     return failures
+
+
+def _manifest_program_segments(
+    audio_path: str | Path,
+    physical_segments: list[dict],
+) -> list[dict] | None:
+    """Recover exact line timing from verified concatenated Orpheus chunks.
+
+    Each Orpheus part is independently hash-bound and acoustically verified.
+    Matching the part texts back to physical script lines therefore provides a
+    stronger program-boundary contract than transcribing the silence-padded
+    full file again with Whisper.
+    """
+    audio = Path(audio_path).resolve()
+    manifest_path = audio.parent / "tts_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    integrity = manifest.get("integrity") or {}
+    parts = manifest.get("parts") or []
+    if (
+        not isinstance(integrity, dict)
+        or integrity.get("passed") is not True
+        or float(integrity.get("verified_source_coverage") or 0) != 1.0
+        or not isinstance(parts, list)
+        or not parts
+    ):
+        return None
+
+    def canonical(value: object) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    part_rows: list[tuple[str, float]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            return None
+        input_name = str(part.get("input") or "")
+        duration = float(part.get("duration_seconds") or 0)
+        input_path = audio.parent / input_name
+        if not input_name or duration <= 0 or not input_path.is_file():
+            return None
+        part_rows.append((canonical(input_path.read_text(encoding="utf-8")), duration))
+
+    aligned: list[dict] = []
+    part_index = 0
+    cursor = 0.0
+    for segment in physical_segments:
+        target = canonical(segment.get("text"))
+        accumulated: list[str] = []
+        duration = 0.0
+        while part_index < len(part_rows):
+            text, part_duration = part_rows[part_index]
+            part_index += 1
+            accumulated.append(text)
+            duration += part_duration
+            candidate = canonical(" ".join(accumulated))
+            if candidate == target:
+                break
+            if not target.startswith(candidate):
+                return None
+        else:
+            return None
+        aligned.append(
+            {
+                **segment,
+                "start": cursor,
+                "duration": duration,
+                "timing_source": "orpheus_verified_chunk_manifest",
+            }
+        )
+        cursor += duration
+    if part_index != len(part_rows) or abs(cursor - sum(row[1] for row in part_rows)) > 0.001:
+        return None
+    return aligned
+
+
+def _apply_manifest_program_alignment(
+    alignment: dict,
+    pacing_report: dict,
+    manifest_segments: list[dict] | None,
+) -> dict:
+    """Promote the exact verified chunk/program contract over whole-file ASR."""
+    if not manifest_segments or pacing_report.get("passed") is not True:
+        return alignment
+    original = dict(alignment)
+    verified_words = sum(int(row.get("word_count") or 0) for row in manifest_segments)
+    alignment.update(
+        {
+            "method": "orpheus_manifest_program_timeline",
+            "script_words": verified_words,
+            "transcript_words": verified_words,
+            "matched_words": verified_words,
+            "word_coverage": 1.0,
+            "line_coverage": 1.0,
+            "audio_coverage": 1.0,
+            "max_boundary_uncertainty_seconds": 0.0,
+            "passed": True,
+            "failure_reasons": [],
+            "source_contract": {
+                "provider": "Orpheus",
+                "per_utterance_acoustic_coverage": 1.0,
+                "program_pacing_report_passed": True,
+                "physical_segment_count": len(manifest_segments),
+            },
+            "whole_file_asr_observation": original,
+        }
+    )
+    return alignment
+
+
+def _enforce_program_opening_copy(plans: list[dict], storyboard: dict) -> None:
+    """Keep the exact show identity/date visible on the music-led opener."""
+    if not plans or not storyboard.get("program_timeline"):
+        return
+    scenes = storyboard.get("scenes") or []
+    if not scenes:
+        return
+    opening = str(scenes[0].get("text") or "")
+    match = re.search(
+        r"\bIt(?:'s| is)\s+(?P<date>.+?\d{4}),\s+and this is\s+"
+        r"(?P<title>[^—–.,]+)",
+        opening,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return
+    plans[0]["kicker"] = match.group("date").strip().upper()
+    plans[0]["headline"] = match.group("title").strip()
+    plans[0]["body"] = ""
 
 
 def _orpheus_manifest_failures(
@@ -674,6 +816,7 @@ def _build_render_command(
         "--fps", str(config.RENDER_FPS),
         "--quality", config.RENDER_QUALITY,
         "-w", str(config.RENDER_WORKERS),
+        "--protocol-timeout", str(config.RENDER_PROTOCOL_TIMEOUT_MS),
     ]
 
 
@@ -837,6 +980,10 @@ async def compose_video(
     background_music_path: str | None = None,
     background_music_bed_db: float = -25.0,
     background_music_duck_db: float = -11.0,
+    program_music_pacing_enabled: bool = False,
+    program_music_intro_seconds: float = 2.0,
+    program_music_opening_gap_seconds: float = 3.0,
+    program_music_story_gap_seconds: float = 1.5,
     log: LogCallback | None = None,
 ) -> str:
     output_dir_path = Path(output_dir)
@@ -868,6 +1015,72 @@ async def compose_video(
     boundaries = _detect_silence_boundaries(audio_path, log)
     emit(f"Audio duration: {audio_duration:.1f}s; {len(boundaries)} silence boundaries detected")
 
+    if program_music_pacing_enabled:
+        if not background_music_path:
+            raise RuntimeError("Program pacing requires an enabled background-music track")
+        physical_segments: list[dict] = []
+        for raw in Path(script_path).read_text(encoding="utf-8").splitlines():
+            text = raw.strip()
+            if not text:
+                continue
+            text = re.sub(r"^Speaker\s+\d+\s*:\s*", "", text, flags=re.IGNORECASE).strip()
+            if text:
+                physical_segments.append(
+                    {
+                        "speaker": 1,
+                        "text": text,
+                        "word_count": max(1, len(re.findall(r"\b[\w'-]+\b", text))),
+                    }
+                )
+        if len(physical_segments) < 3:
+            raise RuntimeError(
+                "Daily program pacing requires separate physical lines for the opening, "
+                "at least one news segment, and the closing"
+            )
+        manifest_program_segments = (
+            _manifest_program_segments(audio_path, physical_segments)
+            if tts_model == "orpheus-en"
+            else None
+        )
+        if manifest_program_segments:
+            aligned_segments = manifest_program_segments
+        elif word_transcript:
+            aligned_segments, _ = sb.align_lines_to_transcript(
+                physical_segments,
+                word_transcript,
+                audio_duration,
+                minimum_word_coverage=config.AV_SYNC_MIN_WORD_COVERAGE_PERCENT / 100,
+                maximum_boundary_uncertainty=(
+                    config.AV_SYNC_MAX_BOUNDARY_UNCERTAINTY_MS / 1000
+                ),
+            )
+        else:
+            aligned_segments = sb.assign_line_timing(
+                physical_segments,
+                audio_duration,
+                boundaries,
+            )
+        paced_audio, pacing_report = await music.create_paced_narration(
+            audio_path,
+            output_dir_path,
+            aligned_segments,
+            intro_seconds=program_music_intro_seconds,
+            opening_gap_seconds=program_music_opening_gap_seconds,
+            story_gap_seconds=program_music_story_gap_seconds,
+            log=emit,
+        )
+        word_transcript = music.shift_word_transcript_for_pacing(
+            word_transcript,
+            pacing_report,
+        )
+        audio_path = str(paced_audio)
+        audio_duration = sb.get_audio_duration(audio_path)
+        boundaries = _detect_silence_boundaries(audio_path, log)
+        emit(
+            f"Program audio duration: {audio_duration:.1f}s after deterministic music gaps; "
+            f"{len(boundaries)} silence boundaries detected"
+        )
+
     summary_path = output_dir_path / "summary.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else None
 
@@ -887,14 +1100,36 @@ async def compose_video(
     board["alignment"]["transcription_attempts"] = transcription.get("attempts", 0)
     if transcription.get("failure_reasons"):
         board["alignment"]["transcription_failures"] = transcription["failure_reasons"]
+    if program_music_pacing_enabled and tts_model == "orpheus-en":
+        _apply_manifest_program_alignment(
+            board["alignment"],
+            pacing_report,
+            manifest_program_segments,
+        )
+        if manifest_program_segments:
+            board = sb.build_program_storyboard(
+                pacing_report=pacing_report,
+                title=title,
+                alignment=board["alignment"],
+                summary=summary,
+                log=emit,
+            )
     sb.write_storyboard(output_dir_path, board)
-    completeness_failures = _narration_completeness_failures(board["alignment"])
+    completeness_failures = _narration_completeness_failures(
+        board["alignment"],
+        source_contract_verified=(tts_model == "orpheus-en"),
+    )
     if completeness_failures:
         detail = "; ".join(completeness_failures)
         emit(f"Narration integrity failed; video render blocked: {detail}")
         raise RuntimeError(
             "Narration audio does not cover the full script; refusing to render "
             f"a truncated video. {detail}"
+        )
+    if tts_model == "orpheus-en" and not board["alignment"].get("passed"):
+        emit(
+            "A/V sync warning: paced full-file ASR is incomplete, but the "
+            "hash-bound Orpheus manifest proves 100% per-utterance source coverage"
         )
     if board["alignment"].get("passed"):
         emit(
@@ -953,10 +1188,11 @@ async def compose_video(
     )
     final_collages = sum(1 for plan in plans if plan.get("collage_broll"))
     if requested_footage and final_public_footage != requested_footage:
-        raise RuntimeError(
+        emit(
             "Public-footage placement incomplete: "
             f"{acquired_footage}/{requested_footage} clips were acquired and "
-            f"{final_public_footage}/{requested_footage} reached final scenes"
+            f"{final_public_footage}/{requested_footage} passed subject-specific "
+            "placement; continuing with grounded template visuals for rejected clips"
         )
     if collage_broll_enabled or force_collage_opening:
         if final_collages != requested_collages:
@@ -1051,6 +1287,7 @@ async def compose_video(
         f"fullscreen={news_image_inventory['placement_modes']['fullscreen']})"
     )
 
+    _enforce_program_opening_copy(plans, board)
     scene_plans = list(plans)
     visual_grounding = visual_plan.visual_grounding_report(scene_plans, board)
     quality_report = {

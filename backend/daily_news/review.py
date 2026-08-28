@@ -746,7 +746,7 @@ async def _web_story_review(
         command.extend(
             [
                 "--window",
-                "foreground" if provider == "gemini" else "background",
+                "foreground",
                 "--site-session",
                 "persistent",
                 "--keep-tab",
@@ -882,6 +882,7 @@ async def _web_story_review(
         )
 
     chatgpt_error: Exception | None = None
+    chatgpt_model_selection_error: Exception | None = None
     chatgpt_model_attempts = 2
     for model_attempt in range(1, chatgpt_model_attempts + 1):
         try:
@@ -891,7 +892,7 @@ async def _web_story_review(
                     "model",
                     config.DAILY_NEWS_CHATGPT_REVIEW_MODEL,
                     "--window",
-                    "background",
+                    "foreground",
                     "--site-session",
                     "persistent",
                     "--keep-tab",
@@ -911,6 +912,7 @@ async def _web_story_review(
             break
         except Exception as exc:  # noqa: BLE001 - fail closed after bounded retry
             chatgpt_error = exc
+            chatgpt_model_selection_error = exc
             raw_attempts.append(
                 f"[CHATGPT MODEL ERROR {model_attempt}/{chatgpt_model_attempts}]\n{exc}"
             )
@@ -921,6 +923,23 @@ async def _web_story_review(
                 )
             if model_attempt < chatgpt_model_attempts:
                 await asyncio.sleep(_MODEL_SELECTION_RETRY_DELAY_SECONDS)
+
+    if chatgpt_error is not None:
+        # ChatGPT periodically removes or delays the composer model picker.
+        # That must not suppress the independent Web review itself: keep the
+        # model-selection failure in the evidence log, ask with the page's
+        # current model, and continue to require the exact W-prefixed protocol.
+        raw_attempts.append(
+            "[CHATGPT CURRENT MODEL FALLBACK]\n"
+            f"Explicit model selection unavailable: {chatgpt_model_selection_error}"
+        )
+        if log:
+            log(
+                "ChatGPT fallback model selector is unavailable after bounded retries; "
+                "using the page's current model while retaining the mandatory live-Web "
+                "review gate"
+            )
+        chatgpt_error = None
 
     conversation_url = ""
     if chatgpt_error is None:
@@ -936,7 +955,7 @@ async def _web_story_review(
                 "--timeout",
                 str(timeout),
                 "--window",
-                "background",
+                "foreground",
                 "--site-session",
                 "persistent",
                 "--keep-tab",

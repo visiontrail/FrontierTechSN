@@ -617,9 +617,12 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
     if task.config.background_music_enabled:
         music_path = task_dir / "music" / "background.wav"
         if not music_path.is_file():
-            task_log(
-                f"Music: Generating a matching program bed via {task.config.background_music_provider}"
+            action = (
+                f"Loading local program track {task.config.background_music_track_id}"
+                if task.config.background_music_provider == "local_library"
+                else f"Generating a matching program bed via {task.config.background_music_provider}"
             )
+            task_log(f"Music: {action}")
             await update_task(task.id, status=TaskStatus.MUSIC.value, error_message=None)
             summary = None
             summary_path = task_dir / "summary.json"
@@ -634,6 +637,7 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
                 title=title,
                 summary=summary,
                 provider=task.config.background_music_provider,
+                track_id=task.config.background_music_track_id,
                 log=task_log,
             )
             music_path = Path(artifact.audio_path)
@@ -667,6 +671,10 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
         background_music_path=background_music_path,
         background_music_bed_db=task.config.background_music_bed_db,
         background_music_duck_db=task.config.background_music_duck_db,
+        program_music_pacing_enabled=task.config.program_music_pacing_enabled,
+        program_music_intro_seconds=task.config.program_music_intro_seconds,
+        program_music_opening_gap_seconds=task.config.program_music_opening_gap_seconds,
+        program_music_story_gap_seconds=task.config.program_music_story_gap_seconds,
         log=task_log,
     )
     completion_fields = {

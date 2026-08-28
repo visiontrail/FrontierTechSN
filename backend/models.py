@@ -106,13 +106,23 @@ class TaskConfig(BaseModel):
     news_max_stories: int = Field(default=6, ge=3, le=12)
     news_window_hours: int = Field(default=36, ge=12, le=96)
     news_timezone: str = "Asia/Singapore"
-    # Program music is generated through Gemini Create Music when available,
-    # with a deterministic local bed as the fail-safe. The final mix always
-    # ducks below narration and is separately measured before rendering.
+    # The daily desk normally reuses a selected local library track. Gemini
+    # generation remains an explicit per-edition option; "local" is retained
+    # for compatibility with the deterministic synth fallback.
     background_music_enabled: bool = True
-    background_music_provider: Literal["gemini_create_music", "local"] = "gemini_create_music"
+    background_music_provider: Literal[
+        "local_library", "gemini_create_music", "local"
+    ] = "local_library"
+    background_music_track_id: str = Field(
+        default="morning-blueprint",
+        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    )
     background_music_bed_db: float = Field(default=-25.0, ge=-45.0, le=-12.0)
     background_music_duck_db: float = Field(default=-11.0, ge=-24.0, le=-4.0)
+    program_music_pacing_enabled: bool = False
+    program_music_intro_seconds: float = Field(default=2.0, ge=0.0, le=10.0)
+    program_music_opening_gap_seconds: float = Field(default=3.0, ge=0.0, le=10.0)
+    program_music_story_gap_seconds: float = Field(default=1.5, ge=0.0, le=5.0)
     # Publishing is account-agnostic: adapters use whichever OpenCLI/browser
     # session is logged in at run time, never a hard-coded handle/channel ID.
     auto_publish: bool = False
@@ -588,7 +598,13 @@ class DailyAutomationSettings(BaseModel):
     # both counts in the desk recipe so scheduled editions never fall back to
     # a generic manual-task default that the operator cannot see.
     footage_clip_count: int = Field(default=8, ge=1, le=30)
-    background_music_provider: Literal["gemini_create_music", "local"] = "gemini_create_music"
+    background_music_provider: Literal[
+        "local_library", "gemini_create_music", "local"
+    ] = "local_library"
+    background_music_track_id: str = Field(
+        default="morning-blueprint",
+        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    )
     auto_publish: bool = True
     publish_targets: list[Literal["youtube", "x", "apple_podcast"]] = Field(
         default_factory=lambda: ["youtube", "x", "apple_podcast"]

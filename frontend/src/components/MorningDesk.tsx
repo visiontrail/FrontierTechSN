@@ -4,9 +4,11 @@ import { Link } from 'react-router-dom'
 import {
   fetchDailyAutomation,
   fetchDailySources,
+  fetchProgramMusicLibrary,
   fetchSettingsSchema,
   fetchTtsModels,
   fetchVoices,
+  programMusicAudioUrl,
   runDailyNow,
   updateDailyAutomation,
   type DailyAutomationSettings,
@@ -43,6 +45,11 @@ export default function MorningDesk() {
     error: automationError,
   } = useQuery({ queryKey: ['daily-automation'], queryFn: fetchDailyAutomation })
   const { data: sources = [] } = useQuery({ queryKey: ['daily-sources'], queryFn: fetchDailySources })
+  const {
+    data: musicTracks = [],
+    isFetching: musicTracksAreLoading,
+    isError: musicTracksAreError,
+  } = useQuery({ queryKey: ['program-music-library'], queryFn: fetchProgramMusicLibrary })
   const { data: settingsSchema } = useQuery({ queryKey: ['settings-schema'], queryFn: fetchSettingsSchema })
   const {
     data: ttsModels = [],
@@ -173,6 +180,7 @@ export default function MorningDesk() {
     },
   ]
   const selectedModel = ttsModels.find((model) => model.id === draft.tts_model)
+  const selectedMusicTrack = musicTracks.find((track) => track.id === draft.background_music_track_id)
   const selectedVoiceIsValid = voices.some((voice) => voice.name === draft.voice)
   const effectiveVoice = selectedVoiceIsValid ? draft.voice : (voices[0]?.name ?? draft.voice)
   const effectiveVoiceIsValid = voices.some((voice) => voice.name === effectiveVoice)
@@ -181,7 +189,10 @@ export default function MorningDesk() {
     && !voicesAreLoading
     && (voicesAreError || effectiveVoiceIsValid)
     && (ttsModelsIsError || ttsModels.some((model) => model.id === draft.tts_model))
+  const musicSelectionReady = draft.background_music_provider !== 'local_library'
+    || (!musicTracksAreLoading && Boolean(selectedMusicTrack))
   const configReady = catalogReady
+    && musicSelectionReady
     && Boolean(draft.generation_time && draft.timezone.trim())
     && inRange(draft.target_duration_minutes, 1, 30)
     && inRange(draft.max_stories, 3, 12)
@@ -284,7 +295,38 @@ export default function MorningDesk() {
               </label>
               <label><span>Clips / edition</span><input type="number" min="1" max="30" disabled={!draft.public_footage_enabled} value={draft.footage_clip_count} onChange={(event) => patch('footage_clip_count', Number(event.target.value))} /></label>
             </div>
-            <label className="morning-music-field"><span>Program music</span><select value={draft.background_music_provider} onChange={(event) => patch('background_music_provider', event.target.value as DailyAutomationSettings['background_music_provider'])}><option value="gemini_create_music">Gemini Create Music · local fallback</option><option value="local">Deterministic local bed</option></select></label>
+            <div className="morning-music-stack">
+              <label className="morning-music-field">
+                <span>Program music source</span>
+                <select value={draft.background_music_provider} onChange={(event) => patch('background_music_provider', event.target.value as DailyAutomationSettings['background_music_provider'])}>
+                  <option value="local_library">Local music library · no generation</option>
+                  <option value="gemini_create_music">Generate a new Gemini track · every edition</option>
+                  <option value="local">Deterministic synthesizer fallback</option>
+                </select>
+              </label>
+              {draft.background_music_provider === 'local_library' && (
+                <>
+                  <label className="morning-music-field">
+                    <span>Default track</span>
+                    <select value={draft.background_music_track_id} disabled={musicTracksAreLoading || musicTracksAreError} onChange={(event) => patch('background_music_track_id', event.target.value)}>
+                      {musicTracks.map((track) => <option value={track.id} key={track.id}>{track.title} · {track.source === 'gemini' ? 'Gemini' : 'Provided'}</option>)}
+                    </select>
+                  </label>
+                  {selectedMusicTrack && (
+                    <div className="morning-music-preview">
+                      <div>
+                        <strong>{selectedMusicTrack.title}</strong>
+                        <small>{selectedMusicTrack.description}</small>
+                        <span>{selectedMusicTrack.duration_seconds.toFixed(1)}s · {selectedMusicTrack.source === 'gemini' ? 'Gemini library' : 'Project default'}</span>
+                      </div>
+                      <audio key={selectedMusicTrack.id} controls preload="metadata" src={programMusicAudioUrl(selectedMusicTrack.id)} />
+                    </div>
+                  )}
+                  {musicTracksAreError && <p className="morning-panel-warning">The local music catalog could not be loaded. Saving is blocked until the library is available.</p>}
+                </>
+              )}
+              <p className="morning-panel-note">Program clock: 2s music-only intro · 3s full-level music after the opening · 1.5s full-level music between news segments. Music is ducked only while the host speaks.</p>
+            </div>
           </article>
         </div>
 

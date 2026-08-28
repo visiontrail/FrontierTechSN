@@ -257,6 +257,52 @@ SPECS: tuple[SettingSpec, ...] = (
         description="Maximum pause between yhroot provider attempts.",
     ),
     SettingSpec(
+        "AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", "ai", "Primary request spacing", "int",
+        unit="seconds", minimum=12, maximum=300,
+        description="Minimum spacing shared by all OneAPI request starts. The default "
+                    "15 seconds stays below the gateway limit of five requests per minute.",
+    ),
+    SettingSpec(
+        "AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS", "ai", "Primary 429 cooldown", "int",
+        unit="seconds", minimum=60, maximum=600,
+        description="Process-wide pause after OneAPI reports a rolling-minute rate limit. "
+                    "The default 65 seconds clears the full quota window with jitter headroom.",
+    ),
+    SettingSpec(
+        "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", "ai", "Primary 429 wait windows", "int",
+        unit="windows", minimum=0, maximum=60,
+        description="Full quota-cooldown windows that do not consume OneAPI's normal "
+                    "failure attempts. The backup is considered only after these waits "
+                    "and the ordinary primary retry ladder are exhausted.",
+    ),
+    SettingSpec(
+        "AI_PRIMARY_RATE_LIMIT_TIMEZONE", "ai", "Primary rate-limit timezone", "string",
+        description="IANA timezone used to decide whether OneAPI's proactive weekday "
+                    "request spacing is active.",
+    ),
+    SettingSpec(
+        "AI_PRIMARY_RATE_LIMIT_START_HOUR", "ai", "Primary daytime start", "int",
+        unit="hour", minimum=0, maximum=23,
+        description="Local weekday hour when proactive OneAPI request spacing begins.",
+    ),
+    SettingSpec(
+        "AI_PRIMARY_RATE_LIMIT_END_HOUR", "ai", "Primary daytime end", "int",
+        unit="hour", minimum=1, maximum=24,
+        description="Local weekday hour when proactive OneAPI request spacing stops. "
+                    "Night and weekend calls are not proactively throttled.",
+    ),
+    SettingSpec(
+        "AI_PRIMARY_MAX_RETRIES", "ai", "Primary max retries", "int", unit="attempts",
+        minimum=0, maximum=10,
+        description="Extra OneAPI turns after the first. The default gives OneAPI four "
+                    "long, rate-limited chances before switching to DeepSeek.",
+    ),
+    SettingSpec(
+        "AI_BACKUP_MAX_RETRIES", "ai", "Backup max retries", "int", unit="attempts",
+        minimum=0, maximum=10,
+        description="Extra DeepSeek turns after failover before the task fails closed.",
+    ),
+    SettingSpec(
         "AI_HTTP_FALLBACK", "ai", "Fall back to HTTP", "bool",
         description="When the Agent SDK backend fails outright, retry the call "
                     "on the same provider's OpenAI-compatible route instead of "
@@ -279,9 +325,14 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         "AGENT_TURN_TIMEOUT", "agent_sdk", "Turn timeout", "int", unit="seconds",
         minimum=60, maximum=7200,
-        description="Wall-clock ceiling for the whole `claude` process. The CLI "
-                    "retries failed requests on its own, so this is what stops "
-                    "one stage from silently burning half an hour.",
+        description="Wall-clock ceiling for one `claude` process. Pipeline retries "
+                    "run outside the CLI so they can obey provider rate limits.",
+    ),
+    SettingSpec(
+        "AGENT_INTERNAL_MAX_RETRIES", "agent_sdk", "CLI internal retries", "int",
+        unit="attempts", minimum=0, maximum=3,
+        description="Keep at zero for OneAPI: one request per CLI turn lets the shared "
+                    "pipeline limiter pace retries instead of sending an 11-request burst.",
     ),
     # ── TTS ──────────────────────────────────────────────────────────────
     SettingSpec(

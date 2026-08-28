@@ -21,13 +21,13 @@ DAILY_NEWS_ENGLISH_WORDS_PER_MINUTE = 120
 DAILY_NEWS_CHINESE_CHARACTERS_PER_MINUTE = 280
 DAILY_NEWS_DURATION_LOWER_RATIO = 0.8
 DAILY_NEWS_DURATION_UPPER_RATIO = 1.2
-DAILY_NEWS_EDIT_MAX_TOKENS = 8192
-DAILY_NEWS_EDIT_MODEL_ALIASES = {
-    # The reasoning variant can spend its entire output allowance on hidden
-    # thought for constrained copy edits. The sibling chat model emits the
-    # requested prose directly while using the same configured gateway/key.
-    "yinhe-thinking": "yinhe-chat",
-}
+# Model budget and accepted spoken-output size are deliberately separate. A
+# reasoning-capable OneAPI model may need substantially more than the final
+# 1–30 minute script to finish its turn; the paragraph/language/character gates
+# below still cap what can enter narration.
+DAILY_NEWS_EDIT_MAX_TOKENS = 32_768
+DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS = 3
+DAILY_NEWS_EDIT_MODEL_ALIASES: dict[str, str] = {}
 SOURCE_SPOKEN_ALIASES = {
     "机器之心 AI Daily": ("Machine Heart", "Jiqizhixin"),
     "量子位 QbitAI": ("QbitAI",),
@@ -82,6 +82,15 @@ def daily_script_duration_report(
 
 def _daily_news_edit_model(model: str) -> str:
     return DAILY_NEWS_EDIT_MODEL_ALIASES.get(model.casefold(), model)
+
+
+def _strip_model_reasoning_preamble(value: str) -> str:
+    """Keep only final answer text from gateways that inline hidden thinking."""
+    clean = value.strip()
+    matches = list(re.finditer(r"</(?:think|analysis)>", clean, flags=re.IGNORECASE))
+    if matches:
+        clean = clean[matches[-1].end():].strip()
+    return clean
 
 
 def narration_duration_report(
@@ -490,6 +499,12 @@ async def fit_daily_script_duration(
         else ""
     )
     protected_lines = _spoken_lines(script)
+    selected_route: tuple[str, str, str] | None = None
+
+    def remember_route(route_endpoint: str, route_model: str, route_api_key: str) -> None:
+        nonlocal selected_route
+        selected_route = (route_endpoint, route_model, route_api_key)
+
     working_script = script
     working_report = report
     repaired = script
@@ -500,6 +515,43 @@ async def fit_daily_script_duration(
             "expand"
             if working_report["spoken_units"] < working_report["minimum_units"]
             else "condense"
+        )
+        fixed_units = (
+            daily_script_duration_report(
+                "\n".join([opening, closing_remarks]),
+                target_duration_minutes,
+                language,
+            )["spoken_units"]
+        )
+        protected_units = sum(
+            daily_script_duration_report(
+                protected_lines[number],
+                target_duration_minutes,
+                language,
+            )["spoken_units"]
+            for number in protected
+        )
+        editable_story_count = max(1, len(dossier.selected) - len(protected))
+        editable_story_budget = max(
+            1,
+            (
+                int(working_report["maximum_units"])
+                - fixed_units
+                - protected_units
+            )
+            // editable_story_count,
+        )
+        length_edit_rule = (
+            f"For this condensation, each editable story paragraph must contain no more "
+            f"than {editable_story_budget} {working_report['unit_label']}. Keep the named "
+            "source attribution and one central evidence-backed claim per story. Omit "
+            "secondary clauses, examples, dates, and numbers as whole details when needed; "
+            "never alter a retained name, number, date, or uncertainty word."
+            if direction == "condense"
+            else (
+                "Preserve every existing name, number, date, uncertainty word, and factual "
+                "limitation while adding only dossier-supported detail."
+            )
         )
         retry_rule = (
             ""
@@ -517,7 +569,8 @@ async def fit_daily_script_duration(
 The final script must contain between {working_report['minimum_units']} and {working_report['maximum_units']} {working_report['unit_label']} (target {working_report['target_units']}).
 Use only facts already present in CURRENT SCRIPT or the supplied EVIDENCE DOSSIER. Never add generic commentary, repetition, speculation, invented transitions, or unsupported significance merely to reach the length.
 Preserve the exact story order and output exactly {len(dossier.selected) + 2} nonblank paragraphs: the exact opening, one paragraph for each selected story, and the exact closing.
-Attribute reported claims aloud. Preserve every number, name, uncertainty word, and factual limitation.
+Attribute reported claims aloud.
+{length_edit_rule}
 {protected_rule}
 {retry_rule}
 {language_rule}
@@ -526,28 +579,95 @@ Output spoken prose only with no markdown, labels, citations section, or explana
 Exact opening: {opening}
 Exact closing: {closing_remarks}
 """
-        raw = await _chat(
-            system_prompt,
-            "\n\n".join(
-                [
-                    "CURRENT SCRIPT\n" + working_script,
-                    "EVIDENCE DOSSIER\n" + dossier_markdown(dossier),
-                ]
-            ),
-            endpoint,
-            edit_model,
-            api_key,
-            log,
-            "Daily news duration correction",
-            max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
-            enable_skills=False,
+        edit_input = "\n\n".join(
+            [
+                "CURRENT SCRIPT\n" + working_script,
+                "EVIDENCE DOSSIER\n" + dossier_markdown(dossier),
+            ]
         )
-        repaired = enforce_script_contract(
-            raw,
-            opening=opening,
-            closing=closing_remarks,
-            language=language,
-        )
+        response_error: RuntimeError | None = None
+        for response_attempt in range(1, DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS + 1):
+            response_prompt = system_prompt
+            if response_error is not None:
+                response_prompt += (
+                    "\nThe previous response was rejected by software: "
+                    f"{response_error}. Return a fresh corrected script that obeys every "
+                    "paragraph, language, and length constraint."
+                )
+            # Constrained copy editing does not need tools or hidden thinking.
+            # The sibling yinhe-chat route has been observed to ignore
+            # max_tokens and emit a 16K-token reasoning transcript. Keep the
+            # configured model and explicitly disable thinking instead.
+            call_endpoint, call_model, call_api_key = (
+                selected_route
+                if selected_route is not None
+                else (endpoint, edit_model, api_key)
+            )
+            raw = await _chat(
+                response_prompt,
+                edit_input,
+                call_endpoint,
+                call_model,
+                call_api_key,
+                log,
+                "Daily news duration correction",
+                max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
+                enable_skills=False,
+                disable_thinking=True,
+                route_selected=remember_route,
+            )
+            raw = _strip_model_reasoning_preamble(raw)
+            try:
+                raw_character_limit = max(
+                    12_000,
+                    int(working_report["maximum_units"]) * 20,
+                )
+                if len(raw) > raw_character_limit:
+                    raise RuntimeError(
+                        "response was pathologically large "
+                        f"({len(raw)} characters; limit {raw_character_limit})"
+                    )
+                repaired_candidate = enforce_script_contract(
+                    raw,
+                    opening=opening,
+                    closing=closing_remarks,
+                    language=language,
+                )
+                _script_paragraphs(
+                    repaired_candidate,
+                    story_count=len(dossier.selected),
+                    context="duration-correction response",
+                )
+                candidate_report = daily_script_duration_report(
+                    repaired_candidate,
+                    target_duration_minutes,
+                    language,
+                )
+                if not protected and not candidate_report["passed"]:
+                    raise RuntimeError(
+                        "response still measures "
+                        f"{candidate_report['spoken_units']} "
+                        f"{candidate_report['unit_label']}; required "
+                        f"{candidate_report['minimum_units']}-"
+                        f"{candidate_report['maximum_units']}"
+                    )
+            except RuntimeError as exc:
+                response_error = exc
+                if response_attempt >= DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS:
+                    raise RuntimeError(
+                        "Daily-news duration correction exhausted "
+                        f"{DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS} semantic response attempts: "
+                        f"{exc}"
+                    ) from exc
+                if log:
+                    log(
+                        "Daily news duration correction: rejected semantic response "
+                        f"{response_attempt}/{DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS} "
+                        f"({exc}); retrying"
+                    )
+                continue
+            repaired = repaired_candidate
+            break
         if protected:
             repaired_lines = _spoken_lines(repaired)
             expected_line_count = len(dossier.selected) + 2
@@ -632,6 +752,7 @@ NON-NEGOTIABLE EDITORIAL CONTRACT
 7. Use short paragraphs suitable for TTS. Output spoken prose only.
 8. The closing line will be injected by software. Do not write a sign-off.
 9. For an English edition, translate every Chinese headline, organization and product description into natural spoken English. Cite Chinese publications only by these English broadcast names: Machine Heart, QbitAI, DeepTech China, AIBase, ITHome, and GeekPark. Output no Chinese, Japanese or Korean characters.
+10. Output exactly {len(dossier.selected)} nonblank story paragraphs. Never join two stories in one paragraph, even when they share a source or theme.
 
 Software-controlled opening (for context only; DO NOT repeat):
 {opening}
@@ -640,37 +761,90 @@ Software-controlled closing (for context only; DO NOT repeat):
 {closing_remarks}
 """
     user_content = dossier_markdown(dossier)
-    raw = await _chat(
-        system_prompt,
-        user_content,
-        endpoint,
-        model,
-        api_key,
-        log,
-        "Daily news script",
-        max_tokens=max(4096, min(8192, spoken_unit_target * 3)),
-        enable_skills=False,
-    )
-    if language == "en" and NON_ENGLISH_RE.search(raw):
-        if log:
-            log("Daily script contains CJK in an English edition; requesting a broadcast-safe translation repair")
-        raw = await _chat(
-            """You are a broadcast copy editor. Rewrite the supplied English technology-news script so it contains no Chinese, Japanese, or Korean characters. Translate non-English names and phrases into natural spoken English without adding, removing, or changing any facts, numbers, uncertainty, story order, or attribution. Use these source aliases: Machine Heart, QbitAI, DeepTech China, AIBase, ITHome, and GeekPark. Output spoken prose only.""",
-            raw,
-            endpoint,
-            model,
-            api_key,
-            log,
-            "Daily news English translation repair",
-            max_tokens=max(4096, min(8192, spoken_unit_target * 3)),
-            enable_skills=False,
+    selected_route: tuple[str, str, str] | None = None
+
+    def remember_route(route_endpoint: str, route_model: str, route_api_key: str) -> None:
+        nonlocal selected_route
+        selected_route = (route_endpoint, route_model, route_api_key)
+
+    response_error: RuntimeError | None = None
+    script = ""
+    for response_attempt in range(1, DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS + 1):
+        response_prompt = system_prompt
+        if response_error is not None:
+            response_prompt += (
+                "\nThe previous response was rejected by software: "
+                f"{response_error}. Return a complete fresh script with exactly "
+                f"{len(dossier.selected)} separate nonblank story paragraphs."
+            )
+        call_endpoint, call_model, call_api_key = (
+            selected_route
+            if selected_route is not None
+            else (endpoint, model, api_key)
         )
-    script = enforce_script_contract(
-        raw,
-        opening=opening,
-        closing=closing_remarks,
-        language=language,
-    )
+        raw = await _chat(
+            response_prompt,
+            user_content,
+            call_endpoint,
+            call_model,
+            call_api_key,
+            log,
+            "Daily news script",
+            max_tokens=max(4096, min(DAILY_NEWS_EDIT_MAX_TOKENS, spoken_unit_target * 3)),
+            enable_skills=False,
+            disable_thinking=response_attempt > 1,
+            route_selected=remember_route,
+        )
+        if language == "en" and NON_ENGLISH_RE.search(raw):
+            if log:
+                log("Daily script contains CJK in an English edition; requesting a broadcast-safe translation repair")
+            call_endpoint, call_model, call_api_key = selected_route or (
+                endpoint,
+                model,
+                api_key,
+            )
+            raw = await _chat(
+                """You are a broadcast copy editor. Rewrite the supplied English technology-news script so it contains no Chinese, Japanese, or Korean characters. Translate non-English names and phrases into natural spoken English without adding, removing, or changing any facts, numbers, uncertainty, story order, paragraph boundaries, or attribution. Use these source aliases: Machine Heart, QbitAI, DeepTech China, AIBase, ITHome, and GeekPark. Output spoken prose only.""",
+                raw,
+                call_endpoint,
+                call_model,
+                call_api_key,
+                log,
+                "Daily news English translation repair",
+                max_tokens=max(4096, min(DAILY_NEWS_EDIT_MAX_TOKENS, spoken_unit_target * 3)),
+                enable_skills=False,
+                disable_thinking=True,
+                route_selected=remember_route,
+            )
+        try:
+            candidate = enforce_script_contract(
+                raw,
+                opening=opening,
+                closing=closing_remarks,
+                language=language,
+            )
+            _script_paragraphs(
+                candidate,
+                story_count=len(dossier.selected),
+                context="generated script",
+            )
+        except RuntimeError as exc:
+            response_error = exc
+            if response_attempt >= DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS:
+                raise RuntimeError(
+                    "Daily-news script generation exhausted "
+                    f"{DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS} semantic response attempts: "
+                    f"{exc}"
+                ) from exc
+            if log:
+                log(
+                    "Daily news script: rejected semantic response "
+                    f"{response_attempt}/{DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS} "
+                    f"({exc}); retrying on the same successful provider"
+                )
+            continue
+        script = candidate
+        break
     if log:
         log(
             f"Daily script contract: exact dated opening + {len(dossier.selected)} researched stories + exact closing"

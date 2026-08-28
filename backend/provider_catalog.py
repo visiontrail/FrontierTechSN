@@ -3,8 +3,8 @@
 The provider/model associations mirror RavenAIService's Admin model catalogue
 (``app/agents/anthropic_client.py`` at 0f1d23d793e892e7387690a50276828eb4c6bfcf).
 FrontierTechSN keeps the catalogue separate from provider rows so multiple
-accounts or gateways can use the same provider type.  It intentionally contains
-no primary/backup slot, failover, circuit-breaker, or routing policy state.
+accounts or gateways can use the same provider type. Runtime primary/backup
+policy lives in ``pipeline.model_router``; catalogue entries remain stateless.
 """
 
 from __future__ import annotations

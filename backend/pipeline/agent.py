@@ -68,6 +68,26 @@ def _diagnostic_tail(sink: deque[str]) -> str:
     return " | claude CLI: " + " ⏎ ".join(sink)[-1500:]
 
 
+async def _record_rate_limit_if_present(
+    endpoint: str | None,
+    detail: str,
+    *,
+    log: LogCallback | None,
+    label: str,
+) -> bool:
+    folded = detail.casefold()
+    if "429" not in folded and "rate_limit" not in folded and "请求数限制" not in detail:
+        return False
+    from backend.pipeline import provider_rate_limit
+
+    cooldown = await provider_rate_limit.record_rate_limit(
+        endpoint or config.AI_ENDPOINT,
+        log=log,
+        label=label,
+    )
+    return cooldown > 0
+
+
 def _derive_base_url(endpoint: str | None) -> str:
     """Map an OpenAI-style endpoint to an Anthropic base URL.
 
@@ -102,6 +122,9 @@ def build_agent_env(
     model. Explicit ``ANTHROPIC_*`` config always wins over the derived values."""
     env: dict[str, str] = {
         "API_TIMEOUT_MS": str(config.AGENT_REQUEST_TIMEOUT * 1000),
+        # Disable Claude Code's own 11-request burst. The pipeline's outer
+        # retry ladder is observable, bounded, and paced for OneAPI's quota.
+        "CLAUDE_CODE_MAX_RETRIES": str(config.AGENT_INTERNAL_MAX_RETRIES),
         # Keep these one-shot text transforms off telemetry/update channels.
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     }
@@ -137,7 +160,7 @@ def build_agent_env(
     return env
 
 
-async def agent_complete(
+async def _agent_complete_single(
     system_prompt: str,
     user_content: str,
     *,
@@ -149,10 +172,12 @@ async def agent_complete(
     disable_thinking: bool = False,
     log: LogCallback | None = None,
     label: str = "AI call",
+    max_retries: int | None = None,
 ) -> str:
-    """Run a single Claude Agent SDK turn and return the assistant's text.
+    """Run one provider's Claude Agent SDK turn and return assistant text.
 
-    Raises ``RuntimeError`` on empty/failed output after ``AI_MAX_RETRIES``,
+    Raises ``RuntimeError`` on empty/failed output after the configured retry
+    limit for this provider route,
     matching the contract of the legacy ``_chat`` so ``digester.py`` can treat
     both backends the same."""
     # Imported lazily so the module (and the HTTP backend) load fine even when
@@ -167,6 +192,10 @@ async def agent_complete(
 
     resolved_model = (config.ANTHROPIC_MODEL or model or "").strip() or None
     env = build_agent_env(model, endpoint, api_key, max_tokens)
+    retry_limit = max(
+        0,
+        int(config.AI_MAX_RETRIES if max_retries is None else max_retries),
+    )
 
     if enable_skills:
         enabled_skills, disabled_skills = skills_admin.runtime_skill_names()
@@ -224,7 +253,9 @@ async def agent_complete(
     )
 
     last_error: Exception | None = None
-    for attempt in range(config.AI_MAX_RETRIES + 1):
+    attempt = 0
+    rate_limit_waits = 0
+    while attempt <= retry_limit:
         start = time.perf_counter()
         prompt = user_content
         if attempt > 0:
@@ -242,12 +273,20 @@ async def agent_complete(
         result: ResultMessage | None = None
         diagnostics: deque[str] = deque(maxlen=DIAGNOSTIC_STDERR_LINES)
         options.stderr = lambda line: _keep_diagnostic(diagnostics, line)
+        rate_limited = False
 
         try:
-            # The CLI retries a failing request on its own, so the process can
-            # outlive AGENT_REQUEST_TIMEOUT many times over. Bound the whole
-            # turn here and close the generator on the way out — that tears the
-            # transport down and kills the CLI instead of leaking it.
+            from backend.pipeline import provider_rate_limit
+
+            await provider_rate_limit.wait_for_request_slot(
+                endpoint or config.AI_ENDPOINT,
+                log=log,
+                label=label,
+            )
+            # Bound the whole turn and close the generator on the way out —
+            # that tears the transport down and kills the CLI instead of
+            # leaking it. Internal CLI retries are disabled so all subsequent
+            # attempts return through the shared OneAPI rate gate above.
             stream = query(prompt=prompt, options=options)
             try:
                 async with asyncio.timeout(config.AGENT_TURN_TIMEOUT):
@@ -287,17 +326,29 @@ async def agent_complete(
                 detail = f"Claude Agent SDK error: {'; '.join(str(e) for e in errs)}"
             detail += _diagnostic_tail(diagnostics)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
+            rate_limited = await _record_rate_limit_if_present(
+                endpoint,
+                detail,
+                log=log,
+                label=label,
+            )
             last_error = RuntimeError(detail)
         except TimeoutError:
             elapsed_ms = (time.perf_counter() - start) * 1000
             detail = (
                 f"the `claude` CLI ran past AGENT_TURN_TIMEOUT "
                 f"({config.AGENT_TURN_TIMEOUT}s, {elapsed_ms:.0f}ms elapsed) and was killed. "
-                f"The CLI retries a failing request internally, so this usually means the "
-                f"gateway kept timing out at AGENT_REQUEST_TIMEOUT "
-                f"({config.AGENT_REQUEST_TIMEOUT}s) rather than that one call was slow"
+                f"The underlying request ceiling is AGENT_REQUEST_TIMEOUT "
+                f"({config.AGENT_REQUEST_TIMEOUT}s); later attempts are paced and started "
+                "by the pipeline rather than retried inside the CLI"
             ) + _diagnostic_tail(diagnostics)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
+            rate_limited = await _record_rate_limit_if_present(
+                endpoint,
+                detail,
+                log=log,
+                label=label,
+            )
             # A hard turn timeout is still a provider failure. Treat it like
             # every other bounded failure so the selected provider receives
             # the configured number of chances. The long worst-case duration
@@ -309,9 +360,30 @@ async def agent_complete(
             # provider-test API instead of only writing it to container logs.
             detail = f"{e.__class__.__name__}: {e}{_diagnostic_tail(diagnostics)}"
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
+            rate_limited = await _record_rate_limit_if_present(
+                endpoint,
+                detail,
+                log=log,
+                label=label,
+            )
             last_error = RuntimeError(detail)
 
-        if attempt < config.AI_MAX_RETRIES:
+        if (
+            rate_limited
+            and rate_limit_waits < max(0, int(config.AI_PRIMARY_RATE_LIMIT_MAX_WAITS))
+        ):
+            rate_limit_waits += 1
+            _log(
+                log,
+                f"{label}: OneAPI quota wait {rate_limit_waits}/"
+                f"{config.AI_PRIMARY_RATE_LIMIT_MAX_WAITS}; retrying the primary after "
+                "the shared cooldown without consuming a provider failure attempt",
+            )
+            # The next loop enters wait_for_request_slot, which owns the exact
+            # process-wide cooldown and coordinates concurrent task calls.
+            continue
+
+        if attempt < retry_limit:
             delay = min(
                 config.AI_RETRY_MAX_SECONDS,
                 config.AI_RETRY_BASE_SECONDS * 2**attempt,
@@ -319,11 +391,104 @@ async def agent_complete(
             _log(
                 log,
                 f"{label}: retrying same provider turn in {delay:.0f}s "
-                f"({attempt + 2}/{config.AI_MAX_RETRIES + 1})",
+                f"({attempt + 2}/{retry_limit + 1})",
             )
             await asyncio.sleep(delay)
+        attempt += 1
 
     raise RuntimeError(f"AI request failed via Claude Agent SDK: {last_error}") from last_error
+
+
+async def agent_complete(
+    system_prompt: str,
+    user_content: str,
+    *,
+    model: str | None = None,
+    endpoint: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int | None = None,
+    enable_skills: bool = True,
+    disable_thinking: bool = False,
+    log: LogCallback | None = None,
+    label: str = "AI call",
+    allow_provider_failover: bool = True,
+    max_retries: int | None = None,
+) -> str:
+    """Complete a turn through the ordered OneAPI -> DeepSeek route.
+
+    Each route owns the full retry ladder implemented by
+    :func:`_agent_complete_single`.  No partial assistant content leaves that
+    function, so moving to the backup cannot duplicate already-committed text
+    or tool calls.
+    """
+    from backend.pipeline import model_router
+
+    resolved_endpoint = endpoint or config.AI_ENDPOINT
+    resolved_model = model or config.AI_MODEL
+    resolved_api_key = api_key if api_key is not None else config.AI_API_KEY
+    routes = await model_router.resolve_model_routes(
+        endpoint=resolved_endpoint,
+        model=resolved_model,
+        api_key=resolved_api_key,
+        allow_failover=allow_provider_failover,
+    )
+    if len(routes) > 1:
+        primary_retry_limit = (
+            max(0, int(max_retries))
+            if max_retries is not None
+            else model_router.max_retries_for_route(routes[0])
+        )
+        _log(
+            log,
+            f"{label}: model route {routes[0].audit_label} -> {routes[1].audit_label}; "
+            f"backup activates only after {primary_retry_limit + 1} primary attempts",
+        )
+
+    last_error: Exception | None = None
+    for index, route in enumerate(routes):
+        route_retry_limit = (
+            max(0, int(max_retries))
+            if max_retries is not None
+            else model_router.max_retries_for_route(route)
+        )
+        try:
+            content = await _agent_complete_single(
+                system_prompt,
+                user_content,
+                model=route.model,
+                endpoint=route.endpoint,
+                api_key=route.api_key,
+                max_tokens=max_tokens,
+                enable_skills=enable_skills,
+                disable_thinking=disable_thinking,
+                log=log,
+                label=label,
+                max_retries=route_retry_limit,
+            )
+            if len(routes) > 1:
+                _log(log, f"{label}: completed via {route.audit_label}")
+            return content
+        except Exception as exc:  # noqa: BLE001 - route exhaustion boundary
+            last_error = exc
+            next_index = index + 1
+            if next_index < len(routes):
+                next_route = routes[next_index]
+                _warn(
+                    log,
+                    f"{label}: {route.audit_label} exhausted its "
+                    f"{route_retry_limit + 1} attempts; switching to "
+                    f"{next_route.audit_label}",
+                )
+
+    if len(routes) > 1:
+        route_labels = " -> ".join(route.audit_label for route in routes)
+        raise model_router.ModelRouteExhausted(
+            f"All configured model routes failed after bounded retries: {route_labels}; "
+            f"last_error={last_error.__class__.__name__ if last_error else 'unknown'}"
+        ) from last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No model route was available")
 
 
 async def test_connection(endpoint: str, model: str, api_key: str) -> int:
@@ -342,7 +507,10 @@ async def test_connection(endpoint: str, model: str, api_key: str) -> int:
         # before emitting even a one-word answer. A 16-token probe therefore
         # reports a false "empty response" despite a healthy connection.
         max_tokens=256,
+        enable_skills=False,
+        disable_thinking=True,
         label="Provider test",
+        allow_provider_failover=False,
     )
     if not text.strip():
         raise RuntimeError("Empty response from Claude Agent SDK")

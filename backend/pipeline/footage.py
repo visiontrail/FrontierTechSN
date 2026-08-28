@@ -9,6 +9,7 @@ human can review provenance before the video is published.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import json
@@ -40,6 +41,7 @@ UNSAFE_LICENSE_MARKERS = ("noncommercial", "no derivatives", "-nc", "-nd")
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 TAG_RE = re.compile(r"<[^>]+>")
 SAFE_FILENAME_RE = re.compile(r"[^a-z0-9]+")
+USER_QUERY_PURPOSE = "User-supplied search direction"
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -86,6 +88,92 @@ def _strip_json_fence(value: str) -> str:
 def _sanitize_query(value: str) -> str:
     words = WORD_RE.findall(value)
     return " ".join(words[:6]).strip()
+
+
+def _script_purpose_for_query(query: str, script: str) -> str:
+    """Ground a manual search direction in its best matching script sentence."""
+    query_terms = {word.casefold() for word in WORD_RE.findall(query)}
+    if not query_terms:
+        return ""
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?。！？])\s+", script)
+        if sentence.strip()
+    ]
+    scored = []
+    for index, sentence in enumerate(sentences):
+        sentence_terms = {word.casefold() for word in WORD_RE.findall(sentence)}
+        overlap = query_terms & sentence_terms
+        if overlap:
+            scored.append((len(overlap), -index, sentence))
+    return max(scored, default=(0, 0, ""))[2]
+
+
+def _storyboard_scene_purposes(task_dir: Path) -> dict[str, str]:
+    path = task_dir / "storyboard.json"
+    if not path.is_file():
+        return {}
+    try:
+        storyboard = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        str(scene.get("id") or ""): str(scene.get("text") or "").strip()
+        for scene in storyboard.get("scenes") or []
+        if isinstance(scene, dict) and scene.get("id") and scene.get("text")
+    }
+
+
+def _closest_storyboard_purpose(purpose: str, scenes: dict[str, str]) -> str:
+    """Expand a sentence-level asset purpose to its complete storyboard scene."""
+    terms = {word.casefold() for word in WORD_RE.findall(purpose)}
+    best_overlap = 0
+    best = ""
+    for scene_text in scenes.values():
+        scene_terms = {word.casefold() for word in WORD_RE.findall(scene_text)}
+        overlap = len(terms & scene_terms)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = scene_text
+    return best if best_overlap >= 2 else ""
+
+
+def _reserved_collage_purposes(task_dir: Path) -> list[str]:
+    """Return full narration scenes already bound to ready collage clips."""
+    path = task_dir / "collage_broll" / "manifest.json"
+    if not path.is_file():
+        return []
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    scenes = _storyboard_scene_purposes(task_dir)
+    purposes: list[str] = []
+    for item in manifest.get("items") or []:
+        if not isinstance(item, dict) or item.get("status") != "ready":
+            continue
+        scene_id = str(item.get("scene_id") or "")
+        purpose = scenes.get(scene_id) or str(
+            (item.get("spec") or {}).get("script_meaning") or ""
+        ).strip()
+        if purpose:
+            purposes.append(purpose)
+    return purposes
+
+
+def _purpose_conflicts_with_reserved(purpose: str, reserved: list[str]) -> bool:
+    """Detect when two assets are semantically locked to the same narration."""
+    terms = {word.casefold() for word in WORD_RE.findall(purpose)}
+    if not terms:
+        return False
+    for value in reserved:
+        other = {word.casefold() for word in WORD_RE.findall(value)}
+        if not other:
+            continue
+        overlap = len(terms & other)
+        if overlap >= 2 and overlap / min(len(terms), len(other)) >= 0.65:
+            return True
+    return False
 
 
 def _parse_plan(value: str, count: int) -> list[dict[str, str]]:
@@ -159,12 +247,24 @@ async def plan_footage_queries(
     ai_endpoint: str | None,
     ai_model: str | None,
     supplied_queries: list[str] | None = None,
+    excluded_purposes: list[str] | None = None,
     log: LogCallback | None = None,
 ) -> tuple[list[dict[str, str]], str]:
     supplied = [
-        {"query": query, "purpose": "User-supplied search direction"}
+        {
+            "query": query,
+            "purpose": _script_purpose_for_query(query, script)
+            or USER_QUERY_PURPOSE,
+        }
         for query in (_sanitize_query(value) for value in supplied_queries or [])
         if query
+    ]
+    supplied = [
+        item
+        for item in supplied
+        if not _purpose_conflicts_with_reserved(
+            str(item.get("purpose") or ""), excluded_purposes or []
+        )
     ]
     if supplied:
         return supplied[:count], "user"
@@ -174,6 +274,8 @@ async def plan_footage_queries(
     user_content = (
         f"Requested queries: {count}\n"
         f"Title: {title}\n"
+        f"Narration meanings already reserved for collage (do not target these): "
+        f"{json.dumps(excluded_purposes or [], ensure_ascii=False)}\n"
         f"Narration:\n{script[:12000]}"
     )
     try:
@@ -188,6 +290,17 @@ async def plan_footage_queries(
             max_tokens=1200,
         )
         plan = _parse_plan(result, count)
+        plan = [
+            item
+            for item in plan
+            if not _purpose_conflicts_with_reserved(
+                _script_purpose_for_query(str(item.get("query") or ""), script)
+                or str(item.get("purpose") or ""),
+                excluded_purposes or [],
+            )
+        ]
+        if not plan:
+            raise ValueError("Footage planner targeted only collage-reserved narration")
         _emit(log, f"Footage agent planned {len(plan)} visual search queries")
         return plan, f"ai:{model}"
     except Exception as exc:
@@ -255,6 +368,20 @@ def _rank_candidate(candidate: dict, query: str) -> tuple:
     return (-overlap, -pixels, candidate["bytes"], candidate["source_page_url"])
 
 
+def _candidate_query_is_specific(candidate: dict, query: str) -> bool:
+    """Reject a two-term result that matches only one generic query word."""
+    query_terms = {word.casefold() for word in WORD_RE.findall(query)}
+    if len(query_terms) != 2:
+        return True
+    candidate_terms = {
+        word.casefold()
+        for word in WORD_RE.findall(
+            f"{candidate.get('title', '')} {candidate.get('description', '')}"
+        )
+    }
+    return query_terms.issubset(candidate_terms)
+
+
 async def search_wikimedia(
     client: httpx.AsyncClient,
     *,
@@ -316,6 +443,126 @@ async def _download_candidate(
     return written, digest.hexdigest()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def _normalize_render_clip(source: Path, destination: Path) -> dict:
+    """Create the bounded, seek-safe video copy consumed by HyperFrames."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp.mp4")
+    temporary.unlink(missing_ok=True)
+    scale = (
+        f"scale=w='min({config.FOOTAGE_RENDER_MAX_WIDTH},iw)':"
+        f"h='min({config.FOOTAGE_RENDER_MAX_HEIGHT},ih)':"
+        "force_original_aspect_ratio=decrease:flags=lanczos,format=yuv420p"
+    )
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-t",
+        str(config.FOOTAGE_RENDER_MAX_SECONDS),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        scale,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        str(config.FOOTAGE_RENDER_CRF),
+        "-movflags",
+        "+faststart",
+        str(temporary),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+    except TimeoutError:
+        process.kill()
+        await process.communicate()
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError("footage render normalization timed out after 300s")
+    if process.returncode or not temporary.is_file() or temporary.stat().st_size == 0:
+        temporary.unlink(missing_ok=True)
+        detail = (stderr or stdout).decode(errors="replace")[-1200:]
+        raise RuntimeError(
+            f"footage render normalization failed ({process.returncode}): {detail}"
+        )
+    temporary.replace(destination)
+    return {
+        "bytes": destination.stat().st_size,
+        "sha256": _file_sha256(destination),
+        "local_path": destination,
+        "render_safe": True,
+        "render_profile": {
+            "container": "mp4",
+            "video_codec": "h264",
+            "pixel_format": "yuv420p",
+            "audio": False,
+            "max_width": config.FOOTAGE_RENDER_MAX_WIDTH,
+            "max_height": config.FOOTAGE_RENDER_MAX_HEIGHT,
+            "max_duration_seconds": config.FOOTAGE_RENDER_MAX_SECONDS,
+            "faststart": True,
+        },
+    }
+
+
+async def normalize_manifest_clips(
+    task_dir: Path,
+    manifest: dict | None = None,
+    *,
+    log: LogCallback | None = None,
+) -> dict | None:
+    """Migrate legacy Commons downloads to seek-safe render copies in place."""
+    current = manifest if isinstance(manifest, dict) else read_manifest(task_dir)
+    if not isinstance(current, dict):
+        return current
+    changed = False
+    for clip in current.get("clips") or []:
+        if not isinstance(clip, dict) or clip.get("render_safe") is True:
+            continue
+        relative = str(clip.get("local_path") or "").strip()
+        if not relative:
+            continue
+        source = (task_dir / relative).resolve()
+        if not source.is_file() or task_dir.resolve() not in source.parents:
+            continue
+        clip_id = str(clip.get("id") or source.stem)
+        destination = task_dir / "footage" / f"{clip_id}-render.mp4"
+        try:
+            normalized = await _normalize_render_clip(source, destination)
+        except Exception as exc:
+            _emit(log, f"Render-safe footage migration failed for {clip_id}: {exc}")
+            continue
+        clip["source_local_path"] = relative
+        clip["source_bytes"] = int(clip.get("bytes") or source.stat().st_size)
+        clip["source_sha256"] = str(clip.get("sha256") or _file_sha256(source))
+        clip["bytes"] = normalized["bytes"]
+        clip["sha256"] = normalized["sha256"]
+        clip["local_path"] = normalized["local_path"].relative_to(task_dir).as_posix()
+        clip["render_safe"] = True
+        clip["render_profile"] = normalized["render_profile"]
+        changed = True
+        _emit(log, f"Normalized {clip_id} to seek-safe H.264/1080p footage")
+    if changed:
+        current["updated_at"] = _now()
+        _write_manifest(task_dir, current)
+    return current
+
+
 def manifest_path(task_dir: Path) -> Path:
     return task_dir / "footage" / "manifest.json"
 
@@ -335,6 +582,101 @@ def _write_manifest(task_dir: Path, manifest: dict) -> None:
         json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     temporary.replace(path)
+
+
+def _next_clip_id(footage_dir: Path, clips: list[dict]) -> str:
+    """Allocate an audit-stable ID without overwriting an earlier download."""
+    used = {
+        str(clip.get("id") or "")
+        for clip in clips
+        if isinstance(clip, dict) and clip.get("id")
+    }
+    used.update(path.stem for path in footage_dir.glob("clip-*.*") if path.is_file())
+    index = 1
+    while f"clip-{index:02d}" in used:
+        index += 1
+    return f"clip-{index:02d}"
+
+
+def _reusable_manifest_clips(
+    task_dir: Path,
+    previous: dict | None,
+    *,
+    orientation: str,
+    script: str,
+    reserved_purposes: list[str] | None = None,
+    replacement_purposes: list[str] | None = None,
+) -> list[dict]:
+    """Return only previously downloaded Commons clips whose ledger still holds."""
+    if not isinstance(previous, dict) or previous.get("orientation") != orientation:
+        return []
+    if previous.get("provider_id") != "wikimedia":
+        return []
+    root = task_dir.resolve()
+    scenes = _storyboard_scene_purposes(task_dir)
+    reusable: list[dict] = []
+    occupied_purposes = list(reserved_purposes or [])
+    used_sources: set[str] = set()
+    for raw in previous.get("clips") or []:
+        if not isinstance(raw, dict) or not _is_open_license(str(raw.get("license") or "")):
+            continue
+        source = str(raw.get("source_page_url") or "").strip()
+        relative = str(raw.get("local_path") or "").strip()
+        expected_sha256 = str(raw.get("sha256") or "").strip()
+        if not source or source in used_sources or not relative or not expected_sha256:
+            continue
+        if (
+            (raw.get("title") or raw.get("description"))
+            and not _candidate_query_is_specific(
+                raw,
+                str(raw.get("query") or ""),
+            )
+        ):
+            # Keep the original file as audit evidence, but do not reuse a
+            # two-word discovery result that matched only the generic half of
+            # the query (for example "research vessel" for "student research").
+            continue
+        path = (task_dir / relative).resolve()
+        if path == root or root not in path.parents or not path.is_file():
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            continue
+        clip = dict(raw)
+        if str(clip.get("purpose") or "") in {"", USER_QUERY_PURPOSE}:
+            grounded_purpose = _script_purpose_for_query(
+                str(clip.get("query") or ""),
+                script,
+            )
+            if not grounded_purpose:
+                # Retain the file on disk for audit, but do not keep an
+                # unplaceable clip in the active manifest. The next re-scout
+                # can fill this slot with a script-grounded result.
+                continue
+            clip["purpose"] = grounded_purpose
+        scene_purpose = _closest_storyboard_purpose(
+            str(clip.get("purpose") or ""), scenes
+        ) or str(clip.get("purpose") or "")
+        if _purpose_conflicts_with_reserved(
+            scene_purpose,
+            replacement_purposes or [],
+        ):
+            # An explicit re-scout query mapped to this same narration scene.
+            # Preserve the file for audit, but free its active slot so the new
+            # operator direction can actually replace it.
+            continue
+        if _purpose_conflicts_with_reserved(scene_purpose, occupied_purposes):
+            # A ready collage is already semantically locked to this scene.
+            # Keep the downloaded file as audit evidence, but free the active
+            # slot so re-scout can acquire footage for a different scene.
+            continue
+        reusable.append(clip)
+        occupied_purposes.append(scene_purpose)
+        used_sources.add(source)
+    return reusable
 
 
 async def acquire_public_footage(
@@ -357,11 +699,39 @@ async def acquire_public_footage(
     footage_dir = task_dir / "footage"
     footage_dir.mkdir(parents=True, exist_ok=True)
     script = script_path.read_text(encoding="utf-8")
+    reserved_purposes = _reserved_collage_purposes(task_dir)
+    replacement_purposes = [
+        purpose
+        for value in supplied_queries or []
+        if (purpose := _script_purpose_for_query(_sanitize_query(value), script))
+    ]
+
+    previous = await normalize_manifest_clips(task_dir, read_manifest(task_dir), log=log)
+    preserved_clips = _reusable_manifest_clips(
+        task_dir,
+        previous,
+        orientation=orientation,
+        script=script,
+        reserved_purposes=reserved_purposes,
+        replacement_purposes=replacement_purposes,
+    )[:clip_count]
+    remaining_count = max(0, clip_count - len(preserved_clips))
+    storyboard_scenes = _storyboard_scene_purposes(task_dir)
+    occupied_purposes = list(reserved_purposes)
+    occupied_purposes.extend(
+        _closest_storyboard_purpose(str(clip.get("purpose") or ""), storyboard_scenes)
+        or str(clip.get("purpose") or "")
+        for clip in preserved_clips
+    )
 
     manifest = {
         "task_id": task_id,
         "status": "planning",
-        "created_at": _now(),
+        "created_at": (
+            str(previous.get("created_at"))
+            if isinstance(previous, dict) and previous.get("created_at")
+            else _now()
+        ),
         "updated_at": _now(),
         "provider": "Wikimedia Commons",
         "provider_id": "wikimedia",
@@ -372,19 +742,29 @@ async def acquire_public_footage(
         "requested_clip_count": clip_count,
         "planner": "",
         "queries": [],
-        "clips": [],
+        "clips": preserved_clips,
         "errors": [],
+        "reserved_collage_purposes": reserved_purposes,
+        "occupied_scene_purposes": occupied_purposes,
     }
     _write_manifest(task_dir, manifest)
+
+    if remaining_count == 0:
+        manifest["status"] = "ready"
+        manifest["updated_at"] = _now()
+        _write_manifest(task_dir, manifest)
+        _emit(log, f"Public footage scout reused {len(preserved_clips)}/{clip_count} verified clips")
+        return manifest
 
     plan, planner = await plan_footage_queries(
         title=title,
         script=script,
-        count=clip_count,
+        count=remaining_count,
         provider_id=provider_id,
         ai_endpoint=ai_endpoint,
         ai_model=ai_model,
         supplied_queries=supplied_queries,
+        excluded_purposes=occupied_purposes,
         log=log,
     )
     manifest["planner"] = planner
@@ -394,13 +774,19 @@ async def acquire_public_footage(
     _write_manifest(task_dir, manifest)
 
     headers = {"User-Agent": config.FOOTAGE_USER_AGENT}
-    used_sources: set[str] = set()
+    used_sources: set[str] = {
+        str(clip.get("source_page_url") or "")
+        for clip in preserved_clips
+        if clip.get("source_page_url")
+    }
     async with httpx.AsyncClient(
         timeout=config.FOOTAGE_TIMEOUT,
         follow_redirects=True,
         headers=headers,
     ) as client:
         for index, shot in enumerate(plan, start=1):
+            if len(manifest["clips"]) >= clip_count:
+                break
             query = shot["query"]
             _emit(log, f"Public footage {index}/{len(plan)}: searching '{query}'")
             try:
@@ -417,6 +803,7 @@ async def acquire_public_footage(
             available = [
                 item for item in candidates
                 if item["source_page_url"] not in used_sources
+                and _candidate_query_is_specific(item, query)
             ]
             if not available:
                 manifest["errors"].append(
@@ -429,20 +816,25 @@ async def acquire_public_footage(
                 _emit(log, f"No eligible open-license footage found for '{query}'")
                 continue
 
-            clip_id = f"clip-{index:02d}"
+            clip_id = _next_clip_id(footage_dir, manifest["clips"])
             downloaded = None
             for candidate in available[:4]:
                 extension = _extension_for(candidate)
-                destination = footage_dir / f"{clip_id}{extension}"
+                source_destination = footage_dir / f"source-{clip_id}{extension}"
+                destination = footage_dir / f"{clip_id}-render.mp4"
                 try:
-                    byte_size, sha256 = await _download_candidate(
+                    source_bytes, source_sha256 = await _download_candidate(
                         client,
                         candidate=candidate,
-                        destination=destination,
+                        destination=source_destination,
+                    )
+                    normalized = await _normalize_render_clip(
+                        source_destination,
+                        destination,
                     )
                 except Exception as exc:
-                    if destination.exists():
-                        destination.unlink()
+                    source_destination.unlink(missing_ok=True)
+                    destination.unlink(missing_ok=True)
                     manifest["errors"].append(
                         {
                             "query": query,
@@ -458,9 +850,14 @@ async def acquire_public_footage(
                     "query": query,
                     "purpose": shot.get("purpose") or "",
                     **candidate,
-                    "bytes": byte_size,
-                    "sha256": sha256,
+                    "source_bytes": source_bytes,
+                    "source_sha256": source_sha256,
+                    "source_local_path": source_destination.relative_to(task_dir).as_posix(),
+                    "bytes": normalized["bytes"],
+                    "sha256": normalized["sha256"],
                     "local_path": destination.relative_to(task_dir).as_posix(),
+                    "render_safe": True,
+                    "render_profile": normalized["render_profile"],
                     "status": "downloaded",
                 }
                 break

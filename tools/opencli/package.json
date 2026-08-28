@@ -8,6 +8,6 @@
     "test:adapter": "node --test adapter-regressions.test.mjs"
   },
   "dependencies": {
-    "@jackwener/opencli": "1.8.6"
+    "@jackwener/opencli": "1.8.7"
   }
 }

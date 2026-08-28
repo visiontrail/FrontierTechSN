@@ -2,11 +2,72 @@ import asyncio
 import copy
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
 from backend.pipeline import composer, visual_plan
 from backend.pipeline.video_format import PORTRAIT
+
+
+def test_verified_orpheus_chunks_define_exact_program_segments(tmp_path: Path):
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    audio = audio_dir / "tts_input_generated.wav"
+    audio.write_bytes(b"wav-placeholder")
+    (audio_dir / "part-1.txt").write_text("Good morning.")
+    (audio_dir / "part-2.txt").write_text("First story.")
+    (audio_dir / "part-3.txt").write_text("Thanks for watching.")
+    (audio_dir / "tts_manifest.json").write_text(
+        json.dumps(
+            {
+                "integrity": {"passed": True, "verified_source_coverage": 1.0},
+                "parts": [
+                    {"input": "part-1.txt", "duration_seconds": 1.25},
+                    {"input": "part-2.txt", "duration_seconds": 2.5},
+                    {"input": "part-3.txt", "duration_seconds": 1.75},
+                ],
+            }
+        )
+    )
+    physical = [
+        {"text": "Good morning.", "word_count": 2},
+        {"text": "First story.", "word_count": 2},
+        {"text": "Thanks for watching.", "word_count": 3},
+    ]
+
+    segments = composer._manifest_program_segments(audio, physical)
+    alignment = composer._apply_manifest_program_alignment(
+        {"passed": False, "word_coverage": 0.5, "failure_reasons": ["missed"]},
+        {"passed": True},
+        segments,
+    )
+
+    assert [row["start"] for row in segments] == [0.0, 1.25, 3.75]
+    assert [row["duration"] for row in segments] == [1.25, 2.5, 1.75]
+    assert alignment["passed"] is True
+    assert alignment["method"] == "orpheus_manifest_program_timeline"
+    assert alignment["whole_file_asr_observation"]["passed"] is False
+
+
+def test_program_opening_copy_keeps_exact_show_title_and_date_visible():
+    plans = [{"id": "scene-01", "kicker": "MORNING", "headline": "Generic"}]
+    board = {
+        "program_timeline": True,
+        "scenes": [
+            {
+                "text": (
+                    "It's Friday, August 28, 2026, and this is Frontier Tech Daily—"
+                    "your concise morning briefing."
+                )
+            }
+        ],
+    }
+
+    composer._enforce_program_opening_copy(plans, board)
+
+    assert plans[0]["kicker"] == "FRIDAY, AUGUST 28, 2026"
+    assert plans[0]["headline"] == "Frontier Tech Daily"
 
 
 def _cache_board() -> dict:
@@ -452,3 +513,6 @@ def test_portrait_render_command_uses_task_resolution(tmp_path):
     command = composer._build_render_command(tmp_path, tmp_path / "video.mp4", PORTRAIT)
 
     assert command[command.index("--resolution") + 1] == "portrait"
+    assert command[command.index("--protocol-timeout") + 1] == str(
+        composer.config.RENDER_PROTOCOL_TIMEOUT_MS
+    )

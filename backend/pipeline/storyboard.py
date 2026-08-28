@@ -579,6 +579,85 @@ def build_storyboard(
     }
 
 
+def build_program_storyboard(
+    *,
+    pacing_report: dict,
+    title: str,
+    alignment: dict,
+    summary: dict | None = None,
+    log: LogCallback | None = None,
+) -> dict:
+    """Build one visual scene per physical daily-program segment."""
+    rows = list(pacing_report.get("segments") or [])
+    if pacing_report.get("passed") is not True or not rows:
+        raise ValueError("a passed program pacing report with segments is required")
+    audio_duration = float(pacing_report.get("paced_duration_seconds") or 0)
+    if audio_duration <= 0:
+        raise ValueError("program pacing report has no positive duration")
+
+    scenes: list[dict] = []
+    previous_source = ""
+    for index, row in enumerate(rows):
+        speech_start = float(row.get("program_start") or 0)
+        speech_end = float(row.get("program_end") or speech_start)
+        scene_start = 0.0 if index == 0 else speech_start
+        scene_end = (
+            float(rows[index + 1].get("program_start") or speech_end)
+            if index + 1 < len(rows)
+            else audio_duration
+        )
+        text = str(row.get("text") or "").strip()
+        source = _citation_source(text)
+        source_label = source[1] if source else ""
+        scene = {
+            "id": f"scene-{index + 1:02d}",
+            "index": index,
+            "start": round(scene_start, 2),
+            "duration": round(max(0.5, scene_end - scene_start), 2),
+            "lines": [
+                {
+                    "start": round(speech_start, 2),
+                    "duration": round(max(0.001, speech_end - speech_start), 2),
+                    "speaker": 1,
+                    "text": text,
+                }
+            ],
+            "text": text,
+            "word_count": len(_tokens(text)),
+            "keywords": _keywords(text),
+            "program_segment_kind": str(row.get("kind") or "news"),
+        }
+        if source_label and previous_source and source_label != previous_source:
+            scene["semantic_boundary_before"] = {
+                "kind": "citation_source_change",
+                "from": previous_source,
+                "to": source_label,
+            }
+        if source_label:
+            previous_source = source_label
+        scenes.append(scene)
+
+    if log:
+        log(
+            f"Program storyboard: {len(rows)} physical segments -> "
+            f"{len(scenes)} editorial scenes"
+        )
+    return {
+        "title": title,
+        "thesis": (summary or {}).get("thesis", ""),
+        "audio_duration": round(audio_duration, 2),
+        "title_duration": 0.0,
+        "outro_duration": OUTRO_DURATION,
+        "content_start": CONTENT_START,
+        "outro_start": round(audio_duration, 2),
+        "total_duration": round(audio_duration + OUTRO_DURATION, 2),
+        "scene_count": len(scenes),
+        "scenes": scenes,
+        "alignment": alignment,
+        "program_timeline": True,
+    }
+
+
 def write_storyboard(task_dir: str | Path, storyboard: dict) -> Path:
     path = Path(task_dir) / "storyboard.json"
     path.write_text(json.dumps(storyboard, indent=2, ensure_ascii=False), encoding="utf-8")

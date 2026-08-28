@@ -38,6 +38,21 @@ def test_narration_completeness_does_not_block_estimated_timing():
     ) == []
 
 
+def test_verified_orpheus_source_contract_outweighs_paced_whisper_false_negative():
+    alignment = {
+        "method": "whisper_script_forced_alignment",
+        "word_coverage": 0.67,
+        "line_coverage": 0.70,
+        "audio_coverage": 0.79,
+    }
+
+    assert composer._narration_completeness_failures(alignment)
+    assert composer._narration_completeness_failures(
+        alignment,
+        source_contract_verified=True,
+    ) == []
+
+
 def test_orpheus_manifest_requires_unchanged_script_and_audio(tmp_path):
     script = tmp_path / "script.txt"
     script.write_text("Speaker 1: Every word is verified.")
