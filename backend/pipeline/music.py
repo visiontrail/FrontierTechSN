@@ -453,54 +453,113 @@ async def mix_narration_and_music(
     mix_dir = output_dir / "audio"
     mix_dir.mkdir(parents=True, exist_ok=True)
     output = mix_dir / "program_mix.wav"
+    music_probe = mix_dir / ".music_bed_probe.wav"
     duration = await _probe_duration(narration)
     intro_db = min(-16.0, bed_db + 7.0)
     ratio = max(4.0, min(20.0, abs(duck_db) * 1.2))
+    narration_lufs, music_lufs = await asyncio.gather(
+        _integrated_loudness(narration),
+        _integrated_loudness(music),
+    )
+    if music_lufs is None or not math.isfinite(music_lufs) or music_lufs <= -60.0:
+        raise RuntimeError("Background music is silent or has no measurable loudness")
+
+    # bed_db and intro_db are program targets, not additional attenuation.
+    # Generated sources vary widely: the deterministic fallback is deliberately
+    # sparse and can measure near -31 LUFS, while downloaded tracks are often
+    # much louder. Convert both targets into source-relative gains so either
+    # provider lands at the same audible level before narration ducking.
+    intro_gain_db = intro_db - music_lufs
+    content_gain_db = bed_db - music_lufs
     volume_expression = (
-        f"if(lt(t,12),pow(10\\,{intro_db}/20),pow(10\\,{bed_db}/20))"
+        f"if(lt(t,12),pow(10\\,{intro_gain_db}/20),"
+        f"pow(10\\,{content_gain_db}/20))"
     )
     filter_graph = (
         f"[1:a]aloop=loop=-1:size=2147483647,atrim=0:{duration:.6f},"
         f"asetpts=N/SR/TB,volume='{volume_expression}':eval=frame[music];"
         f"[music][0:a]sidechaincompress=threshold=0.018:ratio={ratio:.2f}:"
         "attack=18:release=650:makeup=1[ducked];"
-        "[0:a][ducked]amix=inputs=2:duration=first:dropout_transition=0,"
+        "[ducked]asplit=2[ducked_mix][ducked_probe];"
+        "[0:a][ducked_mix]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
         "alimiter=limit=0.92[out]"
     )
-    await _media_command(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(narration),
-            "-i",
-            str(music),
-            "-filter_complex",
-            filter_graph,
-            "-map",
-            "[out]",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-c:a",
-            "pcm_s16le",
-            str(output),
-        ],
-        timeout=max(300, math.ceil(duration * 2)),
-    )
-    mixed_duration = await _probe_duration(output)
-    if abs(mixed_duration - duration) > 0.25:
-        raise RuntimeError(
-            f"Program mix duration drifted from narration: {mixed_duration:.3f}s vs {duration:.3f}s"
+    music_probe.unlink(missing_ok=True)
+    try:
+        await _media_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(narration),
+                "-i",
+                str(music),
+                "-filter_complex",
+                filter_graph,
+                "-map",
+                "[out]",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_s16le",
+                str(output),
+                "-map",
+                "[ducked_probe]",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_s16le",
+                str(music_probe),
+            ],
+            timeout=max(300, math.ceil(duration * 2)),
         )
-    narration_lufs, music_lufs, mix_lufs = await asyncio.gather(
-        _integrated_loudness(narration),
-        _integrated_loudness(music),
-        _integrated_loudness(output),
+        mixed_duration = await _probe_duration(output)
+        if abs(mixed_duration - duration) > 0.25:
+            raise RuntimeError(
+                "Program mix duration drifted from narration: "
+                f"{mixed_duration:.3f}s vs {duration:.3f}s"
+            )
+        ducked_music_lufs, mix_lufs = await asyncio.gather(
+            _integrated_loudness(music_probe),
+            _integrated_loudness(output),
+        )
+    finally:
+        music_probe.unlink(missing_ok=True)
+
+    failure_reasons = []
+    if narration_lufs is None or mix_lufs is None:
+        failure_reasons.append("narration/program loudness could not be measured")
+    if ducked_music_lufs is None:
+        failure_reasons.append("ducked music loudness could not be measured")
+    mix_vs_narration = (
+        mix_lufs - narration_lufs
+        if mix_lufs is not None and narration_lufs is not None
+        else None
     )
+    music_vs_narration = (
+        ducked_music_lufs - narration_lufs
+        if ducked_music_lufs is not None and narration_lufs is not None
+        else None
+    )
+    minimum_ducked_music_lufs = bed_db + duck_db - 6.0
+    if mix_vs_narration is not None and mix_vs_narration < -1.5:
+        failure_reasons.append(
+            f"program mix lowered narration by {abs(mix_vs_narration):.1f} LU"
+        )
+    if (
+        ducked_music_lufs is not None
+        and ducked_music_lufs < minimum_ducked_music_lufs
+    ):
+        failure_reasons.append(
+            "ducked music is below the configured audibility floor "
+            f"({ducked_music_lufs:.1f} < {minimum_ducked_music_lufs:.1f} LUFS)"
+        )
     report = {
-        "passed": True,
+        "passed": not failure_reasons,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "narration_path": str(narration.resolve()),
         "music_path": str(music.resolve()),
@@ -509,19 +568,29 @@ async def mix_narration_and_music(
         "program_mix_duration_seconds": mixed_duration,
         "intro_music_db": intro_db,
         "content_music_db": bed_db,
+        "intro_music_gain_db": round(intro_gain_db, 3),
+        "content_music_gain_db": round(content_gain_db, 3),
         "sidechain_duck_target_db": duck_db,
         "sidechain_ratio": ratio,
         "narration_integrated_lufs": narration_lufs,
         "source_music_integrated_lufs": music_lufs,
+        "ducked_music_integrated_lufs": ducked_music_lufs,
+        "ducked_music_vs_narration_lu": music_vs_narration,
+        "minimum_ducked_music_lufs": minimum_ducked_music_lufs,
         "program_mix_integrated_lufs": mix_lufs,
+        "program_mix_vs_narration_lu": mix_vs_narration,
         "program_mix_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+        "failure_reasons": failure_reasons,
     }
     (mix_dir / "music_mix_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    if failure_reasons:
+        raise RuntimeError(f"Background-music mix quality failed: {'; '.join(failure_reasons)}")
     _log(
         log,
-        f"Music mix passed: intro {intro_db:.1f} dB, news bed {bed_db:.1f} dB, "
-        f"sidechain duck target {duck_db:.1f} dB",
+        f"Music mix passed: intro target {intro_db:.1f} LUFS, "
+        f"news-bed target {bed_db:.1f} LUFS, ducked bed {ducked_music_lufs:.1f} LUFS, "
+        f"program {mix_lufs:.1f} LUFS",
     )
     return output
