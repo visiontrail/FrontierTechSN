@@ -2217,6 +2217,25 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["transcript_words"], 12)
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
 
+    def test_orpheus_transcript_normalizes_postdoc_compound_split(self):
+        expected = (
+            "Back in 2016, he faced postdoc offers from MIT and Georgia Tech,"
+        )
+        observed = (
+            "Back in 2016 he faced post doc offers from MIT and Georgia Tech"
+        ).split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["expected_words"], 12)
+        self.assertEqual(report["transcript_words"], 12)
+        self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
     def test_orpheus_transcript_normalizes_qbitai_and_semiannual(self):
         expected = (
             "QbitAI reports that Perfect World's 2026 semiannual report, "

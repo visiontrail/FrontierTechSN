@@ -84,7 +84,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 20
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 21
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -245,6 +245,9 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     # The company name Xspark is a single canonical source token, while
     # English Whisper preserves its spoken letter boundary as "X Spark".
     ("x", "spark"): "xspark",
+    # Whisper may retain the audible morpheme boundary in the established
+    # compound role name "postdoc" as two tokens.
+    ("post", "doc"): "postdoc",
     # Provider articulation spells the compact model prefix V4 as its letter
     # and number. Preserve the canonical source token after exact ASR recovery.
     ("v", "4"): "v4",
