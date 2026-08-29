@@ -42,6 +42,7 @@ ORPHEUS_MIN_EXACT_ASR_COVERAGE = 0.90
 ORPHEUS_MIN_ASR_WORD_RATIO = 1.0
 ORPHEUS_MAX_ASR_WORD_RATIO = 1.0
 ORPHEUS_MAX_PHONETIC_SUBSTITUTIONS = 1
+ORPHEUS_MAX_EVIDENCED_PHONETIC_SUBSTITUTIONS = 2
 ORPHEUS_MIN_PHONETIC_SPELLING_SIMILARITY = 0.80
 # One live, otherwise exact Reuters utterance was independently transcribed as
 # the brand name ``Shein`` -> ``Shane`` at normal speed.  The raw spellings are
@@ -55,6 +56,13 @@ ORPHEUS_EVIDENCED_PHONETIC_PAIRS = {
     # consistently renders the same spoken personal name as Lukas. Keep the
     # final-letter drift scoped to this exact proper-name pair.
     frozenset({"lukasz", "lukas"}),
+    # Whisper rendered the Slovenian name Jernej Barbic as Jernesh Barbish on
+    # an otherwise exact live narration. Both substitutions must remain
+    # aligned and be corroborated together from the same waveform.
+    frozenset({"jernej", "jernesh"}),
+    # The current ASCII lexical pass represents canonical ``Barbič`` as
+    # ``barbi`` because the final caron consonant is discarded.
+    frozenset({"barbi", "barbish"}),
 }
 ORPHEUS_EXACT_EDGE_ANCHOR_WORDS = 2
 NARRATION_PACING_POLICY = "natural_speech_visuals_follow_audio"
@@ -73,7 +81,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 17
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 18
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -1694,13 +1702,14 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
 
     Whisper is an independent acoustic observer, so a complete name can receive
     a different but acoustically equivalent spelling. The primary path remains
-    exact. A bounded fallback permits one aligned phonetic spelling substitution
-    when acoustic coverage is complete and word count is unchanged. An explicit
-    evidenced spelling pair may qualify even in a short utterance where that
-    one difference alone drops exact coverage below 90%; general similarity
-    still needs the 90% floor. The substitution may positionally anchor an
-    utterance edge, but the caller must corroborate it by transcribing the same
-    waveform at another playback speed.
+    exact. A bounded fallback permits one general aligned phonetic spelling
+    substitution, or up to two substitutions when every pair is explicitly
+    evidenced, acoustic coverage is complete, and word count is unchanged.
+    Explicit evidenced pairs may qualify even in a short utterance where the
+    differences drop exact coverage below 90%; general similarity still needs
+    the 90% floor. Substitutions may positionally anchor an utterance edge, but
+    the caller must corroborate them by transcribing the same waveform at
+    another playback speed.
     """
     expected = _lexical_tokens(text)
     observed, observed_word_indexes = _transcript_tokens(words)
@@ -1857,10 +1866,12 @@ def _aligned_phonetic_substitutions(
     expected: list[str],
     observed: list[str],
 ) -> list[dict] | None:
-    """Return one safe aligned spelling substitution, or ``None``.
+    """Return bounded safe aligned spelling substitutions, or ``None``.
 
     Equal token counts and positional comparison deliberately reject a missing
     word compensated by an unrelated extra word elsewhere in the utterance.
+    General phonetic similarity remains limited to one substitution; a second
+    is allowed only when every substitution is an explicitly evidenced pair.
     """
     if len(expected) != len(observed):
         return None
@@ -1902,7 +1913,16 @@ def _aligned_phonetic_substitutions(
             }
         )
         if len(substitutions) > ORPHEUS_MAX_PHONETIC_SUBSTITUTIONS:
-            return None
+            all_evidenced = all(
+                str(item["phonetic_key"]).startswith("evidenced:")
+                for item in substitutions
+            )
+            if (
+                not all_evidenced
+                or len(substitutions)
+                > ORPHEUS_MAX_EVIDENCED_PHONETIC_SUBSTITUTIONS
+            ):
+                return None
     return substitutions or None
 
 

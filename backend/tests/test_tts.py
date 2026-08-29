@@ -2490,6 +2490,85 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcriber.await_count, 2)
         self.assertEqual(process.await_count, 1)
 
+    async def test_orpheus_verifier_corroborates_two_evidenced_name_spellings(self):
+        expected = (
+            "From Hollywood, IEEE Spectrum profiles Jernej Barbič, the University "
+            "of Southern California"
+        )
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        transcript = words(
+            "From Hollywood IEEE Spectrum profiles Jernesh Barbish the University "
+            "of Southern California"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (transcript, {"passed": True}),
+                    (transcript, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "jernej-barbic.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=lambda _message: None,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["exact_asr_word_coverage"], 0.8333)
+        self.assertEqual(report["acoustic_asr_word_coverage"], 1.0)
+        self.assertEqual(
+            report["verification_mode"],
+            "corroborated_phonetic_substitution",
+        )
+        self.assertEqual(
+            {item["expected"] for item in report["phonetic_substitutions"]},
+            {"jernej", "barbi"},
+        )
+        self.assertEqual(transcriber.await_count, 2)
+        self.assertEqual(process.await_count, 1)
+
+    def test_orpheus_transcript_rejects_three_evidenced_name_spellings(self):
+        expected = "Shein profiles Jernej Barbič today."
+        observed = "Shane profiles Jernesh Barbish today".split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertFalse(report["verified"])
+        self.assertEqual(report["phonetic_substitutions"], [])
+        self.assertIn("below 90.0%", " ".join(report["failure_reasons"]))
+
+    def test_orpheus_transcript_rejects_evidenced_name_plus_unlisted_mismatch(self):
+        expected = "IEEE Spectrum profiles Jernej Barbič today."
+        observed = "IEEE Spectrum profiles Jernesh Smith today".split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertFalse(report["verified"])
+        self.assertEqual(report["phonetic_substitutions"], [])
+
     async def test_orpheus_verifier_corroborates_phonetic_spelling_at_opening_edge(self):
         expected = (
             "Skild was founded in 2023 by Carnegie Mellon robotics researchers "
