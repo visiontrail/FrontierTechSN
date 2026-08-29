@@ -2198,6 +2198,25 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["transcript_words"], 12)
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
 
+    def test_orpheus_transcript_normalizes_xspark_company_name(self):
+        expected = (
+            "And in robotics, DeepTech China sits down with Ding Wenbo of Xspark"
+        )
+        observed = (
+            "And in robotics Deep Tech China sits down with Ding Wenbo of X Spark"
+        ).split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["expected_words"], 12)
+        self.assertEqual(report["transcript_words"], 12)
+        self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
     def test_orpheus_transcript_normalizes_qbitai_and_semiannual(self):
         expected = (
             "QbitAI reports that Perfect World's 2026 semiannual report, "
