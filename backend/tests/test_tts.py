@@ -1980,6 +1980,28 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report["verified"])
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
 
+    def test_orpheus_transcript_normalizes_compound_numeric_ordinal(self):
+        expected = (
+            "has been officially announced for November twentieth and "
+            "twenty-first, co-hosted"
+        )
+
+        def report(second_date: str) -> dict:
+            observed = (
+                "has been officially announced for November 20th and "
+                f"{second_date} co-hosted"
+            ).split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        accepted = report("21st")
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report("22nd")["verified"])
+
     def test_orpheus_transcript_does_not_normalize_non_date_ordinal(self):
         expected = "Version 19 remains stable."
         observed = "Version 19th remains stable".split()

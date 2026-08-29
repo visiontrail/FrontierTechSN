@@ -73,7 +73,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 15
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 16
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -139,6 +139,17 @@ ORDINAL_DIGITS = {
     "1st": "first", "2nd": "second", "3rd": "third", "4th": "fourth",
     "5th": "fifth", "6th": "sixth", "7th": "seventh", "8th": "eighth",
     "9th": "ninth", "10th": "tenth", "20th": "twentieth", "30th": "thirtieth",
+}
+COMPOUND_ORDINAL_ONES = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
 }
 CALENDAR_MONTHS = {
     "january", "february", "march", "april", "may", "june",
@@ -379,13 +390,56 @@ def _raw_lexical_tokens(text: str) -> list[str]:
 
 def _lexical_tokens(text: str) -> list[str]:
     normalized = _raw_lexical_tokens(text)
-    return _canonicalize_calendar_date_tokens(
-        _canonicalize_number_tokens(
-            _canonicalize_decimal_tokens(
-                _canonicalize_acoustic_phrase_tokens(normalized)
-            )
+    normalized = _canonicalize_number_tokens(
+        _canonicalize_decimal_tokens(
+            _canonicalize_acoustic_phrase_tokens(normalized)
         )
     )
+    normalized = _canonicalize_compound_ordinal_tokens(normalized)
+    return _canonicalize_calendar_date_tokens(normalized)
+
+
+def _ordinal_suffix(value: int) -> str:
+    if 10 <= value % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+
+
+def _canonicalize_compound_ordinal_tokens_with_indexes(
+    tokens: list[str], word_indexes: list[int]
+) -> tuple[list[str], list[int]]:
+    """Match spoken ``twenty-first`` with Whisper's compact ``21st``."""
+    if len(tokens) != len(word_indexes):
+        raise ValueError("Ordinal tokens and word indexes must have equal length")
+    result: list[str] = []
+    result_indexes: list[int] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if (
+            token.isdigit()
+            and 20 <= int(token) <= 90
+            and int(token) % 10 == 0
+            and index + 1 < len(tokens)
+            and tokens[index + 1] in COMPOUND_ORDINAL_ONES
+        ):
+            value = int(token) + COMPOUND_ORDINAL_ONES[tokens[index + 1]]
+            result.append(f"{value}{_ordinal_suffix(value)}")
+            result_indexes.append(word_indexes[index])
+            index += 2
+            continue
+        result.append(token)
+        result_indexes.append(word_indexes[index])
+        index += 1
+    return result, result_indexes
+
+
+def _canonicalize_compound_ordinal_tokens(tokens: list[str]) -> list[str]:
+    canonical, _ = _canonicalize_compound_ordinal_tokens_with_indexes(
+        tokens,
+        list(range(len(tokens))),
+    )
+    return canonical
 
 
 def _canonicalize_calendar_date_tokens(tokens: list[str]) -> list[str]:
@@ -742,6 +796,10 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
     canonical, canonical_indexes = _canonicalize_number_tokens_with_indexes(
         tokens,
         word_indexes,
+    )
+    canonical, canonical_indexes = _canonicalize_compound_ordinal_tokens_with_indexes(
+        canonical,
+        canonical_indexes,
     )
     return _canonicalize_calendar_date_tokens(canonical), canonical_indexes
 
