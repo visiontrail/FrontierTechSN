@@ -1810,6 +1810,30 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             source=decimal_source,
         )["verified"])
 
+        word_source = (
+            "According to Bloomberg, the ceremony was held Thursday for the "
+            "four-billion-dollar plant"
+        )
+        live_word_amount = (
+            "According to Bloomberg the ceremony was held Thursday for the "
+            "$4 billion plant"
+        ).split()
+        accepted_word_amount = report(live_word_amount, source=word_source)
+        self.assertTrue(accepted_word_amount["verified"])
+        self.assertEqual(accepted_word_amount["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report(
+            [*live_word_amount[:10], "$5", "billion", "plant"],
+            source=word_source,
+        )["verified"])
+        self.assertFalse(report(
+            [*live_word_amount[:10], "$4", "million", "plant"],
+            source=word_source,
+        )["verified"])
+        self.assertFalse(report(
+            [*live_word_amount[:10], "4", "billion", "plant"],
+            source=word_source,
+        )["verified"])
+
     def test_orpheus_transcript_normalizes_currency_decimal_split_by_whisper(self):
         expected = (
             "bond sale, equivalent to roughly six point three billion dollars, "

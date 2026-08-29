@@ -23,6 +23,30 @@ Derive and explicitly describe these content decisions from the title and script
 - BACKGROUND SCENE
 - DESIRED EMOTION / MOOD
 - OPTIONAL TEXT / ARROW
+- BRAND / PRODUCT FIDELITY
+
+Brand and product identity rules:
+
+- First resolve whether a capitalized or ambiguous title term is a named company,
+  product, model, or service by reading the script. Never reinterpret a named
+  entity through its ordinary dictionary meaning: for example, Cursor the AI
+  coding product is not a mouse-pointer arrow, and OpenAI is not a generic AI
+  server or abstract building.
+- When the chosen story depends on named companies or products, make their exact
+  recognizable identities part of the one visual story. Name every required
+  entity explicitly in BRAND / PRODUCT FIDELITY and require its exact official
+  wordmark, emblem, product icon, spelling, proportions, and established brand
+  colors. Do not invent, approximate, parody, or replace it with a generic
+  lookalike.
+- Prefer the exact official mark plus the exact brand/product name when two
+  entities must be distinguished at thumbnail size. If the image model cannot
+  render an official mark faithfully, require the exact name in bold clean text
+  using the brand's established visual language; never substitute an unrelated
+  object. These identity labels do not count against the optional three-word
+  hook-copy limit.
+- Brand marks must remain crisp, unobstructed, and recognizable on a small mobile
+  screen. A conflict between two brands still counts as one story when their
+  relationship is the single curiosity gap.
 
 Final constraints:
 
@@ -30,5 +54,7 @@ Final constraints:
 - Prefer a human face only when the story benefits from one; never invent a recognizable real person unless the source clearly calls for that person.
 - If text materially improves the hook, use at most 3 punchy words in large bold white or yellow lettering with a thick black outline. Otherwise specify no text.
 - Never place text or faces in the bottom-right corner or bottom 15%.
-- Do not include UI chrome, watermarks, logos, captions, fine print, collages, or decorative clutter.
+- Do not include UI chrome, watermarks, captions, fine print, collages,
+  decorative clutter, or unrelated/decorative logos. Story-essential official
+  brand and product marks are required identity anchors, not decorative logos.
 - End with an explicit instruction to generate one final landscape 16:9 thumbnail image.

@@ -119,7 +119,8 @@ CURRENCY_TRANSCRIPT_AMOUNT_RE = re.compile(
 )
 CURRENCY_SCALE_TOKENS = {"hundred", "thousand", "million", "billion", "trillion"}
 CURRENCY_ADJECTIVE_RE = re.compile(
-    r"\b\d+(?:\.\d+)?-(hundred|thousand|million|billion|trillion)-dollar\b",
+    r"\b(?:\d+(?:\.\d+)?|[A-Za-z]+(?:-[A-Za-z]+)*)-"
+    r"(hundred|thousand|million|billion|trillion)-dollar\b",
     re.IGNORECASE,
 )
 DECIMAL_INTEGER_WORD_RE = re.compile(r"\s*(\d+)\s*")
@@ -754,9 +755,10 @@ def _normalize_currency_adjective_asr_tokens(
 ) -> list[str]:
     """Recover the singular unit encoded by Whisper's ``$amount scale`` form.
 
-    In an attributive phrase such as ``300-million-dollar Series A``, the
-    spoken unit is singular. Whisper conventionally writes the same audio as
-    ``$300 million Series A``; the currency symbol carries the unit while its
+    In an attributive phrase such as ``300-million-dollar Series A`` or
+    ``four-billion-dollar plant``, the spoken unit is singular. Whisper
+    conventionally writes the same audio as ``$300 million Series A`` or
+    ``$4 billion plant``; the currency symbol carries the unit while its
     surface form no longer exposes singular versus plural. Normalize only the
     source-aligned adjective whose observed unit came from that exact currency
     shorthand. Explicit ``dollars``, a different amount/scale, or a missing

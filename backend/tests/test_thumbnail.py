@@ -47,7 +47,12 @@ class ThumbnailPromptTests(unittest.IsolatedAsyncioTestCase):
         spec = prompts_registry.get_spec("thumbnail")
         self.assertIsNotNone(spec)
         self.assertEqual(spec.file, "thumbnail.txt")
-        self.assertIn("Mianyang Style", prompts_registry.read_content(spec))
+        content = prompts_registry.read_content(spec)
+        self.assertIn("Mianyang Style", content)
+        self.assertIn("BRAND / PRODUCT FIDELITY", content)
+        self.assertIn("Cursor the AI", content)
+        self.assertIn("coding product is not a mouse-pointer arrow", content)
+        self.assertIn("Story-essential official", content)
 
 
 class ThumbnailGenerationTests(unittest.IsolatedAsyncioTestCase):
