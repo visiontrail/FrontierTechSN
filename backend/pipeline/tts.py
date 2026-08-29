@@ -63,6 +63,9 @@ ORPHEUS_EVIDENCED_PHONETIC_PAIRS = {
     # The current ASCII lexical pass represents canonical ``Barbič`` as
     # ``barbi`` because the final caron consonant is discarded.
     frozenset({"barbi", "barbish"}),
+    # The Chinese platform name Douyin was spoken completely in a live news
+    # chunk while English Whisper rendered the same pronunciation as Duwayan.
+    frozenset({"douyin", "duwayan"}),
 }
 ORPHEUS_EXACT_EDGE_ANCHOR_WORDS = 2
 NARRATION_PACING_POLICY = "natural_speech_visuals_follow_audio"
@@ -81,7 +84,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 18
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 19
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {

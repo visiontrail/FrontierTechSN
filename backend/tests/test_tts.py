@@ -2542,6 +2542,69 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcriber.await_count, 2)
         self.assertEqual(process.await_count, 1)
 
+    async def test_orpheus_verifier_corroborates_evidenced_douyin_spelling(self):
+        expected = (
+            "one hundred animated dramas on Douyin in May were AI productions."
+        )
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        transcript = words(
+            "100 animated dramas on Duwayan in May were AI productions"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (transcript, {"passed": True}),
+                    (transcript, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "douyin.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=lambda _message: None,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["exact_asr_word_coverage"], 0.9)
+        self.assertEqual(report["acoustic_asr_word_coverage"], 1.0)
+        self.assertEqual(
+            report["phonetic_substitutions"][0]["phonetic_key"],
+            "evidenced:douyin-duwayan",
+        )
+        self.assertEqual(
+            report["verification_mode"],
+            "corroborated_phonetic_substitution",
+        )
+        self.assertEqual(transcriber.await_count, 2)
+        self.assertEqual(process.await_count, 1)
+
+    def test_orpheus_transcript_does_not_generalize_duwayan_spelling(self):
+        expected = "The Dorian platform remained available today."
+        observed = "The Duwayan platform remained available today".split()
+        words = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate(observed)
+        ]
+
+        report = tts._orpheus_transcript_report(expected, words)
+
+        self.assertFalse(report["verified"])
+        self.assertEqual(report["phonetic_substitutions"], [])
+
     def test_orpheus_transcript_rejects_three_evidenced_name_spellings(self):
         expected = "Shein profiles Jernej Barbič today."
         observed = "Shane profiles Jernesh Barbish today".split()
