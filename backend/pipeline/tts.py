@@ -73,7 +73,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 16
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 17
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -1695,9 +1695,12 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     Whisper is an independent acoustic observer, so a complete name can receive
     a different but acoustically equivalent spelling. The primary path remains
     exact. A bounded fallback permits one aligned phonetic spelling substitution
-    only when exact coverage is at least 90% and word count is unchanged. That
-    substitution may positionally anchor an utterance edge, but the caller must
-    corroborate it by transcribing the same waveform at another playback speed.
+    when acoustic coverage is complete and word count is unchanged. An explicit
+    evidenced spelling pair may qualify even in a short utterance where that
+    one difference alone drops exact coverage below 90%; general similarity
+    still needs the 90% floor. The substitution may positionally anchor an
+    utterance edge, but the caller must corroborate it by transcribing the same
+    waveform at another playback speed.
     """
     expected = _lexical_tokens(text)
     observed, observed_word_indexes = _transcript_tokens(words)
@@ -1756,9 +1759,20 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     if phonetic_substitutions:
         matched_acoustic_words += len(phonetic_substitutions)
     acoustic_coverage = matched_acoustic_words / max(1, len(expected))
+    complete_evidenced_phonetic_candidate = bool(phonetic_substitutions) and (
+        acoustic_coverage == 1.0
+        and word_ratio == 1.0
+        and all(
+            str(item.get("phonetic_key") or "").startswith("evidenced:")
+            for item in phonetic_substitutions
+        )
+    )
 
     failures: list[str] = []
-    if exact_coverage < ORPHEUS_MIN_EXACT_ASR_COVERAGE:
+    if (
+        exact_coverage < ORPHEUS_MIN_EXACT_ASR_COVERAGE
+        and not complete_evidenced_phonetic_candidate
+    ):
         failures.append(
             f"exact ASR word coverage {exact_coverage:.1%} is below "
             f"{ORPHEUS_MIN_EXACT_ASR_COVERAGE:.1%}"

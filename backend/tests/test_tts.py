@@ -2444,6 +2444,52 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(process.await_count, 1)
         self.assertIn("corroborated", " ".join(messages))
 
+    async def test_orpheus_verifier_corroborates_short_lukasz_spelling(self):
+        expected = (
+            "Headlining is Łukasz Kaiser, the OpenAI senior research scientist"
+        )
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        transcript = words(
+            "Headlining is Lukas Kaiser the OpenAI senior research scientist"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (transcript, {"passed": True}),
+                    (transcript, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "lukasz.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=lambda _message: None,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["exact_asr_word_coverage"], 0.8889)
+        self.assertEqual(report["acoustic_asr_word_coverage"], 1.0)
+        self.assertEqual(
+            report["verification_mode"],
+            "corroborated_phonetic_substitution",
+        )
+        self.assertEqual(transcriber.await_count, 2)
+        self.assertEqual(process.await_count, 1)
+
     async def test_orpheus_verifier_corroborates_phonetic_spelling_at_opening_edge(self):
         expected = (
             "Skild was founded in 2023 by Carnegie Mellon robotics researchers "
