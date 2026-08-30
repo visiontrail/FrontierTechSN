@@ -13,17 +13,10 @@ def plan(**kwargs) -> sk.ScenePlan:
     return sk.ScenePlan(**base)
 
 
-@pytest.mark.parametrize("archetype", ["title", "statement", "topic", "outro"])
+@pytest.mark.parametrize("archetype", ["title", "statement", "topic"])
 def test_text_archetypes_satisfy_the_runtime_contract(archetype):
     html = sk.render_scene(plan(archetype=archetype, kicker="KICK", body="Some support copy."))
     assert validate_scene_html(html, "scene-01") == []
-
-
-def test_outro_marks_its_intentional_exit_overflow():
-    html = sk.render_scene(plan(archetype="outro"))
-
-    assert '<div class="stage" data-layout-allow-overflow>' in html
-
 
 def test_contrast_and_list_render_when_given_their_content():
     contrast = sk.render_scene(

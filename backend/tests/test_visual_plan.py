@@ -70,7 +70,7 @@ def test_normalise_rejects_spine_owned_archetypes_and_bad_enums():
     plan = visual_plan._normalise(
         {"archetype": "title", "accent": "chartreuse", "motif": "spirograph"}, scene, 0
     )
-    # title/outro/footage belong to the spine and the footage matcher.
+    # Title/footage belong to the narrative spine and the footage matcher.
     assert plan["archetype"] == "topic"
     assert plan["accent"] in scene_kit.ACCENTS
     assert plan["motif"] in scene_kit.MOTIFS
@@ -655,14 +655,6 @@ def test_visual_grounding_report_rejects_legacy_news_image_without_policy_proof(
     assert report["passed"] is False
     assert "current exact-scene grounding proof" in report["scenes"][0]["reason"]
 
-
-def test_outro_plan_is_spine_owned():
-    data = board(1)
-    outro = visual_plan.outro_plan(data)
-    assert outro["archetype"] == "outro"
-    assert outro["body"] == ""
-
-
 def test_visual_plan_payload_does_not_expose_the_working_title_as_scene_copy():
     data = board(1)
     data["title"] = "VIDEO 042"
@@ -732,7 +724,7 @@ def test_visual_planner_drops_unknown_nonfinite_and_arbitrary_fields(
     composer._write_visual_plan_checkpoint(
         tmp_path,
         data,
-        [*plans, visual_plan.outro_plan(data)],
+        plans,
     )
     encoded = (tmp_path / "visual_plan.json").read_text(encoding="utf-8")
     assert nonfinite not in encoded
@@ -774,6 +766,6 @@ def test_visual_planner_falls_back_for_known_nonfinite_fields_and_checkpoints(
     composer._write_visual_plan_checkpoint(
         tmp_path,
         data,
-        [*plans, visual_plan.outro_plan(data)],
+        plans,
     )
     assert composer._load_cached_scene_plans(tmp_path, data) == plans

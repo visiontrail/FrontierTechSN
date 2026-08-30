@@ -9,8 +9,8 @@ def board(scenes: list[dict], *, audio_duration: float = 60.0) -> dict:
         "audio_duration": audio_duration,
         "content_start": 5.0,
         "outro_start": 5.0 + audio_duration,
-        "outro_duration": 5.0,
-        "total_duration": 10.0 + audio_duration,
+        "outro_duration": 0.0,
+        "total_duration": 5.0 + audio_duration,
         "scenes": scenes,
     }
 
@@ -30,7 +30,7 @@ def test_spine_declares_the_runtime_contract_the_old_template_was_missing():
     assert 'data-start="0"' in root
     assert 'data-composition-id="root"' in root
     assert "animation-name:timeline-progress" in html
-    assert "animation-duration:70.0s" in html
+    assert "animation-duration:65.0s" in html
     assert "animation-timing-function:linear" in html
     assert "animation-iteration-count:1" in html
     assert "animation-fill-mode:both" in html
@@ -41,7 +41,7 @@ def test_spine_declares_the_runtime_contract_the_old_template_was_missing():
     progress = re.search(r'<div id="progress-fill"[^>]*>', html).group(0)
     assert 'class="clip progress-fill"' in progress
     assert 'data-start="0"' in progress
-    assert 'data-duration="70.0"' in progress
+    assert 'data-duration="65.0"' in progress
     assert f'data-track-index="{assembler.TRACK_PROGRESS}"' in progress
     assert 'tl.fromTo("#progress-fill"' not in html
     assert 'window.__timelines["root"] = gsap.timeline({ paused: true })' in html

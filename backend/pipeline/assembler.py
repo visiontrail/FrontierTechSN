@@ -334,9 +334,9 @@ def build_spine(
     """The root composition: mounts, captions, audio, progress chrome.
 
     ``mounts`` is the full cover of the timeline — every storyboard scene from
-    zero, then the outro — as ``{"id", "start", "duration"}`` records. Any gap
-    left here renders as a black frame, so the composer builds the list to span
-    0 to ``total_duration`` with no holes.
+    zero through the end of narration — as ``{"id", "start", "duration"}``
+    records. Any gap left here renders as a black frame, so the composer builds
+    the list to span 0 to ``total_duration`` with no holes.
     """
     total = float(storyboard["total_duration"])
     content_start = float(storyboard["content_start"])

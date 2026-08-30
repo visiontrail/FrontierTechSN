@@ -124,7 +124,6 @@ ARCHETYPES = (
     "quote",
     "footage",
     "news_image",
-    "outro",
 )
 
 MAX_NARRATIVE_ITEMS = 5
@@ -1227,24 +1226,6 @@ def _render_title(plan: ScenePlan) -> str:
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 38))
 
 
-def _render_outro(plan: ScenePlan) -> str:
-    out = _render_title(plan)
-    # The final scene is the one place an exit animation is allowed, so fade the
-    # whole stage after the hold instead of cutting to black on the last frame.
-    # Mark its deliberate 26px upward travel so layout inspection does not
-    # report the exit as content accidentally escaping the scene container.
-    out = out.replace(
-        '<div class="stage">',
-        '<div class="stage" data-layout-allow-overflow>',
-        1,
-    )
-    fade = (
-        f'        outAt("#{plan.id} .stage", {{ opacity: 0, y: -26, duration: .8, ease: "power2.in" }}, '
-        f'{max(1.2, plan.duration - 1.0):.2f});\n'
-    )
-    return out.replace('        window.__timelines[', fade + '        window.__timelines[')
-
-
 _RENDERERS = {
     "title": _render_title,
     "statement": _render_statement,
@@ -1255,7 +1236,6 @@ _RENDERERS = {
     "quote": _render_quote,
     "footage": _render_footage,
     "news_image": _render_news_image_fullscreen,
-    "outro": _render_outro,
 }
 
 

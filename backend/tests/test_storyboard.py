@@ -135,7 +135,7 @@ def test_transcript_alignment_blocks_a_missing_final_sentence(tmp_path):
     assert any("100.0%" in reason for reason in report["failure_reasons"])
 
 
-def test_scenes_and_audio_start_immediately_with_no_title_card_gap(tmp_path):
+def test_scenes_and_audio_fill_the_video_without_generic_edge_cards(tmp_path):
     path = write_script(tmp_path, [f"Sentence number {i} with several words in it." for i in range(30)])
     board = sb.build_storyboard(
         script_path=path, audio_duration=300.0, title="T", is_monologue=True
@@ -147,10 +147,10 @@ def test_scenes_and_audio_start_immediately_with_no_title_card_gap(tmp_path):
     for earlier, later in zip(scenes, scenes[1:]):
         assert earlier["start"] + earlier["duration"] == pytest.approx(later["start"], abs=0.05)
     last = scenes[-1]
-    assert last["start"] + last["duration"] == pytest.approx(board["outro_start"], abs=0.05)
-    assert board["total_duration"] == pytest.approx(
-        300.0 + sb.OUTRO_DURATION, abs=0.05
-    )
+    assert last["start"] + last["duration"] == pytest.approx(board["total_duration"], abs=0.05)
+    assert board["outro_start"] == pytest.approx(300.0, abs=0.05)
+    assert board["outro_duration"] == 0.0
+    assert board["total_duration"] == pytest.approx(300.0, abs=0.05)
 
 
 def test_program_storyboard_preserves_every_physical_segment_and_music_gap():
@@ -175,7 +175,8 @@ def test_program_storyboard_preserves_every_physical_segment_and_music_gap():
     assert [scene["start"] for scene in board["scenes"]] == [0.0, 8.0, 11.5]
     assert [scene["duration"] for scene in board["scenes"]] == [8.0, 3.5, 2.5]
     assert board["scenes"][0]["lines"][0]["start"] == 2.0
-    assert board["total_duration"] == 19.0
+    assert board["outro_duration"] == 0.0
+    assert board["total_duration"] == 14.0
 
 
 def test_short_trailing_scene_is_folded_into_its_predecessor(tmp_path):

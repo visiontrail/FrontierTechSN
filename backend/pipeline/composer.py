@@ -249,7 +249,7 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
     if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
         return None
     scene_ids = [str(scene.get("id") or "") for scene in board.get("scenes") or []]
-    expected_ids = [*scene_ids, visual_plan.OUTRO_SCENE_ID]
+    expected_ids = scene_ids
     payload_ids = [item.get("id") for item in payload]
     if not scene_ids or any(not scene_id for scene_id in scene_ids) or payload_ids != expected_ids:
         return None
@@ -300,11 +300,7 @@ async def _load_or_plan_scene_visuals(
     # Direction is the expensive checkpoint. Commit it before any footage,
     # collage, image, or music stage can fail so a retry does not repeat the
     # planner call. Runtime placement fields are added only to the later rewrite.
-    _write_visual_plan_checkpoint(
-        output_dir,
-        board,
-        [*plans, visual_plan.outro_plan(board)],
-    )
+    _write_visual_plan_checkpoint(output_dir, board, plans)
     return plans
 
 
@@ -824,20 +820,12 @@ def _mount_list(board: dict) -> list[dict]:
     """Every mount needed to cover the timeline with no gaps.
 
     The first narrated scene begins at zero; there is no separate title-card
-    mount before the subject starts.
+    mount before the subject starts and no generic outro after it ends.
     """
-    mounts = [
+    return [
         {"id": scene["id"], "start": scene["start"], "duration": scene["duration"]}
         for scene in board["scenes"]
     ]
-    mounts.append(
-        {
-            "id": visual_plan.OUTRO_SCENE_ID,
-            "start": float(board["outro_start"]),
-            "duration": float(board["outro_duration"]),
-        }
-    )
-    return mounts
 
 
 def _quality_warnings(
@@ -1354,7 +1342,7 @@ async def compose_video(
             "report": str((output_dir_path / "audio" / "music_mix_report.json").resolve()),
         }
 
-    plans = scene_plans + [visual_plan.outro_plan(board)]
+    plans = scene_plans
     _write_visual_plan_checkpoint(output_dir_path, board, plans)
 
     # --- 3. Authoring ------------------------------------------------------

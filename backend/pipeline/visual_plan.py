@@ -280,11 +280,11 @@ def _normalise(raw: dict, scene: dict, index: int) -> dict:
     )
 
     archetype = str(plan.get("archetype") or "").lower()
-    if archetype not in scene_kit.ARCHETYPES or archetype in ("title", "outro", "footage"):
-        # title/outro are owned by the spine; footage is assigned by the
-        # footage matcher, which knows which clips actually downloaded.
+    if archetype not in scene_kit.ARCHETYPES or archetype in ("title", "footage"):
+        # Title treatment is owned by the narrative scene itself; footage is
+        # assigned by the matcher, which knows which clips actually downloaded.
         archetype = "topic" if archetype not in scene_kit.ARCHETYPES else archetype
-        if archetype in ("title", "outro", "footage"):
+        if archetype in ("title", "footage"):
             archetype = "topic"
     plan["archetype"] = archetype
 
@@ -512,22 +512,6 @@ async def plan_scene_visuals(
     planned = sum(1 for scene in scenes if scene["id"] in by_id)
     _emit(log, f"Visual plan ready: {planned}/{len(scenes)} scenes directed by the model")
     return plans
-
-
-OUTRO_SCENE_ID = "scene-99-outro"
-
-
-def outro_plan(storyboard: dict, *, brand: str = "") -> dict:
-    """Closing card. The one scene allowed to animate itself out."""
-    return {
-        "id": OUTRO_SCENE_ID,
-        "archetype": "outro",
-        "kicker": "",
-        "headline": "Thanks for watching",
-        "body": brand,
-        "accent": "coral",
-        "motif": "bloom",
-    }
 
 
 def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, task_dir: Path) -> int:

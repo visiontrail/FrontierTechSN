@@ -37,7 +37,6 @@ SCENE_MAX_SECONDS = 24.0
 # versions reserved five seconds for a metadata-style title card, which delayed
 # the actual subject and made every video open the same way.
 CONTENT_START = 0.0
-OUTRO_DURATION = 5.0
 
 SPEAKER_LABEL_RE = re.compile(r"^Speaker\s*(\d+)\s*[:：\-—–]\s*(.+)$", re.IGNORECASE)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")
@@ -569,10 +568,13 @@ def build_storyboard(
         "thesis": (summary or {}).get("thesis", ""),
         "audio_duration": round(audio_duration, 2),
         "title_duration": 0.0,
-        "outro_duration": OUTRO_DURATION,
+        # Retain the legacy fields as explicit zeroes for consumers that still
+        # deserialize them, but end the composition with the narration instead
+        # of appending a generic closing card.
+        "outro_duration": 0.0,
         "content_start": CONTENT_START,
         "outro_start": round(CONTENT_START + audio_duration, 2),
-        "total_duration": round(CONTENT_START + audio_duration + OUTRO_DURATION, 2),
+        "total_duration": round(CONTENT_START + audio_duration, 2),
         "scene_count": len(scenes),
         "scenes": scenes,
         "alignment": alignment,
@@ -647,10 +649,10 @@ def build_program_storyboard(
         "thesis": (summary or {}).get("thesis", ""),
         "audio_duration": round(audio_duration, 2),
         "title_duration": 0.0,
-        "outro_duration": OUTRO_DURATION,
+        "outro_duration": 0.0,
         "content_start": CONTENT_START,
         "outro_start": round(audio_duration, 2),
-        "total_duration": round(audio_duration + OUTRO_DURATION, 2),
+        "total_duration": round(audio_duration, 2),
         "scene_count": len(scenes),
         "scenes": scenes,
         "alignment": alignment,

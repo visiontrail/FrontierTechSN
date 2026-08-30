@@ -112,7 +112,6 @@ def _cache_plans() -> list[dict]:
             "news_image_mode": "fullscreen",
             "news_image_original_archetype": "statement",
         },
-        {"id": visual_plan.OUTRO_SCENE_ID, "headline": "Outro"},
     ]
 
 
@@ -127,8 +126,6 @@ def _write_cache(tmp_path, board: dict | None = None, plans: list[dict] | None =
 def test_mount_list_starts_with_content_and_has_no_title_card():
     board = {
         "content_start": 0.0,
-        "outro_start": 12.0,
-        "outro_duration": 5.0,
         "scenes": [
             {"id": "scene-01", "start": 0.0, "duration": 7.0},
             {"id": "scene-02", "start": 7.0, "duration": 5.0},
@@ -138,11 +135,7 @@ def test_mount_list_starts_with_content_and_has_no_title_card():
     mounts = composer._mount_list(board)
 
     assert mounts[0] == {"id": "scene-01", "start": 0.0, "duration": 7.0}
-    assert [mount["id"] for mount in mounts] == [
-        "scene-01",
-        "scene-02",
-        visual_plan.OUTRO_SCENE_ID,
-    ]
+    assert [mount["id"] for mount in mounts] == ["scene-01", "scene-02"]
 
 
 def test_kit_plans_preserve_the_fifth_narrative_item():
@@ -258,7 +251,7 @@ def test_cached_scene_plans_reject_nonfinite_plan_even_with_matching_sha(
     plan_bytes = (
         '[{"id":"scene-01","stat":'
         + nonfinite
-        + '},{"id":"scene-02"},{"id":"scene-99-outro"}]'
+        + '},{"id":"scene-02"}]'
     ).encode()
     plan_path = tmp_path / "visual_plan.json"
     plan_path.write_bytes(plan_bytes)
