@@ -401,11 +401,17 @@ class ScenePlan:
     collage_hold_src: str = ""
     collage_target_duration_seconds: float = 0.0
     news_image_src: str = ""
+    news_image_srcs: tuple[str, ...] = ()
     news_image_mode: str = ""
     news_image_kind: str = ""
     news_image_fit: str = "cover"
     news_image_credit: str = ""
+    news_image_credits: tuple[str, ...] = ()
     news_image_caption: str = ""
+    news_webpage_src: str = ""
+    news_webpage_url: str = ""
+    news_webpage_source: str = ""
+    news_webpage_headline: str = ""
     theme: Theme = DEFAULT_THEME
     frame: FrameSpec = LANDSCAPE
 
@@ -459,6 +465,11 @@ class ScenePlan:
                 data.get("collage_target_duration_seconds") or 0.0
             ),
             news_image_src=str(data.get("news_image_src") or ""),
+            news_image_srcs=tuple(
+                str(item)
+                for item in data.get("news_image_srcs") or []
+                if str(item).strip()
+            ),
             news_image_mode=str(data.get("news_image_mode") or ""),
             news_image_kind=str(data.get("news_image_kind") or ""),
             news_image_fit=(
@@ -467,7 +478,16 @@ class ScenePlan:
                 else "cover"
             ),
             news_image_credit=str(data.get("news_image_credit") or ""),
+            news_image_credits=tuple(
+                str(item)
+                for item in data.get("news_image_credits") or []
+                if str(item).strip()
+            ),
             news_image_caption=str(data.get("news_image_caption") or ""),
+            news_webpage_src=str(data.get("news_webpage_src") or ""),
+            news_webpage_url=str(data.get("news_webpage_url") or ""),
+            news_webpage_source=str(data.get("news_webpage_source") or ""),
+            news_webpage_headline=str(data.get("news_webpage_headline") or ""),
             theme=theme,
             frame=frame,
         )
@@ -987,6 +1007,71 @@ def _render_footage(plan: ScenePlan) -> str:
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
 
 
+def _render_news_webpage_overlay(plan: ScenePlan) -> str:
+    """Layer a captured English article page over image or moving footage."""
+    accent = accent_hex(plan.accent, plan.theme)
+    if plan.footage_src and plan.footage_kind == "video":
+        background = (
+            f'      <video id="{plan.id}-background" class="clip news-web-background" '
+            f'src="{_esc(plan.footage_src)}" data-start="0" '
+            f'data-duration="{plan.duration:.2f}" data-track-index="0" muted playsinline loop '
+            'crossorigin="anonymous"></video>\n'
+        )
+    else:
+        background_src = plan.footage_src or plan.news_image_src
+        background = (
+            f'      <img id="{plan.id}-background" class="news-web-background" '
+            f'src="{_esc(background_src)}" alt="" crossorigin="anonymous">\n'
+        )
+    source_label = plan.news_webpage_source or "English news source"
+    css = f"""
+  #{plan.id} .news-web-bg-frame {{ position:absolute; inset:0; overflow:hidden; background:{plan.theme.bg}; }}
+  #{plan.id} .news-web-background {{ position:absolute; inset:0; display:block; width:100%; height:100%;
+      object-fit:cover; filter:saturate(.78) contrast(1.06); }}
+  #{plan.id} .news-web-scrim {{ position:absolute; inset:0; background:rgba(8,10,18,.43); }}
+  #{plan.id} .news-web-card-wrap {{ position:absolute; left:50%; top:50%; width:1260px; height:760px;
+      margin:-380px 0 0 -630px; z-index:4; perspective:1800px; }}
+  #{plan.id} .news-web-card {{ position:absolute; inset:0; overflow:hidden; border:3px solid rgba(255,255,255,.92);
+      border-radius:12px; background:#FFFFFF; box-shadow:0 46px 130px rgba(0,0,0,.58);
+      transform-style:preserve-3d; }}
+  #{plan.id} .news-web-shot-crop {{ position:absolute; inset:0; overflow:hidden; border-radius:9px; }}
+  #{plan.id} .news-web-shot {{ display:block; width:100%; height:100%; object-fit:cover; object-position:50% 0%; }}
+  #{plan.id} .news-web-source {{ position:absolute; left:28px; top:26px; z-index:6; max-width:720px;
+      padding:12px 20px; border-radius:999px; background:rgba(9,12,20,.88); border:2px solid {accent};
+      color:#F5F2EA; font:800 19px {SANS}; line-height:1.2; letter-spacing:.12em;
+      text-transform:uppercase; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  #{plan.id} .news-web-corner {{ position:absolute; right:-22px; bottom:-22px; width:126px; height:126px;
+      z-index:5; border-right:7px solid {accent}; border-bottom:7px solid {accent}; }}
+"""
+    markup = (
+        f'    <div class="news-web-bg-frame" id="{plan.id}-background-frame">\n'
+        + background
+        + "    </div>\n"
+        + f'    <div class="news-web-scrim" id="{plan.id}-web-scrim"></div>\n'
+        + f'    <div class="news-web-card-wrap" id="{plan.id}-web-wrap" data-layout-allow-overflow>\n'
+        + f'      <div class="news-web-card" id="{plan.id}-web-card">\n'
+        + '        <div class="news-web-shot-crop">\n'
+        + f'          <img class="news-web-shot" id="{plan.id}-web-shot" '
+        + f'src="{_esc(plan.news_webpage_src)}" alt="{_esc(plan.news_webpage_headline)}" '
+        + 'crossorigin="anonymous">\n'
+        + "        </div>\n"
+        + f'        <div class="news-web-source" id="{plan.id}-web-source">English news · {_esc(source_label)}</div>\n'
+        + "      </div>\n"
+        + f'      <div class="news-web-corner" id="{plan.id}-web-corner"></div>\n'
+        + "    </div>\n"
+    )
+    direction = -1 if _seed_from(plan.id) % 2 else 1
+    drift = max(2.4, plan.duration - 0.25)
+    timeline = f"""        inAt("#{plan.id}-background", {{ scale: 1.08, x: {direction * -18} }}, {{ scale: 1.16, x: {direction * 18}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.05);
+        inAt("#{plan.id}-web-scrim", {{ opacity: 0 }}, {{ opacity: 1, duration: .48, ease: "sine.out" }}, 0.12);
+        inAt("#{plan.id}-web-card", {{ x: {direction * 210}, y: 70, opacity: 0, rotationY: {direction * -10}, rotationZ: {direction * 1.2}, scale: .9 }}, {{ x: 0, y: 0, opacity: 1, rotationY: 0, rotationZ: 0, scale: 1, duration: 1.02, ease: "power4.out", transformPerspective: 1800, transformOrigin: "50% 50%" }}, 0.22);
+        inAt("#{plan.id}-web-shot", {{ scale: 1.035, y: -8 }}, {{ scale: 1, y: 8, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 0%" }}, 0.28);
+        inAt("#{plan.id}-web-source", {{ x: -34, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .58, ease: "expo.out" }}, 0.64);
+        inAt("#{plan.id}-web-corner", {{ scale: .45, opacity: 0, transformOrigin: "100% 100%" }}, {{ scale: 1, opacity: 1, duration: .7, ease: "circ.out" }}, 0.72);
+"""
+    return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
+
+
 def _render_news_image_inline(plan: ScenePlan) -> str:
     """Place a sourced image inside the HyperFrames editorial text flow."""
     accent = accent_hex(plan.accent, plan.theme)
@@ -1128,8 +1213,104 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(22, 40))
 
 
+def _render_news_image_collage(plan: ScenePlan) -> str:
+    """Fill the frame with three overlapping sourced images and no story copy."""
+    sources = tuple(dict.fromkeys(plan.news_image_srcs))[:3]
+    if len(sources) < 3:
+        return _render_news_image_fullscreen(plan)
+    credits = tuple(plan.news_image_credits)
+    accent = accent_hex(plan.accent, plan.theme)
+    placements = (
+        ("top", "left:560px; top:54px; width:800px; height:400px; z-index:6;", -1.2),
+        ("left", "left:76px; top:338px; width:1080px; height:632px; z-index:4;", 0.8),
+        ("right", "right:72px; top:304px; width:820px; height:610px; z-index:5;", -0.7),
+    )
+    css = f"""
+  #{plan.id} .news-collage-canvas {{ position:absolute; inset:0; overflow:hidden; background:#0B090B; }}
+  #{plan.id} .news-collage-glow {{ position:absolute; inset:-18%; background:
+      radial-gradient(circle at 72% 38%, {_rgba(accent, .24)} 0%, rgba(11,9,11,0) 42%),
+      radial-gradient(circle at 22% 72%, rgba(255,255,255,.12) 0%, rgba(11,9,11,0) 38%); }}
+  #{plan.id} .news-collage-panel {{ position:absolute; overflow:hidden; background:#161218;
+      border:3px solid rgba(255,255,255,.84); box-shadow:0 34px 100px rgba(0,0,0,.62);
+      transform-style:preserve-3d; }}
+  #{plan.id} .news-collage-crop {{ position:absolute; inset:0; overflow:hidden; }}
+  #{plan.id} .news-collage-image {{ display:block; width:100%; height:100%; object-fit:cover; }}
+  #{plan.id} .news-collage-credit {{ position:absolute; left:16px; right:16px; bottom:14px; z-index:2;
+      padding:8px 12px; color:rgba(245,242,234,.88); background:rgba(8,9,15,.76);
+      font:500 15px {SANS}; line-height:1.2; letter-spacing:.025em; white-space:nowrap;
+      overflow:hidden; text-overflow:ellipsis; }}
+  #{plan.id} .news-collage-rail {{ position:absolute; left:0; right:0; bottom:0; height:12px;
+      z-index:7; background:{accent}; }}
+"""
+    panel_markup = []
+    timeline_rows = []
+    entrances = ((-170, -72), (-190, 94), (190, 52))
+    eases = ("power4.out", "expo.out", "circ.out")
+    starts = (0.18, 0.38, 0.58)
+    for index, ((name, placement, rotation), source) in enumerate(
+        zip(placements, sources, strict=True), start=1
+    ):
+        credit = credits[index - 1] if index - 1 < len(credits) else ""
+        panel_markup.append(
+            f'    <div class="news-collage-panel news-collage-{name}" '
+            f'id="{plan.id}-collage-panel-{index}" style="{placement} transform:rotate({rotation}deg)" '
+            'data-layout-allow-overflow>\n'
+            f'      <div class="news-collage-crop"><img class="news-collage-image" '
+            f'id="{plan.id}-collage-image-{index}" src="{_esc(source)}" alt="" '
+            'crossorigin="anonymous"></div>\n'
+            + (
+                f'      <div class="news-collage-credit" id="{plan.id}-collage-credit-{index}">'
+                f'{_esc(credit)}</div>\n'
+                if credit
+                else ""
+            )
+            + "    </div>\n"
+        )
+        x, y = entrances[index - 1]
+        direction = -1 if index % 2 else 1
+        timeline_rows.append(
+            f'        inAt("#{plan.id}-collage-panel-{index}", '
+            f'{{ x: {x}, y: {y}, opacity: 0, scale: .9, rotationZ: {rotation + direction * 3:.1f} }}, '
+            f'{{ x: 0, y: 0, opacity: 1, scale: 1, rotationZ: {rotation:.1f}, duration: '
+            f'{0.82 + index * 0.09:.2f}, ease: "{eases[index - 1]}", transformPerspective: 1500, '
+            f'transformOrigin: "50% 50%" }}, {starts[index - 1]:.2f});'
+        )
+        timeline_rows.append(
+            f'        inAt("#{plan.id}-collage-image-{index}", '
+            f'{{ scale: 1.08, x: {direction * -12} }}, '
+            f'{{ scale: 1.02, x: {direction * 12}, duration: {max(2.4, plan.duration - starts[index - 1]):.2f}, '
+            'ease: "none", transformOrigin: "50% 50%" }, '
+            f'{starts[index - 1]:.2f});'
+        )
+        if credit:
+            timeline_rows.append(
+                f'        inAt("#{plan.id}-collage-credit-{index}", {{ y: 18, opacity: 0 }}, '
+                f'{{ y: 0, opacity: 1, duration: .42, ease: "sine.out" }}, '
+                f'{starts[index - 1] + 0.5:.2f});'
+            )
+    markup = (
+        f'    <div class="news-collage-canvas" id="{plan.id}-collage-canvas">\n'
+        f'      <div class="news-collage-glow" id="{plan.id}-collage-glow" '
+        'data-layout-allow-overflow></div>\n'
+        + "".join(panel_markup)
+        + f'      <div class="news-collage-rail" id="{plan.id}-collage-rail"></div>\n'
+        + "    </div>\n"
+    )
+    timeline = (
+        f'        inAt("#{plan.id}-collage-glow", {{ opacity: 0, scale: .9 }}, '
+        f'{{ opacity: 1, scale: 1.04, duration: {max(2.8, plan.duration):.2f}, ease: "sine.inOut", '
+        'transformOrigin: "50% 50%" }, 0.1);\n'
+        + "\n".join(timeline_rows)
+        + f'\n        inAt("#{plan.id}-collage-rail", {{ scaleX: 0, transformOrigin: "0 50%" }}, '
+        f'{{ scaleX: 1, duration: .72, ease: "power3.inOut" }}, 0.72);\n'
+    )
+    return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
+
+
 def _render_news_image_fullscreen(plan: ScenePlan) -> str:
     """Give one factual still the frame with a smooth, seekable reveal."""
+    if len(tuple(dict.fromkeys(plan.news_image_srcs))) >= 3:
+        return _render_news_image_collage(plan)
     accent = accent_hex(plan.accent, plan.theme)
     body_copy = plan.body.strip()
     support_copy = body_copy or plan.quote.strip()
@@ -1241,6 +1422,8 @@ _RENDERERS = {
 
 def render_scene(plan: ScenePlan) -> str:
     """Full sub-composition HTML for one scene."""
+    if plan.news_webpage_src and (plan.footage_src or plan.news_image_src):
+        return _render_news_webpage_overlay(plan)
     if plan.news_image_src and plan.news_image_mode == "inline":
         return _render_news_image_inline(plan)
     if plan.news_image_src and plan.news_image_mode == "fullscreen":

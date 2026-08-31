@@ -29,6 +29,7 @@ WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 YOUTUBE_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch|youtu\.be/)")
 GEMINI_RECOVERY_TIMEOUT_SECONDS = 60.0
 GEMINI_RECOVERY_POLL_SECONDS = 5.0
+MAX_CANDIDATE_ATTEMPTS_PER_QUERY = 3
 
 
 class WebFootageError(RuntimeError):
@@ -353,7 +354,43 @@ async def _download_youtube(
         )
     command.append(candidate["source_page_url"])
     before = {path.resolve() for path in raw_dir.glob("*") if path.is_file()}
-    await _run_command(command, timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT)
+    try:
+        await _run_command(command, timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT)
+    except WebFootageError as section_error:
+        if not sectioned:
+            raise
+        # YouTube's signed googlevideo URL can reject FFmpeg's range request
+        # even when yt-dlp itself can download the same media.  Fetch a bounded
+        # 360p source with yt-dlp's native downloader, then trim it locally.
+        # The byte ceiling prevents an unexpectedly long source from filling
+        # the task workspace.
+        fallback_template = raw_dir / "%(id)s-full.%(ext)s"
+        fallback_command = [
+            _yt_dlp_bin(),
+            *_yt_dlp_common_args(include_cookies=False),
+            "--no-playlist",
+            "-f",
+            (
+                "bestvideo[height<=360][ext=mp4]/"
+                "bestvideo[height<=360]/best[height<=360]"
+            ),
+            "--max-filesize",
+            str(config.FOOTAGE_MAX_BYTES),
+            "-o",
+            str(fallback_template),
+            candidate["source_page_url"],
+        ]
+        try:
+            await _run_command(
+                fallback_command,
+                timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT,
+            )
+        except WebFootageError as fallback_error:
+            raise WebFootageError(
+                "YouTube section download and bounded full-download fallback both failed: "
+                f"section={str(section_error)[-420:]}; fallback={str(fallback_error)[-420:]}"
+            ) from fallback_error
+        sectioned = False
     after = [
         path for path in raw_dir.glob("*")
         if path.is_file() and path.resolve() not in before and path.suffix.lower() in {".mp4", ".webm", ".mkv", ".mov"}
@@ -525,7 +562,8 @@ async def supplement_web_footage(
     manifest["updated_at"] = _now()
     _write_manifest(manifest_file, manifest)
 
-    for shot in query_plan:
+    pending_shots = [dict(shot) for shot in query_plan]
+    for shot in pending_shots:
         if len(manifest.get("clips", [])) >= target_total:
             break
         query = str(shot.get("query") or "").strip()
@@ -553,11 +591,25 @@ async def supplement_web_footage(
             )
             continue
 
-        excerpt = matching_script_excerpt(script, query)
-        _emit(log, f"Web footage: asking Gemini Web to select a trim for {candidate['source_page_url']}")
-        analysis = await analyze_candidate_link(candidate, excerpt)
+        excerpt = str(shot.get("script_excerpt") or "").strip()
+        if not excerpt:
+            # Backward-compatible recovery for an older/manual query plan.  A
+            # descriptive purpose often contains the story identity even when
+            # the short visual query uses a synonym (Taipei vs Taiwan).
+            excerpt = matching_script_excerpt(
+                script,
+                f"{query} {str(shot.get('purpose') or '')}",
+            )
+        candidate_attempt = int(shot.get("_candidate_attempt") or 1)
+        _emit(
+            log,
+            "Web footage: asking Gemini Web to select a trim for "
+            f"{candidate['source_page_url']} (candidate {candidate_attempt}/"
+            f"{MAX_CANDIDATE_ATTEMPTS_PER_QUERY})",
+        )
         raw_path: Path | None = None
         try:
+            analysis = await analyze_candidate_link(candidate, excerpt)
             source_duration = float(candidate.get("duration_seconds") or 0)
             if source_duration:
                 analysis = _fit_analysis_to_media(analysis, source_duration)
@@ -591,10 +643,45 @@ async def supplement_web_footage(
                     "query": query,
                     "stage": "web-download-edit",
                     "source_page_url": candidate["source_page_url"],
+                    "candidate_attempt": candidate_attempt,
                     "message": str(exc),
                 }
             )
-            _emit(log, f"Web footage candidate failed: {exc}")
+            used_sources.add(candidate["source_page_url"])
+            if candidate_attempt < MAX_CANDIDATE_ATTEMPTS_PER_QUERY:
+                pending_shots.append(
+                    {
+                        **shot,
+                        "_candidate_attempt": candidate_attempt + 1,
+                    }
+                )
+                _emit(
+                    log,
+                    "Web footage candidate failed; queued the next unique result for "
+                    f"'{query}': {str(exc)[-520:]}",
+                )
+            else:
+                if not shot.get("_stock_variant") and "stock footage" not in query.casefold():
+                    variant_query = f"{query} stock footage"
+                    pending_shots.append(
+                        {
+                            **shot,
+                            "query": variant_query,
+                            "_candidate_attempt": 1,
+                            "_stock_variant": True,
+                        }
+                    )
+                    _emit(
+                        log,
+                        f"Web footage exhausted {candidate_attempt} candidates for '{query}'; "
+                        f"queued focused short-form fallback '{variant_query}'",
+                    )
+                else:
+                    _emit(
+                        log,
+                        f"Web footage exhausted {candidate_attempt} candidates for '{query}': "
+                        f"{str(exc)[-520:]}",
+                    )
             continue
 
         # Keep failed downloads for diagnosis. Remove the exact raw file only

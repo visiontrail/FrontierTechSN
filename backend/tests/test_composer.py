@@ -158,6 +158,31 @@ def test_kit_plans_preserve_the_fifth_narrative_item():
     assert plans[0].items[-1] == "Generate marketing posters from reference images"
 
 
+def test_locked_visual_asset_gate_requires_every_media_source_in_scene_html(tmp_path):
+    compositions = tmp_path / "compositions"
+    compositions.mkdir()
+    (compositions / "scene-02.html").write_text(
+        '<video src="../footage/clip-01.mp4"></video>'
+        '<img src="../news_webpages/page-01.png">',
+        encoding="utf-8",
+    )
+    plans = [
+        {
+            "id": "scene-02",
+            "footage_src": "../footage/clip-01.mp4",
+            "news_webpage_src": "../news_webpages/page-01.png",
+        }
+    ]
+
+    composer._assert_locked_visual_assets(tmp_path, plans)
+
+    (compositions / "scene-02.html").write_text(
+        '<video src="../footage/clip-01.mp4"></video>', encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="news_webpages/page-01.png"):
+        composer._assert_locked_visual_assets(tmp_path, plans)
+
+
 def test_cached_scene_plans_require_exact_current_checkpoint_and_strip_placements(tmp_path):
     board = _cache_board()
     _write_cache(tmp_path, board)
@@ -447,7 +472,7 @@ def test_clean_quality_report_has_no_warnings():
     ) == []
 
 
-def test_failed_review_blocks_delivery():
+def test_failed_review_defers_delivery_for_retry():
     report = composer._finalize_quality_report(
         {},
         {"passed": True},
@@ -463,8 +488,8 @@ def test_failed_review_blocks_delivery():
     )
 
     assert report["passed"] is False
-    assert report["quality_status"] == "failed"
-    assert report["delivery_status"] == "blocked"
+    assert report["quality_status"] == "retrying"
+    assert report["delivery_status"] == "deferred"
     assert "81.42" in report["warnings"][0]
 
 
@@ -484,7 +509,10 @@ def test_failed_quality_report_never_promotes_and_preserves_candidate(tmp_path, 
 
     monkeypatch.setattr(composer, "_promote_render_candidate", should_not_promote)
 
-    with pytest.raises(RuntimeError, match="failed the final A/V quality gate"):
+    with pytest.raises(
+        composer.QualityGateRetry,
+        match="automatic compose retry 1 requested",
+    ):
         composer._promote_quality_gated_candidate(
             staged,
             staged_report,
@@ -500,6 +528,11 @@ def test_failed_quality_report_never_promotes_and_preserves_candidate(tmp_path, 
     assert previous.read_bytes() == b"previous completed cut"
     assert staged.read_bytes() == b"new rejected candidate"
     assert staged_report.read_text(encoding="utf-8") == '{"passed": false}'
+    retry_state = json.loads(
+        (tmp_path / composer.QUALITY_RETRY_STATE_FILENAME).read_text(encoding="utf-8")
+    )
+    assert retry_state["status"] == "retrying"
+    assert retry_state["attempt_count"] == 1
 
 
 def test_portrait_render_command_uses_task_resolution(tmp_path):

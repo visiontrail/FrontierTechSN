@@ -1068,6 +1068,61 @@ class ResumeTtsWorkerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
+    async def test_quality_gate_finding_requeues_compose_instead_of_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = Path(directory) / "task-quality-retry"
+            task_dir.mkdir()
+            marker = task_dir / worker.RENDER_MARKER
+            marker.write_text("{}", encoding="utf-8")
+            queued = make_task(
+                "task-quality-retry",
+                status=TaskStatus.QUEUED,
+                script_path=str(task_dir / "script.txt"),
+                output_dir=str(task_dir),
+            )
+
+            with (
+                patch.object(
+                    worker,
+                    "get_next_queued_task",
+                    AsyncMock(side_effect=[queued, asyncio.CancelledError()]),
+                ),
+                patch.object(
+                    worker,
+                    "compare_and_set_task_status",
+                    AsyncMock(return_value=True),
+                ),
+                patch.object(
+                    worker,
+                    "run_compose",
+                    AsyncMock(
+                        side_effect=worker.QualityGateRetry(
+                            "scene-02 needs a more focused visual"
+                        )
+                    ),
+                ),
+                patch.object(worker, "update_task", AsyncMock()) as update_task,
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await worker._worker_loop()
+
+            self.assertTrue(marker.is_file())
+            self.assertEqual(
+                json.loads(marker.read_text(encoding="utf-8")),
+                {"quality_retry": True},
+            )
+            update_task.assert_awaited_once_with(
+                queued.id,
+                status=TaskStatus.QUEUED.value,
+                error_message=None,
+                publication_safety_hold=False,
+            )
+            pipeline_log = (task_dir / "logs" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Quality gate requested another compose cycle", pipeline_log)
+            self.assertNotIn("Task failed", pipeline_log)
+
     async def test_publication_exception_fails_closed_with_durable_suppression(self):
         with tempfile.TemporaryDirectory() as directory:
             task_dir = Path(directory) / "task-publish-failure"

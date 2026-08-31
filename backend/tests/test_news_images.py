@@ -823,6 +823,241 @@ def test_real_split_story_invalid_planner_rows_are_replaced_and_backfilled():
     assert len({news_images._subject_identity_key(shot) for shot in plan}) == 8
 
 
+def test_meta_robotics_scene_exposes_distinct_collage_support_subjects():
+    scene = {
+        "id": "scene-05",
+        "text": (
+            "Ars reports that Meta is putting robots to work in its data centers while human "
+            "technicians supervise the machines."
+        ),
+        "keywords": ["meta", "robots", "data centers"],
+    }
+
+    shots = news_images._fallback_shots_for_scene(scene, display_mode="inline")
+    subjects = [shot["expected_subject"] for shot in shots]
+
+    assert subjects[:3] == ["Meta", "robots", "data centers"]
+    assert [shot["kind"] for shot in shots[:3]] == ["logo", "object", "object"]
+
+
+def test_meta_robotics_scene_normalizes_infinitive_put_before_robots():
+    scene = {
+        "id": "scene-05",
+        "text": (
+            "Ars Technica takes us inside Meta's push to put robots to work "
+            "in its data centers."
+        ),
+        "keywords": ["meta", "robots", "data centers"],
+    }
+
+    subjects = [
+        shot["expected_subject"]
+        for shot in news_images._fallback_shots_for_scene(scene)
+    ]
+
+    assert subjects[:3] == ["Meta", "robots", "data centers"]
+
+
+def test_reserve_plan_allows_repeated_object_as_collage_support():
+    robotics = {
+        "id": "scene-05",
+        "text": "Meta is putting robots to work in its data centers.",
+        "keywords": ["meta", "robots", "data centers"],
+    }
+    fund = {
+        "id": "scene-06",
+        "text": "The fund targets chips, storage, data centers, and robotics.",
+        "keywords": ["fund", "data centers"],
+    }
+    primary = [
+        {
+            "scene_id": "scene-05",
+            "search_query": "Meta logo",
+            "expected_subject": "Meta",
+            "kind": "logo",
+            "display_mode": "inline",
+        },
+        next(
+            shot
+            for shot in news_images._fallback_shots_for_scene(fund)
+            if shot["expected_subject"] == "data centers"
+        ),
+    ]
+
+    reserves = news_images._reserve_plan(primary, [robotics, fund])
+    robotics_subjects = [
+        shot["expected_subject"]
+        for shot in reserves
+        if shot["scene_id"] == "scene-05"
+    ]
+
+    assert robotics_subjects[:2] == ["robots", "data centers"]
+
+
+def test_single_token_object_identity_accepts_descriptive_modifiers():
+    scene = {
+        "text": "Meta is putting robots to work in its data centers.",
+        "keywords": ["meta", "robots", "data centers"],
+    }
+    shot = {"expected_subject": "robots", "kind": "object"}
+    candidate = {
+        "title": "Industrial robots at work.jpg",
+        "description": "Industrial robots in a technology facility",
+        "object_name": "Industrial robots",
+    }
+
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+
+    assert evidence["grounding_passed"] is True
+    assert evidence["grounding_distinctive_anchors"] == ["robots"]
+
+
+def test_multi_token_object_identity_accepts_descriptive_location():
+    scene = {
+        "text": "Meta is putting robots to work in its data centers.",
+        "keywords": ["meta", "robots", "data centers"],
+    }
+    shot = {"expected_subject": "data centers", "kind": "object"}
+    candidate = {
+        "title": "Data centers in Ashburn.jpg",
+        "description": "Aerial view of data centers near Ashburn",
+        "object_name": "Data centers in Ashburn",
+    }
+
+    evidence = news_images._grounding_evidence(shot, scene, candidate)
+
+    assert evidence["grounding_passed"] is True
+    assert evidence["grounding_distinctive_anchors"] == ["data", "centers"]
+
+
+def test_collage_support_pool_retains_download_fallbacks_for_each_subject():
+    candidates = [
+        {
+            "expected_subject": "data centers",
+            "kind": "object",
+            "source_page_url": "https://commons.example/data-center-chart-a",
+            "title": "Data center server racks A.jpg",
+        },
+        {
+            "expected_subject": "data centers",
+            "kind": "object",
+            "source_page_url": "https://commons.example/data-center-chart-b",
+            "title": "Data center server racks B.jpg",
+        },
+        {
+            "expected_subject": "robots",
+            "kind": "object",
+            "source_page_url": "https://commons.example/industrial-robots",
+            "title": "Industrial robots at work.jpg",
+        },
+    ]
+
+    selected = news_images._collage_support_candidates(candidates)
+
+    assert [candidate["expected_subject"] for candidate in selected] == [
+        "data centers",
+        "data centers",
+        "robots",
+    ]
+
+    with_logo = news_images._collage_support_candidates(
+        [
+            {
+                "expected_subject": "Meta",
+                "kind": "logo",
+                "source_page_url": "https://commons.example/meta-logo",
+            },
+            *candidates,
+        ],
+        allow_logo=True,
+    )
+    assert [candidate["expected_subject"] for candidate in with_logo] == [
+        "Meta",
+        "data centers",
+        "data centers",
+        "robots",
+    ]
+
+
+def test_collage_support_pool_rejects_non_photographic_explainer_assets():
+    candidates = [
+        {
+            "expected_subject": "data centers",
+            "kind": "object",
+            "source_page_url": "https://commons.example/data-center-chart",
+            "title": "Top cities with most data centers.png",
+            "description": "Horizontal bar chart of regional facilities",
+        },
+        {
+            "expected_subject": "data centers",
+            "kind": "object",
+            "source_page_url": "https://commons.example/data-center-photo",
+            "title": "Data center server racks.jpg",
+            "description": "Server racks inside a data center",
+        },
+    ]
+
+    selected = news_images._collage_support_candidates(candidates)
+
+    assert [candidate["source_page_url"] for candidate in selected] == [
+        "https://commons.example/data-center-photo"
+    ]
+
+
+def test_mode_mix_never_demotes_locked_fullscreen_collage():
+    rows = [
+        {"scene_id": "scene-05", "display_mode": "fullscreen"},
+        {"scene_id": "scene-06", "display_mode": "fullscreen"},
+    ]
+
+    news_images._ensure_placement_mode_mix(
+        rows,
+        locked_fullscreen_scene_ids={"scene-05"},
+    )
+
+    assert rows == [
+        {"scene_id": "scene-05", "display_mode": "fullscreen"},
+        {"scene_id": "scene-06", "display_mode": "inline"},
+    ]
+
+
+def test_structured_fund_scene_replaces_generic_object_with_named_company():
+    scene = {
+        "id": "scene-06",
+        "text": (
+            "DeepTech China reports that venture firm Andreessen Horowitz announced a "
+            "one point one billion dollar Machine Age Fund. It targets chips, memory, "
+            "networking, storage, data centers, robotics, and home AI devices."
+        ),
+        "keywords": ["andreessen", "horowitz", "fund", "data centers"],
+    }
+    preferred = {
+        "scene_id": "scene-06",
+        "search_query": "data centers photo",
+        "news_query": "data centers",
+        "expected_subject": "data centers",
+        "kind": "object",
+        "display_mode": "fullscreen",
+    }
+    hints = {
+        "scene-06": {
+            "headline": "a16z bets $1.1 billion on AI's physical layer",
+            "items": ["Chips", "Memory", "Networking", "Storage & data centers"],
+        }
+    }
+
+    prepared = news_images._prepare_primary_plan(
+        [preferred],
+        [scene],
+        1,
+        hints,
+    )
+
+    assert prepared[0]["expected_subject"] == "Andreessen Horowitz"
+    assert prepared[0]["kind"] == "logo"
+    assert prepared[0]["search_query"] == "Andreessen Horowitz logo"
+
+
 def test_valid_planner_subject_cannot_retain_an_unrelated_outbound_query():
     scene = next(
         scene for scene in real_split_story_board()["scenes"] if scene["id"] == "scene-07"
@@ -1477,6 +1712,8 @@ def test_commons_file_reference_parser_accepts_only_exact_https_file_pages():
     ("subject", "kind", "title"),
     [
         ("humanoid robot", "object", "File:Humanoid robot is being programmed.jpg"),
+        ("robots", "object", "File:FANUC 6-axis welding robots.jpg"),
+        ("data centers", "object", "File:Data centers in Ashburn.jpg"),
         ("annual reports", "object", "File:WMUA Annual reports 2012.JPG"),
         ("Qwen", "logo", "File:Qwen Logo.svg"),
     ],
@@ -2096,6 +2333,180 @@ def test_attach_news_images_preserves_inline_archetype_and_promotes_fullscreen(
     assert plans[0]["news_image_grounding_context_conflicts"] == []
     assert plans[1]["archetype"] == "news_image"
     assert plans[1]["news_image_original_archetype"] == "topic"
+
+
+def test_attach_news_images_builds_three_asset_fullscreen_collage(tmp_path: Path):
+    data = board()
+    plans = visual_plan.fallback_plan(data)
+    asset_dir = tmp_path / "news_images"
+    asset_dir.mkdir()
+    inline_payload = _image_bytes("PNG", "inline-primary")
+    hero_payload = _image_bytes("JPEG", "falcon-hero")
+    support_one_payload = _image_bytes("JPEG", "falcon-support-one")
+    support_two_payload = _image_bytes("JPEG", "falcon-support-two")
+    payloads = {
+        "image-01.png": inline_payload,
+        "image-02.jpg": hero_payload,
+        "image-03.jpg": support_one_payload,
+        "image-04.jpg": support_two_payload,
+    }
+    for name, payload in payloads.items():
+        (asset_dir / name).write_bytes(payload)
+    inline = _grounded_image_record(
+        data["scenes"][0],
+        local_path="news_images/image-01.png",
+        payload=inline_payload,
+        source="https://commons.example/nvidia-collage",
+        subject="NVIDIA",
+        kind="logo",
+        mode="inline",
+    )
+    inline["id"] = "image-01"
+    hero = _grounded_image_record(
+        data["scenes"][1],
+        local_path="news_images/image-02.jpg",
+        payload=hero_payload,
+        source="https://commons.example/falcon-hero",
+        subject="Falcon 9",
+        kind="event",
+        mode="fullscreen",
+    )
+    hero["id"] = "image-02"
+    support_one = _grounded_image_record(
+        data["scenes"][1],
+        local_path="news_images/image-03.jpg",
+        payload=support_one_payload,
+        source="https://commons.example/falcon-support-one",
+        subject="Falcon 9",
+        kind="event",
+        mode="fullscreen",
+    )
+    support_one.update({"id": "image-03", "collage_role": "supporting"})
+    support_two = _grounded_image_record(
+        data["scenes"][1],
+        local_path="news_images/image-04.jpg",
+        payload=support_two_payload,
+        source="https://commons.example/falcon-support-two",
+        subject="Falcon 9",
+        kind="event",
+        mode="fullscreen",
+    )
+    support_two.update({"id": "image-04", "collage_role": "supporting"})
+    manifest = {
+        "manifest_version": news_images.MANIFEST_VERSION,
+        "query_semantics_version": news_images.QUERY_SEMANTICS_VERSION,
+        "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+        "status": "ready",
+        "storyboard_sha256": news_images.storyboard_fingerprint(data),
+        "license_policy": "open_only",
+        "requested_image_count": 2,
+        "planned_image_count": 2,
+        "eligible_scene_count": 2,
+        "eligible_scene_ids": ["scene-01", "scene-02"],
+        "excluded_scene_ids": [],
+        "placement_modes": {"inline": 1, "fullscreen": 1},
+        "images": [inline, hero],
+        "collage_sets": [
+            {
+                "scene_id": "scene-02",
+                "primary_image_id": hero["id"],
+                "assets": [support_one, support_two],
+            }
+        ],
+        "collage_asset_count": 2,
+    }
+
+    summary = news_images.attach_news_images(plans, data, manifest, tmp_path)
+
+    assert summary == {"attached": 2, "placement_modes": {"inline": 1, "fullscreen": 1}}
+    assert plans[1]["news_image_collage"] is True
+    assert plans[1]["news_image_collage_asset_count"] == 3
+    assert plans[1]["news_image_srcs"] == [
+        "../news_images/image-02.jpg",
+        "../news_images/image-03.jpg",
+        "../news_images/image-04.jpg",
+    ]
+    assert len(plans[1]["news_image_credits"]) == 3
+
+
+def test_logo_primary_collage_remains_copy_free_fullscreen_with_structured_plan(
+    tmp_path: Path,
+):
+    data = board()
+    plans = visual_plan.fallback_plan(data)
+    plans[1]["stat"] = "$1.1B"
+    asset_dir = tmp_path / "news_images"
+    asset_dir.mkdir()
+    primary_payload = _image_bytes("PNG", "spacex-logo-primary")
+    support_one_payload = _image_bytes("JPEG", "falcon-support-a")
+    support_two_payload = _image_bytes("JPEG", "falcon-support-b")
+    for name, payload in (
+        ("image-01.png", primary_payload),
+        ("image-02.jpg", support_one_payload),
+        ("image-03.jpg", support_two_payload),
+    ):
+        (asset_dir / name).write_bytes(payload)
+    primary = _grounded_image_record(
+        data["scenes"][1],
+        local_path="news_images/image-01.png",
+        payload=primary_payload,
+        source="https://commons.example/spacex-logo",
+        subject="SpaceX",
+        kind="logo",
+        mode="fullscreen",
+    )
+    primary["id"] = "image-01"
+    supports = []
+    for index, (name, payload) in enumerate(
+        (
+            ("image-02.jpg", support_one_payload),
+            ("image-03.jpg", support_two_payload),
+        ),
+        start=2,
+    ):
+        support = _grounded_image_record(
+            data["scenes"][1],
+            local_path=f"news_images/{name}",
+            payload=payload,
+            source=f"https://commons.example/falcon-support-{index}",
+            subject="Falcon 9",
+            kind="event",
+            mode="fullscreen",
+        )
+        support.update(
+            {"id": f"image-{index:02d}", "collage_role": "supporting"}
+        )
+        supports.append(support)
+    manifest = {
+        "manifest_version": news_images.MANIFEST_VERSION,
+        "query_semantics_version": news_images.QUERY_SEMANTICS_VERSION,
+        "grounding_policy_version": news_images.QUERY_SEMANTICS_VERSION,
+        "status": "ready",
+        "storyboard_sha256": news_images.storyboard_fingerprint(data),
+        "license_policy": "open_only",
+        "requested_image_count": 1,
+        "planned_image_count": 1,
+        "eligible_scene_count": 2,
+        "eligible_scene_ids": ["scene-01", "scene-02"],
+        "excluded_scene_ids": [],
+        "placement_modes": {"inline": 0, "fullscreen": 1},
+        "images": [primary],
+        "collage_sets": [
+            {
+                "scene_id": "scene-02",
+                "primary_image_id": primary["id"],
+                "assets": supports,
+            }
+        ],
+        "collage_asset_count": 2,
+    }
+
+    summary = news_images.attach_news_images(plans, data, manifest, tmp_path)
+
+    assert summary["placement_modes"] == {"inline": 0, "fullscreen": 1}
+    assert plans[1]["archetype"] == "news_image"
+    assert plans[1]["news_image_collage"] is True
+    assert len(plans[1]["news_image_srcs"]) == 3
 
 
 def test_attach_news_images_accepts_verified_partial_inventory(tmp_path: Path):
@@ -3761,7 +4172,9 @@ async def test_acquisition_tries_next_candidate_after_download_failure(
     assert attempts == [failed["source_page_url"], succeeds["source_page_url"]]
     assert manifest["images"][0]["source_page_url"] == succeeds["source_page_url"]
     assert manifest["images"][0]["id"] == "image-01"
-    assert research.await_count == 1
+    # The successful primary is followed by one reserve-subject discovery pass
+    # so a three-image same-scene collage can be assembled when possible.
+    assert research.await_count == 2
     assert any(
         error["stage"] == "download" and error["source_page_url"] == failed["source_page_url"]
         for error in manifest["errors"]

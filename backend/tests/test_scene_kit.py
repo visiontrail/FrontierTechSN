@@ -254,6 +254,82 @@ def test_fullscreen_news_image_uses_a_masked_reveal_and_separate_ken_burns_layer
     assert "scale: 1.025" in html
 
 
+def test_fullscreen_news_image_can_be_a_copy_free_three_image_collage():
+    html = sk.render_scene(
+        plan(
+            archetype="news_image",
+            kicker="THIS COPY MUST NOT RENDER",
+            body="Nor should this narration copy.",
+            news_image_src="../news_images/hero.jpg",
+            news_image_srcs=(
+                "../news_images/hero.jpg",
+                "../news_images/support-1.jpg",
+                "../news_images/support-2.jpg",
+            ),
+            news_image_mode="fullscreen",
+            news_image_credits=("Source one", "Source two", "Source three"),
+        )
+    )
+
+    assert validate_scene_html(html, "scene-01") == []
+    assert 'class="news-collage-canvas"' in html
+    assert html.count('class="news-collage-panel') == 3
+    assert 'class="news-collage-glow"' in html
+    assert 'data-layout-allow-overflow' in html
+    assert 'src="../news_images/hero.jpg"' in html
+    assert 'src="../news_images/support-1.jpg"' in html
+    assert 'src="../news_images/support-2.jpg"' in html
+    assert 'width:800px; height:400px; z-index:6;' in html
+    assert 'top:338px; width:1080px; height:632px; z-index:4;' in html
+    assert "THIS COPY MUST NOT RENDER" not in html
+    assert "Nor should this narration copy" not in html
+    assert "news-full-headline" not in html
+    assert "power4.out" in html and "expo.out" in html and "circ.out" in html
+    assert " }}, " not in html
+
+
+def test_english_news_webpage_capture_overlays_image_background():
+    html = sk.render_scene(
+        plan(
+            archetype="news_image",
+            news_image_src="../news_images/chip-factory.jpg",
+            news_image_mode="fullscreen",
+            news_webpage_src="../news_webpages/page-01.png",
+            news_webpage_url="https://example.com/english-story",
+            news_webpage_source="Example News",
+            news_webpage_headline="A chip factory breaks ground",
+        )
+    )
+
+    assert validate_scene_html(html, "scene-01") == []
+    assert 'class="news-web-card"' in html
+    assert 'src="../news_images/chip-factory.jpg"' in html
+    assert 'src="../news_webpages/page-01.png"' in html
+    assert "English news · Example News" in html
+    assert "news-full-headline" not in html
+    assert "rotationY" in html and "transformPerspective" in html
+
+
+def test_english_news_webpage_capture_overlays_public_video():
+    html = sk.render_scene(
+        plan(
+            archetype="footage",
+            footage_src="../footage/clip-01.mp4",
+            footage_kind="video",
+            news_webpage_src="../news_webpages/page-01.png",
+            news_webpage_source="IEEE Spectrum",
+            news_webpage_headline="Simulation software brings monsters to life",
+        )
+    )
+
+    assert validate_scene_html(html, "scene-01") == []
+    video = re.search(r"<video[^>]*>", html).group(0)
+    assert 'src="../footage/clip-01.mp4"' in video
+    assert 'data-duration="12.00"' in video
+    assert "muted" in video and "playsinline" in video and " loop" in video
+    assert 'src="../news_webpages/page-01.png"' in html
+
+
 def test_fullscreen_news_image_uses_escaped_quote_when_body_is_empty():
     html = sk.render_scene(
         plan(

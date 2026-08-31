@@ -165,6 +165,13 @@ def test_malformed_issue_field_cannot_disappear_into_a_valid_match(tmp_path: Pat
     assert normalized["reviews"][0]["rubric_consistent"] is False
 
 
+def test_response_payload_can_recover_json_wrapper_from_stderr():
+    payload = _matching_payload([_scene("scene-01", 0, "Gold rises.")], 90)
+    wrapped = json.dumps([{"response": json.dumps(payload)}])
+
+    assert multimodal_review._response_payload(f"plain stdout\n{wrapped}") == payload
+
+
 class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
     async def test_keyframe_extraction_retries_transient_failure(self):
         extract_once = AsyncMock(side_effect=[RuntimeError("busy"), None])
@@ -220,6 +227,7 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
                 patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
                 patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 1),
+                patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""),
             ):
                 report = await multimodal_review.review_video(
                     root / "video.mp4",
@@ -336,6 +344,7 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
                 patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
                 patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+                patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""),
             ):
                 report = await multimodal_review.review_video(
                     root / "video.mp4",
@@ -372,6 +381,7 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
                 patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
                 patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+                patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""),
             ):
                 report = await multimodal_review.review_video(
                     root / "video.mp4",
@@ -422,6 +432,7 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
                 patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
                 patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+                patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""),
             ):
                 report = await multimodal_review.review_video(
                     root / "video.mp4",
@@ -470,6 +481,7 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
                 patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
                 patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 1),
+                patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""),
             ):
                 report = await multimodal_review.review_video(
                     root / "video.mp4",
@@ -490,6 +502,42 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(calibration["fallback_to_initial"])
             self.assertIn("retained the initial review", calibration["fallback_reason"])
             self.assertEqual(opencli.await_count, 3)
+
+    async def test_chatgpt_fallback_can_pass_after_unusable_gemini_response(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
+            frames = _frames(root, scenes)
+            opencli = AsyncMock(
+                side_effect=[
+                    OpenCLIResult(args=(), returncode=0, stdout="not JSON", stderr=""),
+                    _opencli_result(_matching_payload(scenes, 90)),
+                ]
+            )
+            with (
+                patch.object(
+                    multimodal_review,
+                    "extract_scene_frames",
+                    AsyncMock(return_value=frames),
+                ),
+                patch.object(multimodal_review, "run_opencli", opencli),
+                patch.object(config, "AV_SYNC_GEMINI_BATCH_SIZE", 8),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_SCENE_SCORE", 70),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
+                patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
+                patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+                patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "chatgpt"),
+            ):
+                report = await multimodal_review.review_video(
+                    root / "video.mp4",
+                    {"title": "Gold", "scenes": scenes},
+                    root,
+                )
+
+            self.assertTrue(report["passed"])
+            self.assertEqual(opencli.await_count, 2)
+            self.assertEqual(opencli.await_args_list[1].args[0][0], "chatgpt")
+            self.assertEqual(report["batches"][0]["review_provider"], "chatgpt")
 
     async def test_low_scene_score_rejects_video_even_when_average_is_high(self):
         with TemporaryDirectory() as temporary:

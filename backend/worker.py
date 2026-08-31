@@ -11,6 +11,7 @@ from backend.database import (
     update_task,
 )
 from backend.models import TaskResponse, TaskStatus
+from backend.pipeline.composer import QualityGateRetry
 from backend.pipeline.orchestrator import (
     append_pipeline_log,
     format_pipeline_log,
@@ -336,6 +337,28 @@ async def _worker_loop():
                     task.id,
                     final_task.status.value if final_task else TaskStatus.COMPLETE.value,
                 )
+            except QualityGateRetry as retry:
+                # Semantic/visual quality findings are recoverable pipeline
+                # feedback, not a terminal task failure. Preserve the rejected
+                # candidate and report, enqueue another compose-only cycle,
+                # and keep the task out of FAILED while the worker continues.
+                retry_marker = _task_dir(task.id, task.output_dir) / RENDER_MARKER
+                temporary_marker = retry_marker.with_suffix(".tmp")
+                temporary_marker.write_text(
+                    json.dumps({"quality_retry": True}), encoding="utf-8"
+                )
+                temporary_marker.replace(retry_marker)
+                _persist_and_publish(
+                    task,
+                    f"Quality gate requested another compose cycle: {retry}",
+                )
+                await update_task(
+                    task.id,
+                    status=TaskStatus.QUEUED.value,
+                    error_message=None,
+                    publication_safety_hold=False,
+                )
+                finish_task_logs(task.id, TaskStatus.QUEUED.value)
             except Exception as exc:
                 logger.error(f"Task {task.id} failed: {exc}\n{traceback.format_exc()}")
                 try:

@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
-MANIFEST_VERSION = 12
+MANIFEST_VERSION = 17
 QUERY_SEMANTICS_VERSION = 8
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
@@ -75,6 +75,12 @@ KNOWN_COMMONS_FILE_TITLES = {
         "humanoid robot",
         "object",
     ): ("File:Humanoid robot is being programmed.jpg",),
+    # These two broad narrated objects otherwise attract charts, museum
+    # exhibits, and consumer robots near the top of Commons search.  The
+    # vetted stills are literal photographic matches suitable for a collage:
+    # an industrial robot line and visible server racks in a data centre.
+    ("robots", "object"): ("File:FANUC 6-axis welding robots.jpg",),
+    ("data centers", "object"): ("File:Data centers in Ashburn.jpg",),
     ("qwen", "logo"): ("File:Qwen Logo.svg",),
     ("qwen office", "logo"): ("File:Qwen Logo.svg",),
     ("softbank group", "logo"): ("File:SoftBank Group logo.svg",),
@@ -248,7 +254,15 @@ GEOGRAPHIC_ADJECTIVE_TERMS = frozenset(
 CONCRETE_OBJECT_HEADS = frozenset(
     "robot robots report reports browser browsers poster posters document documents satellite satellites "
     "rocket rockets drone drones chip chips processor processors computer computers server servers vehicle "
-    "vehicles aircraft phone phones battery batteries camera cameras sensor sensors shop shops".split()
+    "vehicles aircraft phone phones battery batteries camera cameras sensor sensors shop shops center centers".split()
+)
+STANDALONE_VISUAL_OBJECT_HEADS = frozenset(
+    "robot robots satellite satellites rocket rockets drone drones chip chips processor processors "
+    "computer computers server servers vehicle vehicles aircraft phone phones battery batteries camera "
+    "cameras sensor sensors".split()
+)
+OBJECT_ACTION_MODIFIERS = frozenset(
+    "building deploying making operating put putting testing using".split()
 )
 ORGANISATION_NAME_SUFFIXES = frozenset(
     "association company corporation group institute laboratory labs society university".split()
@@ -531,14 +545,24 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
     subject_tokens = _identity_tokens(shot.get("expected_subject"))
     if not subject_tokens or subject_tokens == ["ai"]:
         return None
-    if any(
-        _metadata_extends_subject_identity(candidate.get(field_name), shot.get("expected_subject"))
-        for field_name in ("title", "object_name")
-    ) or _first_metadata_subject_identity_extends(
-        candidate.get("description"), shot.get("expected_subject")
+    kind = str(shot.get("kind") or "event")
+    # Identity extension is essential for proper names (``Google`` must not
+    # validate ``Google Loon``), but ordinary objects need descriptive
+    # context.  ``Data centers in Ashburn`` and ``industrial robots at work``
+    # are better photographic matches for their narrated objects, not new
+    # named identities.
+    if kind != "object" and (
+        any(
+            _metadata_extends_subject_identity(
+                candidate.get(field_name), shot.get("expected_subject")
+            )
+            for field_name in ("title", "object_name")
+        )
+        or _first_metadata_subject_identity_extends(
+            candidate.get("description"), shot.get("expected_subject")
+        )
     ):
         return None
-    kind = str(shot.get("kind") or "event")
     title_tokens = _identity_tokens(candidate.get("title"))
     if kind == "logo":
         # Exact Commons file titles can be just ``Techmeme.png`` while the
@@ -573,7 +597,14 @@ def _candidate_identity_match(shot: dict, candidate: dict) -> tuple[str, str, li
                 if token not in IDENTITY_DECORATORS
                 and not (len(token) == 4 and token.isdigit())
             ]
-        if (kind == "logo" or len(subject_tokens) == 1) and exact_identity != subject_tokens:
+        # Generic objects need descriptive modifiers to be useful imagery:
+        # ``Industrial robots`` is a truthful candidate for narrated
+        # ``robots``. Keep exact-only matching for brands, people, products,
+        # events, and places, where a modifier often creates a different
+        # identity (Google Loon, Google I/O, and so on).
+        if (
+            kind == "logo" or (len(subject_tokens) == 1 and kind != "object")
+        ) and exact_identity != subject_tokens:
             continue
         if kind != "logo" and ({"logo", "wordmark", "icon"} & set(field_tokens)) and not (
             {"event", "photo", "photograph", "screenshot", "launch", "conference", "expo"}
@@ -905,6 +936,10 @@ def _subject_semantic_role(subject: object, scene: dict) -> tuple[str, str]:
             scene_text, normalized, case_sensitive=True
         ):
             return "", "concrete object subject was not a lower-case narrated noun phrase"
+        if len(identity) == 1 and object_head in STANDALONE_VISUAL_OBJECT_HEADS:
+            return "object", ""
+        if " ".join(object_identity) in {"data center", "data centers"}:
+            return "object", ""
         modifier = object_identity[0] if len(object_identity) == 2 else ""
         if (
             len(identity) != 2
@@ -1023,6 +1058,17 @@ def _concrete_object_candidates(scene: dict) -> list[str]:
     pattern = re.compile(rf"\b([a-z][A-Za-z0-9'’-]*)[\s-]+({heads})\b")
     for match in pattern.finditer(text):
         modifier = match.group(1).casefold().strip("'’")
+        if (
+            modifier in OBJECT_ACTION_MODIFIERS
+            and match.group(2).casefold() in STANDALONE_VISUAL_OBJECT_HEADS
+        ):
+            subject = match.group(2)
+            key = subject.casefold()
+            shot = {"expected_subject": subject, "kind": "object"}
+            if key not in seen and not _shot_subject_semantic_error(shot, scene):
+                seen.add(key)
+                output.append(subject)
+            continue
         if (
             modifier in STOPWORDS
             or modifier in CARDINAL_OR_ORDINAL_TERMS
@@ -1623,6 +1669,80 @@ def _cached_asset_is_intact(task_dir: Path, image: dict) -> bool:
     return True
 
 
+def _validated_collage_sets(
+    task_dir: Path,
+    manifest: dict,
+    scenes_by_id: dict[str, dict],
+) -> dict[str, list[dict]] | None:
+    """Validate optional same-scene supporting images for fullscreen collages."""
+    images = manifest.get("images") or []
+    primary_by_scene = {
+        str(image.get("scene_id") or ""): image
+        for image in images
+        if isinstance(image, dict)
+    }
+    raw_sets = manifest.get("collage_sets") or []
+    if not isinstance(raw_sets, list) or any(not isinstance(item, dict) for item in raw_sets):
+        return None
+    try:
+        expected_count = int(manifest.get("collage_asset_count") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    output: dict[str, list[dict]] = {}
+    seen_sources = {
+        str(image.get("source_page_url") or "") for image in images if isinstance(image, dict)
+    }
+    seen_hashes = {
+        str(image.get("sha256") or "") for image in images if isinstance(image, dict)
+    }
+    seen_paths = {
+        str(image.get("local_path") or "") for image in images if isinstance(image, dict)
+    }
+    actual_count = 0
+    for item in raw_sets:
+        scene_id = str(item.get("scene_id") or "")
+        primary = primary_by_scene.get(scene_id)
+        assets = item.get("assets") or []
+        if (
+            not scene_id
+            or scene_id in output
+            or not primary
+            or primary.get("display_mode") != "fullscreen"
+            or str(item.get("primary_image_id") or "") != str(primary.get("id") or "")
+            or not isinstance(assets, list)
+            or len(assets) != 2
+            or any(not isinstance(asset, dict) for asset in assets)
+        ):
+            return None
+        scene = scenes_by_id.get(scene_id)
+        if scene is None:
+            return None
+        verified: list[dict] = []
+        for asset in assets:
+            source = str(asset.get("source_page_url") or "")
+            digest = str(asset.get("sha256") or "")
+            local_path = str(asset.get("local_path") or "")
+            if (
+                str(asset.get("scene_id") or "") != scene_id
+                or not source
+                or source in seen_sources
+                or not digest
+                or digest in seen_hashes
+                or not local_path
+                or local_path in seen_paths
+                or not image_grounding_is_valid(asset, scene)
+                or not _cached_asset_is_intact(task_dir, asset)
+            ):
+                return None
+            seen_sources.add(source)
+            seen_hashes.add(digest)
+            seen_paths.add(local_path)
+            verified.append(asset)
+            actual_count += 1
+        output[scene_id] = verified
+    return output if actual_count == expected_count else None
+
+
 def image_grounding_is_valid(image: dict, scene: dict) -> bool:
     """Recompute policy proof instead of trusting manifest booleans."""
     raw_expected_subject = " ".join(str(image.get("expected_subject") or "").split())
@@ -1783,6 +1903,8 @@ def _cached_manifest(
         seen_hashes.add(digest)
         seen_paths.add(local_path)
         seen_identities.add(identity)
+    if _validated_collage_sets(task_dir, manifest, scenes_by_id) is None:
+        return None
     return manifest
 
 
@@ -1913,13 +2035,26 @@ def _normalise_plan(
     return output
 
 
-def _ensure_placement_mode_mix(rows: list[dict]) -> None:
+def _ensure_placement_mode_mix(
+    rows: list[dict],
+    *,
+    locked_fullscreen_scene_ids: set[str] | None = None,
+) -> None:
     """Keep every multi-image result usable by both supported compositions."""
     if len(rows) < 2:
         return
+    locked = locked_fullscreen_scene_ids or set()
     modes = {str(item.get("display_mode") or "") for item in rows}
     if "inline" not in modes:
-        rows[0]["display_mode"] = "inline"
+        row = next(
+            (
+                item
+                for item in rows
+                if str(item.get("scene_id") or "") not in locked
+            ),
+            rows[0],
+        )
+        row["display_mode"] = "inline"
     if "fullscreen" not in modes:
         rows[-1]["display_mode"] = "fullscreen"
 
@@ -2076,6 +2211,53 @@ def _subject_identity_key(shot: dict) -> str:
     return SUBJECT_IDENTITY_ALIASES.get(ordered[0], ordered[0]) if ordered else ""
 
 
+def _collage_support_candidates(
+    candidates: list[dict],
+    *,
+    excluded_sources: set[str] | None = None,
+    allow_logo: bool = False,
+) -> list[dict]:
+    """Return usable support sources while retaining per-subject fallbacks.
+
+    Three charts that all happen to mention data centres are not a visual
+    collage. A collage must combine different concepts grounded in the same
+    narration, such as the company, robots, and data centres. Keep alternate
+    sources for each concept until download/decode succeeds; distinctness is
+    enforced when an asset is accepted below.
+    """
+    excluded = excluded_sources or set()
+    output: list[dict] = []
+    used_sources: set[str] = set()
+    for candidate in candidates:
+        is_logo = candidate.get("kind") == "logo"
+        if is_logo and not allow_logo:
+            continue
+        # A fullscreen photo collage must stay photographic.  Charts, maps,
+        # diagrams, and icons can be grounded to a phrase while still
+        # replacing the story with unrelated explanatory content (for
+        # example a regional data-centre count chart in a robotics story).
+        visual_metadata = " ".join(
+            str(candidate.get(field) or "")
+            for field in ("title", "description", "categories", "object_name")
+        ).casefold()
+        if not is_logo and any(
+            marker in visual_metadata for marker in BAD_PHOTO_MARKERS
+        ):
+            continue
+        source = str(candidate.get("source_page_url") or "")
+        identity = _subject_identity_key(candidate)
+        if (
+            not source
+            or source in excluded
+            or source in used_sources
+            or not identity
+        ):
+            continue
+        output.append(candidate)
+        used_sources.add(source)
+    return output
+
+
 def _allocate_unique_scene_shots(
     scenes: list[dict],
     preferred_by_scene: dict[str, dict] | None = None,
@@ -2194,7 +2376,13 @@ def _reserve_plan(
                 continue
             identity = _subject_identity_key(variant)
             owner = identity_owners.get(identity) if identity else None
-            if owner and owner != scene_id:
+            # A concrete object can truthfully recur in separate narrated
+            # stories (for example ``data centers`` in both a robotics story
+            # and an infrastructure-fund story). Keep primary identities
+            # unique, but let the repeated object remain available as a
+            # same-scene collage support; global source matching still keeps
+            # the actual licensed images distinct.
+            if owner and owner != scene_id and variant.get("kind") != "object":
                 continue
             used.add(signature)
             output.append(
@@ -2242,6 +2430,42 @@ def _shot_is_grounded_to_scene(shot: dict, scene: dict) -> bool:
     return not _shot_subject_semantic_error(shot, scene)
 
 
+def _structured_scene_named_subject(
+    scene: dict,
+    hint: dict | None,
+    *,
+    display_mode: str,
+) -> dict | None:
+    """Prefer an exact named subject when the scene already carries facts.
+
+    A generic object can be literally present in a narration while still being
+    a poor editorial replacement for the scene's structured stat or list.  For
+    example, a data-centre inventory chart is not a faithful full-screen visual
+    for an Andreessen Horowitz fund announcement merely because the portfolio
+    list mentions data centres.  Keep the structured explanation and use the
+    central named organisation, person, or product as supporting imagery.
+    """
+    hint = hint or {}
+    has_structured_facts = bool(
+        str(hint.get("stat") or "").strip()
+        or [item for item in hint.get("items") or [] if str(item).strip()]
+    )
+    if not has_structured_facts:
+        return None
+    return next(
+        (
+            shot
+            for shot in _fallback_shots_for_scene(
+                scene,
+                hint,
+                display_mode=display_mode,
+            )
+            if shot.get("kind") in {"logo", "person", "product"}
+        ),
+        None,
+    )
+
+
 def _prepare_primary_plan(
     plan: list[dict],
     scenes: list[dict],
@@ -2261,6 +2485,14 @@ def _prepare_primary_plan(
             "expected_subject": _normalise_entity_phrase(shot.get("expected_subject")),
         }
         if _shot_is_grounded_to_scene(normalized, scene):
+            if str(normalized.get("kind") or "") == "object":
+                named_subject = _structured_scene_named_subject(
+                    scene,
+                    (scene_hints or {}).get(scene_id) or {},
+                    display_mode=str(normalized.get("display_mode") or "inline"),
+                )
+                if named_subject is not None:
+                    normalized = named_subject
             normalized["search_query"] = _deterministic_query(
                 str(normalized["expected_subject"]),
                 str(normalized.get("kind") or ""),
@@ -3143,6 +3375,15 @@ async def acquire_news_images(
             stale_path = _owned_generated_asset_path(task_dir, stale_image)
             if stale_path is not None:
                 stale_path.unlink()
+        for stale_set in (previous_manifest or {}).get("collage_sets") or []:
+            if not isinstance(stale_set, dict):
+                continue
+            for stale_image in stale_set.get("assets") or []:
+                if not isinstance(stale_image, dict):
+                    continue
+                stale_path = _owned_generated_asset_path(task_dir, stale_image)
+                if stale_path is not None:
+                    stale_path.unlink()
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -3169,6 +3410,8 @@ async def acquire_news_images(
         "license_allowlist": ["Public Domain", "CC0", "CC BY", "CC BY-SA", "Apache-2.0"],
         "queries": [],
         "images": [],
+        "collage_sets": [],
+        "collage_asset_count": 0,
         "errors": [],
         "placement_modes": {"inline": 0, "fullscreen": 0},
     }
@@ -3421,6 +3664,220 @@ async def acquire_news_images(
                     continue
                 continue
 
+            # Discover the unused reserve subjects for every acquired scene
+            # before deciding where the collage belongs.  Selection matching
+            # may already be complete after the primary queries; without this
+            # explicit pass the two supporting images would never be searched.
+            staged_scene_ids = {
+                str(image.get("scene_id") or "") for image in staged
+            }
+            for position, reserve_shot in list(reserve_rows):
+                if str(reserve_shot.get("scene_id") or "") not in staged_scene_ids:
+                    continue
+                reserve_rows.remove((position, reserve_shot))
+                await discover(position, reserve_shot)
+
+            # Use two additional, independently licensed images from the same
+            # narration scene. Prefer an already-fullscreen photo, but permit a
+            # logo primary when two photo/object supports exist (for example a
+            # company logo plus robots and a data center). If necessary an
+            # inline primary is promoted to the copy-free fullscreen treatment.
+            primary_candidates = [
+                image
+                for image in sorted(
+                    staged,
+                    key=lambda image: (
+                        0
+                        if image.get("display_mode") == "fullscreen"
+                        and image.get("kind") != "logo"
+                        else (1 if image.get("display_mode") == "fullscreen" else 2)
+                    ),
+                )
+                # A scene whose authored template already carries a stat or a
+                # factual list keeps that evidence. Collage promotion is for
+                # otherwise simple image/topic scenes only.
+                if not (
+                    str(
+                        ((scene_hints or {}).get(str(image.get("scene_id") or "")) or {}).get(
+                            "stat"
+                        )
+                        or ""
+                    ).strip()
+                    or [
+                        item
+                        for item in (
+                            (
+                                (scene_hints or {}).get(
+                                    str(image.get("scene_id") or "")
+                                )
+                                or {}
+                            ).get("items")
+                            or []
+                        )
+                        if str(item).strip()
+                    ]
+                )
+            ]
+            fullscreen_primary: dict | None = None
+            collage_assets: list[dict] = []
+            used_primary_sources = {
+                str(image.get("source_page_url") or "") for image in staged
+            }
+            used_primary_hashes = {str(image.get("sha256") or "") for image in staged}
+            for primary in primary_candidates:
+                collage_scene_id = str(primary.get("scene_id") or "")
+                available_supports = _collage_support_candidates(
+                    candidate_pools.get(collage_scene_id) or [],
+                    excluded_sources=used_primary_sources | failed_sources,
+                    allow_logo=primary.get("kind") != "logo",
+                )
+                if len(
+                    {
+                        _subject_identity_key(candidate)
+                        for candidate in available_supports
+                        if _subject_identity_key(candidate)
+                    }
+                ) < 2:
+                    continue
+                attempt_assets: list[dict] = []
+                used_sources = set(used_primary_sources)
+                used_hashes = set(used_primary_hashes)
+                used_support_subjects: set[str] = {
+                    identity
+                    for identity in (_subject_identity_key(primary),)
+                    if identity
+                }
+                logo_support_used = False
+                for candidate in available_supports:
+                    if len(attempt_assets) >= 2:
+                        break
+                    source = str(candidate.get("source_page_url") or "")
+                    subject_identity = _subject_identity_key(candidate)
+                    is_logo = candidate.get("kind") == "logo"
+                    if (
+                        not source
+                        or source in used_sources
+                        or not subject_identity
+                        or subject_identity in used_support_subjects
+                        or (is_logo and logo_support_used)
+                    ):
+                        continue
+                    success_number, destination = _next_asset_destination(
+                        image_dir,
+                        target + len(attempt_assets) + 1,
+                        _extension_for(candidate),
+                    )
+                    try:
+                        byte_size, sha256 = await _download_candidate(
+                            client,
+                            candidate=candidate,
+                            destination=destination,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - try another support
+                        destination.unlink(missing_ok=True)
+                        manifest["errors"].append(
+                            {
+                                "scene_id": collage_scene_id,
+                                "stage": "collage_download",
+                                "source_page_url": source,
+                                "message": str(exc),
+                            }
+                        )
+                        continue
+                    asset_record = {
+                        "local_path": destination.relative_to(task_dir).as_posix(),
+                        "bytes": byte_size,
+                        "sha256": sha256,
+                        "kind": candidate.get("kind"),
+                    }
+                    if sha256 in used_hashes or not _cached_asset_is_intact(
+                        task_dir, asset_record
+                    ):
+                        destination.unlink(missing_ok=True)
+                        continue
+                    supporting = dict(
+                        _public_value(
+                            {
+                                "id": f"image-{success_number:02d}",
+                                **candidate,
+                                "scene_id": collage_scene_id,
+                                "display_mode": "fullscreen",
+                                "resolved_search_query": candidate.get(
+                                    "resolved_search_query"
+                                )
+                                or candidate.get("search_query"),
+                                "source_mime_type": candidate.get("source_mime_type")
+                                or candidate.get("mime_type"),
+                                "download_mime_type": candidate.get("mime_type"),
+                                "mime_type": {
+                                    ".jpg": "image/jpeg",
+                                    ".jpeg": "image/jpeg",
+                                    ".png": "image/png",
+                                    ".webp": "image/webp",
+                                    ".svg": "image/svg+xml",
+                                }.get(
+                                    destination.suffix.lower(),
+                                    "application/octet-stream",
+                                ),
+                                "match_terms": list(
+                                    candidate["grounding_distinctive_anchors"]
+                                ),
+                                "bytes": byte_size,
+                                "sha256": sha256,
+                                "local_path": destination.relative_to(
+                                    task_dir
+                                ).as_posix(),
+                                "fit": (
+                                    "contain"
+                                    if candidate.get("kind") == "logo"
+                                    else "cover"
+                                ),
+                                "status": "downloaded",
+                                "collage_role": "supporting",
+                            }
+                        )
+                    )
+                    if not image_grounding_is_valid(
+                        supporting, scenes_by_id[collage_scene_id]
+                    ):
+                        destination.unlink(missing_ok=True)
+                        continue
+                    attempt_assets.append(supporting)
+                    used_sources.add(source)
+                    used_hashes.add(sha256)
+                    used_support_subjects.add(subject_identity)
+                    logo_support_used = logo_support_used or is_logo
+
+                if len(attempt_assets) == 2:
+                    primary["display_mode"] = "fullscreen"
+                    fullscreen_primary = primary
+                    collage_assets = attempt_assets
+                    break
+                for asset in attempt_assets:
+                    stale = _generated_asset_path(task_dir, asset.get("local_path"))
+                    if stale is not None:
+                        stale.unlink(missing_ok=True)
+
+            if len(collage_assets) == 2 and fullscreen_primary is not None:
+                manifest["collage_sets"] = [
+                    {
+                        "scene_id": fullscreen_primary["scene_id"],
+                        "primary_image_id": fullscreen_primary["id"],
+                        "assets": collage_assets,
+                    }
+                ]
+                manifest["collage_asset_count"] = 2
+                _emit(
+                    log,
+                    "News image collage: 3 same-scene licensed images ready for "
+                    f"{fullscreen_primary['scene_id']}",
+                )
+            else:
+                for asset in collage_assets:
+                    stale = _generated_asset_path(task_dir, asset.get("local_path"))
+                    if stale is not None:
+                        stale.unlink(missing_ok=True)
+
             manifest["images"] = staged
             for downloaded in staged:
                 _emit(
@@ -3518,7 +3975,14 @@ async def acquire_news_images(
         )
 
     acquired = len(manifest["images"])
-    _ensure_placement_mode_mix(manifest["images"])
+    _ensure_placement_mode_mix(
+        manifest["images"],
+        locked_fullscreen_scene_ids={
+            str(item.get("scene_id") or "")
+            for item in manifest.get("collage_sets") or []
+            if isinstance(item, dict)
+        },
+    )
     manifest["placement_modes"] = _placement_mode_counts(manifest["images"])
     final_modes = {image["scene_id"]: image["display_mode"] for image in manifest["images"]}
     for query in manifest["queries"]:
@@ -3619,6 +4083,9 @@ def attach_news_images(
     scenes_by_id = {
         str(scene.get("id") or ""): scene for scene in storyboard.get("scenes") or []
     }
+    collage_sets = _validated_collage_sets(task_dir, manifest, scenes_by_id)
+    if collage_sets is None:
+        return {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
     attached = 0
     modes = {"inline": 0, "fullscreen": 0}
     attached_scenes: set[str] = set()
@@ -3677,6 +4144,7 @@ def attach_news_images(
         mode = str(image.get("display_mode") or "inline")
         if mode not in PLAN_MODES:
             mode = "inline"
+        supporting = collage_sets.get(scene_id) or []
         # A fullscreen logo replaces the original scene composition.  For a
         # structured stat/list scene that discards the strongest narrated
         # evidence and can leave a sparse transparent mark filling the frame.
@@ -3687,6 +4155,7 @@ def attach_news_images(
             mode == "fullscreen"
             and str(image.get("kind") or "") == "logo"
             and (plan.get("stat") or plan.get("items"))
+            and len(supporting) != 2
         ):
             mode = "inline"
         plan.update(
@@ -3726,6 +4195,17 @@ def attach_news_images(
                 "news_image_reference_count": len(image.get("references") or []),
             }
         )
+        if mode == "fullscreen" and len(supporting) == 2:
+            plan["news_image_srcs"] = [
+                f"../{image['local_path']}",
+                *[f"../{asset['local_path']}" for asset in supporting],
+            ]
+            plan["news_image_credits"] = [
+                _credit(image),
+                *[_credit(asset) for asset in supporting],
+            ]
+            plan["news_image_collage"] = True
+            plan["news_image_collage_asset_count"] = 3
         if mode == "fullscreen":
             plan["news_image_original_archetype"] = plan.get("archetype") or "topic"
             plan["archetype"] = "news_image"

@@ -124,6 +124,10 @@ async def create_daily_task(
         video_orientation="landscape",
         opening_style="paper_collage",
         footage_enabled=settings.public_footage_enabled,
+        # The desk exposes one Public Footage switch, so an enabled run must
+        # use the hybrid scout. Wikimedia remains the rights-first source and
+        # YouTube fills otherwise-empty slots with explicit review blockers.
+        footage_provider="hybrid",
         footage_clip_count=settings.footage_clip_count,
         collage_broll_enabled=True,
         collage_broll_count=settings.collage_broll_count,

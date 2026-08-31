@@ -24,6 +24,7 @@ import math
 import os
 import re
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from backend import config
@@ -36,6 +37,7 @@ from backend.pipeline import (
     music,
     multimodal_review,
     news_images,
+    news_webpages,
     scene_kit,
     storyboard as sb,
     visual_plan,
@@ -64,6 +66,7 @@ RENDER_STALL_TIMEOUT = max(600, math.ceil(config.RENDER_PROTOCOL_TIMEOUT_MS / 10
 VISUAL_PLAN_CACHE_FILENAME = "visual_plan.cache.json"
 VISUAL_PLAN_CACHE_VERSION = 1
 VISUAL_PLAN_PROMPT_CONTRACT_VERSION = 2
+QUALITY_RETRY_STATE_FILENAME = "quality_retry_state.json"
 _VISUAL_PLAN_CACHE_KEYS = {
     "cache_version",
     "planner_input_sha256",
@@ -72,6 +75,59 @@ _VISUAL_PLAN_CACHE_KEYS = {
     "visual_plan_bytes",
     "visual_plan_sha256",
 }
+
+
+class QualityGateRetry(RuntimeError):
+    """A rendered candidate needs another compose/review cycle, not FAILED."""
+
+
+def _record_quality_retry(
+    output_dir: Path,
+    quality_report: dict,
+    video_sha256: str,
+) -> dict:
+    path = output_dir / QUALITY_RETRY_STATE_FILENAME
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        previous = {}
+    history = previous.get("history") if isinstance(previous, dict) else []
+    if not isinstance(history, list):
+        history = []
+    multimodal = quality_report.get("multimodal") or {}
+    attempt = {
+        "attempt": len(history) + 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "rendered_video_sha256": video_sha256,
+        "failed_scene_ids": [
+            str(value) for value in multimodal.get("failed_scene_ids") or []
+        ],
+        "average_score": multimodal.get("average_score"),
+        "warnings": [str(value) for value in quality_report.get("warnings") or []],
+        "scene_reviews": [
+            {
+                "id": str(review.get("id") or ""),
+                "score": review.get("score"),
+                "issues": [str(value) for value in review.get("issues") or []],
+                "suggested_visual": str(review.get("suggested_visual") or ""),
+            }
+            for review in multimodal.get("scenes") or []
+            if isinstance(review, dict) and review.get("passed") is not True
+        ],
+    }
+    history.append(attempt)
+    state = {
+        "status": "retrying",
+        "attempt_count": len(history),
+        "latest": attempt,
+        "history": history[-20:],
+    }
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    temporary.replace(path)
+    return state
 
 
 def _reject_json_constant(value: str) -> None:
@@ -272,6 +328,9 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
             for key in tuple(plan):
                 if key.startswith("news_image"):
                     plan.pop(key, None)
+        for key in tuple(plan):
+            if key.startswith("news_webpage"):
+                plan.pop(key, None)
         recovered.append(plan)
     return recovered
 
@@ -728,10 +787,31 @@ def _promote_quality_gated_candidate(
     """Promote only a candidate whose final persisted quality report passed."""
     if quality_report.get("passed") is not True:
         details = [str(value) for value in quality_report.get("warnings") or []]
-        raise RuntimeError(
-            "Rendered candidate failed the final A/V quality gate and was not "
-            "promoted"
+        state = _record_quality_retry(
+            output_dir,
+            quality_report,
+            video_sha256,
+        )
+        raise QualityGateRetry(
+            "Rendered candidate did not pass the final A/V quality gate and was "
+            f"not promoted; automatic compose retry {state['attempt_count']} requested"
             + (f": {'; '.join(details)}" if details else "")
+        )
+    retry_state_path = output_dir / QUALITY_RETRY_STATE_FILENAME
+    if retry_state_path.is_file():
+        try:
+            state = json.loads(retry_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        state.update(
+            {
+                "status": "passed",
+                "passed_at": datetime.now(timezone.utc).isoformat(),
+                "promoted_video_sha256": video_sha256,
+            }
+        )
+        retry_state_path.write_text(
+            json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
         )
     return _promote_render_candidate(
         staged_video_path,
@@ -918,8 +998,12 @@ def _finalize_quality_report(
     report.update(
         {
             "passed": quality_passed,
-            "quality_status": "passed" if quality_passed else "failed",
-            "delivery_status": "completed" if quality_passed else "blocked",
+            # A rejected candidate is active rework, not a terminal task
+            # failure. Keep the persisted report vocabulary aligned with the
+            # worker state: the candidate remains deferred while another
+            # compose cycle is queued automatically.
+            "quality_status": "passed" if quality_passed else "retrying",
+            "delivery_status": "completed" if quality_passed else "deferred",
             "warnings": warnings,
             "multimodal": multimodal,
         }
@@ -944,6 +1028,39 @@ def _kit_plans(
         )
         for plan in plans
     ]
+
+
+def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
+    """Fail closed if a media-locked scene file drops any requested source."""
+    failures: list[str] = []
+    for plan in plans:
+        scene_id = str(plan.get("id") or "")
+        required = [
+            str(plan.get("footage_src") or ""),
+            str(plan.get("news_webpage_src") or ""),
+            str(plan.get("news_image_src") or ""),
+            *[
+                str(value or "")
+                for value in plan.get("news_image_srcs") or []
+            ],
+        ]
+        required = list(dict.fromkeys(value for value in required if value))
+        if not required:
+            continue
+        path = output_dir / "compositions" / f"{scene_id}.html"
+        try:
+            html = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            failures.append(f"{scene_id}: unreadable composition ({exc})")
+            continue
+        missing = [source for source in required if f'src="{source}"' not in html]
+        if missing:
+            failures.append(f"{scene_id}: missing {', '.join(missing)}")
+    if failures:
+        raise RuntimeError(
+            "Locked visual assets did not reach generated HyperFrames scenes: "
+            + "; ".join(failures)
+        )
 
 
 async def compose_video(
@@ -1176,11 +1293,11 @@ async def compose_video(
     )
     final_collages = sum(1 for plan in plans if plan.get("collage_broll"))
     if requested_footage and final_public_footage != requested_footage:
-        emit(
-            "Public-footage placement incomplete: "
+        raise RuntimeError(
+            "Public-footage delivery blocked: "
             f"{acquired_footage}/{requested_footage} clips were acquired and "
-            f"{final_public_footage}/{requested_footage} passed subject-specific "
-            "placement; continuing with grounded template visuals for rejected clips"
+            f"{final_public_footage}/{requested_footage} reached exact narration scenes. "
+            "An enabled Public Footage request may not silently fall back to template visuals."
         )
     if collage_broll_enabled or force_collage_opening:
         if final_collages != requested_collages:
@@ -1266,13 +1383,44 @@ async def compose_video(
             "missing_scene_ids": missing_scene_ids,
             "warning": shortfall,
         }
+
+    webpage_manifest = await news_webpages.acquire_news_webpages(
+        board,
+        plans,
+        output_dir_path,
+        log=emit,
+    )
+    webpage_attached = news_webpages.attach_news_webpages(
+        plans,
+        webpage_manifest,
+        output_dir_path,
+    )
+    webpage_requested = int(webpage_manifest.get("requested_count") or 0)
+    webpage_captured = len(webpage_manifest.get("pages") or [])
+    if webpage_captured and webpage_attached != webpage_captured:
+        raise RuntimeError(
+            "News-webpage placement incomplete: "
+            f"{webpage_attached}/{webpage_captured} verified English captures reached final scenes"
+        )
+    if webpage_requested and not webpage_attached:
+        errors = "; ".join(
+            str(item.get("message") or "capture failed")
+            for item in webpage_manifest.get("errors") or []
+            if isinstance(item, dict)
+        )
+        raise RuntimeError(
+            "News-webpage overlay delivery blocked: English article scenes were eligible "
+            f"but 0/{webpage_requested} captures were usable"
+            + (f". {errors[:700]}" if errors else "")
+        )
     emit(
         "Final B-roll inventory: "
         f"{final_public_footage} public footage clip(s), "
         f"{final_collages} paper-collage clip(s), "
         f"{news_image_inventory['attached']} news image(s) "
         f"(inline={news_image_inventory['placement_modes']['inline']}, "
-        f"fullscreen={news_image_inventory['placement_modes']['fullscreen']})"
+        f"fullscreen={news_image_inventory['placement_modes']['fullscreen']}), "
+        f"{webpage_attached} English news webpage overlay(s)"
     )
 
     _enforce_program_opening_copy(plans, board)
@@ -1371,7 +1519,9 @@ async def compose_video(
     director_plans = [
         plan
         for plan in scene_plans
-        if not plan.get("collage_broll") and not plan.get("news_image")
+        if not plan.get("footage_src")
+        and not plan.get("news_image")
+        and not plan.get("news_webpage")
     ]
     if config.DIRECTOR_ENABLED and director_plans and model:
         budget = director_plans[: config.DIRECTOR_MAX_SCENES] if config.DIRECTOR_MAX_SCENES else director_plans
@@ -1407,6 +1557,8 @@ async def compose_video(
         outcome = director.DirectorOutcome()
 
     # --- 4. Assembly -------------------------------------------------------
+    _assert_locked_visual_assets(output_dir_path, scene_plans)
+    emit("Locked visual assets verified in generated HyperFrames scene sources")
     audio_src = _project_relative(program_audio_path, output_dir_path)
     spine = assembler.build_spine(
         board,
@@ -1556,13 +1708,14 @@ async def compose_video(
         )
     elif config.AV_SYNC_GEMINI_REVIEW_ENABLED:
         emit(
-            "A/V quality gate failed: Gemini review did not fully pass after retries; "
-            "the rendered candidate and av_sync_report.next.json remain for diagnosis"
+            "A/V quality gate not yet passed: Gemini review requested another "
+            "compose cycle; the rendered candidate and av_sync_report.next.json "
+            "remain as retry evidence"
         )
     if not quality_report["passed"]:
         emit(
-            f"Final A/V quality gate blocked promotion with "
-            f"{len(quality_report['warnings'])} failure(s)"
+            f"Final A/V quality gate deferred promotion with "
+            f"{len(quality_report['warnings'])} finding(s); automatic retry will continue"
         )
     video_path = _promote_quality_gated_candidate(
         staged_video_path,

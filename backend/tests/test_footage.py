@@ -95,6 +95,66 @@ class FootagePlanTests(unittest.TestCase):
             scenes["scene-02"],
         )
 
+    def test_footage_plan_discards_two_queries_for_the_same_story(self):
+        script = (
+            "Taiwanese prosecutors raided a printed circuit board factory. "
+            "AQuA agents improve research using a factor loop and model loop."
+        )
+        plan = [
+            {
+                "query": "printed circuit board factory",
+                "purpose": "The Taiwan factory raid",
+            },
+            {
+                "query": "Taipei city skyline",
+                "purpose": "The Taiwan prosecutor raid and chip supply story",
+            },
+            {
+                "query": "computer research agents",
+                "purpose": "AQuA agents improve research with two loops",
+            },
+        ]
+
+        grounded = footage._distinct_grounded_plan(plan, script, 2)
+
+        self.assertEqual(
+            [item["query"] for item in grounded],
+            ["printed circuit board factory", "computer research agents"],
+        )
+        self.assertEqual(
+            grounded[0]["script_excerpt"],
+            "Taiwanese prosecutors raided a printed circuit board factory.",
+        )
+        self.assertEqual(
+            grounded[1]["script_excerpt"],
+            "AQuA agents improve research using a factor loop and model loop.",
+        )
+
+    def test_hybrid_web_plan_skips_scene_already_filled_by_commons(self):
+        rocket = "NASA engineers test a new rocket engine concept."
+        factory = "Prosecutors raided a printed circuit board factory."
+
+        remaining = footage._unoccupied_web_plan(
+            [
+                {
+                    "query": "rocket engine test",
+                    "purpose": rocket,
+                    "script_excerpt": rocket,
+                },
+                {
+                    "query": "printed circuit board factory",
+                    "purpose": factory,
+                    "script_excerpt": factory,
+                },
+            ],
+            [{"provider_id": "wikimedia", "purpose": rocket}],
+        )
+
+        self.assertEqual(
+            [shot["query"] for shot in remaining],
+            ["printed circuit board factory"],
+        )
+
 
 class WikimediaCandidateTests(unittest.TestCase):
     def test_two_term_query_requires_both_terms_in_candidate_metadata(self):

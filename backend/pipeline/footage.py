@@ -42,6 +42,9 @@ WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 TAG_RE = re.compile(r"<[^>]+>")
 SAFE_FILENAME_RE = re.compile(r"[^a-z0-9]+")
 USER_QUERY_PURPOSE = "User-supplied search direction"
+PURPOSE_MATCH_STOPWORDS = frozenset(
+    "a an and are as at be by for from in into is it of on or that the this to with".split()
+)
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -92,7 +95,23 @@ def _sanitize_query(value: str) -> str:
 
 def _script_purpose_for_query(query: str, script: str) -> str:
     """Ground a manual search direction in its best matching script sentence."""
-    query_terms = {word.casefold() for word in WORD_RE.findall(query)}
+    def match_term(word: str) -> str:
+        term = word.casefold()
+        if term.endswith("ese") and len(term) > 7:
+            term = term[:-3]
+        elif term.endswith("ied") and len(term) > 5:
+            term = term[:-3] + "y"
+        elif term.endswith("ed") and len(term) > 5:
+            term = term[:-2]
+        elif term.endswith("s") and not term.endswith("ss") and len(term) > 4:
+            term = term[:-1]
+        return term
+
+    query_terms = {
+        match_term(word)
+        for word in WORD_RE.findall(query)
+        if word.casefold() not in PURPOSE_MATCH_STOPWORDS
+    }
     if not query_terms:
         return ""
     sentences = [
@@ -102,7 +121,11 @@ def _script_purpose_for_query(query: str, script: str) -> str:
     ]
     scored = []
     for index, sentence in enumerate(sentences):
-        sentence_terms = {word.casefold() for word in WORD_RE.findall(sentence)}
+        sentence_terms = {
+            match_term(word)
+            for word in WORD_RE.findall(sentence)
+            if word.casefold() not in PURPOSE_MATCH_STOPWORDS
+        }
         overlap = query_terms & sentence_terms
         if overlap:
             scored.append((len(overlap), -index, sentence))
@@ -176,6 +199,24 @@ def _purpose_conflicts_with_reserved(purpose: str, reserved: list[str]) -> bool:
     return False
 
 
+def _unoccupied_web_plan(query_plan: list[dict[str, str]], clips: list[dict]) -> list[dict[str, str]]:
+    """Do not spend the web quota twice on the scene Commons already filled."""
+    occupied = [
+        str(clip.get("script_excerpt") or clip.get("purpose") or "").strip()
+        for clip in clips
+        if isinstance(clip, dict)
+        and str(clip.get("script_excerpt") or clip.get("purpose") or "").strip()
+    ]
+    return [
+        shot
+        for shot in query_plan
+        if not _purpose_conflicts_with_reserved(
+            str(shot.get("script_excerpt") or shot.get("purpose") or "").strip(),
+            occupied,
+        )
+    ]
+
+
 def _parse_plan(value: str, count: int) -> list[dict[str, str]]:
     parsed = json.loads(_strip_json_fence(value))
     raw_queries = parsed.get("queries") if isinstance(parsed, dict) else None
@@ -238,6 +279,58 @@ def _fallback_plan(title: str, script: str, count: int) -> list[dict[str, str]]:
     return output
 
 
+def _distinct_grounded_plan(
+    plan: list[dict[str, str]],
+    script: str,
+    count: int,
+    *,
+    excluded_purposes: list[str] | None = None,
+    keep_ungrounded: bool = False,
+) -> list[dict[str, str]]:
+    """Bind each search query to a different narration segment.
+
+    A visually plausible query is not sufficient evidence for placement.  The
+    exact script sentence is persisted with the query, and duplicate queries
+    for the same story are discarded before acquisition.  This prevents two
+    clips planned for one story from being forced onto an unrelated second
+    scene merely to satisfy the requested clip count.
+    """
+    output: list[dict[str, str]] = []
+    occupied = list(excluded_purposes or [])
+    for raw in plan:
+        query = _sanitize_query(str(raw.get("query") or ""))
+        purpose = str(raw.get("purpose") or "").strip()
+        excerpt = _script_purpose_for_query(f"{query} {purpose}", script)
+        if not query:
+            continue
+        if not excerpt and keep_ungrounded:
+            output.append(
+                {
+                    "query": query,
+                    "purpose": purpose or USER_QUERY_PURPOSE,
+                    "script_excerpt": "",
+                }
+            )
+            if len(output) >= count:
+                break
+            continue
+        if not excerpt:
+            continue
+        if _purpose_conflicts_with_reserved(excerpt, occupied):
+            continue
+        output.append(
+            {
+                "query": query,
+                "purpose": purpose or excerpt,
+                "script_excerpt": excerpt,
+            }
+        )
+        occupied.append(excerpt)
+        if len(output) >= count:
+            break
+    return output
+
+
 async def plan_footage_queries(
     *,
     title: str,
@@ -267,12 +360,20 @@ async def plan_footage_queries(
         )
     ]
     if supplied:
-        return supplied[:count], "user"
+        grounded = _distinct_grounded_plan(
+            supplied,
+            script,
+            count,
+            excluded_purposes=excluded_purposes,
+            keep_ungrounded=True,
+        )
+        return grounded, "user"
 
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
     system_prompt = (config.PROMPTS_DIR / "footage_plan.txt").read_text(encoding="utf-8")
     user_content = (
-        f"Requested queries: {count}\n"
+        f"Requested candidate queries: {max(count * 3, count + 2)}\n"
+        f"Final clips: {count}; every candidate must target a different narration story.\n"
         f"Title: {title}\n"
         f"Narration meanings already reserved for collage (do not target these): "
         f"{json.dumps(excluded_purposes or [], ensure_ascii=False)}\n"
@@ -289,23 +390,26 @@ async def plan_footage_queries(
             "Footage plan",
             max_tokens=1200,
         )
-        plan = _parse_plan(result, count)
-        plan = [
-            item
-            for item in plan
-            if not _purpose_conflicts_with_reserved(
-                _script_purpose_for_query(str(item.get("query") or ""), script)
-                or str(item.get("purpose") or ""),
-                excluded_purposes or [],
-            )
-        ]
+        plan = _parse_plan(result, max(count * 3, count + 2))
+        plan = _distinct_grounded_plan(
+            plan,
+            script,
+            count,
+            excluded_purposes=excluded_purposes,
+        )
         if not plan:
             raise ValueError("Footage planner targeted only collage-reserved narration")
         _emit(log, f"Footage agent planned {len(plan)} visual search queries")
         return plan, f"ai:{model}"
     except Exception as exc:
         _emit(log, f"Footage planning fallback: {exc}")
-        return _fallback_plan(title, script, count), "deterministic-fallback"
+        fallback = _distinct_grounded_plan(
+            _fallback_plan(title, script, max(count * 3, count + 2)),
+            script,
+            count,
+            excluded_purposes=excluded_purposes,
+        )
+        return fallback, "deterministic-fallback"
 
 
 def _candidate_from_page(page: dict, orientation: str) -> dict | None:
@@ -849,6 +953,7 @@ async def acquire_public_footage(
                     "id": clip_id,
                     "query": query,
                     "purpose": shot.get("purpose") or "",
+                    "script_excerpt": shot.get("script_excerpt") or "",
                     **candidate,
                     "source_bytes": source_bytes,
                     "source_sha256": source_sha256,
@@ -979,10 +1084,15 @@ async def acquire_footage(
     # helpers above, but footage remains the manifest-facing public API.
     from backend.pipeline.web_footage import supplement_web_footage
 
+    web_query_plan = _unoccupied_web_plan(
+        query_plan,
+        [clip for clip in manifest.get("clips") or [] if isinstance(clip, dict)],
+    )
+
     return await supplement_web_footage(
         task_dir=task_dir,
         manifest=manifest,
-        query_plan=query_plan,
+        query_plan=web_query_plan,
         target_total=clip_count,
         orientation=orientation,
         script=script,

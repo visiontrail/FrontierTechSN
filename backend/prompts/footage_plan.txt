@@ -13,4 +13,8 @@ Rules:
 - Do not search for trademarks, logos, celebrities, copyrighted characters, or
   abstract phrases such as "the future of ideas".
 - Make every query meaningfully different.
+- Target a different narration story or scene with every query. Do not return
+  two angles, locations, or objects for the same narrated event.
+- In purpose, include the concrete narrated entity/action that makes the
+  intended story unambiguous; do not use a generic label such as "technology".
 - Do not include markdown fences or any text outside the JSON.

@@ -332,6 +332,12 @@ AV_SYNC_GEMINI_MIN_AVERAGE_SCORE = int(
 )
 AV_SYNC_GEMINI_TIMEOUT = int(os.getenv("AV_SYNC_GEMINI_TIMEOUT", "180"))
 AV_SYNC_GEMINI_MAX_RETRIES = int(os.getenv("AV_SYNC_GEMINI_MAX_RETRIES", "2"))
+# A structurally unusable Gemini response is a provider failure, not evidence
+# about the rendered pixels. After the bounded Gemini attempts, use the other
+# signed-in vision-capable web model before deferring the quality gate.
+AV_SYNC_REVIEW_FALLBACK_PROVIDER = os.getenv(
+    "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "chatgpt"
+).strip().casefold()
 
 AVAILABLE_VOICES = {
     "Carter": {"gender": "male", "lang": "en"},

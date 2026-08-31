@@ -276,6 +276,56 @@ def _response_payload(stdout: str) -> dict:
     return parsed
 
 
+def _review_command(provider: str, prompt: str, sheet: Path, timeout: int) -> list[str]:
+    return [
+        provider,
+        "ask",
+        prompt,
+        "--file",
+        str(sheet),
+        "--new",
+        "true",
+        "--timeout",
+        str(timeout),
+        # Foreground is required for both supported web file pickers.
+        "--window",
+        "foreground",
+        "--site-session",
+        "ephemeral",
+        "--keep-tab",
+        "false",
+        "-f",
+        "json",
+    ]
+
+
+def _persist_provider_response(
+    sheet: Path,
+    *,
+    phase: str,
+    batch_index: int,
+    attempt: int,
+    provider: str,
+    stdout: str,
+    stderr: str,
+) -> None:
+    """Retain provider output so a structurally bad review is diagnosable."""
+    path = sheet.parent / (
+        f"response-{phase}-{batch_index:02d}-attempt-{attempt:02d}-{provider}.json"
+    )
+    try:
+        path.write_text(
+            json.dumps(
+                {"provider": provider, "stdout": stdout, "stderr": stderr},
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def _score(value: Any) -> int:
     try:
         return max(0, min(100, int(round(float(value)))))
@@ -437,40 +487,30 @@ async def _review_batch(
     for attempt in range(maximum_retries + 1):
         attempts = attempt + 1
         try:
+            prompt = _review_prompt(
+                title,
+                batch_frames,
+                match_floor,
+                minimum_average_score,
+                aggregate_calibration=phase == "aggregate_calibration",
+            )
             result = await run_opencli(
-                [
-                    "gemini",
-                    "ask",
-                    _review_prompt(
-                        title,
-                        batch_frames,
-                        match_floor,
-                        minimum_average_score,
-                        aggregate_calibration=phase == "aggregate_calibration",
-                    ),
-                    "--file",
-                    str(sheet),
-                    "--new",
-                    "true",
-                    "--timeout",
-                    str(timeout),
-                    # Gemini's upload menu does not hydrate in OpenCLI's
-                    # background window on current Chrome; foreground is a
-                    # functional requirement for the local-file picker.
-                    "--window",
-                    "foreground",
-                    "--site-session",
-                    "ephemeral",
-                    "--keep-tab",
-                    "false",
-                    "-f",
-                    "json",
-                ],
+                _review_command("gemini", prompt, sheet, timeout),
                 timeout=timeout + 90,
             )
-            payload = _response_payload(result.stdout)
+            _persist_provider_response(
+                sheet,
+                phase=phase,
+                batch_index=batch_index,
+                attempt=attempts,
+                provider="gemini",
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+            payload = _response_payload(f"{result.stdout}\n{result.stderr}")
             normalized = normalise_batch(payload, batch_frames, match_floor)
             if _batch_is_valid(normalized):
+                normalized["review_provider"] = "gemini"
                 return normalized, attempts, ""
             last_normalized = normalized
             raise OpenCLIError(
@@ -486,14 +526,61 @@ async def _review_batch(
                     f"Gemini A/V review: retrying {phase} batch {batch_index} "
                     f"after unusable response ({last_error})",
                 )
+
+    fallback_provider = str(
+        getattr(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "") or ""
+    ).strip().casefold()
+    if fallback_provider in {"chatgpt"}:
+        attempts += 1
+        try:
+            prompt = _review_prompt(
+                title,
+                batch_frames,
+                match_floor,
+                minimum_average_score,
+                aggregate_calibration=phase == "aggregate_calibration",
+            )
+            _emit(
+                log,
+                f"Gemini A/V review: trying {fallback_provider} vision fallback "
+                f"for {phase} batch {batch_index}",
+            )
+            result = await run_opencli(
+                _review_command(fallback_provider, prompt, sheet, timeout),
+                timeout=timeout + 90,
+            )
+            _persist_provider_response(
+                sheet,
+                phase=phase,
+                batch_index=batch_index,
+                attempt=attempts,
+                provider=fallback_provider,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+            payload = _response_payload(f"{result.stdout}\n{result.stderr}")
+            normalized = normalise_batch(payload, batch_frames, match_floor)
+            if _batch_is_valid(normalized):
+                normalized["review_provider"] = fallback_provider
+                return normalized, attempts, ""
+            last_normalized = normalized
+            raise OpenCLIError(
+                f"{fallback_provider} omitted the image, required scene ids, or "
+                "a score/verdict row violated the requested review rubric"
+            )
+        except Exception as exc:  # noqa: BLE001 - retain fail-closed proof
+            last_error = f"{fallback_provider} fallback: {exc}"
     if last_normalized is not None:
+        last_normalized["review_provider"] = fallback_provider or "gemini"
         return last_normalized, attempts, last_error
-    return (
-        normalise_batch(
+    unavailable = normalise_batch(
             {"image_received": False, "reviews": []},
             batch_frames,
             match_floor,
-        ),
+        )
+    unavailable["review_provider"] = fallback_provider or "gemini"
+    return (
+        unavailable,
         attempts,
         last_error,
     )
@@ -519,6 +606,7 @@ def _batch_audit(
         "image_received": normalized["image_received"],
         "structure_valid": normalized["structure_valid"],
         "contract_valid": normalized["contract_valid"],
+        "review_provider": normalized.get("review_provider") or "gemini",
         "attempts": attempts,
         "match_floor": match_floor,
         "error": error or None,

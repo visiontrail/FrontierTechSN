@@ -9,6 +9,7 @@ import time
 import wave
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -84,7 +85,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 21
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 22
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -1226,6 +1227,26 @@ def _split_tts_text(
                 words = clause.strip().split()
                 while words:
                     take = min(max_words, len(words))
+                    if take > 1 and take < len(words):
+                        left_name = words[take - 1].strip(
+                            ".,!?;:\"'’”()[]{}"
+                        )
+                        right_name = words[take].strip(
+                            ".,!?;:\"'’”()[]{}"
+                        )
+                        if (
+                            left_name[:1].isupper()
+                            and right_name[:1].isupper()
+                            and any(character.isalpha() for character in left_name)
+                            and any(character.isalpha() for character in right_name)
+                        ):
+                            # Never split an adjacent proper-name pair such as
+                            # ``Ant Group`` or ``New York``. A context-free
+                            # trailing name fragment is prone to being spoken as
+                            # a common function word (observed ``Ant`` ->
+                            # ``and``), while moving one token preserves the
+                            # complete source and the configured token budget.
+                            take -= 1
                     if (
                         take < len(words)
                         and words[take - 1].strip(".,!?;:\"'’”()[]{}").casefold()
@@ -2106,12 +2127,241 @@ async def _transcribe_orpheus_at_speed(
     )
 
 
+def _first_json_object(value: str) -> dict | None:
+    """Extract one model JSON object without accepting prose-only verdicts."""
+    clean = value.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\s*```$", "", clean)
+    try:
+        parsed = json.loads(clean)
+    except json.JSONDecodeError:
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(clean[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _raw_transcript(words: list[dict]) -> str:
+    return " ".join(
+        str(word.get("text") or "").strip()
+        for word in words
+        if str(word.get("text") or "").strip()
+    )
+
+
+def _medium_asr_verdict_is_corroborated(
+    expected_tokens: list[str],
+    normal_transcript: str,
+    slower_transcript: str,
+) -> bool:
+    """Bound medium-confidence approvals to tightly corroborated ASR drift.
+
+    Proper names can be spelled phonetically by Whisper even when two decodes
+    hear the same complete waveform (for example ``Andreessen`` ->
+    ``Andreasen``).  A medium model verdict is usable only when both decodes
+    normalize identically, remain very close to the source at character level,
+    and the source has no mixed letter/digit token such as ``a16z``.  That last
+    guard prevents an alphanumeric brand or model number from being silently
+    changed into another entity.
+    """
+    normal_tokens = re.findall(r"[a-z0-9]+", normal_transcript.casefold())
+    slower_tokens = re.findall(r"[a-z0-9]+", slower_transcript.casefold())
+    if not normal_tokens or normal_tokens != slower_tokens:
+        return False
+    if any(
+        any(character.isalpha() for character in token)
+        and any(character.isdigit() for character in token)
+        for token in expected_tokens
+    ):
+        return False
+    expected_text = " ".join(expected_tokens)
+    observed_text = " ".join(normal_tokens)
+    if not expected_text or not observed_text:
+        return False
+    length_ratio = len(observed_text) / len(expected_text)
+    if not 0.85 <= length_ratio <= 1.15:
+        return False
+    return SequenceMatcher(None, expected_text, observed_text).ratio() >= 0.9
+
+
+async def _adjudicate_orpheus_asr_mismatch(
+    text: str,
+    normal_words: list[dict],
+    slower_words: list[dict],
+    report: dict,
+    verification_dir: Path,
+    *,
+    emit: LogCallback,
+) -> dict | None:
+    """Ask the configured LLM whether transcript deltas are ASR-only.
+
+    The model sees two independent transcripts of the same waveform and the
+    deterministic diff report.  It may approve only spelling, word-boundary,
+    exact-homophone, or phonetic proper-name transcription drift.  Missing or
+    extra spoken content stays a hard failure.  Every response and selected
+    route is persisted beside the acoustic transcript for auditability.
+    """
+    from backend.pipeline import model_router
+    from backend.pipeline.digester import _chat, _resolve_provider
+
+    verification_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = verification_dir / "llm_asr_adjudication.json"
+    expected_tokens = _lexical_tokens(text)
+    request = {
+        "source_text": text,
+        "normalized_source_tokens": expected_tokens,
+        "normal_speed_transcript": _raw_transcript(normal_words),
+        "slower_speed_transcript": _raw_transcript(slower_words),
+        "deterministic_check": {
+            key: report.get(key)
+            for key in (
+                "expected_words",
+                "transcript_words",
+                "matched_exact_words",
+                "exact_asr_word_coverage",
+                "transcript_word_ratio",
+                "leading_anchor",
+                "trailing_anchor",
+                "failure_reasons",
+            )
+        },
+    }
+    evidence: dict = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "pending",
+        "request": request,
+        "route": {},
+    }
+
+    def write_evidence() -> None:
+        temporary = evidence_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(evidence, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        os.replace(temporary, evidence_path)
+
+    def remember_route(endpoint: str, model: str, _api_key: str) -> None:
+        evidence["route"] = {"endpoint": endpoint, "model": model}
+
+    write_evidence()
+    system_prompt = """You are a fail-closed speech-transcription adjudicator.
+Decide whether the TTS waveform can still contain the complete SOURCE TEXT even
+though automatic speech recognition produced a mismatch. You receive two ASR
+transcripts of the same waveform, one at normal speed and one slowed down.
+
+Approve only when every normalized source token is accounted for by explicit
+transcript evidence and every difference is plausibly ASR spelling,
+capitalization, punctuation, hyphenation, word-boundary, exact-homophone, or
+phonetic proper-name drift. A spelled-out number and the same value rendered as
+digits are explicit equivalent evidence (for example, "twenty-four point five
+million" and "24.5 million"); a genuinely changed numeric value is not. Treat
+the deterministic check as a mismatch trigger, not as ground truth: its token
+expansion and leading/trailing anchor fields can be false for number formatting,
+punctuation, or word-boundary differences. Independently compare SOURCE TEXT
+with both raw transcripts before deciding. Reject any omitted, added, repeated,
+paraphrased, negated, number-changed, or entity-changed spoken content. Do not
+fill a missing word from context. If the two transcripts do not provide enough
+evidence, reject. Return JSON only with exactly these fields:
+{
+  "decision": "approve_asr_error" | "reject_audio_mismatch",
+  "all_source_tokens_accounted_for": true | false,
+  "accounted_source_token_indexes": [0-based integer indexes],
+  "confidence": "high" | "medium" | "low",
+  "reason": "brief evidence-based explanation"
+}"""
+    try:
+        endpoint, model, api_key = await _resolve_provider(None, None, None)
+        routes = await model_router.resolve_model_routes(
+            endpoint=endpoint,
+            model=model,
+            api_key=api_key,
+        )
+        adjudication_route = next(
+            (route for route in routes if route.slot == "backup"),
+            routes[0],
+        )
+        endpoint = adjudication_route.endpoint
+        model = adjudication_route.model
+        api_key = adjudication_route.api_key
+        emit(
+            "Orpheus ASR adjudication: using isolated judge route "
+            f"{adjudication_route.audit_label}"
+        )
+        raw = await _chat(
+            system_prompt,
+            json.dumps(request, ensure_ascii=False),
+            endpoint=endpoint,
+            model=model,
+            api_key=api_key,
+            log=emit,
+            label="Orpheus ASR adjudication",
+            max_tokens=700,
+            enable_skills=False,
+            disable_thinking=True,
+            route_selected=remember_route,
+        )
+        evidence["raw_response"] = raw
+        verdict = _first_json_object(raw)
+        evidence["verdict"] = verdict
+        expected_indexes = list(range(len(expected_tokens)))
+        confidence = str((verdict or {}).get("confidence") or "").strip()
+        normal_transcript = request["normal_speed_transcript"]
+        slower_transcript = request["slower_speed_transcript"]
+        confidence_accepted = confidence == "high" or bool(
+            confidence == "medium"
+            and _medium_asr_verdict_is_corroborated(
+                expected_tokens,
+                normal_transcript,
+                slower_transcript,
+            )
+        )
+        approved = bool(
+            verdict
+            and verdict.get("decision") == "approve_asr_error"
+            and verdict.get("all_source_tokens_accounted_for") is True
+            and confidence_accepted
+            and verdict.get("accounted_source_token_indexes") == expected_indexes
+            and str(verdict.get("reason") or "").strip()
+            and str((evidence.get("route") or {}).get("model") or "").strip()
+        )
+        evidence["status"] = "approved" if approved else "rejected"
+        write_evidence()
+        if not approved:
+            return None
+        return {
+            "decision": "approve_asr_error",
+            "confidence": confidence,
+            "medium_confidence_corroborated": confidence == "medium",
+            "reason": str(verdict["reason"]).strip()[:600],
+            "normal_speed_transcript": normal_transcript,
+            "slower_speed_transcript": slower_transcript,
+            "evidence_path": evidence_path.name,
+            "route": evidence.get("route") or {},
+        }
+    except Exception as exc:  # noqa: BLE001 - unavailable adjudication fails closed
+        evidence["status"] = "error"
+        evidence["error"] = f"{type(exc).__name__}: {exc}"[:700]
+        write_evidence()
+        emit(
+            "Orpheus integrity: ASR adjudication unavailable; preserving strict "
+            f"failure ({type(exc).__name__}: {exc})"
+        )
+        return None
+
+
 async def _verify_orpheus_part(
     path: Path,
     text: str,
     verification_dir: Path,
     *,
     emit: LogCallback,
+    adjudicate_asr: bool = False,
 ) -> dict:
     from backend.pipeline import av_sync
 
@@ -2286,13 +2536,73 @@ async def _verify_orpheus_part(
                 f"same waveform at {speed:g}x playback"
             )
             break
+    if not report["verified"] and adjudicate_asr:
+        emit(
+            "Orpheus integrity: deterministic ASR check found a mismatch; "
+            "requesting fail-closed model adjudication"
+        )
+        slower_words: list[dict] = []
+        try:
+            slower_words, slower_transcription = await _transcribe_orpheus_at_speed(
+                path,
+                verification_dir,
+                ORPHEUS_NAME_RECHECK_SPEEDS[0],
+                emit=emit,
+            )
+            if not slower_words:
+                failures = "; ".join(
+                    slower_transcription.get("failure_reasons") or []
+                )
+                emit(
+                    "Orpheus integrity: model adjudication skipped because the "
+                    "slower corroborating transcript is unavailable"
+                    f"{': ' + failures if failures else ''}"
+                )
+        except Exception as exc:  # noqa: BLE001 - adjudication remains fail-closed
+            emit(
+                "Orpheus integrity: model adjudication skipped because slower "
+                f"transcription failed ({type(exc).__name__}: {exc})"
+            )
+        if slower_words:
+            adjudication = await _adjudicate_orpheus_asr_mismatch(
+                text,
+                words,
+                slower_words,
+                report,
+                verification_dir,
+                emit=emit,
+            )
+            if adjudication is not None:
+                original_failures = list(report["failure_reasons"])
+                report = {
+                    **report,
+                    "verified": True,
+                    "verification_mode": "llm_asr_adjudication",
+                    "failure_reasons": [],
+                    "deterministic_failure_reasons": original_failures,
+                    "llm_asr_adjudication": adjudication,
+                }
+                emit(
+                    "Orpheus integrity: model adjudication approved ASR-only "
+                    f"transcription drift ({adjudication['reason']})"
+                )
+            else:
+                emit(
+                    "Orpheus integrity: model adjudication rejected or lacked "
+                    "high-confidence evidence; preserving strict failure"
+                )
     if not report["verified"]:
         raise TtsIntegrityError(
             "Orpheus narration does not match its input utterance: "
             + "; ".join(report["failure_reasons"])
         )
     substitutions = report.get("phonetic_substitutions") or []
-    if substitutions:
+    if report.get("verification_mode") == "llm_asr_adjudication":
+        emit(
+            "Orpheus integrity: utterance verified by two-level ASR plus model "
+            "adjudication; persisted evidence retains both transcripts and route"
+        )
+    elif substitutions:
         substitution_summary = ", ".join(
             f"{item['expected']}~{item['observed']}"
             for item in substitutions
@@ -2477,6 +2787,7 @@ async def _recover_orpheus_part(
             text,
             verification_dir,
             emit=emit,
+            adjudicate_asr=True,
         )
     except TtsIntegrityError as exc:
         emit(f"Orpheus recovery: existing WAV rejected ({exc}); regenerating")
@@ -2794,6 +3105,7 @@ async def _generate_orpheus(
                         chunk,
                         output_dir_path / "verification" / input_path.stem,
                         emit=emit,
+                        adjudicate_asr=True,
                     )
                 except TtsIntegrityError as exc:
                     raise TtsIntegrityError(str(exc), part_key=input_path.name) from exc
