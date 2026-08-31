@@ -25,6 +25,7 @@ from collections.abc import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from backend import config, skills_admin
+from backend.provider_credentials import redact_api_keys
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -72,6 +73,8 @@ async def _record_rate_limit_if_present(
     endpoint: str | None,
     detail: str,
     *,
+    route_slot: str,
+    api_key_id: str,
     log: LogCallback | None,
     label: str,
 ) -> bool:
@@ -82,6 +85,8 @@ async def _record_rate_limit_if_present(
 
     cooldown = await provider_rate_limit.record_rate_limit(
         endpoint or config.AI_ENDPOINT,
+        route_slot=route_slot,
+        api_key_id=api_key_id,
         log=log,
         label=label,
     )
@@ -173,7 +178,8 @@ async def _agent_complete_single(
     log: LogCallback | None = None,
     label: str = "AI call",
     max_retries: int | None = None,
-) -> str:
+    route=None,
+) -> tuple[str, object]:
     """Run one provider's Claude Agent SDK turn and return assistant text.
 
     Raises ``RuntimeError`` on empty/failed output after the configured retry
@@ -190,8 +196,26 @@ async def _agent_complete_single(
         query,
     )
 
-    resolved_model = (config.ANTHROPIC_MODEL or model or "").strip() or None
-    env = build_agent_env(model, endpoint, api_key, max_tokens)
+    from backend.pipeline import model_router
+
+    if route is None:
+        route = model_router.ModelRoute(
+            slot="standalone",
+            provider_id=None,
+            provider_type="selected",
+            provider_name="Selected provider",
+            endpoint=endpoint or config.AI_ENDPOINT,
+            model=model or config.AI_MODEL,
+            api_key=api_key if api_key is not None else config.AI_API_KEY,
+        )
+    current_route = route
+    resolved_model = (config.ANTHROPIC_MODEL or current_route.model or "").strip() or None
+    env = build_agent_env(
+        current_route.model,
+        current_route.endpoint,
+        current_route.api_key,
+        max_tokens,
+    )
     retry_limit = max(
         0,
         int(config.AI_MAX_RETRIES if max_retries is None else max_retries),
@@ -255,6 +279,7 @@ async def _agent_complete_single(
     last_error: Exception | None = None
     attempt = 0
     rate_limit_waits = 0
+    tried_key_ids = {current_route.api_key_id}
     while attempt <= retry_limit:
         start = time.perf_counter()
         prompt = user_content
@@ -268,18 +293,34 @@ async def _agent_complete_single(
                 "markdown fences, or explanations. Start immediately with the requested output."
             )
 
-        options = ClaudeAgentOptions(**base_options)
         text_parts: list[str] = []
         result: ResultMessage | None = None
         diagnostics: deque[str] = deque(maxlen=DIAGNOSTIC_STDERR_LINES)
-        options.stderr = lambda line: _keep_diagnostic(diagnostics, line)
         rate_limited = False
+        attempt_committed = False
+
+        env = build_agent_env(
+            current_route.model,
+            current_route.endpoint,
+            current_route.api_key,
+            max_tokens,
+        )
+        base_options["env"] = env
+        _log(
+            log,
+            f"{label}: using {current_route.api_key_id} "
+            f"({current_route.api_key_index + 1}/{current_route.api_key_count})",
+        )
+        options = ClaudeAgentOptions(**base_options)
+        options.stderr = lambda line: _keep_diagnostic(diagnostics, line)
 
         try:
             from backend.pipeline import provider_rate_limit
 
             await provider_rate_limit.wait_for_request_slot(
-                endpoint or config.AI_ENDPOINT,
+                current_route.endpoint,
+                route_slot=current_route.slot,
+                api_key_id=current_route.api_key_id,
                 log=log,
                 label=label,
             )
@@ -292,6 +333,8 @@ async def _agent_complete_single(
                 async with asyncio.timeout(config.AGENT_TURN_TIMEOUT):
                     async for message in stream:
                         if isinstance(message, AssistantMessage):
+                            if message.content:
+                                attempt_committed = True
                             for block in message.content:
                                 if isinstance(block, TextBlock):
                                     text_parts.append(block.text)
@@ -315,7 +358,7 @@ async def _agent_complete_single(
                     log,
                     f"{label}: responded in {elapsed_ms:.0f}ms ({len(content)} chars{usage_str})",
                 )
-                return content
+                return content, current_route
 
             detail = (
                 f"empty content from Claude Agent SDK (model={resolved_model or 'default'}"
@@ -325,10 +368,13 @@ async def _agent_complete_single(
                 errs = result.errors or [result.result or "unknown SDK error"]
                 detail = f"Claude Agent SDK error: {'; '.join(str(e) for e in errs)}"
             detail += _diagnostic_tail(diagnostics)
+            detail = redact_api_keys(detail, current_route.api_keys)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
             rate_limited = await _record_rate_limit_if_present(
-                endpoint,
+                current_route.endpoint,
                 detail,
+                route_slot=current_route.slot,
+                api_key_id=current_route.api_key_id,
                 log=log,
                 label=label,
             )
@@ -342,10 +388,13 @@ async def _agent_complete_single(
                 f"({config.AGENT_REQUEST_TIMEOUT}s); later attempts are paced and started "
                 "by the pipeline rather than retried inside the CLI"
             ) + _diagnostic_tail(diagnostics)
+            detail = redact_api_keys(detail, current_route.api_keys)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
             rate_limited = await _record_rate_limit_if_present(
-                endpoint,
+                current_route.endpoint,
                 detail,
+                route_slot=current_route.slot,
+                api_key_id=current_route.api_key_id,
                 log=log,
                 label=label,
             )
@@ -359,14 +408,36 @@ async def _agent_complete_single(
             # Preserve the SDK callback's stderr in the error returned by the
             # provider-test API instead of only writing it to container logs.
             detail = f"{e.__class__.__name__}: {e}{_diagnostic_tail(diagnostics)}"
+            detail = redact_api_keys(detail, current_route.api_keys)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
             rate_limited = await _record_rate_limit_if_present(
-                endpoint,
+                current_route.endpoint,
                 detail,
+                route_slot=current_route.slot,
+                api_key_id=current_route.api_key_id,
                 log=log,
                 label=label,
             )
             last_error = RuntimeError(detail)
+
+        if attempt_committed:
+            raise model_router.ModelOutputCommittedError(
+                f"{label} failed after model/tool output began; refusing to replay "
+                f"through another key or provider: {last_error}"
+            ) from last_error
+
+        if rate_limited:
+            alternate = current_route.next_untried_key(tried_key_ids)
+            if alternate is not None:
+                previous_key_id = current_route.api_key_id
+                current_route = alternate
+                tried_key_ids.add(current_route.api_key_id)
+                _warn(
+                    log,
+                    f"{label}: rotating primary API key {previous_key_id} -> "
+                    f"{current_route.api_key_id} before provider failover",
+                )
+                continue
 
         if (
             rate_limited
@@ -381,6 +452,7 @@ async def _agent_complete_single(
             )
             # The next loop enters wait_for_request_slot, which owns the exact
             # process-wide cooldown and coordinates concurrent task calls.
+            tried_key_ids = {current_route.api_key_id}
             continue
 
         if attempt < retry_limit:
@@ -395,6 +467,7 @@ async def _agent_complete_single(
             )
             await asyncio.sleep(delay)
         attempt += 1
+        tried_key_ids = {current_route.api_key_id}
 
     raise RuntimeError(f"AI request failed via Claude Agent SDK: {last_error}") from last_error
 
@@ -413,6 +486,8 @@ async def agent_complete(
     label: str = "AI call",
     allow_provider_failover: bool = True,
     max_retries: int | None = None,
+    route=None,
+    credential_selected: Callable[[str], None] | None = None,
 ) -> str:
     """Complete a turn through the ordered OneAPI -> DeepSeek route.
 
@@ -426,11 +501,15 @@ async def agent_complete(
     resolved_endpoint = endpoint or config.AI_ENDPOINT
     resolved_model = model or config.AI_MODEL
     resolved_api_key = api_key if api_key is not None else config.AI_API_KEY
-    routes = await model_router.resolve_model_routes(
-        endpoint=resolved_endpoint,
-        model=resolved_model,
-        api_key=resolved_api_key,
-        allow_failover=allow_provider_failover,
+    routes = (
+        (route,)
+        if route is not None
+        else await model_router.resolve_model_routes(
+            endpoint=resolved_endpoint,
+            model=resolved_model,
+            api_key=resolved_api_key,
+            allow_failover=allow_provider_failover,
+        )
     )
     if len(routes) > 1:
         primary_retry_limit = (
@@ -452,7 +531,7 @@ async def agent_complete(
             else model_router.max_retries_for_route(route)
         )
         try:
-            content = await _agent_complete_single(
+            content, completed_route = await _agent_complete_single(
                 system_prompt,
                 user_content,
                 model=route.model,
@@ -464,10 +543,19 @@ async def agent_complete(
                 log=log,
                 label=label,
                 max_retries=route_retry_limit,
+                route=route,
             )
             if len(routes) > 1:
-                _log(log, f"{label}: completed via {route.audit_label}")
+                _log(
+                    log,
+                    f"{label}: completed via {route.audit_label} "
+                    f"using {completed_route.api_key_id}",
+                )
+            if credential_selected is not None:
+                credential_selected(completed_route.api_key)
             return content
+        except model_router.ModelOutputCommittedError:
+            raise
         except Exception as exc:  # noqa: BLE001 - route exhaustion boundary
             last_error = exc
             next_index = index + 1
@@ -508,9 +596,9 @@ async def test_connection(endpoint: str, model: str, api_key: str) -> int:
         # reports a false "empty response" despite a healthy connection.
         max_tokens=256,
         enable_skills=False,
+        allow_provider_failover=False,
         disable_thinking=True,
         label="Provider test",
-        allow_provider_failover=False,
     )
     if not text.strip():
         raise RuntimeError("Empty response from Claude Agent SDK")

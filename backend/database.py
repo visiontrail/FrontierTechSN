@@ -22,6 +22,7 @@ from backend.models import (
     new_content_id,
     new_task_id,
 )
+from backend.provider_credentials import decode_api_keys, encode_api_keys, normalize_api_keys
 from backend.provider_catalog import infer_provider_type
 
 SCHEMA = """
@@ -93,8 +94,11 @@ CREATE TABLE IF NOT EXISTS providers (
     name TEXT NOT NULL,
     endpoint TEXT NOT NULL,
     api_key TEXT,
+    api_keys_json TEXT NOT NULL DEFAULT '[]',
+    api_key_cursor INTEGER NOT NULL DEFAULT 0,
     model TEXT NOT NULL,
     is_default INTEGER NOT NULL DEFAULT 0,
+    route_role TEXT NOT NULL DEFAULT 'standalone',
     created_at TEXT NOT NULL
 );
 
@@ -338,12 +342,25 @@ async def _migrate_content_planning(db: aiosqlite.Connection) -> None:
 
 
 async def _migrate_providers(db: aiosqlite.Connection) -> None:
-    """Add provider catalogue metadata without rewriting endpoint credentials."""
+    """Add provider routing metadata and preserve every existing credential."""
     rows = await db.execute_fetchall("PRAGMA table_info(providers)")
     columns = {row["name"] for row in rows}
     if "provider_type" not in columns:
         await db.execute(
             "ALTER TABLE providers ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'custom'"
+        )
+    route_role_added = "route_role" not in columns
+    if route_role_added:
+        await db.execute(
+            "ALTER TABLE providers ADD COLUMN route_role TEXT NOT NULL DEFAULT 'standalone'"
+        )
+    if "api_keys_json" not in columns:
+        await db.execute(
+            "ALTER TABLE providers ADD COLUMN api_keys_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    if "api_key_cursor" not in columns:
+        await db.execute(
+            "ALTER TABLE providers ADD COLUMN api_key_cursor INTEGER NOT NULL DEFAULT 0"
         )
 
     provider_rows = await db.execute_fetchall(
@@ -358,6 +375,73 @@ async def _migrate_providers(db: aiosqlite.Connection) -> None:
                 "UPDATE providers SET provider_type = ? WHERE id = ?",
                 (inferred, row["id"]),
             )
+
+    await db.execute(
+        """UPDATE providers SET route_role = 'standalone'
+           WHERE route_role NOT IN ('primary', 'backup', 'standalone')"""
+    )
+    if route_role_added:
+        default_rows = await db.execute_fetchall(
+            "SELECT id FROM providers WHERE is_default = 1 ORDER BY created_at ASC LIMIT 1"
+        )
+        if default_rows:
+            await db.execute(
+                "UPDATE providers SET route_role = 'primary' WHERE id = ?",
+                (default_rows[0]["id"],),
+            )
+            backup_rows = await db.execute_fetchall(
+                """SELECT id FROM providers
+                   WHERE provider_type = 'deepseek' AND id != ?
+                   ORDER BY created_at ASC LIMIT 1""",
+                (default_rows[0]["id"],),
+            )
+            if backup_rows:
+                await db.execute(
+                    "UPDATE providers SET route_role = 'backup', is_default = 0 WHERE id = ?",
+                    (backup_rows[0]["id"],),
+                )
+
+    primary_rows = await db.execute_fetchall(
+        """SELECT id, api_key, api_keys_json FROM providers
+           WHERE route_role = 'primary'
+           ORDER BY is_default DESC, created_at ASC"""
+    )
+    for duplicate in primary_rows[1:]:
+        await db.execute(
+            """UPDATE providers SET route_role = 'standalone', is_default = 0
+               WHERE id = ?""",
+            (duplicate["id"],),
+        )
+    primary_rows = primary_rows[:1]
+    backup_rows = await db.execute_fetchall(
+        """SELECT id FROM providers WHERE route_role = 'backup'
+           ORDER BY created_at ASC"""
+    )
+    for duplicate in backup_rows[1:]:
+        await db.execute(
+            "UPDATE providers SET route_role = 'standalone' WHERE id = ?",
+            (duplicate["id"],),
+        )
+    for row in primary_rows:
+        api_keys = decode_api_keys(row["api_keys_json"])
+        if not api_keys and str(row["api_key"] or "").strip():
+            api_keys = [str(row["api_key"]).strip()]
+        await db.execute(
+            """UPDATE providers
+               SET api_keys_json = ?, api_key = ?, is_default = 1
+               WHERE id = ?""",
+            (
+                encode_api_keys(api_keys),
+                api_keys[0] if api_keys else row["api_key"],
+                row["id"],
+            ),
+        )
+    if primary_rows:
+        primary_id = primary_rows[0]["id"]
+        await db.execute(
+            "UPDATE providers SET is_default = 0 WHERE id != ?",
+            (primary_id,),
+        )
     await db.commit()
 
 
@@ -377,13 +461,15 @@ async def init_db():
             now = datetime.now(timezone.utc).isoformat()
             await db.execute(
                 """INSERT INTO providers
-                   (provider_type, name, endpoint, api_key, model, is_default, created_at)
-                   VALUES (?, ?, ?, ?, ?, 1, ?)""",
+                   (provider_type, name, endpoint, api_key, api_keys_json,
+                    model, is_default, route_role, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, 'primary', ?)""",
                 (
                     infer_provider_type(config.AI_ENDPOINT, config.AI_MODEL),
                     "Default (settings)",
                     config.AI_ENDPOINT,
                     config.AI_API_KEY,
+                    encode_api_keys([config.AI_API_KEY] if config.AI_API_KEY else []),
                     config.AI_MODEL,
                     now,
                 ),
@@ -397,21 +483,35 @@ async def init_db():
 
 
 def _row_to_provider(row: aiosqlite.Row) -> ProviderResponse:
+    route_role = str(row["route_role"] or "standalone")
+    pool = decode_api_keys(row["api_keys_json"])
+    api_key_count = (
+        len(pool)
+        if route_role == "primary" and pool
+        else int(bool(str(row["api_key"] or "").strip()))
+    )
     return ProviderResponse(
         id=row["id"],
         provider_type=row["provider_type"],
         name=row["name"],
         endpoint=row["endpoint"],
         api_key_masked=_mask_key(row["api_key"]),
+        api_key_count=api_key_count,
         model=row["model"],
         is_default=bool(row["is_default"]),
+        route_role=route_role,
         created_at=row["created_at"],
     )
 
 
 async def list_providers() -> list[ProviderResponse]:
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT * FROM providers ORDER BY created_at ASC")
+    rows = await db.execute_fetchall(
+        """SELECT * FROM providers
+           ORDER BY CASE route_role
+               WHEN 'primary' THEN 0 WHEN 'backup' THEN 1 ELSE 2 END,
+               created_at ASC"""
+    )
     await db.close()
     return [_row_to_provider(r) for r in rows]
 
@@ -430,7 +530,13 @@ async def get_provider_raw(provider_id: int | None) -> aiosqlite.Row | None:
     if provider_id is not None:
         rows = await db.execute_fetchall("SELECT * FROM providers WHERE id = ?", (provider_id,))
     else:
-        rows = await db.execute_fetchall("SELECT * FROM providers WHERE is_default = 1 LIMIT 1")
+        rows = await db.execute_fetchall(
+            """SELECT * FROM providers
+               ORDER BY CASE WHEN route_role = 'primary' THEN 0
+                             WHEN is_default = 1 THEN 1 ELSE 2 END,
+                        created_at ASC
+               LIMIT 1"""
+        )
     await db.close()
     return rows[0] if rows else None
 
@@ -444,7 +550,10 @@ async def list_providers_raw() -> list[aiosqlite.Row]:
     """
     db = await get_db()
     rows = await db.execute_fetchall(
-        "SELECT * FROM providers ORDER BY is_default DESC, created_at ASC"
+        """SELECT * FROM providers
+           ORDER BY CASE route_role
+               WHEN 'primary' THEN 0 WHEN 'backup' THEN 1 ELSE 2 END,
+               is_default DESC, created_at ASC"""
     )
     await db.close()
     return rows
@@ -457,16 +566,49 @@ async def create_provider(
     api_key: str | None,
     model: str,
     is_default: bool,
+    route_role: str = "standalone",
+    api_keys: object = None,
 ) -> ProviderResponse:
     now = datetime.now(timezone.utc).isoformat()
+    normalized_keys = normalize_api_keys(api_keys)
+    if route_role != "primary" and len(normalized_keys) > 1:
+        raise ValueError("Only the primary provider can use multiple API keys")
+    if route_role == "primary":
+        normalized_keys = normalized_keys or ([api_key.strip()] if api_key and api_key.strip() else [])
+        api_key = normalized_keys[0] if normalized_keys else api_key
+        is_default = True
+    else:
+        if normalized_keys:
+            api_key = normalized_keys[0]
+            normalized_keys = []
+        is_default = False
     db = await get_db()
+    if route_role == "primary":
+        await db.execute(
+            "UPDATE providers SET route_role = 'standalone', is_default = 0 WHERE route_role = 'primary'"
+        )
+    elif route_role == "backup":
+        await db.execute(
+            "UPDATE providers SET route_role = 'standalone' WHERE route_role = 'backup'"
+        )
     if is_default:
         await db.execute("UPDATE providers SET is_default = 0")
     cursor = await db.execute(
         """INSERT INTO providers
-           (provider_type, name, endpoint, api_key, model, is_default, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (provider_type, name, endpoint, api_key, model, 1 if is_default else 0, now),
+           (provider_type, name, endpoint, api_key, api_keys_json, api_key_cursor,
+            model, is_default, route_role, created_at)
+           VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+        (
+            provider_type,
+            name,
+            endpoint,
+            api_key,
+            encode_api_keys(normalized_keys),
+            model,
+            1 if is_default else 0,
+            route_role,
+            now,
+        ),
     )
     await db.commit()
     rows = await db.execute_fetchall("SELECT * FROM providers WHERE id = ?", (cursor.lastrowid,))
@@ -477,6 +619,65 @@ async def create_provider(
 async def update_provider(provider_id: int, **kwargs) -> ProviderResponse | None:
     fields = {k: v for k, v in kwargs.items() if v is not None}
     db = await get_db()
+    current_rows = await db.execute_fetchall(
+        "SELECT * FROM providers WHERE id = ?", (provider_id,)
+    )
+    if not current_rows:
+        await db.close()
+        return None
+    current = current_rows[0]
+    route_role = str(fields.get("route_role", current["route_role"] or "standalone"))
+    if route_role not in {"primary", "backup", "standalone"}:
+        await db.close()
+        raise ValueError("Unknown provider route role")
+
+    api_keys_supplied = "api_keys" in fields
+    try:
+        api_keys = (
+            normalize_api_keys(fields.pop("api_keys"))
+            if api_keys_supplied
+            else decode_api_keys(current["api_keys_json"])
+        )
+    except ValueError:
+        await db.close()
+        raise
+    candidate_api_key = str(fields.get("api_key", current["api_key"] or "")).strip()
+    if route_role == "primary":
+        if not api_keys and candidate_api_key:
+            api_keys = [candidate_api_key]
+        fields["api_key"] = api_keys[0] if api_keys else candidate_api_key
+        fields["api_keys_json"] = encode_api_keys(api_keys)
+        fields["is_default"] = True
+    else:
+        if api_keys_supplied and len(api_keys) > 1:
+            await db.close()
+            raise ValueError("Only the primary provider can use multiple API keys")
+        if api_keys_supplied and api_keys:
+            fields["api_key"] = api_keys[0]
+        fields["api_keys_json"] = "[]"
+        fields["is_default"] = False
+    if api_keys_supplied or route_role != str(current["route_role"] or "standalone"):
+        fields["api_key_cursor"] = 0
+    fields["route_role"] = route_role
+
+    allowed_fields = {
+        "provider_type", "name", "endpoint", "api_key", "api_keys_json",
+        "api_key_cursor", "model", "is_default", "route_role",
+    }
+    fields = {key: value for key, value in fields.items() if key in allowed_fields}
+    if route_role == "primary":
+        await db.execute(
+            """UPDATE providers
+               SET route_role = 'standalone', is_default = 0
+               WHERE route_role = 'primary' AND id != ?""",
+            (provider_id,),
+        )
+    elif route_role == "backup":
+        await db.execute(
+            """UPDATE providers SET route_role = 'standalone'
+               WHERE route_role = 'backup' AND id != ?""",
+            (provider_id,),
+        )
     if fields.get("is_default"):
         await db.execute("UPDATE providers SET is_default = 0")
     if fields:
@@ -493,6 +694,44 @@ async def update_provider(provider_id: int, **kwargs) -> ProviderResponse | None
     rows = await db.execute_fetchall("SELECT * FROM providers WHERE id = ?", (provider_id,))
     await db.close()
     return _row_to_provider(rows[0]) if rows else None
+
+
+async def reserve_provider_api_key(provider_id: int) -> tuple[list[str], int]:
+    """Atomically reserve the next primary-pool key index.
+
+    The service intentionally runs one process, but the SQLite transaction also
+    keeps the cursor fair across concurrent worker and API tasks and survives a
+    process restart.
+    """
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        rows = await db.execute_fetchall(
+            "SELECT api_key, api_keys_json, api_key_cursor FROM providers WHERE id = ?",
+            (provider_id,),
+        )
+        if not rows:
+            await db.rollback()
+            return [], 0
+        row = rows[0]
+        api_keys = decode_api_keys(row["api_keys_json"])
+        if not api_keys and str(row["api_key"] or "").strip():
+            api_keys = [str(row["api_key"]).strip()]
+        if not api_keys:
+            await db.commit()
+            return [], 0
+        index = int(row["api_key_cursor"] or 0) % len(api_keys)
+        await db.execute(
+            "UPDATE providers SET api_key_cursor = ? WHERE id = ?",
+            ((index + 1) % len(api_keys), provider_id),
+        )
+        await db.commit()
+        return api_keys, index
+    except BaseException:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
 
 
 async def delete_provider(provider_id: int):

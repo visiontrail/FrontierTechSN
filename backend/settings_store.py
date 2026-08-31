@@ -259,21 +259,22 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         "AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", "ai", "Primary request spacing", "int",
         unit="seconds", minimum=12, maximum=300,
-        description="Minimum spacing shared by all OneAPI request starts. The default "
-                    "15 seconds stays below the gateway limit of five requests per minute.",
+        description="Minimum spacing between request starts for each primary API key. "
+                    "The default 15 seconds stays below a five-request-per-minute key limit.",
     ),
     SettingSpec(
         "AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS", "ai", "Primary 429 cooldown", "int",
         unit="seconds", minimum=60, maximum=600,
-        description="Process-wide pause after OneAPI reports a rolling-minute rate limit. "
-                    "The default 65 seconds clears the full quota window with jitter headroom.",
+        description="Per-key pause after the primary provider reports a rolling-minute "
+                    "rate limit. The default 65 seconds clears the full quota window with "
+                    "jitter headroom while other primary keys remain available.",
     ),
     SettingSpec(
         "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", "ai", "Primary 429 wait windows", "int",
         unit="windows", minimum=0, maximum=60,
-        description="Full quota-cooldown windows that do not consume OneAPI's normal "
-                    "failure attempts. The backup is considered only after these waits "
-                    "and the ordinary primary retry ladder are exhausted.",
+        description="Full quota-cooldown windows that do not consume the primary route's "
+                    "normal failure attempts. Untried primary keys rotate first; the backup "
+                    "is considered only after the pool and retry ladder are exhausted.",
     ),
     SettingSpec(
         "AI_PRIMARY_RATE_LIMIT_TIMEZONE", "ai", "Primary rate-limit timezone", "string",

@@ -65,6 +65,131 @@ class ProviderBaseUrlTests(unittest.TestCase):
 
 
 class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_primary_429_rotates_to_next_key_before_backup(self):
+        attempts: list[str] = []
+        selected: list[str] = []
+        logs: list[str] = []
+
+        async def query(*, prompt, options):
+            key = options.env["ANTHROPIC_API_KEY"]
+            attempts.append(key)
+            if key == "primary-a":
+                options.stderr("[ERROR] 429 rate_limit")
+                raise Exception("quota full")
+            yield FakeAssistantMessage([FakeTextBlock("primary answer")])
+
+        routes = (
+            model_router.ModelRoute(
+                slot="primary",
+                provider_id=1,
+                provider_type="yinhe",
+                provider_name="OneAPI",
+                endpoint="http://oneapi.example",
+                model="yinhe-thinking",
+                api_key="primary-a",
+                api_keys=("primary-a", "primary-b", "primary-c"),
+            ),
+            model_router.ModelRoute(
+                slot="backup",
+                provider_id=2,
+                provider_type="deepseek",
+                provider_name="DeepSeek",
+                endpoint="https://api.deepseek.com/anthropic",
+                model="deepseek-v4-flash",
+                api_key="backup-key",
+            ),
+        )
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(model_router, "resolve_model_routes", AsyncMock(return_value=routes)),
+            patch.object(config, "AI_PRIMARY_MAX_RETRIES", 0),
+            patch.object(config, "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", 0),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(config, "ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names", return_value=([], [])),
+            patch.object(
+                provider_rate_limit,
+                "wait_for_request_slot",
+                AsyncMock(return_value=0.0),
+            ),
+            patch.object(
+                provider_rate_limit,
+                "record_rate_limit",
+                AsyncMock(return_value=65.0),
+            ) as record_rate_limit,
+        ):
+            result = await agent.agent_complete(
+                "Return text.",
+                "content",
+                endpoint=routes[0].endpoint,
+                model=routes[0].model,
+                api_key=routes[0].api_key,
+                log=logs.append,
+                credential_selected=selected.append,
+            )
+
+        self.assertEqual(result, "primary answer")
+        self.assertEqual(attempts, ["primary-a", "primary-b"])
+        self.assertEqual(selected, ["primary-b"])
+        self.assertTrue(any("rotating primary API key" in line for line in logs))
+        self.assertFalse(any("switching to DeepSeek" in line for line in logs))
+        self.assertEqual(
+            record_rate_limit.await_args.kwargs["api_key_id"],
+            routes[0].api_key_id,
+        )
+
+    async def test_output_started_failure_is_never_replayed_on_backup(self):
+        attempts: list[str] = []
+
+        async def query(*, prompt, options):
+            attempts.append(options.env["ANTHROPIC_BASE_URL"])
+            yield FakeAssistantMessage([FakeTextBlock("partial")])
+            raise Exception("stream broke after output for primary-key")
+
+        routes = (
+            model_router.ModelRoute(
+                slot="primary",
+                provider_id=1,
+                provider_type="yinhe",
+                provider_name="OneAPI",
+                endpoint="http://oneapi.example",
+                model="yinhe-thinking",
+                api_key="primary-key",
+            ),
+            model_router.ModelRoute(
+                slot="backup",
+                provider_id=2,
+                provider_type="deepseek",
+                provider_name="DeepSeek",
+                endpoint="https://api.deepseek.com/anthropic",
+                model="deepseek-v4-flash",
+                api_key="backup-key",
+            ),
+        )
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(model_router, "resolve_model_routes", AsyncMock(return_value=routes)),
+            patch.object(config, "AI_PRIMARY_MAX_RETRIES", 2),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(config, "ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names", return_value=([], [])),
+        ):
+            with self.assertRaises(model_router.ModelOutputCommittedError) as caught:
+                await agent.agent_complete(
+                    "Return text.",
+                    "content",
+                    endpoint=routes[0].endpoint,
+                    model=routes[0].model,
+                    api_key=routes[0].api_key,
+                )
+
+        self.assertEqual(attempts, ["http://oneapi.example"])
+        self.assertNotIn("primary-key", str(caught.exception))
+
     async def test_primary_429_wait_does_not_consume_attempt_or_use_backup(self):
         attempts: list[str] = []
         logs: list[str] = []

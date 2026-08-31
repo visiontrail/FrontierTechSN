@@ -7,6 +7,7 @@ import {
   updateProvider,
   deleteProvider,
   testProvider,
+  testProviderRoute,
 } from '../api'
 import type {
   Provider,
@@ -14,6 +15,7 @@ import type {
   ProviderInput,
   ProviderTestRequest,
   ProviderTestResult,
+  ProviderRouteTestResult,
 } from '../api'
 
 const CUSTOM_MODEL = '__custom__'
@@ -35,6 +37,20 @@ const EMPTY_FORM: ProviderInput = {
   api_key: '',
   model: '',
   is_default: false,
+  route_role: 'standalone',
+}
+
+const ROLE_LABELS: Record<NonNullable<ProviderInput['route_role']>, string> = {
+  primary: 'PRIMARY',
+  backup: 'BACKUP',
+  standalone: 'STANDALONE',
+}
+
+function parseKeyPool(value: string): string[] {
+  return value
+    .split(/[\n,]+/)
+    .map((key) => key.trim())
+    .filter(Boolean)
 }
 
 export default function ProvidersPanel() {
@@ -55,10 +71,12 @@ export default function ProvidersPanel() {
 
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState<ProviderInput>(EMPTY_FORM)
+  const [apiKeysText, setApiKeysText] = useState('')
   const [showForm, setShowForm] = useState(false)
 
   const [testing, setTesting] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<Record<string, ProviderTestResult>>({})
+  const [routeTestResult, setRouteTestResult] = useState<ProviderRouteTestResult | null>(null)
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['providers'] })
 
@@ -80,26 +98,48 @@ export default function ProvidersPanel() {
   }
 
   const saveMutation = useMutation({
-    mutationFn: () =>
-      editingId === null ? createProvider(form) : updateProvider(editingId, form),
+    mutationFn: () => {
+      const isPrimary = form.route_role === 'primary'
+      const parsedKeys = parseKeyPool(apiKeysText)
+      const payload: ProviderInput = {
+        ...form,
+        api_key: isPrimary ? undefined : form.api_key?.trim() || undefined,
+        api_keys: isPrimary
+          ? (apiKeysText.trim() ? parsedKeys : editingId === null ? [] : undefined)
+          : undefined,
+      }
+      return editingId === null ? createProvider(payload) : updateProvider(editingId, payload)
+    },
     onSuccess: () => {
       invalidate()
+      setRouteTestResult(null)
       resetForm()
     },
   })
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => deleteProvider(id),
-    onSuccess: invalidate,
+    onSuccess: () => {
+      invalidate()
+      setRouteTestResult(null)
+    },
   })
 
-  const defaultMutation = useMutation({
-    mutationFn: (id: number) => updateProvider(id, { is_default: true }),
-    onSuccess: invalidate,
+  const routeTestMutation = useMutation({
+    mutationFn: testProviderRoute,
+    onMutate: () => setRouteTestResult(null),
+    onSuccess: setRouteTestResult,
+    onError: (error) => setRouteTestResult({
+      ok: false,
+      message: (error as Error).message,
+      fallback_used: false,
+      events: [],
+    }),
   })
 
   function resetForm() {
     setForm(EMPTY_FORM)
+    setApiKeysText('')
     setEditingId(null)
     setShowForm(false)
   }
@@ -113,7 +153,9 @@ export default function ProvidersPanel() {
       api_key: '',
       model: p.model,
       is_default: p.is_default,
+      route_role: p.route_role,
     })
+    setApiKeysText('')
     setShowForm(true)
   }
 
@@ -137,6 +179,7 @@ export default function ProvidersPanel() {
 
   function startAdd() {
     setForm(EMPTY_FORM)
+    setApiKeysText('')
     setEditingId(null)
     setShowForm(true)
   }
@@ -152,11 +195,23 @@ export default function ProvidersPanel() {
     const r = testResults[key]
     if (!r) return null
     return (
-      <span className={`provider-test-result ${r.ok ? 'is-ok' : 'is-fail'}`}>
-        {r.ok
-          ? `✓ ${r.message}${r.latency_ms != null ? ` (${r.latency_ms} ms)` : ''}`
-          : `✗ ${r.message}`}
-      </span>
+      <div className={`provider-test-result ${r.ok ? 'is-ok' : 'is-fail'}`}>
+        <span>
+          {r.ok
+            ? `✓ ${r.message}${r.latency_ms != null ? ` (${r.latency_ms} ms)` : ''}`
+            : `✗ ${r.message}`}
+        </span>
+        {r.key_results && r.key_results.length > 1 && (
+          <div className="provider-key-test-list">
+            {r.key_results.map((result) => (
+              <span key={result.key_id} className={result.ok ? 'is-ok' : 'is-fail'}>
+                {result.ok ? '✓' : '✗'} {result.key_id}
+                {result.latency_ms != null ? ` · ${result.latency_ms} ms` : ''}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
     )
   }
 
@@ -166,13 +221,47 @@ export default function ProvidersPanel() {
         <div>
           <h2 className="panel-title">Models &amp; Providers</h2>
           <p className="panel-sub">
-            Add independent AI gateways from the RavenAIService provider catalog. Choosing a
-            provider fills its endpoint and links the matching model presets; custom values remain
-            editable. The <strong>default</strong> row is used when a task doesn&apos;t pick one.
+            Configure the persisted primary and backup routes used by every task. The primary route
+            accepts a pool of API keys and distributes calls across them; the backup route is used
+            only when the primary route is unavailable.
           </p>
-          <p className="provider-routing-note">Independent provider rows · no primary/backup routing</p>
+          <p className="provider-routing-note">Admin-owned routing · no .env role switches · secrets stay server-side</p>
         </div>
+        <button
+          className="provider-route-test-button"
+          disabled={routeTestMutation.isPending || !providers.some((provider) => provider.route_role === 'primary')}
+          onClick={() => routeTestMutation.mutate()}
+        >
+          {routeTestMutation.isPending ? 'Testing route…' : 'Test primary → backup route'}
+        </button>
       </div>
+
+      {routeTestResult && (
+        <div className={`provider-route-result ${routeTestResult.ok ? 'is-ok' : 'is-fail'}`} role="status">
+          <div className="provider-route-result-head">
+            <strong>{routeTestResult.ok ? 'Route test passed' : 'Route test failed'}</strong>
+            {routeTestResult.route_role && (
+              <span className={`provider-role-badge is-${routeTestResult.route_role}`}>
+                {ROLE_LABELS[routeTestResult.route_role]}
+              </span>
+            )}
+          </div>
+          <div>{routeTestResult.message}</div>
+          {routeTestResult.provider_name && (
+            <div className="provider-route-meta">
+              {routeTestResult.provider_name} · {routeTestResult.model}
+              {routeTestResult.key_id ? ` · key ${routeTestResult.key_id}` : ''}
+              {routeTestResult.fallback_used ? ' · fallback used' : ''}
+              {routeTestResult.latency_ms != null ? ` · ${routeTestResult.latency_ms} ms` : ''}
+            </div>
+          )}
+          {routeTestResult.events.length > 0 && (
+            <ol className="provider-route-events">
+              {routeTestResult.events.map((event, index) => <li key={`${index}-${event}`}>{event}</li>)}
+            </ol>
+          )}
+        </div>
+      )}
 
       {catalogIsError && (
         <div className="provider-catalog-warning" role="status">
@@ -195,23 +284,24 @@ export default function ProvidersPanel() {
                   <span className="badge badge-muted">
                     {catalog.find((profile) => profile.id === p.provider_type)?.label ?? p.provider_type}
                   </span>{' '}
-                  {p.is_default && (
-                    <span className="badge badge-accent">default</span>
-                  )}
+                  <span className={`provider-role-badge is-${p.route_role}`}>
+                    {ROLE_LABELS[p.route_role]}
+                  </span>
                 </div>
                 <div style={{ fontSize: 13, color: 'var(--text-dim)', wordBreak: 'break-all' }}>
                   {p.model} — {p.endpoint}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-faint)' }}>
-                  key: {p.api_key_masked || '(none)'}
+                  {p.route_role === 'primary'
+                    ? `${p.api_key_count} key${p.api_key_count === 1 ? '' : 's'} in rotation · first ${p.api_key_masked || '(none)'}`
+                    : `key: ${p.api_key_masked || '(none)'}`}
                 </div>
               </div>
               <div className="provider-actions">
                 <div className="provider-actions-row">
                   <button disabled={testing === `card-${p.id}`} onClick={() => runTest(`card-${p.id}`, { provider_id: p.id })}>
-                    Test
+                    {p.route_role === 'primary' && p.api_key_count > 1 ? 'Test all keys' : 'Test'}
                   </button>
-                  {!p.is_default && <button onClick={() => defaultMutation.mutate(p.id)}>Set default</button>}
                   <button onClick={() => startEdit(p)}>Edit</button>
                   <button onClick={() => deleteMutation.mutate(p.id)}>Delete</button>
                 </div>
@@ -230,6 +320,23 @@ export default function ProvidersPanel() {
               <h3>{editingId === null ? 'Add Provider' : 'Edit Provider'}</h3>
             </div>
             <span className="provider-form-index">{editingId === null ? 'NEW' : `#${editingId}`}</span>
+          </div>
+
+          <div className="form-group provider-route-role-field">
+            <label htmlFor="provider-route-role">Routing role</label>
+            <select
+              id="provider-route-role"
+              value={form.route_role ?? 'standalone'}
+              onChange={(event) => setForm({
+                ...form,
+                route_role: event.target.value as NonNullable<ProviderInput['route_role']>,
+              })}
+            >
+              <option value="primary">Primary — normal traffic, multi-key rotation</option>
+              <option value="backup">Backup — automatic failover, single key</option>
+              <option value="standalone">Standalone — selected explicitly by a task</option>
+            </select>
+            <small>Saving a primary or backup route replaces the previous provider in that role.</small>
           </div>
 
           <div className="grid-2 provider-form-grid">
@@ -310,27 +417,39 @@ export default function ProvidersPanel() {
             </div>
           </div>
 
-          <div className="form-group">
-            <label htmlFor="provider-key">API Key {editingId !== null && '(leave blank to keep)'}</label>
-            <input
-              id="provider-key"
-              type="password"
-              value={form.api_key ?? ''}
-              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              placeholder="sk-…"
-              autoComplete="new-password"
-            />
-            <small>The key is stored server-side and only returned in masked form.</small>
-          </div>
-
-          <label className="provider-default-toggle">
-            <input
-              type="checkbox"
-              checked={form.is_default ?? false}
-              onChange={(e) => setForm({ ...form, is_default: e.target.checked })}
-            />
-            Set as default provider
-          </label>
+          {form.route_role === 'primary' ? (
+            <div className="form-group">
+              <label htmlFor="provider-key-pool">
+                Primary API key pool {editingId !== null && '(leave blank to keep existing keys)'}
+              </label>
+              <textarea
+                id="provider-key-pool"
+                className="provider-key-pool-input"
+                rows={5}
+                value={apiKeysText}
+                onChange={(event) => setApiKeysText(event.target.value)}
+                placeholder={'sk-primary-01\nsk-primary-02\nsk-primary-03'}
+                autoComplete="new-password"
+              />
+              <small>
+                One key per line. Calls reserve keys in a persisted round-robin sequence; duplicate
+                keys are rejected. Existing values are never returned to this page.
+              </small>
+            </div>
+          ) : (
+            <div className="form-group">
+              <label htmlFor="provider-key">API Key {editingId !== null && '(leave blank to keep)'}</label>
+              <input
+                id="provider-key"
+                type="password"
+                value={form.api_key ?? ''}
+                onChange={(event) => setForm({ ...form, api_key: event.target.value })}
+                placeholder="sk-…"
+                autoComplete="new-password"
+              />
+              <small>The key is stored server-side and only returned in masked form.</small>
+            </div>
+          )}
 
           <div className="provider-form-actions">
             <button className="btn-primary" disabled={!canSave || saveMutation.isPending} onClick={() => saveMutation.mutate()}>
@@ -343,7 +462,10 @@ export default function ProvidersPanel() {
                   provider_id: editingId,
                   endpoint: form.endpoint.trim(),
                   model: form.model.trim(),
-                  api_key: form.api_key?.trim() || undefined,
+                  api_key: form.route_role === 'primary' ? undefined : form.api_key?.trim() || undefined,
+                  api_keys: form.route_role === 'primary'
+                    ? (apiKeysText.trim() ? parseKeyPool(apiKeysText) : undefined)
+                    : undefined,
                 })
               }
             >

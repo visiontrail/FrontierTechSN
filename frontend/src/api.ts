@@ -50,8 +50,10 @@ export interface Provider {
   name: string;
   endpoint: string;
   api_key_masked: string;
+  api_key_count: number;
   model: string;
   is_default: boolean;
+  route_role: 'primary' | 'backup' | 'standalone';
   created_at: string;
 }
 
@@ -60,8 +62,10 @@ export interface ProviderInput {
   name: string;
   endpoint: string;
   api_key?: string;
+  api_keys?: string[];
   model: string;
   is_default?: boolean;
+  route_role?: 'primary' | 'backup' | 'standalone';
 }
 
 export interface ProviderCatalogEntry {
@@ -79,12 +83,35 @@ export interface ProviderTestRequest {
   endpoint?: string;
   model?: string;
   api_key?: string;
+  api_keys?: string[];
+}
+
+export interface ProviderKeyTestResult {
+  key_id: string;
+  ok: boolean;
+  message: string;
+  latency_ms?: number | null;
 }
 
 export interface ProviderTestResult {
   ok: boolean;
   message: string;
   latency_ms?: number | null;
+  keys_tested?: number;
+  keys_succeeded?: number;
+  key_results?: ProviderKeyTestResult[];
+}
+
+export interface ProviderRouteTestResult {
+  ok: boolean;
+  message: string;
+  route_role?: 'primary' | 'backup' | 'standalone' | null;
+  provider_name?: string | null;
+  model?: string | null;
+  key_id?: string | null;
+  fallback_used: boolean;
+  latency_ms?: number | null;
+  events: string[];
 }
 
 export interface Task {
@@ -505,6 +532,12 @@ export async function testProvider(input: ProviderTestRequest): Promise<Provider
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function testProviderRoute(): Promise<ProviderRouteTestResult> {
+  const res = await fetch(`${BASE}/api/providers/route-test`, { method: 'POST' });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

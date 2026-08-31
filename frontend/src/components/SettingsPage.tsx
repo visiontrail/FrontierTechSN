@@ -9,7 +9,7 @@ import PublishingPanel from './PublishingPanel'
 type Tab = 'models' | 'prompts' | 'skills' | 'publishing' | 'system'
 
 const TABS: { id: Tab; label: string; hint: string; index: string }[] = [
-  { id: 'models', label: 'Models', hint: 'Providers & endpoints', index: '01' },
+  { id: 'models', label: 'Models', hint: 'Primary & backup routing', index: '01' },
   { id: 'prompts', label: 'Prompts', hint: 'Pipeline instructions', index: '02' },
   { id: 'skills', label: 'Skills', hint: 'Composition bundles', index: '03' },
   { id: 'publishing', label: 'Publishing', hint: 'Platforms & accounts', index: '04' },

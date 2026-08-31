@@ -1,4 +1,4 @@
-"""Process-wide request pacing for the configured primary model gateway."""
+"""Process-wide, per-credential pacing for the persisted primary model."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from backend import config
-from backend.provider_catalog import PROVIDER_PROFILE_MAP
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -21,16 +20,22 @@ _next_request_at: dict[str, float] = {}
 _cooldown_until: dict[str, float] = {}
 
 
-def _primary_gateway_key(endpoint: str) -> str | None:
-    profile = PROVIDER_PROFILE_MAP.get(config.AI_PRIMARY_PROVIDER_TYPE)
-    if profile is None:
+def _primary_gateway_key(
+    endpoint: str,
+    *,
+    route_slot: str,
+    api_key_id: str,
+) -> str | None:
+    if route_slot != "primary" or not api_key_id:
         return None
     selected = urlsplit(endpoint.strip())
-    primary = urlsplit(profile.default_endpoint)
-    if not selected.hostname or selected.hostname.casefold() != (primary.hostname or "").casefold():
+    if not selected.hostname:
         return None
     port = selected.port or (443 if selected.scheme == "https" else 80)
-    return f"{selected.scheme.casefold()}://{selected.hostname.casefold()}:{port}"
+    return (
+        f"{selected.scheme.casefold()}://{selected.hostname.casefold()}:{port}"
+        f"/{api_key_id}"
+    )
 
 
 def _proactive_limit_active(now: datetime | None = None) -> bool:
@@ -48,12 +53,18 @@ def _proactive_limit_active(now: datetime | None = None) -> bool:
 async def wait_for_request_slot(
     endpoint: str,
     *,
+    route_slot: str = "standalone",
+    api_key_id: str = "",
     log: LogCallback | None = None,
     label: str = "AI call",
     now: datetime | None = None,
 ) -> float:
     """Reserve one globally paced OneAPI request start and return wait time."""
-    key = _primary_gateway_key(endpoint)
+    key = _primary_gateway_key(
+        endpoint,
+        route_slot=route_slot,
+        api_key_id=api_key_id,
+    )
     if key is None:
         return 0.0
     interval = (
@@ -75,7 +86,7 @@ async def wait_for_request_slot(
             )
             message = (
                 f"{label}: OneAPI rate gate waiting {delay:.1f}s before the next request "
-                f"({policy})"
+                f"for {api_key_id} ({policy})"
             )
             if log is not None:
                 log(message)
@@ -95,11 +106,17 @@ async def wait_for_request_slot(
 async def record_rate_limit(
     endpoint: str,
     *,
+    route_slot: str = "standalone",
+    api_key_id: str = "",
     log: LogCallback | None = None,
     label: str = "AI call",
 ) -> float:
     """Open a process-wide cooldown after OneAPI reports HTTP 429."""
-    key = _primary_gateway_key(endpoint)
+    key = _primary_gateway_key(
+        endpoint,
+        route_slot=route_slot,
+        api_key_id=api_key_id,
+    )
     if key is None:
         return 0.0
     cooldown = max(
@@ -113,8 +130,8 @@ async def record_rate_limit(
             now + cooldown,
         )
     message = (
-        f"{label}: OneAPI returned 429; pausing every local OneAPI request for "
-        f"{cooldown:.0f}s so the rolling one-minute quota can clear"
+        f"{label}: OneAPI returned 429 for {api_key_id}; pausing that API key for "
+        f"{cooldown:.0f}s so its rolling one-minute quota can clear"
     )
     if log is not None:
         log(message)

@@ -1,8 +1,10 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 from backend import config
-from backend.pipeline import digester
+from backend.pipeline import digester, model_router, provider_rate_limit
 
 
 class ChatCompletionsUrlTests(unittest.TestCase):
@@ -63,6 +65,64 @@ class ChatDispatchTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatHttpReasoningBudgetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_primary_429_rotates_key_without_consuming_provider_retry(self):
+        request = httpx.Request("POST", "http://oneapi.example/v1/chat/completions")
+        limited = httpx.Response(429, request=request, json={"error": "rate limit"})
+        completed = httpx.Response(
+            200,
+            request=request,
+            json={
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"content": "final answer"},
+                }],
+            },
+        )
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(side_effect=[limited, completed])
+        selected: list[str] = []
+        route = model_router.ModelRoute(
+            slot="primary",
+            provider_id=1,
+            provider_type="yinhe",
+            provider_name="OneAPI",
+            endpoint="http://oneapi.example/v1/chat/completions",
+            model="yinhe-thinking",
+            api_key="key-a",
+            api_keys=("key-a", "key-b"),
+        )
+
+        with (
+            patch.object(digester.httpx, "AsyncClient", return_value=client),
+            patch.object(
+                provider_rate_limit,
+                "wait_for_request_slot",
+                AsyncMock(return_value=0.0),
+            ),
+            patch.object(
+                provider_rate_limit,
+                "record_rate_limit",
+                AsyncMock(return_value=65.0),
+            ),
+            patch.object(config, "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", 0),
+        ):
+            result = await digester._chat_http(
+                "system",
+                "content",
+                route=route,
+                max_retries=0,
+                credential_selected=selected.append,
+            )
+
+        self.assertEqual(result, "final answer")
+        self.assertEqual(
+            [call.kwargs["headers"]["Authorization"] for call in client.post.await_args_list],
+            ["Bearer key-a", "Bearer key-b"],
+        )
+        self.assertEqual(selected, ["key-b"])
+
     async def test_empty_length_response_doubles_reasoning_budget_immediately(self):
         exhausted = MagicMock()
         exhausted.raise_for_status.return_value = None

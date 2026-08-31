@@ -12,6 +12,7 @@ def provider_row(
     endpoint: str,
     model: str,
     api_key: str,
+    route_role: str,
 ):
     return {
         "id": provider_id,
@@ -20,6 +21,7 @@ def provider_row(
         "endpoint": endpoint,
         "model": model,
         "api_key": api_key,
+        "route_role": route_role,
     }
 
 
@@ -59,6 +61,7 @@ class ModelRouterTests(unittest.IsolatedAsyncioTestCase):
                 "http://oneapi.yhroot.com/v1/chat/completions",
                 "yinhe-thinking",
                 "primary-secret",
+                "primary",
             ),
             provider_row(
                 2,
@@ -67,15 +70,18 @@ class ModelRouterTests(unittest.IsolatedAsyncioTestCase):
                 "https://api.deepseek.com/anthropic",
                 "deepseek-v4-flash",
                 "backup-secret",
+                "backup",
             ),
         ]
         with (
-            patch.object(config, "AI_PROVIDER_FAILOVER_ENABLED", True),
-            patch.object(config, "AI_PRIMARY_PROVIDER_TYPE", "yinhe"),
-            patch.object(config, "AI_BACKUP_PROVIDER_TYPE", "deepseek"),
             patch.object(config, "ANTHROPIC_BASE_URL", ""),
             patch.object(config, "ANTHROPIC_MODEL", ""),
             patch.object(database, "list_providers_raw", AsyncMock(return_value=rows)),
+            patch.object(
+                database,
+                "reserve_provider_api_key",
+                AsyncMock(return_value=(["primary-a", "primary-b"], 1)),
+            ) as reserve_key,
         ):
             routes = await model_router.resolve_model_routes(
                 endpoint="http://oneapi.yhroot.com/v1/chat/completions",
@@ -86,11 +92,29 @@ class ModelRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([route.slot for route in routes], ["primary", "backup"])
         self.assertEqual([route.provider_type for route in routes], ["yinhe", "deepseek"])
         self.assertEqual(routes[1].model, "deepseek-v4-flash")
+        self.assertEqual(routes[0].api_key, "primary-b")
+        self.assertEqual(routes[0].api_key_count, 2)
+        reserve_key.assert_awaited_once_with(1)
         self.assertNotIn("primary-secret", repr(routes[0]))
         self.assertNotIn("backup-secret", repr(routes[1]))
 
     async def test_explicit_deepseek_selection_never_routes_back_to_oneapi(self):
-        with patch.object(database, "list_providers_raw", AsyncMock()) as list_rows:
+        rows = [
+            provider_row(
+                2,
+                "deepseek",
+                "DeepSeek",
+                "https://api.deepseek.com/anthropic",
+                "deepseek-v4-flash",
+                "backup-secret",
+                "backup",
+            )
+        ]
+        with patch.object(
+            database,
+            "list_providers_raw",
+            AsyncMock(return_value=rows),
+        ) as list_rows:
             routes = await model_router.resolve_model_routes(
                 endpoint="https://api.deepseek.com/anthropic",
                 model="deepseek-v4-flash",
@@ -99,10 +123,16 @@ class ModelRouterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(routes), 1)
         self.assertEqual(routes[0].endpoint, "https://api.deepseek.com/anthropic")
-        list_rows.assert_not_awaited()
+        self.assertEqual(routes[0].slot, "standalone")
+        self.assertEqual(routes[0].provider_id, 2)
+        list_rows.assert_awaited_once()
 
     async def test_unsaved_custom_endpoint_never_uses_saved_backup(self):
-        with patch.object(database, "list_providers_raw", AsyncMock()) as list_rows:
+        with patch.object(
+            database,
+            "list_providers_raw",
+            AsyncMock(return_value=[]),
+        ) as list_rows:
             routes = await model_router.resolve_model_routes(
                 endpoint="https://custom.example/anthropic",
                 model="custom-model",
@@ -110,7 +140,27 @@ class ModelRouterTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(len(routes), 1)
-        list_rows.assert_not_awaited()
+        self.assertEqual(routes[0].slot, "standalone")
+        list_rows.assert_awaited_once()
+
+    def test_primary_route_rotates_only_to_an_untried_key(self):
+        route = model_router.ModelRoute(
+            slot="primary",
+            provider_id=1,
+            provider_type="yinhe",
+            provider_name="OneAPI",
+            endpoint="http://oneapi.example",
+            model="yinhe-thinking",
+            api_key="key-a",
+            api_keys=("key-a", "key-b", "key-c"),
+        )
+
+        second = route.next_untried_key({route.api_key_id})
+        self.assertIsNotNone(second)
+        third = second.next_untried_key({route.api_key_id, second.api_key_id})
+        self.assertIsNotNone(third)
+        self.assertEqual({route.api_key, second.api_key, third.api_key}, {"key-a", "key-b", "key-c"})
+        self.assertIsNone(third.next_untried_key({route.api_key_id, second.api_key_id, third.api_key_id}))
 
 
 if __name__ == "__main__":

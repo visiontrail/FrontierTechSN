@@ -10,6 +10,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, urlunsplit
 from backend import config
 from backend.pipeline.extractors.base import ExtractedContent
+from backend.provider_credentials import redact_api_keys
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -107,6 +108,12 @@ async def _chat(
 
     last_error: Exception | None = None
     for index, route in enumerate(routes):
+        selected_api_key = route.api_key
+
+        def remember_credential(api_key: str) -> None:
+            nonlocal selected_api_key
+            selected_api_key = api_key
+
         try:
             if config.AI_BACKEND == "agent_sdk":
                 from backend.pipeline import agent
@@ -127,12 +134,16 @@ async def _chat(
                         # cannot independently perform the same failover twice.
                         allow_provider_failover=False,
                         max_retries=model_router.max_retries_for_route(route),
+                        route=route,
+                        credential_selected=remember_credential,
                     )
                     if len(routes) > 1:
                         _dlog(log, f"{label}: completed via {route.audit_label}")
                     if route_selected is not None:
-                        route_selected(route.endpoint, route.model, route.api_key)
+                        route_selected(route.endpoint, route.model, selected_api_key)
                     return content
+                except model_router.ModelOutputCommittedError:
+                    raise
                 except Exception as exc:
                     # When a backup exists, move forward after the primary's
                     # SDK retry ladder. HTTP fallback is reserved for the last
@@ -156,12 +167,16 @@ async def _chat(
                 label=label,
                 max_tokens=max_tokens,
                 max_retries=model_router.max_retries_for_route(route),
+                route=route,
+                credential_selected=remember_credential,
             )
             if len(routes) > 1:
                 _dlog(log, f"{label}: completed via {route.audit_label}")
             if route_selected is not None:
-                route_selected(route.endpoint, route.model, route.api_key)
+                route_selected(route.endpoint, route.model, selected_api_key)
             return content
+        except model_router.ModelOutputCommittedError:
+            raise
         except Exception as exc:  # noqa: BLE001 - provider route boundary
             last_error = exc
             next_index = index + 1
@@ -234,10 +249,24 @@ async def _chat_http(
     label: str = "AI call",
     max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     max_retries: int | None = None,
+    route=None,
+    credential_selected: Callable[[str], None] | None = None,
 ) -> str:
-    endpoint = _chat_completions_url(endpoint or config.AI_ENDPOINT)
-    model = model or config.AI_MODEL
-    api_key = api_key if api_key is not None else config.AI_API_KEY
+    from backend.pipeline import model_router
+
+    if route is None:
+        route = model_router.ModelRoute(
+            slot="standalone",
+            provider_id=None,
+            provider_type="selected",
+            provider_name="Selected provider",
+            endpoint=endpoint or config.AI_ENDPOINT,
+            model=model or config.AI_MODEL,
+            api_key=api_key if api_key is not None else config.AI_API_KEY,
+        )
+    current_route = route
+    endpoint = _chat_completions_url(current_route.endpoint)
+    model = current_route.model
     retry_limit = max(
         0,
         int(config.AI_MAX_RETRIES if max_retries is None else max_retries),
@@ -249,10 +278,16 @@ async def _chat_http(
         current_max_tokens = max_tokens
         attempt = 0
         rate_limit_waits = 0
+        tried_key_ids = {current_route.api_key_id}
         while attempt <= retry_limit:
             start = time.perf_counter()
             retry_after_delay = 0.0
             quota_wait_requested = False
+            _dlog(
+                log,
+                f"{label}: using {current_route.api_key_id} "
+                f"({current_route.api_key_index + 1}/{current_route.api_key_count})",
+            )
             try:
                 prompt = system_prompt
                 if attempt > 0:
@@ -266,12 +301,17 @@ async def _chat_http(
 
                 await provider_rate_limit.wait_for_request_slot(
                     endpoint,
+                    route_slot=current_route.slot,
+                    api_key_id=current_route.api_key_id,
                     log=log,
                     label=label,
                 )
                 resp = await client.post(
                     endpoint,
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {current_route.api_key}",
+                        "Content-Type": "application/json",
+                    },
                     json={
                         "model": model,
                         "messages": [
@@ -299,6 +339,8 @@ async def _chat_http(
                 finish_str = f", finish={finish_reason}" if finish_reason else ""
                 _dlog(log, f"{label}: {model} responded in {elapsed_ms:.0f}ms ({len(content)} chars{usage_str}{finish_str})")
                 if content.strip():
+                    if credential_selected is not None:
+                        credential_selected(current_route.api_key)
                     return content
 
                 reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
@@ -332,6 +374,7 @@ async def _chat_http(
                 # where the API's real error detail lives (bad path, unknown
                 # model, auth, quota...). Surface status + URL + body.
                 body = e.response.text[:1000].strip() if e.response is not None else ""
+                body = redact_api_keys(body, current_route.api_keys)
                 detail = (
                     f"HTTP {e.response.status_code} {e.response.reason_phrase} "
                     f"from {e.request.method} {e.request.url} (model={model}); "
@@ -346,10 +389,23 @@ async def _chat_http(
                         retry_after_delay,
                         await provider_rate_limit.record_rate_limit(
                             endpoint,
+                            route_slot=current_route.slot,
+                            api_key_id=current_route.api_key_id,
                             log=log,
                             label=label,
                         ),
                     )
+                    alternate = current_route.next_untried_key(tried_key_ids)
+                    if alternate is not None:
+                        previous_key_id = current_route.api_key_id
+                        current_route = alternate
+                        tried_key_ids.add(current_route.api_key_id)
+                        _dwarn(
+                            log,
+                            f"{label}: rotating primary API key {previous_key_id} -> "
+                            f"{current_route.api_key_id} before provider failover",
+                        )
+                        continue
                     quota_wait_requested = (
                         retry_after_delay > 0
                         and rate_limit_waits
@@ -388,6 +444,7 @@ async def _chat_http(
                     f"{config.AI_PRIMARY_RATE_LIMIT_MAX_WAITS}; retrying the primary after "
                     "the shared cooldown without consuming a provider failure attempt",
                 )
+                tried_key_ids = {current_route.api_key_id}
                 continue
 
             if attempt < retry_limit:
@@ -403,6 +460,7 @@ async def _chat_http(
                 )
                 await asyncio.sleep(delay)
             attempt += 1
+            tried_key_ids = {current_route.api_key_id}
 
 
 async def test_connection(endpoint: str, model: str, api_key: str) -> int:

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
+from backend.provider_credentials import normalize_api_keys
 from backend.provider_catalog import PROVIDER_TYPES
 
 
@@ -427,13 +428,18 @@ class ManualPublicationRecord(BaseModel):
         return value.strip() or None
 
 
+ProviderRouteRole = Literal["primary", "backup", "standalone"]
+
+
 class ProviderCreate(BaseModel):
     provider_type: str = "custom"
     name: str
     endpoint: str
     api_key: Optional[str] = None
+    api_keys: Optional[list[str]] = None
     model: str
     is_default: bool = False
+    route_role: ProviderRouteRole = "standalone"
 
     @field_validator("provider_type")
     @classmethod
@@ -450,14 +456,33 @@ class ProviderCreate(BaseModel):
             raise ValueError("Replace endpoint placeholders before saving")
         return value
 
+    @field_validator("api_keys", mode="before")
+    @classmethod
+    def normalize_valid_api_keys(cls, value: object) -> object:
+        if value is None:
+            return None
+        try:
+            return normalize_api_keys(value)
+        except ValueError:
+            # Persistence performs the authoritative check and returns a
+            # secret-free HTTP error instead of Pydantic echoing the input.
+            return value
+
+    @model_validator(mode="after")
+    def validate_route_credentials(self):
+        self.is_default = self.route_role == "primary"
+        return self
+
 
 class ProviderUpdate(BaseModel):
     provider_type: Optional[str] = None
     name: Optional[str] = None
     endpoint: Optional[str] = None
     api_key: Optional[str] = None
+    api_keys: Optional[list[str]] = None
     model: Optional[str] = None
     is_default: Optional[bool] = None
+    route_role: Optional[ProviderRouteRole] = None
 
     @field_validator("provider_type")
     @classmethod
@@ -476,6 +501,15 @@ class ProviderUpdate(BaseModel):
             raise ValueError("Replace endpoint placeholders before saving")
         return value
 
+    @field_validator("api_keys", mode="before")
+    @classmethod
+    def normalize_valid_api_keys(cls, value: object) -> object:
+        if value is None:
+            return None
+        try:
+            return normalize_api_keys(value)
+        except ValueError:
+            return value
 
 class ProviderResponse(BaseModel):
     id: int
@@ -483,8 +517,10 @@ class ProviderResponse(BaseModel):
     name: str
     endpoint: str
     api_key_masked: str
+    api_key_count: int = 0
     model: str
     is_default: bool
+    route_role: ProviderRouteRole = "standalone"
     created_at: str
 
 
@@ -511,12 +547,34 @@ class ProviderTestRequest(BaseModel):
     endpoint: Optional[str] = None
     model: Optional[str] = None
     api_key: Optional[str] = None
+    api_keys: Optional[list[str]] = None
+
+class ProviderKeyTestResult(BaseModel):
+    key_id: str
+    ok: bool
+    message: str
+    latency_ms: Optional[int] = None
 
 
 class ProviderTestResponse(BaseModel):
     ok: bool
     message: str
     latency_ms: Optional[int] = None
+    keys_tested: int = 0
+    keys_succeeded: int = 0
+    key_results: list[ProviderKeyTestResult] = Field(default_factory=list)
+
+
+class ProviderRouteTestResponse(BaseModel):
+    ok: bool
+    message: str
+    route_role: Optional[ProviderRouteRole] = None
+    provider_name: Optional[str] = None
+    model: Optional[str] = None
+    key_id: Optional[str] = None
+    fallback_used: bool = False
+    latency_ms: Optional[int] = None
+    events: list[str] = Field(default_factory=list)
 
 
 class VoiceOption(BaseModel):

@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.models import ProviderCreate, ProviderUpdate
+from backend.provider_credentials import normalize_api_keys
 from backend.provider_catalog import (
     PROVIDER_PROFILES,
     describe_provider_catalog,
@@ -78,3 +79,23 @@ def test_provider_payloads_accept_catalog_types_and_reject_unknown_types():
             endpoint="https://{WorkspaceId}.example/apps/anthropic",
             model="qwen3.7-max",
         )
+
+
+def test_primary_accepts_a_unique_key_pool_and_owns_the_default_route():
+    provider = ProviderCreate(
+        provider_type="yinhe",
+        name="Yinhe OneAPI",
+        endpoint="https://oneapi.example/v1/chat/completions",
+        model="yinhe-thinking",
+        api_keys=[" key-a ", "key-b", "key-c"],
+        route_role="primary",
+    )
+
+    assert provider.api_keys == ["key-a", "key-b", "key-c"]
+    assert provider.is_default is True
+
+
+def test_duplicate_key_pool_error_does_not_echo_secrets():
+    with pytest.raises(ValueError, match="cannot contain duplicate") as duplicate:
+        normalize_api_keys(["secret-a", "secret-a"])
+    assert "secret-a" not in str(duplicate.value)

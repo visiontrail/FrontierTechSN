@@ -1811,6 +1811,80 @@ video {
   text-transform: uppercase;
 }
 
+.provider-route-test-button {
+  flex: 0 0 auto;
+}
+
+.provider-role-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  padding: 3px 7px;
+  vertical-align: middle;
+}
+
+.provider-role-badge.is-primary {
+  border-color: color-mix(in srgb, var(--accent-green) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent-green) 10%, transparent);
+  color: var(--accent-green);
+}
+
+.provider-role-badge.is-backup {
+  border-color: color-mix(in srgb, var(--accent-yellow) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent-yellow) 10%, transparent);
+  color: var(--accent-yellow);
+}
+
+.provider-role-badge.is-standalone {
+  color: var(--text-faint);
+}
+
+.provider-route-result {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--text-dim);
+  padding: 12px 14px;
+  font-size: 12px;
+}
+
+.provider-route-result.is-ok {
+  border-color: color-mix(in srgb, var(--accent-green) 40%, var(--border));
+}
+
+.provider-route-result.is-fail {
+  border-color: color-mix(in srgb, var(--accent-red) 40%, var(--border));
+}
+
+.provider-route-result-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+  color: var(--text);
+}
+
+.provider-route-meta {
+  margin-top: 5px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.provider-route-events {
+  margin: 9px 0 0 18px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
 .provider-catalog-warning {
   margin-bottom: 16px;
   border: 1px solid color-mix(in srgb, var(--accent-yellow) 45%, var(--border));
@@ -1887,9 +1961,19 @@ video {
 
 .provider-form-card #provider-endpoint,
 .provider-form-card #provider-model,
+.provider-form-card .provider-key-pool-input,
 .provider-manual-field {
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+.provider-route-role-field {
+  margin-bottom: 18px;
+}
+
+.provider-key-pool-input {
+  min-height: 112px;
+  resize: vertical;
 }
 
 .provider-manual-field {
@@ -1932,6 +2016,16 @@ video {
   font-size: 12px;
 }
 
+.provider-key-test-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 9px;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
 .provider-test-result.is-testing {
   color: var(--text-dim);
 }
@@ -1945,6 +2039,14 @@ video {
 }
 
 @media (max-width: 760px) {
+  .panel-head {
+    flex-direction: column;
+  }
+
+  .provider-route-test-button {
+    width: 100%;
+  }
+
   .provider-row {
     flex-direction: column;
     align-items: stretch;

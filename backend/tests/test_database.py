@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -45,7 +46,9 @@ class TaskDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await database._migrate_providers(connection)
             row = (
                 await connection.execute_fetchall(
-                    "SELECT provider_type, endpoint, api_key, model FROM providers"
+                    """SELECT provider_type, endpoint, api_key, api_keys_json,
+                              api_key_cursor, model, route_role
+                       FROM providers"""
                 )
             )[0]
             await connection.close()
@@ -53,7 +56,10 @@ class TaskDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["provider_type"], "yinhe")
         self.assertEqual(row["endpoint"], "http://oneapi.yhroot.com/v1/chat/completions")
         self.assertEqual(row["api_key"], "secret-key")
+        self.assertEqual(json.loads(row["api_keys_json"]), ["secret-key"])
+        self.assertEqual(row["api_key_cursor"], 0)
         self.assertEqual(row["model"], "yinhe-chat")
+        self.assertEqual(row["route_role"], "primary")
 
     async def test_provider_catalog_type_round_trips_through_database_response(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -76,6 +82,68 @@ class TaskDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created.provider_type, "moonshot")
         self.assertEqual(created.api_key_masked, "secr...-key")
         self.assertEqual([provider.provider_type for provider in listed], ["moonshot"])
+
+    async def test_provider_roles_are_unique_and_primary_key_cursor_persists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "routes.db"
+            with (
+                patch.object(config, "DB_PATH", db_path),
+                patch.object(config, "AI_ENDPOINT", ""),
+            ):
+                await database.init_db()
+                first_primary = await database.create_provider(
+                    provider_type="yinhe",
+                    name="Primary old",
+                    endpoint="https://primary-old.example/v1/chat/completions",
+                    api_key=None,
+                    api_keys=["key-a", "key-b", "key-c"],
+                    model="old-model",
+                    is_default=False,
+                    route_role="primary",
+                )
+                with self.assertRaisesRegex(ValueError, "Only the primary"):
+                    await database.create_provider(
+                        provider_type="deepseek",
+                        name="Invalid backup pool",
+                        endpoint="https://backup.example/anthropic",
+                        api_key=None,
+                        api_keys=["backup-a", "backup-b"],
+                        model="backup-model",
+                        is_default=False,
+                        route_role="backup",
+                    )
+                backup = await database.create_provider(
+                    provider_type="deepseek",
+                    name="Backup",
+                    endpoint="https://backup.example/anthropic",
+                    api_key="backup-key",
+                    model="backup-model",
+                    is_default=True,
+                    route_role="backup",
+                )
+                replacement = await database.create_provider(
+                    provider_type="yinhe",
+                    name="Primary current",
+                    endpoint="https://primary.example/v1/chat/completions",
+                    api_key=None,
+                    api_keys=["key-a", "key-b", "key-c"],
+                    model="primary-model",
+                    is_default=False,
+                    route_role="primary",
+                )
+                reservations = [
+                    await database.reserve_provider_api_key(replacement.id)
+                    for _ in range(4)
+                ]
+                listed = await database.list_providers()
+
+        by_id = {provider.id: provider for provider in listed}
+        self.assertEqual(by_id[first_primary.id].route_role, "standalone")
+        self.assertEqual(by_id[backup.id].route_role, "backup")
+        self.assertEqual(by_id[replacement.id].route_role, "primary")
+        self.assertEqual(by_id[replacement.id].api_key_count, 3)
+        self.assertEqual([index for _, index in reservations], [0, 1, 2, 0])
+        self.assertTrue(all(keys == ["key-a", "key-b", "key-c"] for keys, _ in reservations))
 
     async def test_task_status_compare_and_set_has_only_one_concurrent_winner(self):
         with tempfile.TemporaryDirectory() as directory:

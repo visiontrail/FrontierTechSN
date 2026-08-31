@@ -77,6 +77,24 @@ run, including uploads and publishing, passes against the isolated accounts.
 
 Open [http://localhost:8101](http://localhost:8101). The production launcher builds the frontend and serves the UI/API/outputs from one port. Override with `PORT` only when needed.
 
+### Model routing
+
+Configure model endpoints and credentials under **Admin → Models**. Routing
+roles are persisted in the application database; `.env` does not select the
+primary or backup provider.
+
+- **Primary** carries normal task traffic and accepts up to 64 API keys, one
+  per line. Calls reserve keys through a persisted round-robin cursor, and an
+  HTTP 429 before any model output rotates to an untried primary key first.
+- **Backup** accepts one API key and activates only after the primary route's
+  bounded attempts are exhausted.
+- **Standalone** providers are used only when a task explicitly selects them.
+
+The route test in the same panel exercises the real task dispatcher and reports
+the provider role and non-reversible key ID actually used. Once model or tool
+output has begun, the dispatcher refuses to replay that turn through another
+key or provider.
+
 With no saved desk configuration, the next edition runs automatically at 05:30 Asia/Singapore, publishes to YouTube and X through the accounts signed into Chrome, and updates the Apple Podcasts RSS feed. YouTube production visibility defaults to `public`. A first launch later than the two-hour morning window waits for the next scheduled edition instead of publishing stale news.
 
 The **Morning Desk** page configures:

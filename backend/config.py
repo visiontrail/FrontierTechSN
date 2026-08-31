@@ -47,16 +47,16 @@ AI_RETRY_MAX_SECONDS = float(os.getenv("AI_RETRY_MAX_SECONDS", "60"))
 AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS = float(
     os.getenv("AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", "15")
 )
-# A 429 means the rolling minute is already full, potentially because another
-# process or operator used the same account. Stop all local OneAPI starts for a
-# complete window instead of merely applying the normal between-call spacing.
+# A 429 means that key's rolling minute is already full, potentially because
+# another process or operator used the same credential. Pause that key for a
+# complete window while other keys in the primary pool remain available.
 AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS = float(
     os.getenv("AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS", "65")
 )
-# Quota exhaustion is not a model failure. Let the automation sit through a
-# bounded number of full rolling-minute windows before a 429 begins consuming
-# the primary route's ordinary failure budget and can eventually trigger the
-# paid backup.
+# Quota exhaustion is not a model failure. Rotate every untried primary key,
+# then let the automation sit through a bounded number of full rolling-minute
+# windows before a 429 consumes the ordinary failure budget and can eventually
+# trigger the backup.
 AI_PRIMARY_RATE_LIMIT_MAX_WAITS = int(
     os.getenv("AI_PRIMARY_RATE_LIMIT_MAX_WAITS", "6")
 )
@@ -72,16 +72,10 @@ AI_PRIMARY_RATE_LIMIT_START_HOUR = int(
 AI_PRIMARY_RATE_LIMIT_END_HOUR = int(
     os.getenv("AI_PRIMARY_RATE_LIMIT_END_HOUR", "20")
 )
-# Automated editions use an ordered provider route.  Unlike RavenAIService's
-# latency-sensitive interactive router, the worker deliberately gives the
-# primary gateway its full timeout/retry ladder before moving on.  Provider
-# types refer to the Admin -> Models catalogue, not mutable display names.
-AI_PROVIDER_FAILOVER_ENABLED = _env_bool("AI_PROVIDER_FAILOVER_ENABLED", "1")
-AI_PRIMARY_PROVIDER_TYPE = os.getenv("AI_PRIMARY_PROVIDER_TYPE", "yinhe").strip()
-AI_BACKUP_PROVIDER_TYPE = os.getenv("AI_BACKUP_PROVIDER_TYPE", "deepseek").strip()
-# Per-route ceilings. Four full OneAPI turns preserve the automation worker's
-# high latency tolerance without letting one node occupy 2.5 hours; the backup
-# gets three independent chances before the task fails closed.
+# Admin -> Models persists the primary/backup roles and provider credentials.
+# These are execution-policy ceilings only: four full primary turns preserve
+# the automation worker's high latency tolerance before the backup receives
+# three independent chances and the task fails closed.
 AI_PRIMARY_MAX_RETRIES = int(os.getenv("AI_PRIMARY_MAX_RETRIES", "3"))
 AI_BACKUP_MAX_RETRIES = int(os.getenv("AI_BACKUP_MAX_RETRIES", "2"))
 
