@@ -150,14 +150,10 @@ OPENCLI_RETRY_BASE_SECONDS = float(os.getenv("OPENCLI_RETRY_BASE_SECONDS", "3"))
 OPENCLI_WEB_REQUEST_INTERVAL_SECONDS = int(
     os.getenv("OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "180")
 )
-# Daily-news claim review starts with fast Gemini Flash. A failed or malformed
-# primary turn falls back to ChatGPT at a deliberately non-Pro reasoning level.
+# Daily-news claim review uses ChatGPT at a deliberately non-Pro reasoning level.
 DAILY_NEWS_CHATGPT_REVIEW_MODEL = os.getenv(
     "DAILY_NEWS_CHATGPT_REVIEW_MODEL", "medium"
 ).strip() or "medium"
-DAILY_NEWS_GEMINI_REVIEW_MODEL = os.getenv(
-    "DAILY_NEWS_GEMINI_REVIEW_MODEL", "3.7-flash"
-).strip() or "3.7-flash"
 DAILY_NEWS_WEB_REVIEW_TIMEOUT = int(
     os.getenv("DAILY_NEWS_WEB_REVIEW_TIMEOUT", "90")
 )

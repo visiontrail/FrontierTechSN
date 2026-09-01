@@ -288,6 +288,27 @@ class SettingsStoreTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.field("ORPHEUS_TTS_SPEED_PERCENT")
 
+    def test_retired_daily_news_gemini_model_is_pruned(self):
+        self.store.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "values": {
+                        "DAILY_NEWS_GEMINI_REVIEW_MODEL": "3.7-flash",
+                        "DAILY_NEWS_CHATGPT_REVIEW_MODEL": "medium",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        settings_store.apply_saved()
+
+        self.assertNotIn("DAILY_NEWS_GEMINI_REVIEW_MODEL", self.stored())
+        self.assertEqual(self.stored()["DAILY_NEWS_CHATGPT_REVIEW_MODEL"], "medium")
+        with self.assertRaises(AssertionError):
+            self.field("DAILY_NEWS_GEMINI_REVIEW_MODEL")
+
     def test_provider_routing_settings_are_pruned_from_system_admin(self):
         provider_keys = {
             "AI_ENDPOINT",

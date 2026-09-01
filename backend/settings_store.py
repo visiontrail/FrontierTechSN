@@ -30,6 +30,9 @@ _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off", ""}
 _RETIRED_KEYS = {
     "ORPHEUS_TTS_SPEED_PERCENT",
+    # Fact check is ChatGPT-only. Keep Gemini settings for video stages, but
+    # discard the retired daily-news review override from older stores.
+    "DAILY_NEWS_GEMINI_REVIEW_MODEL",
     # Provider routing is owned by Admin -> Models. Prune the former System
     # overrides so hidden settings cannot keep winning after the fields move.
     "AI_ENDPOINT",
@@ -689,18 +692,10 @@ SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         "DAILY_NEWS_CHATGPT_REVIEW_MODEL", "footage",
-        "News review ChatGPT fallback level", "choice",
+        "News review ChatGPT level", "choice",
         options=("instant", "medium", "high", "xhigh"),
-        description="Thinking level used only when the primary Gemini story "
-                    "review fails. Medium avoids Pro-mode latency.",
-        allow_blank=False,
-    ),
-    SettingSpec(
-        "DAILY_NEWS_GEMINI_REVIEW_MODEL", "footage",
-        "News review Gemini primary model", "string",
-        placeholder="3.7-flash",
-        description="Canonical Gemini Web model used first for every story review. "
-                    "Failures fall back to ChatGPT.",
+        description="Thinking level used for every daily-news Fact check. "
+                    "Medium avoids Pro-mode latency.",
         allow_blank=False,
     ),
     SettingSpec(
@@ -809,9 +804,8 @@ def _read_store() -> dict[str, Any]:
     values = payload.get("values")
     if not isinstance(values, dict):
         return {}
-    # Voice speed used to be an Admin knob and could be persisted at values such
-    # as 140%.  It is now an immutable natural-speed contract: prune the retired
-    # override rather than merely hiding it, so it cannot return after restart.
+    # Prune retired overrides rather than merely hiding them, so they cannot
+    # return after restart or keep influencing an older runtime path.
     if any(key in values for key in _RETIRED_KEYS):
         values = {
             key: value for key, value in values.items() if key not in _RETIRED_KEYS

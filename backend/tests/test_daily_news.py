@@ -239,6 +239,15 @@ def test_saved_web_review_is_reused_only_for_the_exact_prompt(tmp_path: Path):
         claims,
     ) is None
 
+    response_path.write_text("[GEMINI 1]\nW1P;2P", encoding="utf-8")
+    assert review._cached_batch_review(
+        prompt_path,
+        response_path,
+        prompt,
+        [1, 2],
+        claims,
+    ) is None
+
 
 def test_saved_duration_candidate_requires_a_complete_prompt_matched_audit(tmp_path: Path):
     articles = [
@@ -1426,50 +1435,59 @@ def test_review_recovery_requires_the_current_request_anchor():
     ) == ""
 
 
-def test_story_review_uses_gemini_primary_without_touching_chatgpt():
-    command = AsyncMock(
-        return_value=OpenCLIResult(
-            ("gemini", "ask"),
-            0,
-            '[{"response":"💬 W1P"}]',
-            "",
-        )
-    )
+def test_story_review_uses_chatgpt_only_without_touching_gemini():
+    async def command(args, **kwargs):
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"response":"💬 W1P","conversationUrl":"https://chatgpt.com/c/fact"}]',
+                "",
+            )
+        raise AssertionError(args)
+
+    command = AsyncMock(side_effect=command)
     with patch.object(review, "run_opencli", command):
         payload, _, url, provider = asyncio.run(
             review._web_story_review("audit\nmore", story_number=1, log=None)
         )
 
     assert payload["approved"] is True
-    assert url == ""
-    assert provider == "gemini"
-    assert command.await_count == 1
-    args = command.await_args.args[0]
-    assert args[:2] == ["gemini", "ask"]
-    assert args[args.index("--model") + 1] == "3.7-flash"
+    assert url.endswith("/fact")
+    assert provider == "chatgpt"
+    assert command.await_count == 2
+    calls = [call.args[0] for call in command.await_args_list]
+    assert not any(args[0] == "gemini" for args in calls)
+    assert calls[0][:3] == ["chatgpt", "model", "medium"]
+    args = calls[1]
+    assert args[:2] == ["chatgpt", "ask"]
     assert args[args.index("--new") + 1] == "true"
     assert review._REVIEW_REQUEST_RE.search(args[2])
     assert "\n" not in args[2]
-    assert command.await_args.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 60
-    assert command.await_args.kwargs["site_session_namespace"].startswith(
+    assert command.await_args.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 20
+    assert all(call.kwargs["site_session_namespace"].startswith(
         "frontiertechsn-review-"
-    )
+    ) for call in command.await_args_list)
 
 
-def test_gemini_late_recovery_accepts_only_its_owned_turn():
+def test_chatgpt_late_recovery_accepts_only_its_owned_turn():
     owned_prompt = ""
 
     async def command(args, **kwargs):
         nonlocal owned_prompt
-        if args[:2] == ["gemini", "ask"]:
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
             owned_prompt = args[2]
             return OpenCLIResult(
                 tuple(args),
                 0,
-                '[{"response":"💬 [NO RESPONSE] No Gemini response within 90s."}]',
+                '[{"response":"💬 [NO RESPONSE] No ChatGPT response within 90s."}]',
                 "",
             )
-        if args[:2] == ["gemini", "read"]:
+        if args[:2] == ["chatgpt", "read"]:
             turns = [
                 {"Index": 1, "Role": "Assistant", "Text": "What's the vibe, Leo?"},
                 {"Index": 2, "Role": "User", "Text": owned_prompt},
@@ -1486,9 +1504,9 @@ def test_gemini_late_recovery_accepts_only_its_owned_turn():
         )
 
     assert payload["approved"] is True
-    assert provider == "gemini"
-    assert "[GEMINI RECOVERY]" in raw
-    assert not any(call.args[0][0] == "chatgpt" for call in command_mock.await_args_list)
+    assert provider == "chatgpt"
+    assert "[CHATGPT RECOVERY]" in raw
+    assert not any(call.args[0][0] == "gemini" for call in command_mock.await_args_list)
     assert len(
         {
             call.kwargs["site_session_namespace"]
@@ -1497,21 +1515,23 @@ def test_gemini_late_recovery_accepts_only_its_owned_turn():
     ) == 1
 
 
-def test_unowned_gemini_greeting_is_rejected_before_fresh_retry():
-    gemini_asks = 0
+def test_unowned_chatgpt_greeting_is_rejected_before_fresh_retry():
+    chatgpt_asks = 0
 
     async def command(args, **kwargs):
-        nonlocal gemini_asks
-        if args[:2] == ["gemini", "ask"]:
-            gemini_asks += 1
-            response = "[NO RESPONSE]" if gemini_asks == 1 else "W1P2P"
+        nonlocal chatgpt_asks
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_asks += 1
+            response = "[NO RESPONSE]" if chatgpt_asks == 1 else "W1P2P"
             return OpenCLIResult(
                 tuple(args),
                 0,
                 json.dumps([{"response": response}]),
                 "",
             )
-        if args[:2] == ["gemini", "read"]:
+        if args[:2] == ["chatgpt", "read"]:
             unrelated = [
                 {"Index": 1, "Role": "Assistant", "Text": "What's the vibe, Leo?"},
                 {"Index": 2, "Role": "User", "Text": "Analyze a Kuala Lumpur B-roll video"},
@@ -1526,26 +1546,29 @@ def test_unowned_gemini_greeting_is_rejected_before_fresh_retry():
         )
 
     assert payload["approved"] is True
-    assert provider == "gemini"
-    assert gemini_asks == 2
+    assert provider == "chatgpt"
+    assert chatgpt_asks == 2
     assert "What's the vibe" not in raw
-    gemini_calls = [
+    chatgpt_calls = [
         call.args[0]
         for call in command_mock.await_args_list
-        if call.args[0][:2] == ["gemini", "ask"]
+        if call.args[0][:2] == ["chatgpt", "ask"]
     ]
-    assert all(args[args.index("--new") + 1] == "true" for args in gemini_calls)
+    assert all(args[args.index("--new") + 1] == "true" for args in chatgpt_calls)
+    assert not any(call.args[0][0] == "gemini" for call in command_mock.await_args_list)
 
 
-def test_gemini_late_recovery_polls_before_resubmitting_the_owned_request():
+def test_chatgpt_late_recovery_polls_before_resubmitting_the_owned_request():
     owned_prompt = ""
-    gemini_asks = 0
-    gemini_reads = 0
+    chatgpt_asks = 0
+    chatgpt_reads = 0
 
     async def command(args, **kwargs):
-        nonlocal owned_prompt, gemini_asks, gemini_reads
-        if args[:2] == ["gemini", "ask"]:
-            gemini_asks += 1
+        nonlocal owned_prompt, chatgpt_asks, chatgpt_reads
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_asks += 1
             owned_prompt = args[2]
             return OpenCLIResult(
                 tuple(args),
@@ -1553,10 +1576,10 @@ def test_gemini_late_recovery_polls_before_resubmitting_the_owned_request():
                 '[{"response":"[NO RESPONSE]"}]',
                 "",
             )
-        if args[:2] == ["gemini", "read"]:
-            gemini_reads += 1
+        if args[:2] == ["chatgpt", "read"]:
+            chatgpt_reads += 1
             turns = [{"Role": "User", "Text": owned_prompt}]
-            if gemini_reads == 3:
+            if chatgpt_reads == 3:
                 turns.append({"Role": "Assistant", "Text": "W1P2P"})
             return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
         raise AssertionError(args)
@@ -1567,31 +1590,16 @@ def test_gemini_late_recovery_polls_before_resubmitting_the_owned_request():
         )
 
     assert payload["approved"] is True
-    assert provider == "gemini"
-    assert gemini_asks == 1
-    assert gemini_reads == 3
+    assert provider == "chatgpt"
+    assert chatgpt_asks == 1
+    assert chatgpt_reads == 3
 
 
-def test_story_review_falls_back_to_fresh_chatgpt_after_gemini_exhaustion():
-    gemini_asks = 0
+def test_story_review_retries_fresh_chatgpt_without_gemini_fallback():
+    chatgpt_asks = 0
 
     async def command(args, **kwargs):
-        nonlocal gemini_asks
-        if args[:2] == ["gemini", "ask"]:
-            gemini_asks += 1
-            return OpenCLIResult(
-                tuple(args),
-                0,
-                '[{"response":"[NO RESPONSE]"}]',
-                "",
-            )
-        if args[:2] == ["gemini", "read"]:
-            return OpenCLIResult(
-                tuple(args),
-                0,
-                '[{"Role":"Assistant","Text":"What is next?"}]',
-                "",
-            )
+        nonlocal chatgpt_asks
         if args[:2] == ["chatgpt", "model"]:
             return OpenCLIResult(
                 tuple(args),
@@ -1600,12 +1608,16 @@ def test_story_review_falls_back_to_fresh_chatgpt_after_gemini_exhaustion():
                 "",
             )
         if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_asks += 1
+            response = "[NO RESPONSE]" if chatgpt_asks == 1 else "W1P2P"
             return OpenCLIResult(
                 tuple(args),
                 0,
-                '[{"response":"W1P2P","conversationUrl":"https://chatgpt.com/c/fallback"}]',
+                json.dumps([{"response": response, "conversationUrl": ""}]),
                 "",
             )
+        if args[:2] == ["chatgpt", "read"]:
+            return OpenCLIResult(tuple(args), 0, "[]", "")
         raise AssertionError(args)
 
     command_mock = AsyncMock(side_effect=command)
@@ -1616,26 +1628,21 @@ def test_story_review_falls_back_to_fresh_chatgpt_after_gemini_exhaustion():
 
     assert payload["approved"] is True
     assert provider == "chatgpt"
-    assert url.endswith("/fallback")
-    assert gemini_asks == 2
+    assert url == ""
+    assert chatgpt_asks == 2
     calls = [call.args[0] for call in command_mock.await_args_list]
-    first_chatgpt = next(index for index, args in enumerate(calls) if args[0] == "chatgpt")
-    assert all(args[0] == "gemini" for args in calls[:first_chatgpt])
+    assert not any(args[0] == "gemini" for args in calls)
     chatgpt_ask = next(args for args in calls if args[:2] == ["chatgpt", "ask"])
     assert chatgpt_ask[chatgpt_ask.index("--new") + 1] == "true"
     assert chatgpt_ask[chatgpt_ask.index("--window") + 1] == "foreground"
 
 
-def test_chatgpt_fallback_retries_transient_model_picker_failure():
+def test_chatgpt_fact_check_retries_transient_model_picker_failure():
     model_attempts = 0
     messages: list[str] = []
 
     async def command(args, **kwargs):
         nonlocal model_attempts
-        if args[:2] == ["gemini", "ask"]:
-            return OpenCLIResult(tuple(args), 0, '[{"response":"[NO RESPONSE]"}]', "")
-        if args[:2] == ["gemini", "read"]:
-            return OpenCLIResult(tuple(args), 0, "[]", "")
         if args[:2] == ["chatgpt", "model"]:
             model_attempts += 1
             if model_attempts == 1:
@@ -1676,17 +1683,13 @@ def test_chatgpt_fallback_retries_transient_model_picker_failure():
     sleep.assert_any_await(review._MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
 
-def test_chatgpt_fallback_uses_current_model_when_picker_remains_unavailable():
+def test_chatgpt_fact_check_uses_current_model_when_picker_remains_unavailable():
     model_attempts = 0
     chatgpt_asks = 0
     messages: list[str] = []
 
     async def command(args, **kwargs):
         nonlocal model_attempts, chatgpt_asks
-        if args[:2] == ["gemini", "ask"]:
-            return OpenCLIResult(tuple(args), 0, '[{"response":"N"}]', "")
-        if args[:2] == ["gemini", "read"]:
-            return OpenCLIResult(tuple(args), 0, "[]", "")
         if args[:2] == ["chatgpt", "model"]:
             model_attempts += 1
             raise OpenCLIError("Could not find the ChatGPT model selector in the composer")
@@ -1717,20 +1720,16 @@ def test_chatgpt_fallback_uses_current_model_when_picker_remains_unavailable():
     assert url.endswith("/current")
     assert model_attempts == 2
     assert chatgpt_asks == 1
-    assert "[CHATGPT CURRENT MODEL FALLBACK]" in raw
+    assert "[CHATGPT CURRENT MODEL]" in raw
     assert any("current model" in message for message in messages)
 
 
-def test_chatgpt_fallback_recovers_the_target_conversation_after_route_drift():
+def test_chatgpt_fact_check_recovers_target_conversation_after_route_drift():
     chatgpt_prompt = ""
     target_url = "https://chatgpt.com/c/6a868e01-3b9c-83ec-b973-e3aee234afe4"
 
     async def command(args, **kwargs):
         nonlocal chatgpt_prompt
-        if args[:2] == ["gemini", "ask"]:
-            raise OpenCLIError("Gemini browser lease failed")
-        if args[:2] == ["gemini", "read"]:
-            return OpenCLIResult(tuple(args), 0, "[]", "")
         if args[:2] == ["chatgpt", "model"]:
             return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
         if args[:2] == ["chatgpt", "ask"]:
@@ -1769,17 +1768,13 @@ def test_chatgpt_fallback_recovers_the_target_conversation_after_route_drift():
     assert detail.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 15
 
 
-def test_chatgpt_fallback_retries_target_conversation_until_protocol_is_stable():
+def test_chatgpt_fact_check_retries_target_until_protocol_is_stable():
     chatgpt_prompt = ""
     detail_reads = 0
     target_url = "https://chatgpt.com/c/6a8efd33-7908-83ec-af9a-5f2f74befe0b"
 
     async def command(args, **kwargs):
         nonlocal chatgpt_prompt, detail_reads
-        if args[:2] == ["gemini", "ask"]:
-            raise OpenCLIError("Gemini browser lease failed")
-        if args[:2] == ["gemini", "read"]:
-            return OpenCLIResult(tuple(args), 0, "[]", "")
         if args[:2] == ["chatgpt", "model"]:
             return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
         if args[:2] == ["chatgpt", "ask"]:
@@ -1830,17 +1825,19 @@ def test_chatgpt_fallback_retries_target_conversation_until_protocol_is_stable()
     sleep.assert_any_await(review._RECOVERY_POLL_INTERVAL_SECONDS)
 
 
-def test_gemini_retry_uses_current_flash_when_model_picker_is_missing():
-    gemini_asks = 0
+def test_chatgpt_fact_check_retries_submission_without_using_gemini():
+    chatgpt_asks = 0
 
     async def command(args, **kwargs):
-        nonlocal gemini_asks
-        if args[:2] == ["gemini", "ask"]:
-            gemini_asks += 1
-            if gemini_asks == 1:
-                raise OpenCLIError("Gemini model picker button was not found")
+        nonlocal chatgpt_asks
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_asks += 1
+            if chatgpt_asks == 1:
+                raise OpenCLIError("ChatGPT composer submission failed")
             return OpenCLIResult(tuple(args), 0, '[{"response":"W1P2P"}]', "")
-        if args[:2] == ["gemini", "read"]:
+        if args[:2] == ["chatgpt", "read"]:
             return OpenCLIResult(tuple(args), 0, "[]", "")
         raise AssertionError(args)
 
@@ -1850,32 +1847,19 @@ def test_gemini_retry_uses_current_flash_when_model_picker_is_missing():
             review._web_story_review("audit", story_numbers=[1, 2], log=None)
         )
 
-    gemini_calls = [
+    chatgpt_calls = [
         call.args[0]
         for call in command_mock.await_args_list
-        if call.args[0][:2] == ["gemini", "ask"]
+        if call.args[0][:2] == ["chatgpt", "ask"]
     ]
     assert payload["approved"] is True
-    assert provider == "gemini"
-    assert "--model" in gemini_calls[0]
-    assert "--model" not in gemini_calls[1]
-    assert gemini_calls[0][gemini_calls[0].index("--new") + 1] == "true"
-    assert gemini_calls[1][gemini_calls[1].index("--new") + 1] == "false"
+    assert provider == "chatgpt"
+    assert chatgpt_asks == 2
+    assert all(args[args.index("--new") + 1] == "true" for args in chatgpt_calls)
+    assert not any(call.args[0][0] == "gemini" for call in command_mock.await_args_list)
 
 
-@pytest.mark.parametrize(
-    ("provider", "fallback_used", "reviewer_fragment"),
-    [
-        ("gemini", False, "Gemini Web (3.7-flash) via"),
-        ("chatgpt", True, "with ChatGPT Web (medium) fallback"),
-    ],
-)
-def test_review_report_records_gemini_primary_and_chatgpt_fallback(
-    tmp_path: Path,
-    provider: str,
-    fallback_used: bool,
-    reviewer_fragment: str,
-):
+def test_review_report_records_chatgpt_only(tmp_path: Path):
     articles = [
         research.NewsArticle(
             id=str(index),
@@ -1905,7 +1889,7 @@ def test_review_report_records_gemini_primary_and_chatgpt_fallback(
         "issues": [],
         "corrected_script": "",
     }
-    web_review = AsyncMock(return_value=(payload, "[RAW]", "", provider))
+    web_review = AsyncMock(return_value=(payload, "[CHATGPT 1]\nW1P;2P", "", "chatgpt"))
     contract = {"passed": True, "failures": []}
 
     with (
@@ -1929,8 +1913,9 @@ def test_review_report_records_gemini_primary_and_chatgpt_fallback(
             )
         )
 
-    assert result.report["fallback_used"] is fallback_used
-    assert reviewer_fragment in result.report["reviewer"]
+    assert result.report["fallback_used"] is False
+    assert result.report["reviewer"] == "ChatGPT Web (medium) via project-local OpenCLI"
+    assert result.report["attempts"][0]["providers"] == ["chatgpt"]
     assert web_review.await_args.kwargs["site_session_namespace"].startswith(
         "frontiertechsn-review-"
     )

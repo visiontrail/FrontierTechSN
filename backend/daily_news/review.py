@@ -577,8 +577,15 @@ def _cached_batch_review(
             )
         except ValueError:
             continue
-        provider = "chatgpt" if "[CHATGPT" in raw.upper() else "gemini"
-        return payload, raw, "", provider
+        if not re.search(
+            r"\[CHATGPT (?:\d+|FALLBACK|RECOVERY)\]",
+            raw,
+            flags=re.I,
+        ):
+            # Fact check is ChatGPT-only. Do not let an exact-prompt Gemini
+            # verdict from an older or interrupted run bypass the new route.
+            return None
+        return payload, raw, "", "chatgpt"
     return None
 
 
@@ -755,8 +762,8 @@ async def _web_story_review(
                 "json",
             ]
         )
-        # Both sites can expose a transient assistant snapshot immediately
-        # after generation. Keep parsing strict, but allow the owned page to
+        # ChatGPT can expose a transient assistant snapshot immediately after
+        # generation. Keep parsing strict, but allow the owned page to
         # settle to its final protocol token before failing the whole review.
         recovery_attempts = 3
         last_error: Exception | None = None
@@ -786,101 +793,6 @@ async def _web_story_review(
         assert last_error is not None
         raise last_error
 
-    gemini_error: Exception | None = None
-    gemini_attempts = 2
-    select_gemini_model = True
-    start_fresh_gemini = True
-    for gemini_attempt in range(1, gemini_attempts + 1):
-        try:
-            gemini_args = ["gemini", "ask", owned_prompt]
-            if select_gemini_model:
-                gemini_args.extend(
-                    ["--model", config.DAILY_NEWS_GEMINI_REVIEW_MODEL]
-                )
-            gemini_args.extend(
-                [
-                    "--new",
-                    "true" if start_fresh_gemini else "false",
-                    "--timeout",
-                    str(timeout),
-                    "--window",
-                    # Keep each owned review session in a fresh foreground tab;
-                    # stale persistent tabs can receive input without submitting it.
-                    "foreground",
-                    "--site-session",
-                    "persistent",
-                    "--keep-tab",
-                    "true",
-                    "-f",
-                    "json",
-                ]
-            )
-            result = await run_opencli(
-                gemini_args,
-                # Model discovery happens before Gemini's answer timeout.
-                timeout=timeout + 60,
-                site_session_namespace=review_session_namespace,
-            )
-            rows = _rows(first_json(result.stdout))
-            response = next(
-                (_field(row, "response") for row in rows if _field(row, "response")),
-                "",
-            )
-            raw_attempts.append(f"[GEMINI {gemini_attempt}]\n{response or '[EMPTY]'}")
-            if not response or "[NO RESPONSE]" in response.upper():
-                raise ValueError("Gemini ask returned no completed assistant response")
-            payload = parse_response(response)
-            if log:
-                log(
-                    f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL} completed "
-                    f"{review_label} primary review"
-                )
-            return (
-                payload,
-                "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
-                "",
-                "gemini",
-            )
-        except Exception as exc:  # noqa: BLE001 - bounded primary-provider retry
-            gemini_error = exc
-            try:
-                recovered = await recover_current("gemini")
-                payload, _ = recovered
-                if log:
-                    log(
-                        f"Recovered completed Gemini {review_label} primary review "
-                        "from its owned browser turn"
-                    )
-                return (
-                    payload,
-                    "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
-                    "",
-                    "gemini",
-                )
-            except Exception as recovery_exc:  # noqa: BLE001 - preserve both failures
-                gemini_error = RuntimeError(
-                    f"ask failed ({exc}); owned-turn recovery failed ({recovery_exc})"
-                )
-            if "model picker button was not found" in str(exc).casefold():
-                select_gemini_model = False
-                start_fresh_gemini = False
-                if log:
-                    log(
-                        "Gemini model picker is not ready; the retry will reuse "
-                        "the isolated page and its current Flash model"
-                    )
-            if gemini_attempt < gemini_attempts and log:
-                log(
-                    f"Gemini {review_label} primary attempt {gemini_attempt}/"
-                    f"{gemini_attempts} failed; starting the bounded retry: {gemini_error}"
-                )
-
-    if log:
-        log(
-            f"Gemini {review_label} primary review failed; falling back to "
-            f"ChatGPT {config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}: {gemini_error}"
-        )
-
     chatgpt_error: Exception | None = None
     chatgpt_model_selection_error: Exception | None = None
     chatgpt_model_attempts = 2
@@ -906,7 +818,7 @@ async def _web_story_review(
             chatgpt_error = None
             if log:
                 log(
-                    "ChatGPT fallback review model: "
+                    "ChatGPT fact-check model: "
                     f"{config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}"
                 )
             break
@@ -918,7 +830,7 @@ async def _web_story_review(
             )
             if model_attempt < chatgpt_model_attempts and log:
                 log(
-                    "ChatGPT fallback model selection attempt "
+                    "ChatGPT fact-check model selection attempt "
                     f"{model_attempt}/{chatgpt_model_attempts} failed; retrying: {exc}"
                 )
             if model_attempt < chatgpt_model_attempts:
@@ -930,19 +842,20 @@ async def _web_story_review(
         # model-selection failure in the evidence log, ask with the page's
         # current model, and continue to require the exact W-prefixed protocol.
         raw_attempts.append(
-            "[CHATGPT CURRENT MODEL FALLBACK]\n"
+            "[CHATGPT CURRENT MODEL]\n"
             f"Explicit model selection unavailable: {chatgpt_model_selection_error}"
         )
         if log:
             log(
-                "ChatGPT fallback model selector is unavailable after bounded retries; "
+                "ChatGPT fact-check model selector is unavailable after bounded retries; "
                 "using the page's current model while retaining the mandatory live-Web "
                 "review gate"
             )
         chatgpt_error = None
 
-    conversation_url = ""
-    if chatgpt_error is None:
+    chatgpt_attempts = 2
+    for chatgpt_attempt in range(1, chatgpt_attempts + 1):
+        conversation_url = ""
         try:
             chatgpt_args = [
                 "chatgpt",
@@ -981,12 +894,14 @@ async def _web_story_review(
                 ),
                 "",
             )
-            raw_attempts.append(f"[CHATGPT FALLBACK]\n{response or '[EMPTY]'}")
-            if not response:
-                raise ValueError("ChatGPT ask returned no assistant response")
+            raw_attempts.append(
+                f"[CHATGPT {chatgpt_attempt}]\n{response or '[EMPTY]'}"
+            )
+            if not response or "[NO RESPONSE]" in response.upper():
+                raise ValueError("ChatGPT ask returned no completed assistant response")
             payload = parse_response(response)
             if log:
-                log(f"ChatGPT completed {review_label} fallback review")
+                log(f"ChatGPT completed {review_label} fact check")
             return (
                 payload,
                 "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
@@ -1006,7 +921,7 @@ async def _web_story_review(
                 if log:
                     recovery_source = "target conversation" if target_url else "owned browser turn"
                     log(
-                        f"Recovered completed ChatGPT {review_label} fallback from "
+                        f"Recovered completed ChatGPT {review_label} fact check from "
                         f"its {recovery_source}"
                     )
                 return (
@@ -1019,11 +934,16 @@ async def _web_story_review(
                 chatgpt_error = RuntimeError(
                     f"ask failed ({exc}); owned-turn recovery failed ({recovery_exc})"
                 )
+            if chatgpt_attempt < chatgpt_attempts and log:
+                log(
+                    f"ChatGPT {review_label} fact-check attempt {chatgpt_attempt}/"
+                    f"{chatgpt_attempts} failed; starting the bounded retry: "
+                    f"{chatgpt_error}"
+                )
 
     raise RuntimeError(
-        f"Gemini {config.DAILY_NEWS_GEMINI_REVIEW_MODEL} primary {review_label} review "
-        f"failed ({gemini_error}); ChatGPT {config.DAILY_NEWS_CHATGPT_REVIEW_MODEL} "
-        f"fallback failed ({chatgpt_error})"
+        f"ChatGPT {config.DAILY_NEWS_CHATGPT_REVIEW_MODEL} {review_label} fact check "
+        f"failed after {chatgpt_attempts} attempts ({chatgpt_error})"
     ) from chatgpt_error
 
 
@@ -1082,8 +1002,8 @@ async def _review_daily_script(
                     candidate,
                     encoding="utf-8",
                 )
-        # Each two-story group owns a fresh Gemini turn. A failed primary turn
-        # gets a fresh ChatGPT fallback instead of reusing mutable active-page state.
+        # Each two-story group owns a fresh ChatGPT turn instead of reusing
+        # mutable active-page state.
         contract = script_contract_report(
             candidate,
             dossier,
@@ -1159,13 +1079,9 @@ async def _review_daily_script(
             if result["conversation_url"]
         )
         providers = [result["provider"] for result in group_results]
-        chatgpt_level = config.DAILY_NEWS_CHATGPT_REVIEW_MODEL
-        gemini_model = config.DAILY_NEWS_GEMINI_REVIEW_MODEL
         reviewer = (
-            f"Gemini Web ({gemini_model}) via project-local OpenCLI"
-            if set(providers) == {"gemini"}
-            else f"Gemini Web ({gemini_model}) with ChatGPT Web "
-            f"({chatgpt_level}) fallback via project-local OpenCLI"
+            f"ChatGPT Web ({config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}) "
+            "via project-local OpenCLI"
         )
         blocking = [
             issue
@@ -1207,9 +1123,7 @@ async def _review_daily_script(
                 "passed": True,
                 "reviewed_at": datetime.now(timezone.utc).isoformat(),
                 "reviewer": reviewer,
-                "fallback_used": any(
-                    "chatgpt" in prior.get("providers", []) for prior in attempts
-                ),
+                "fallback_used": False,
                 "attempts": attempts,
                 "final_contract": contract,
                 "correction_count": correction_count,
@@ -1265,11 +1179,9 @@ async def _review_daily_script(
     report = {
         "passed": False,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
-        "reviewer": f"Gemini Web ({config.DAILY_NEWS_GEMINI_REVIEW_MODEL}) with "
-        f"ChatGPT Web ({config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}) fallback via project-local OpenCLI",
-        "fallback_used": any(
-            "chatgpt" in prior.get("providers", []) for prior in attempts
-        ),
+        "reviewer": f"ChatGPT Web ({config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}) "
+        "via project-local OpenCLI",
+        "fallback_used": False,
         "attempts": attempts,
         "correction_count": correction_count,
         "manual_review_required": True,
@@ -1321,7 +1233,7 @@ async def review_daily_script(
         try:
             await close_opencli_site_sessions(review_session_namespace)
             if log:
-                log("Released completed OpenCLI Gemini/ChatGPT browser sessions")
+                log("Released completed OpenCLI ChatGPT fact-check browser sessions")
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask review outcome
             message = f"OpenCLI browser-session cleanup failed: {exc}"
             if log:
