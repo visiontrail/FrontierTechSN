@@ -168,7 +168,7 @@ def _rank_youtube_candidates(candidates: list[dict], query: str) -> list[dict]:
     return [candidate for _score, _index, candidate in ranked]
 
 
-async def search_youtube(query: str, *, limit: int = 4) -> list[dict]:
+async def search_youtube(query: str, *, limit: int = 8) -> list[dict]:
     command = [
         _yt_dlp_bin(),
         *_yt_dlp_common_args(include_cookies=False),

@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +10,40 @@ from backend.pipeline.opencli import OpenCLIResult
 
 
 class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
+    async def test_youtube_search_ranks_specific_result_beyond_first_four(self):
+        rows = [
+            {
+                "title": f"Generic Didi travel guide {index}",
+                "channel": "Travel Guide",
+                "webpage_url": f"https://www.youtube.com/watch?v=generic{index}",
+            }
+            for index in range(1, 5)
+        ]
+        rows.append(
+            {
+                "title": "China Self-Driving DiDi RoboTaxi Fleet in Shanghai",
+                "channel": "Road Test",
+                "webpage_url": "https://www.youtube.com/watch?v=robotaxi",
+            }
+        )
+        runner = AsyncMock(
+            return_value=(
+                0,
+                "\n".join(json.dumps(row) for row in rows),
+                "",
+            )
+        )
+
+        with patch.object(web_footage, "_run_command", runner):
+            ranked = await web_footage.search_youtube("Didi Robotaxi Beijing")
+
+        command = runner.await_args.args[0]
+        self.assertIn("ytsearch8:Didi Robotaxi Beijing", command)
+        self.assertEqual(
+            ranked[0]["source_page_url"],
+            "https://www.youtube.com/watch?v=robotaxi",
+        )
+
     def test_youtube_candidates_prefer_specific_story_terms_over_first_result(self):
         candidates = [
             {
