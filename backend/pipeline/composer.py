@@ -437,6 +437,7 @@ def _narration_manifest_failures(
 ) -> list[str]:
     """Recheck the generated narration's source/audio contract before render."""
     from backend.pipeline.tts import (
+        LEGACY_NARRATION_PACING_POLICY,
         NARRATION_PACING_POLICY,
         NARRATION_SYNTHESIS_SPEED_RATIO,
         _expand_vibevoice_pronunciations,
@@ -454,24 +455,51 @@ def _narration_manifest_failures(
         return ["narration integrity manifest must be a JSON object"]
 
     failures: list[str] = []
-    if manifest.get("pacing_policy") != NARRATION_PACING_POLICY:
-        failures.append(
-            "the narration manifest does not prove the natural-speech, "
-            "visuals-follow-audio pacing policy"
-        )
-    speed_ratio = manifest.get("synthesis_speed_ratio")
-    if (
-        isinstance(speed_ratio, bool)
-        or not isinstance(speed_ratio, (int, float))
-        or not math.isfinite(float(speed_ratio))
-        or float(speed_ratio) != NARRATION_SYNTHESIS_SPEED_RATIO
-    ):
-        failures.append(
-            "the narration manifest does not prove natural 1.0x synthesis speed "
-            f"(recorded {speed_ratio!r})"
-        )
     manifest_model = str(manifest.get("model") or "")
     effective_model = tts_model or config.TTS_DEFAULT_MODEL
+    speed_ratio = manifest.get("synthesis_speed_ratio")
+    legacy_natural_pacing = (
+        manifest.get("pacing_policy") == LEGACY_NARRATION_PACING_POLICY
+        and speed_ratio == NARRATION_SYNTHESIS_SPEED_RATIO
+    )
+    if (
+        manifest.get("pacing_policy") != NARRATION_PACING_POLICY
+        and not legacy_natural_pacing
+    ):
+        failures.append(
+            "the narration manifest does not prove the configured-speech, "
+            "visuals-follow-measured-audio pacing policy"
+        )
+    speed_is_number = (
+        not isinstance(speed_ratio, bool)
+        and isinstance(speed_ratio, (int, float))
+        and math.isfinite(float(speed_ratio))
+    )
+    if not speed_is_number:
+        failures.append(
+            "the narration manifest does not record a valid synthesis speed "
+            f"(recorded {speed_ratio!r})"
+        )
+    else:
+        model = config.TTS_MODELS.get(effective_model, {})
+        speed_percent_range = model.get("speed_percent_range")
+        if (
+            speed_percent_range is None
+            and float(speed_ratio) != NARRATION_SYNTHESIS_SPEED_RATIO
+        ):
+            failures.append(
+                f"the {effective_model} model does not support configurable speech "
+                f"speed (recorded {float(speed_ratio):g}x)"
+            )
+        elif speed_percent_range is not None and not (
+            speed_percent_range[0] / 100
+            <= float(speed_ratio)
+            <= speed_percent_range[1] / 100
+        ):
+            failures.append(
+                "the narration manifest records a synthesis speed outside the "
+                f"supported range (recorded {float(speed_ratio):g}x)"
+            )
     if manifest_model and manifest_model != effective_model:
         failures.append(
             "the narration manifest model does not match the current task "
@@ -1110,7 +1138,7 @@ async def compose_video(
         )
     if tts_model == "orpheus-en":
         emit("Narration integrity: Orpheus manifest verifies 100% of source utterances")
-    emit("Narration pacing: natural 1.0x speech locked; scene timing follows measured audio")
+    emit("Narration pacing: configured synthesis speed; scene timing follows measured audio")
     audio_duration = sb.get_audio_duration(audio_path)
     word_transcript, transcription = await av_sync.ensure_word_transcript(
         audio_path,

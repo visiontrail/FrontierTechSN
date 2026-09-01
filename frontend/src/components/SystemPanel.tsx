@@ -109,6 +109,8 @@ export default function SystemPanel() {
         <div className="setting-inline">
           <input
             type="number"
+            min={field.minimum ?? undefined}
+            max={field.maximum ?? undefined}
             value={String(draft)}
             onChange={(e) => {
               // Keep half-typed input ("-", "1e") as text rather than NaN; the

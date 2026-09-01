@@ -34,6 +34,8 @@ async def list_tts_models():
             label=model["label"],
             provider=model.get("provider", "Unknown"),
             single_speaker=bool(model.get("single_speaker")),
+            speed_adjustable="speed_percent_range" in model,
+            speed_percent_range=model.get("speed_percent_range"),
             is_default=model_id == config.TTS_DEFAULT_MODEL,
         )
         for model_id, model in config.TTS_MODELS.items()

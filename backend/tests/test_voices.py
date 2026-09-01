@@ -91,8 +91,13 @@ class VoiceRouteTests(unittest.TestCase):
     def test_lists_tts_model_capabilities(self):
         body = self.client.get("/api/voices/models").json()
         orpheus = next(model for model in body if model["id"] == "orpheus-en")
+        vibevoice = next(model for model in body if model["id"] == "vibevoice-0.5b")
         self.assertEqual(orpheus["provider"], "Orpheus")
         self.assertTrue(orpheus["single_speaker"])
+        self.assertTrue(orpheus["speed_adjustable"])
+        self.assertEqual(orpheus["speed_percent_range"], [50, 200])
+        self.assertFalse(vibevoice["speed_adjustable"])
+        self.assertIsNone(vibevoice["speed_percent_range"])
 
     def test_rejects_unknown_voice_before_touching_the_filesystem(self):
         res = self.client.get("/api/voices/Bogus*/preview")

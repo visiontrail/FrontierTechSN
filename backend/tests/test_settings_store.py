@@ -280,27 +280,23 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(config.VIBEVOICE_TTS_CHUNK_WORDS, 275)
         self.assertTrue(self.field("VIBEVOICE_TTS_CHUNK_WORDS")["is_overridden"])
 
-    def test_retired_orpheus_speed_is_pruned_and_cannot_change_narration(self):
-        self.store.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "values": {
-                        "ORPHEUS_TTS_SPEED_PERCENT": 140,
-                        "RENDER_QUALITY": "high",
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
+    def test_orpheus_speed_is_persisted_and_applied_live(self):
+        restart = settings_store.update({"ORPHEUS_TTS_SPEED_PERCENT": 140})
 
-        settings_store.apply_saved()
+        self.assertEqual(restart, [])
+        self.assertEqual(config.ORPHEUS_TTS_SPEED_PERCENT, 140)
+        self.assertEqual(self.stored()["ORPHEUS_TTS_SPEED_PERCENT"], 140)
+        field = self.field("ORPHEUS_TTS_SPEED_PERCENT")
+        self.assertEqual(field["minimum"], 50)
+        self.assertEqual(field["maximum"], 200)
+        self.assertTrue(field["is_overridden"])
 
-        self.assertEqual(config.ORPHEUS_TTS_SPEED_PERCENT, 100)
-        self.assertNotIn("ORPHEUS_TTS_SPEED_PERCENT", self.stored())
-        self.assertEqual(self.stored()["RENDER_QUALITY"], "high")
-        with self.assertRaises(AssertionError):
-            self.field("ORPHEUS_TTS_SPEED_PERCENT")
+    def test_orpheus_speed_rejects_values_outside_provider_range(self):
+        for speed in (49, 201):
+            with self.subTest(speed=speed):
+                with self.assertRaises(settings_store.SettingsError):
+                    settings_store.update({"ORPHEUS_TTS_SPEED_PERCENT": speed})
+        self.assertFalse(self.store.exists())
 
     def test_legacy_daily_news_review_models_are_pruned_and_migrated(self):
         self.store.write_text(
