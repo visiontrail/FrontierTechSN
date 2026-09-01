@@ -302,6 +302,7 @@ async def _chat_http(
                 await provider_rate_limit.wait_for_request_slot(
                     endpoint,
                     route_slot=current_route.slot,
+                    provider_type=current_route.provider_type,
                     api_key_id=current_route.api_key_id,
                     log=log,
                     label=label,
@@ -390,6 +391,7 @@ async def _chat_http(
                         await provider_rate_limit.record_rate_limit(
                             endpoint,
                             route_slot=current_route.slot,
+                            provider_type=current_route.provider_type,
                             api_key_id=current_route.api_key_id,
                             log=log,
                             label=label,

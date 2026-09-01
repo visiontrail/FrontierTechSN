@@ -13,7 +13,7 @@ class ProviderRateLimitTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         provider_rate_limit.reset_for_tests()
 
-    async def test_primary_request_starts_are_spaced_per_api_key(self):
+    async def test_yinhe_request_starts_are_spaced_across_primary_key_pool(self):
         clock = [100.0]
         sleeps: list[float] = []
 
@@ -22,6 +22,7 @@ class ProviderRateLimitTests(unittest.IsolatedAsyncioTestCase):
             clock[0] += delay
 
         with (
+            patch.object(config, "AI_YINHE_MIN_REQUEST_INTERVAL_SECONDS", 7.0),
             patch.object(config, "AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", 15.0),
             patch.object(provider_rate_limit, "_proactive_limit_active", return_value=True),
             patch.object(provider_rate_limit.time, "monotonic", side_effect=lambda: clock[0]),
@@ -30,36 +31,47 @@ class ProviderRateLimitTests(unittest.IsolatedAsyncioTestCase):
             first = await provider_rate_limit.wait_for_request_slot(
                 "http://oneapi.yhroot.com/v1/chat/completions",
                 route_slot="primary",
+                provider_type="yinhe",
                 api_key_id="key-a",
             )
             second = await provider_rate_limit.wait_for_request_slot(
                 "http://oneapi.yhroot.com",
                 route_slot="primary",
+                provider_type="yinhe",
                 api_key_id="key-a",
             )
             another_key = await provider_rate_limit.wait_for_request_slot(
                 "http://oneapi.yhroot.com",
                 route_slot="primary",
+                provider_type="yinhe",
                 api_key_id="key-b",
             )
 
         self.assertEqual(first, 0.0)
         self.assertEqual(second, 15.0)
-        self.assertEqual(another_key, 0.0)
-        self.assertEqual(sleeps, [15.0])
+        self.assertEqual(another_key, 7.0)
+        self.assertEqual(sleeps, [15.0, 7.0])
 
-    async def test_backup_and_custom_endpoints_are_not_oneapi_throttled(self):
+    async def test_backup_and_non_yinhe_primary_are_not_oneapi_throttled(self):
         with patch.object(provider_rate_limit.asyncio, "sleep", AsyncMock()) as sleep:
-            waited = await provider_rate_limit.wait_for_request_slot(
+            backup_wait = await provider_rate_limit.wait_for_request_slot(
                 "https://api.deepseek.com/anthropic",
                 route_slot="backup",
+                provider_type="deepseek",
                 api_key_id="backup-key",
             )
+            custom_wait = await provider_rate_limit.wait_for_request_slot(
+                "https://custom.example/anthropic",
+                route_slot="primary",
+                provider_type="custom",
+                api_key_id="custom-key",
+            )
 
-        self.assertEqual(waited, 0.0)
+        self.assertEqual(backup_wait, 0.0)
+        self.assertEqual(custom_wait, 0.0)
         sleep.assert_not_awaited()
 
-    async def test_primary_429_opens_cooldown_only_for_that_key(self):
+    async def test_yinhe_429_opens_cooldown_for_complete_primary_key_pool(self):
         clock = [100.0]
         sleeps: list[float] = []
         logs: list[str] = []
@@ -69,6 +81,7 @@ class ProviderRateLimitTests(unittest.IsolatedAsyncioTestCase):
             clock[0] += delay
 
         with (
+            patch.object(config, "AI_YINHE_MIN_REQUEST_INTERVAL_SECONDS", 7.0),
             patch.object(config, "AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", 15.0),
             patch.object(config, "AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS", 65.0),
             patch.object(provider_rate_limit, "_proactive_limit_active", return_value=True),
@@ -78,6 +91,7 @@ class ProviderRateLimitTests(unittest.IsolatedAsyncioTestCase):
             cooldown = await provider_rate_limit.record_rate_limit(
                 "http://oneapi.yhroot.com/v1/chat/completions",
                 route_slot="primary",
+                provider_type="yinhe",
                 api_key_id="key-a",
                 log=logs.append,
                 label="Duration edit",
@@ -85,6 +99,7 @@ class ProviderRateLimitTests(unittest.IsolatedAsyncioTestCase):
             waited = await provider_rate_limit.wait_for_request_slot(
                 "http://oneapi.yhroot.com",
                 route_slot="primary",
+                provider_type="yinhe",
                 api_key_id="key-a",
                 log=logs.append,
                 label="Duration edit",
@@ -92,16 +107,17 @@ class ProviderRateLimitTests(unittest.IsolatedAsyncioTestCase):
             another_key_wait = await provider_rate_limit.wait_for_request_slot(
                 "http://oneapi.yhroot.com",
                 route_slot="primary",
+                provider_type="yinhe",
                 api_key_id="key-b",
             )
 
         self.assertEqual(cooldown, 65.0)
         self.assertEqual(waited, 65.0)
-        self.assertEqual(another_key_wait, 0.0)
-        self.assertEqual(sleeps, [65.0])
+        self.assertEqual(another_key_wait, 7.0)
+        self.assertEqual(sleeps, [65.0, 7.0])
         self.assertTrue(any("rolling one-minute quota" in line for line in logs))
 
-    async def test_night_and_weekend_skip_proactive_spacing(self):
+    async def test_night_and_weekend_keep_pool_spacing_but_skip_per_key_spacing(self):
         # 15:00 UTC is 23:00 in Asia/Singapore on this Friday.
         friday_night = datetime(2026, 8, 28, 15, tzinfo=timezone.utc)
         saturday_day = datetime(2026, 8, 29, 3, tzinfo=timezone.utc)
@@ -114,19 +130,25 @@ class ProviderRateLimitTests(unittest.IsolatedAsyncioTestCase):
             night_wait = await provider_rate_limit.wait_for_request_slot(
                 "http://oneapi.yhroot.com",
                 route_slot="primary",
+                provider_type="yinhe",
                 api_key_id="key-a",
                 now=friday_night,
             )
             weekend_wait = await provider_rate_limit.wait_for_request_slot(
                 "http://oneapi.yhroot.com",
                 route_slot="primary",
+                provider_type="yinhe",
                 api_key_id="key-a",
                 now=saturday_day,
             )
 
         self.assertEqual(night_wait, 0.0)
-        self.assertEqual(weekend_wait, 0.0)
-        sleep.assert_not_awaited()
+        self.assertAlmostEqual(
+            weekend_wait,
+            config.AI_YINHE_MIN_REQUEST_INTERVAL_SECONDS,
+            places=3,
+        )
+        sleep.assert_awaited_once()
 
 
 class RetryAfterTests(unittest.TestCase):

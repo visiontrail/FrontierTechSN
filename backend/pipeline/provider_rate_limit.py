@@ -1,4 +1,4 @@
-"""Process-wide, per-credential pacing for the persisted primary model."""
+"""Process-wide pacing for the persisted Galaxy OneAPI primary model."""
 
 from __future__ import annotations
 
@@ -16,26 +16,32 @@ logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
 _request_lock = asyncio.Lock()
-_next_request_at: dict[str, float] = {}
-_cooldown_until: dict[str, float] = {}
+_next_gateway_request_at: dict[str, float] = {}
+_next_credential_request_at: dict[str, float] = {}
+_gateway_cooldown_until: dict[str, float] = {}
 
 
-def _primary_gateway_key(
+def _yinhe_gateway_keys(
     endpoint: str,
     *,
     route_slot: str,
+    provider_type: str,
     api_key_id: str,
-) -> str | None:
-    if route_slot != "primary" or not api_key_id:
+) -> tuple[str, str] | None:
+    if (
+        route_slot != "primary"
+        or provider_type.strip().casefold() != "yinhe"
+        or not api_key_id
+    ):
         return None
     selected = urlsplit(endpoint.strip())
     if not selected.hostname:
         return None
     port = selected.port or (443 if selected.scheme == "https" else 80)
-    return (
+    gateway_key = (
         f"{selected.scheme.casefold()}://{selected.hostname.casefold()}:{port}"
-        f"/{api_key_id}"
     )
+    return gateway_key, f"{gateway_key}/{api_key_id}"
 
 
 def _proactive_limit_active(now: datetime | None = None) -> bool:
@@ -54,20 +60,27 @@ async def wait_for_request_slot(
     endpoint: str,
     *,
     route_slot: str = "standalone",
+    provider_type: str = "",
     api_key_id: str = "",
     log: LogCallback | None = None,
     label: str = "AI call",
     now: datetime | None = None,
 ) -> float:
-    """Reserve one globally paced OneAPI request start and return wait time."""
-    key = _primary_gateway_key(
+    """Reserve one globally paced Galaxy OneAPI request start."""
+    keys = _yinhe_gateway_keys(
         endpoint,
         route_slot=route_slot,
+        provider_type=provider_type,
         api_key_id=api_key_id,
     )
-    if key is None:
+    if keys is None:
         return 0.0
-    interval = (
+    gateway_key, credential_key = keys
+    gateway_interval = max(
+        0.0,
+        float(config.AI_YINHE_MIN_REQUEST_INTERVAL_SECONDS),
+    )
+    credential_interval = (
         max(0.0, float(config.AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS))
         if _proactive_limit_active(now)
         else 0.0
@@ -75,18 +88,36 @@ async def wait_for_request_slot(
 
     async with _request_lock:
         monotonic_now = time.monotonic()
-        spacing_at = _next_request_at.get(key, monotonic_now) if interval > 0 else monotonic_now
-        cooldown_at = _cooldown_until.get(key, monotonic_now)
-        delay = max(0.0, max(spacing_at, cooldown_at) - monotonic_now)
+        gateway_spacing_at = (
+            _next_gateway_request_at.get(gateway_key, monotonic_now)
+            if gateway_interval > 0
+            else monotonic_now
+        )
+        credential_spacing_at = (
+            _next_credential_request_at.get(credential_key, monotonic_now)
+            if credential_interval > 0
+            else monotonic_now
+        )
+        cooldown_at = _gateway_cooldown_until.get(gateway_key, monotonic_now)
+        delay = max(
+            0.0,
+            max(gateway_spacing_at, credential_spacing_at, cooldown_at) - monotonic_now,
+        )
         if delay > 0:
-            policy = (
-                "shared daytime limit: at most 5 requests/minute"
-                if interval > 0
-                else "explicit 429 cooldown"
-            )
+            policies = []
+            if gateway_spacing_at > monotonic_now:
+                policies.append(
+                    f"Galaxy pool spacing: one start/{gateway_interval:.1f}s"
+                )
+            if credential_spacing_at > monotonic_now:
+                policies.append(
+                    f"daytime per-key spacing: one start/{credential_interval:.1f}s"
+                )
+            if cooldown_at > monotonic_now:
+                policies.append("shared 429 cooldown")
             message = (
-                f"{label}: OneAPI rate gate waiting {delay:.1f}s before the next request "
-                f"for {api_key_id} ({policy})"
+                f"{label}: Galaxy OneAPI rate gate waiting {delay:.1f}s before the next "
+                f"request for {api_key_id} ({'; '.join(policies)})"
             )
             if log is not None:
                 log(message)
@@ -94,12 +125,18 @@ async def wait_for_request_slot(
                 logger.info(message)
             await asyncio.sleep(delay)
         started_at = time.monotonic()
-        if interval > 0:
-            _next_request_at[key] = started_at + interval
+        if gateway_interval > 0:
+            _next_gateway_request_at[gateway_key] = started_at + gateway_interval
         else:
-            _next_request_at.pop(key, None)
-        if _cooldown_until.get(key, 0.0) <= started_at:
-            _cooldown_until.pop(key, None)
+            _next_gateway_request_at.pop(gateway_key, None)
+        if credential_interval > 0:
+            _next_credential_request_at[credential_key] = (
+                started_at + credential_interval
+            )
+        else:
+            _next_credential_request_at.pop(credential_key, None)
+        if _gateway_cooldown_until.get(gateway_key, 0.0) <= started_at:
+            _gateway_cooldown_until.pop(gateway_key, None)
         return delay
 
 
@@ -107,31 +144,34 @@ async def record_rate_limit(
     endpoint: str,
     *,
     route_slot: str = "standalone",
+    provider_type: str = "",
     api_key_id: str = "",
     log: LogCallback | None = None,
     label: str = "AI call",
 ) -> float:
-    """Open a process-wide cooldown after OneAPI reports HTTP 429."""
-    key = _primary_gateway_key(
+    """Open a process-wide pool cooldown after Galaxy OneAPI reports 429."""
+    keys = _yinhe_gateway_keys(
         endpoint,
         route_slot=route_slot,
+        provider_type=provider_type,
         api_key_id=api_key_id,
     )
-    if key is None:
+    if keys is None:
         return 0.0
+    gateway_key, _ = keys
     cooldown = max(
         60.0,
         float(config.AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS),
     )
     async with _request_lock:
         now = time.monotonic()
-        _cooldown_until[key] = max(
-            _cooldown_until.get(key, now),
+        _gateway_cooldown_until[gateway_key] = max(
+            _gateway_cooldown_until.get(gateway_key, now),
             now + cooldown,
         )
     message = (
-        f"{label}: OneAPI returned 429 for {api_key_id}; pausing that API key for "
-        f"{cooldown:.0f}s so its rolling one-minute quota can clear"
+        f"{label}: Galaxy OneAPI returned 429 for {api_key_id}; pausing the complete "
+        f"primary key pool for {cooldown:.0f}s so its rolling one-minute quota can clear"
     )
     if log is not None:
         log(message)
@@ -141,5 +181,6 @@ async def record_rate_limit(
 
 
 def reset_for_tests() -> None:
-    _next_request_at.clear()
-    _cooldown_until.clear()
+    _next_gateway_request_at.clear()
+    _next_credential_request_at.clear()
+    _gateway_cooldown_until.clear()

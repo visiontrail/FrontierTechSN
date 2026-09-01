@@ -14,8 +14,9 @@ class FakeTextBlock:
 
 
 class FakeAssistantMessage:
-    def __init__(self, content):
+    def __init__(self, content, *, error=None):
         self.content = content
+        self.error = error
 
 
 class FakeResultMessage:
@@ -65,6 +66,16 @@ class ProviderBaseUrlTests(unittest.TestCase):
 
 
 class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        provider_rate_limit.reset_for_tests()
+        self.addCleanup(provider_rate_limit.reset_for_tests)
+        self.enterContext(
+            patch.object(config, "AI_YINHE_MIN_REQUEST_INTERVAL_SECONDS", 0.0)
+        )
+        self.enterContext(
+            patch.object(config, "AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", 0.0)
+        )
+
     async def test_primary_429_rotates_to_next_key_before_backup(self):
         attempts: list[str] = []
         selected: list[str] = []
@@ -189,6 +200,81 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(attempts, ["http://oneapi.example"])
         self.assertNotIn("primary-key", str(caught.exception))
+
+    async def test_rate_limit_assistant_error_is_not_treated_as_committed_output(self):
+        attempts: list[str] = []
+
+        async def query(*, prompt, options):
+            key = options.env["ANTHROPIC_API_KEY"]
+            attempts.append(key)
+            if key == "primary-a":
+                yield FakeAssistantMessage(
+                    [FakeTextBlock("API Error: 429 request limit")],
+                    error="rate_limit",
+                )
+                yield FakeResultMessage(
+                    "API Error: 429 request limit",
+                    is_error=True,
+                )
+                return
+            yield FakeAssistantMessage([FakeTextBlock("primary answer")])
+
+        routes = (
+            model_router.ModelRoute(
+                slot="primary",
+                provider_id=1,
+                provider_type="yinhe",
+                provider_name="Galaxy OneAPI",
+                endpoint="http://oneapi.example",
+                model="yinhe-thinking",
+                api_key="primary-a",
+                api_keys=("primary-a", "primary-b"),
+            ),
+            model_router.ModelRoute(
+                slot="backup",
+                provider_id=2,
+                provider_type="deepseek",
+                provider_name="DeepSeek",
+                endpoint="https://api.deepseek.com/anthropic",
+                model="deepseek-v4-flash",
+                api_key="backup-key",
+            ),
+        )
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(model_router, "resolve_model_routes", AsyncMock(return_value=routes)),
+            patch.object(config, "AI_PRIMARY_MAX_RETRIES", 0),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(config, "ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names", return_value=([], [])),
+            patch.object(
+                provider_rate_limit,
+                "wait_for_request_slot",
+                AsyncMock(return_value=0.0),
+            ),
+            patch.object(
+                provider_rate_limit,
+                "record_rate_limit",
+                AsyncMock(return_value=65.0),
+            ) as record_rate_limit,
+        ):
+            result = await agent.agent_complete(
+                "Return text.",
+                "content",
+                endpoint=routes[0].endpoint,
+                model=routes[0].model,
+                api_key=routes[0].api_key,
+            )
+
+        self.assertEqual(result, "primary answer")
+        self.assertEqual(attempts, ["primary-a", "primary-b"])
+        record_rate_limit.assert_awaited_once()
+        self.assertEqual(
+            record_rate_limit.await_args.kwargs["provider_type"],
+            "yinhe",
+        )
 
     async def test_primary_429_wait_does_not_consume_attempt_or_use_backup(self):
         attempts: list[str] = []

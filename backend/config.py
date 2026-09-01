@@ -41,9 +41,16 @@ AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "600"))
 AI_MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "9"))
 AI_RETRY_BASE_SECONDS = float(os.getenv("AI_RETRY_BASE_SECONDS", "4"))
 AI_RETRY_MAX_SECONDS = float(os.getenv("AI_RETRY_MAX_SECONDS", "60"))
+# Galaxy OneAPI advertises a ten-request rolling-minute ceiling shared by the
+# local model route. Pace the whole primary key pool below that ceiling at all
+# times so normal round-robin use cannot create a burst across credentials.
+AI_YINHE_MIN_REQUEST_INTERVAL_SECONDS = float(
+    os.getenv("AI_YINHE_MIN_REQUEST_INTERVAL_SECONDS", "7")
+)
 # OneAPI currently allows five requests in a rolling minute. Four starts per
 # minute leaves headroom for operator probes and clock jitter, while long model
-# generation itself remains governed by the request/turn ceilings below.
+# generation itself remains governed by the request/turn ceilings below. This
+# stricter per-key daytime guard is layered on top of the Galaxy-wide interval.
 AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS = float(
     os.getenv("AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", "15")
 )

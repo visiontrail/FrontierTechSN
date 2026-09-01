@@ -74,6 +74,7 @@ async def _record_rate_limit_if_present(
     detail: str,
     *,
     route_slot: str,
+    provider_type: str,
     api_key_id: str,
     log: LogCallback | None,
     label: str,
@@ -86,6 +87,7 @@ async def _record_rate_limit_if_present(
     cooldown = await provider_rate_limit.record_rate_limit(
         endpoint or config.AI_ENDPOINT,
         route_slot=route_slot,
+        provider_type=provider_type,
         api_key_id=api_key_id,
         log=log,
         label=label,
@@ -296,6 +298,7 @@ async def _agent_complete_single(
         text_parts: list[str] = []
         result: ResultMessage | None = None
         diagnostics: deque[str] = deque(maxlen=DIAGNOSTIC_STDERR_LINES)
+        assistant_errors: set[str] = set()
         rate_limited = False
         attempt_committed = False
 
@@ -320,6 +323,7 @@ async def _agent_complete_single(
             await provider_rate_limit.wait_for_request_slot(
                 current_route.endpoint,
                 route_slot=current_route.slot,
+                provider_type=current_route.provider_type,
                 api_key_id=current_route.api_key_id,
                 log=log,
                 label=label,
@@ -333,11 +337,24 @@ async def _agent_complete_single(
                 async with asyncio.timeout(config.AGENT_TURN_TIMEOUT):
                     async for message in stream:
                         if isinstance(message, AssistantMessage):
-                            if message.content:
-                                attempt_committed = True
+                            message_error = getattr(message, "error", None)
+                            if message_error:
+                                # Claude CLI represents rejected requests as an
+                                # AssistantMessage whose text is an API-error
+                                # diagnostic. It is not model output and is
+                                # safe to retry through the Galaxy rate gate.
+                                assistant_errors.add(str(message_error))
+                                continue
                             for block in message.content:
                                 if isinstance(block, TextBlock):
-                                    text_parts.append(block.text)
+                                    if block.text:
+                                        attempt_committed = True
+                                        text_parts.append(block.text)
+                                else:
+                                    # Thinking and tool blocks are a real
+                                    # output boundary even though this helper
+                                    # only returns visible TextBlocks.
+                                    attempt_committed = True
                         elif isinstance(message, ResultMessage):
                             result = message
             finally:
@@ -347,7 +364,13 @@ async def _agent_complete_single(
                         await stream.aclose()
 
             content = "".join(text_parts).strip()
-            if not content and result is not None and result.result:
+            if (
+                not content
+                and result is not None
+                and result.result
+                and not result.is_error
+                and not assistant_errors
+            ):
                 content = result.result.strip()
 
             elapsed_ms = (time.perf_counter() - start) * 1000
@@ -368,12 +391,15 @@ async def _agent_complete_single(
                 errs = result.errors or [result.result or "unknown SDK error"]
                 detail = f"Claude Agent SDK error: {'; '.join(str(e) for e in errs)}"
             detail += _diagnostic_tail(diagnostics)
+            if assistant_errors:
+                detail += f" | assistant error: {', '.join(sorted(assistant_errors))}"
             detail = redact_api_keys(detail, current_route.api_keys)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
             rate_limited = await _record_rate_limit_if_present(
                 current_route.endpoint,
                 detail,
                 route_slot=current_route.slot,
+                provider_type=current_route.provider_type,
                 api_key_id=current_route.api_key_id,
                 log=log,
                 label=label,
@@ -388,12 +414,15 @@ async def _agent_complete_single(
                 f"({config.AGENT_REQUEST_TIMEOUT}s); later attempts are paced and started "
                 "by the pipeline rather than retried inside the CLI"
             ) + _diagnostic_tail(diagnostics)
+            if assistant_errors:
+                detail += f" | assistant error: {', '.join(sorted(assistant_errors))}"
             detail = redact_api_keys(detail, current_route.api_keys)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
             rate_limited = await _record_rate_limit_if_present(
                 current_route.endpoint,
                 detail,
                 route_slot=current_route.slot,
+                provider_type=current_route.provider_type,
                 api_key_id=current_route.api_key_id,
                 log=log,
                 label=label,
@@ -408,12 +437,15 @@ async def _agent_complete_single(
             # Preserve the SDK callback's stderr in the error returned by the
             # provider-test API instead of only writing it to container logs.
             detail = f"{e.__class__.__name__}: {e}{_diagnostic_tail(diagnostics)}"
+            if assistant_errors:
+                detail += f" | assistant error: {', '.join(sorted(assistant_errors))}"
             detail = redact_api_keys(detail, current_route.api_keys)
             _warn(log, f"{label} attempt {attempt + 1} failed: {detail}")
             rate_limited = await _record_rate_limit_if_present(
                 current_route.endpoint,
                 detail,
                 route_slot=current_route.slot,
+                provider_type=current_route.provider_type,
                 api_key_id=current_route.api_key_id,
                 log=log,
                 label=label,

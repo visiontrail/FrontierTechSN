@@ -257,17 +257,25 @@ SPECS: tuple[SettingSpec, ...] = (
         description="Maximum pause between yhroot provider attempts.",
     ),
     SettingSpec(
+        "AI_YINHE_MIN_REQUEST_INTERVAL_SECONDS", "ai", "Galaxy OneAPI pool spacing", "int",
+        unit="seconds", minimum=6, maximum=300,
+        description="Always-on minimum spacing between Galaxy OneAPI request starts across "
+                    "the complete primary API-key pool. The default seven seconds keeps the "
+                    "service below the gateway's ten-request rolling-minute ceiling.",
+    ),
+    SettingSpec(
         "AI_PRIMARY_MIN_REQUEST_INTERVAL_SECONDS", "ai", "Primary request spacing", "int",
         unit="seconds", minimum=12, maximum=300,
         description="Minimum spacing between request starts for each primary API key. "
-                    "The default 15 seconds stays below a five-request-per-minute key limit.",
+                    "The default 15 seconds stays below a five-request-per-minute key limit "
+                    "during the configured weekday daytime window.",
     ),
     SettingSpec(
         "AI_PRIMARY_RATE_LIMIT_COOLDOWN_SECONDS", "ai", "Primary 429 cooldown", "int",
         unit="seconds", minimum=60, maximum=600,
-        description="Per-key pause after the primary provider reports a rolling-minute "
+        description="Galaxy OneAPI pool-wide pause after the provider reports a rolling-minute "
                     "rate limit. The default 65 seconds clears the full quota window with "
-                    "jitter headroom while other primary keys remain available.",
+                    "jitter headroom before any primary key is tried again.",
     ),
     SettingSpec(
         "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", "ai", "Primary 429 wait windows", "int",
