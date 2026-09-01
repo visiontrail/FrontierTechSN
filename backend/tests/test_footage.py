@@ -155,6 +155,65 @@ class FootagePlanTests(unittest.TestCase):
             ["printed circuit board factory"],
         )
 
+    def test_fallback_plan_uses_distinct_story_entities_not_reporting_boilerplate(self):
+        script = """Good morning. This is Frontier Tech Daily—your concise briefing.
+The Wall Street Journal reports that Anthropic signed a cloud deal with Nvidia-backed Lambda for a Texas data center.
+QbitAI reports that Didi Autonomous Driving began passenger tests with its Robotaxi R2 in Beijing and Guangzhou.
+IEEE Spectrum revisits the first battery at the Faraday Museum in London, built after work by Alessandro Volta.
+DeepTech reports that Chinese researchers developed a light-driven soft robot that can jump repeatedly.
+Alex Konrad reports that AI startup Mirage streamed a live news show on X.
+Thanks for watching, and subscribe for more."""
+
+        plan = footage._fallback_plan("Frontier Tech Daily", script, 12)
+
+        self.assertEqual(len(plan), 5)
+        self.assertTrue(all(len(item["query"].split()) >= 2 for item in plan))
+        self.assertEqual(len({item["purpose"] for item in plan}), len(plan))
+        combined = " ".join(item["query"].casefold() for item in plan)
+        self.assertNotIn("and reports", combined)
+        self.assertNotIn("reports can", combined)
+        self.assertIn("anthropic", combined)
+        self.assertIn("didi", combined)
+        self.assertIn("battery", combined)
+        self.assertIn("robot", combined)
+
+    def test_planner_fallback_keeps_alternate_story_queries_for_web_fill(self):
+        script = "\n".join(
+            [
+                "Anthropic signed a Lambda cloud agreement in Texas.",
+                "Didi tested the Robotaxi R2 in Beijing.",
+                "The Faraday Museum displays Alessandro Volta's battery.",
+                "Chinese researchers built a light-driven soft robot.",
+                "Mirage streamed an AI news show.",
+                "Students earned ham radio licenses in New Jersey.",
+            ]
+        )
+
+        async def fail_chat(*args, **kwargs):
+            raise ValueError("malformed planner JSON")
+
+        async def provider(*args, **kwargs):
+            return "https://example.invalid", "test-model", "test-key"
+
+        with (
+            patch.object(footage, "_chat", fail_chat),
+            patch.object(footage, "_resolve_provider", provider),
+        ):
+            plan, planner = __import__("asyncio").run(
+                footage.plan_footage_queries(
+                    title="Frontier Tech Daily",
+                    script=script,
+                    count=2,
+                    provider_id=None,
+                    ai_endpoint=None,
+                    ai_model=None,
+                )
+            )
+
+        self.assertEqual(planner, "deterministic-fallback")
+        self.assertGreater(len(plan), 2)
+        self.assertEqual(len({item["script_excerpt"] for item in plan}), len(plan))
+
 
 class WikimediaCandidateTests(unittest.TestCase):
     def test_two_term_query_requires_both_terms_in_candidate_metadata(self):
@@ -174,6 +233,26 @@ class WikimediaCandidateTests(unittest.TestCase):
                     "description": "An engineering symposium",
                 },
                 "student research",
+            )
+        )
+
+    def test_multi_term_query_requires_two_concrete_metadata_anchors(self):
+        self.assertFalse(
+            footage._candidate_query_is_specific(
+                {
+                    "title": "General technology documentary.webm",
+                    "description": "A broad report about future technology.",
+                },
+                "Anthropic Lambda Texas data center",
+            )
+        )
+        self.assertTrue(
+            footage._candidate_query_is_specific(
+                {
+                    "title": "Texas data center construction.webm",
+                    "description": "Workers install cooling equipment.",
+                },
+                "Anthropic Lambda Texas data center",
             )
         )
 

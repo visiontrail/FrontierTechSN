@@ -45,6 +45,20 @@ USER_QUERY_PURPOSE = "User-supplied search direction"
 PURPOSE_MATCH_STOPWORDS = frozenset(
     "a an and are as at be by for from in into is it of on or that the this to with".split()
 )
+FALLBACK_QUERY_STOPWORDS = PURPOSE_MATCH_STOPWORDS | frozenset(
+    """
+    about after again also because been before being between can could did does
+    doing during each final finally first from gave get gets got had has have
+    having here how if its itself just many may might more most next not now off
+    once only other our out over own really report reported reports reporting
+    said says should since some still story than their them then there these they
+    think through today tomorrow too under unlike very was watching were what when
+    where which while who will would your
+    good morning concise briefing frontier tech daily journal magazine outlet
+    according thanks subscribe
+    documentary footage video scene
+    """.split()
+)
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -247,35 +261,108 @@ def _parse_plan(value: str, count: int) -> list[dict[str, str]]:
 
 
 def _fallback_plan(title: str, script: str, count: int) -> list[dict[str, str]]:
-    title_words = WORD_RE.findall(title)
-    script_words = WORD_RE.findall(script)
-    stop = {
-        "about", "after", "again", "also", "because", "been", "before",
-        "being", "between", "could", "from", "have", "into", "just",
-        "more", "most", "other", "over", "really", "some", "than",
-        "that", "their", "there", "these", "they", "this", "through",
-        "very", "what", "when", "where", "which", "while", "with",
-        "would", "your",
-    }
-    frequencies: dict[str, int] = {}
-    for word in title_words + script_words[:400]:
-        key = word.lower()
-        if key not in stop:
-            frequencies[key] = frequencies.get(key, 0) + 1
-    ranked = sorted(frequencies, key=lambda word: (-frequencies[word], word))
-    anchors = ranked[: max(2, count + 1)] or ["documentary", "people"]
+    """Build story-specific queries when the model plan cannot be decoded.
 
-    output = []
-    for index in range(count):
-        first = anchors[index % len(anchors)]
-        second = anchors[(index + 1) % len(anchors)]
-        query = _sanitize_query(f"{first} {second} documentary")
-        output.append(
-            {
-                "query": query or "people documentary scene",
-                "purpose": "Fallback visual derived from the narration",
-            }
+    Daily-news scripts use one nonblank paragraph per editorial story.  The old
+    fallback ranked words across the whole script, which elevated connective
+    language such as ``and reports can`` and downloaded unrelated documentary
+    footage.  Plan per story instead, prefer rare/proper-name anchors, and keep
+    the exact narration paragraph as the placement purpose.
+    """
+
+    paragraphs = [
+        " ".join(part.split())
+        for part in re.split(r"\n\s*\n|\n+", script)
+        if part.strip()
+    ]
+    if len(paragraphs) <= 1:
+        paragraphs = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])\s+", script)
+            if sentence.strip()
+        ]
+
+    def useful_words(value: str) -> list[str]:
+        output: list[str] = []
+        seen: set[str] = set()
+        for word in WORD_RE.findall(value):
+            key = word.casefold().strip("'-")
+            if (
+                key in FALLBACK_QUERY_STOPWORDS
+                or key in seen
+                or len(key) < 3
+                or len(key) > 32
+            ):
+                continue
+            seen.add(key)
+            output.append(word.strip("'-"))
+        return output
+
+    candidates: list[tuple[str, list[str]]] = []
+    for paragraph in paragraphs:
+        lowered = paragraph.casefold()
+        if (
+            ("good morning" in lowered and "briefing" in lowered)
+            or "thanks for watching" in lowered
+            or "subscribe for more" in lowered
+        ):
+            continue
+        # Strip a source-attribution lead ("QbitAI reports that ...") so the
+        # fallback searches for the depicted subject instead of the publisher.
+        subject_text = re.sub(
+            r"^.{0,100}?\b(?:reports?|says?|writes?|profiles?|revisits?)\b"
+            r"(?:\s+(?:that|how))?[,;:\s-]*",
+            "",
+            paragraph,
+            count=1,
+            flags=re.IGNORECASE,
         )
+        words = useful_words(subject_text)
+        if len(words) >= 2:
+            candidates.append((paragraph, words))
+
+    # If a non-news script was filtered too aggressively, retain any concrete
+    # paragraph rather than returning no search plan at all.
+    if not candidates:
+        candidates = [
+            (paragraph, words)
+            for paragraph in paragraphs
+            if len(words := useful_words(paragraph)) >= 2
+        ]
+
+    document_frequency: dict[str, int] = {}
+    for _, words in candidates:
+        for key in {word.casefold() for word in words}:
+            document_frequency[key] = document_frequency.get(key, 0) + 1
+
+    output: list[dict[str, str]] = []
+    seen_queries: set[str] = set()
+    for paragraph, words in candidates:
+        indexed = list(enumerate(words))
+        term_frequency: dict[str, int] = {}
+        for word in words:
+            key = word.casefold()
+            term_frequency[key] = len(
+                re.findall(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", paragraph.casefold())
+            )
+
+        def salience(item: tuple[int, str]) -> tuple[int, int, int, int, int]:
+            index, word = item
+            key = word.casefold()
+            proper_name = int(word[:1].isupper() and index > 0)
+            technical = int("-" in word or any(char.isdigit() for char in word))
+            rarity = -document_frequency.get(key, 1)
+            return term_frequency[key], proper_name, technical, rarity, -index
+
+        selected = sorted(indexed, key=salience, reverse=True)[:6]
+        selected.sort(key=lambda item: item[0])
+        query = _sanitize_query(" ".join(word for _, word in selected))
+        if len(query.split()) < 2 or query.casefold() in seen_queries:
+            continue
+        seen_queries.add(query.casefold())
+        output.append({"query": query, "purpose": paragraph})
+        if len(output) >= count:
+            break
     return output
 
 
@@ -343,6 +430,7 @@ async def plan_footage_queries(
     excluded_purposes: list[str] | None = None,
     log: LogCallback | None = None,
 ) -> tuple[list[dict[str, str]], str]:
+    candidate_count = max(count * 3, count + 2)
     supplied = [
         {
             "query": query,
@@ -372,7 +460,7 @@ async def plan_footage_queries(
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
     system_prompt = (config.PROMPTS_DIR / "footage_plan.txt").read_text(encoding="utf-8")
     user_content = (
-        f"Requested candidate queries: {max(count * 3, count + 2)}\n"
+        f"Requested candidate queries: {candidate_count}\n"
         f"Final clips: {count}; every candidate must target a different narration story.\n"
         f"Title: {title}\n"
         f"Narration meanings already reserved for collage (do not target these): "
@@ -390,11 +478,11 @@ async def plan_footage_queries(
             "Footage plan",
             max_tokens=1200,
         )
-        plan = _parse_plan(result, max(count * 3, count + 2))
+        plan = _parse_plan(result, candidate_count)
         plan = _distinct_grounded_plan(
             plan,
             script,
-            count,
+            candidate_count,
             excluded_purposes=excluded_purposes,
         )
         if not plan:
@@ -404,9 +492,9 @@ async def plan_footage_queries(
     except Exception as exc:
         _emit(log, f"Footage planning fallback: {exc}")
         fallback = _distinct_grounded_plan(
-            _fallback_plan(title, script, max(count * 3, count + 2)),
+            _fallback_plan(title, script, candidate_count),
             script,
-            count,
+            candidate_count,
             excluded_purposes=excluded_purposes,
         )
         return fallback, "deterministic-fallback"
@@ -473,9 +561,13 @@ def _rank_candidate(candidate: dict, query: str) -> tuple:
 
 
 def _candidate_query_is_specific(candidate: dict, query: str) -> bool:
-    """Reject a two-term result that matches only one generic query word."""
-    query_terms = {word.casefold() for word in WORD_RE.findall(query)}
-    if len(query_terms) != 2:
+    """Require candidate metadata to prove at least two concrete query anchors."""
+    query_terms = {
+        word.casefold()
+        for word in WORD_RE.findall(query)
+        if word.casefold() not in FALLBACK_QUERY_STOPWORDS
+    }
+    if len(query_terms) < 2:
         return True
     candidate_terms = {
         word.casefold()
@@ -483,7 +575,7 @@ def _candidate_query_is_specific(candidate: dict, query: str) -> bool:
             f"{candidate.get('title', '')} {candidate.get('description', '')}"
         )
     }
-    return query_terms.issubset(candidate_terms)
+    return len(query_terms & candidate_terms) >= min(2, len(query_terms))
 
 
 async def search_wikimedia(
