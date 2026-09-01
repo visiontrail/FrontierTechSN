@@ -30,6 +30,8 @@ class OpenCLISessionIsolationTests(unittest.TestCase):
         env = opencli_module._environment()
 
         self.assertEqual(env["OPENCLI_SITE_SESSION_NAMESPACE"], "frontiertechsn")
+        self.assertEqual(env["OPENCLI_CHATGPT_MODEL_MIN"], "medium")
+        self.assertEqual(env["OPENCLI_CHATGPT_MODEL_MAX"], "xhigh")
 
     def test_one_review_can_isolate_and_reuse_its_own_persistent_tab(self):
         env = opencli_module._environment(

@@ -786,6 +786,271 @@ chatgptUtils = replaceWithinFunction(
   'ChatGPT five-level intelligence slider readiness',
 )
 }
+const chatgptRangePolicyHelpers = `function chatGPTModelRangePolicy() {
+    const minimumValue = String(process?.env?.OPENCLI_CHATGPT_MODEL_MIN || '').trim();
+    const maximumValue = String(process?.env?.OPENCLI_CHATGPT_MODEL_MAX || '').trim();
+    if (!minimumValue && !maximumValue) return null;
+    if (!minimumValue || !maximumValue) {
+        throw new ArgumentError(
+            'ChatGPT model policy requires both minimum and maximum levels.',
+            'Set OPENCLI_CHATGPT_MODEL_MIN and OPENCLI_CHATGPT_MODEL_MAX together.',
+        );
+    }
+    const minimum = requireKnownChatGPTModel(minimumValue);
+    const maximum = requireKnownChatGPTModel(maximumValue);
+    if (!Number.isInteger(minimum.intelligenceOrder)
+        || !Number.isInteger(maximum.intelligenceOrder)
+        || minimum.intelligenceOrder > maximum.intelligenceOrder) {
+        throw new ArgumentError(
+            \`Invalid ChatGPT model policy \${minimumValue}..\${maximumValue}.\`,
+            'Use an ordered non-Pro intelligence range such as medium..xhigh.',
+        );
+    }
+    return { minimum, maximum };
+}
+
+function chatGPTModelTargetAtOrder(order) {
+    const match = Object.values(CHATGPT_MODEL_TARGETS).find(
+        (target) => Number.isInteger(target.intelligenceOrder)
+            && target.intelligenceOrder === Number(order),
+    );
+    return match || null;
+}
+
+function requireChatGPTModelInRange(current, policy) {
+    const target = typeof current === 'string'
+        ? CHATGPT_MODEL_TARGETS[current]
+        : chatGPTModelTargetAtOrder(current);
+    const order = target?.intelligenceOrder;
+    if (!Number.isInteger(order)
+        || order < policy.minimum.intelligenceOrder
+        || order > policy.maximum.intelligenceOrder) {
+        throw new CommandExecutionError(
+            \`ChatGPT current model \${target?.label || current || 'unknown'} is outside allowed range \`
+            + \`\${policy.minimum.label}..\${policy.maximum.label}; refusing to switch or submit.\`,
+        );
+    }
+    return target;
+}
+
+`
+chatgptUtils = replaceOnce(
+  chatgptUtils,
+  `export const CHATGPT_MODEL_CHOICES = Object.keys(CHATGPT_MODEL_ALIASES);
+
+function debugChatGPTModel(message) {`,
+  `export const CHATGPT_MODEL_CHOICES = Object.keys(CHATGPT_MODEL_ALIASES);
+
+${chatgptRangePolicyHelpers}function debugChatGPTModel(message) {`,
+  'ChatGPT fallback model range helpers',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  `    const target = requireKnownChatGPTModel(model);
+    debugChatGPTModel(\`target=\${target.key}\`);`,
+  `    const target = requireKnownChatGPTModel(model);
+    const rangePolicy = chatGPTModelRangePolicy();
+    let allowedPolicyFallback = null;
+    debugChatGPTModel(\`target=\${target.key}\`);`,
+  'ChatGPT current model range policy',
+)
+const upstreamKnownCurrentModel = `    const before = await getCurrentChatGPTModel(page);
+    debugChatGPTModel(\`before=\${before.model || 'none'}\`);
+    if (before.model === target.key) {
+        return { Status: 'Already selected', Model: target.label };
+    }`
+const previousKnownCurrentModel = `    const before = await getCurrentChatGPTModel(page);
+    debugChatGPTModel(\`before=\${before.model || 'none'}\`);
+    if (rangePolicy && before.model) {
+        try {
+            allowedPolicyFallback = requireChatGPTModelInRange(before.model, rangePolicy);
+        }
+        catch {}
+    }
+    if (before.model === target.key) {
+        return { Status: 'Already selected', Model: target.label };
+    }`
+const currentKnownCurrentModel = `    const before = await getCurrentChatGPTModel(page);
+    debugChatGPTModel(\`before=\${before.model || 'none'}\`);
+    if (rangePolicy && before.model) {
+        try {
+            allowedPolicyFallback = requireChatGPTModelInRange(before.model, rangePolicy);
+        }
+        catch {}
+    }
+    if (before.model === target.key) {
+        if (rangePolicy && typeof page.pressKey === 'function') {
+            await page.pressKey('Escape').catch(() => undefined);
+        }
+        return { Status: 'Already selected', Model: target.label };
+    }`
+const knownCurrentModelSource = chatgptUtils.includes(previousKnownCurrentModel)
+  ? previousKnownCurrentModel
+  : upstreamKnownCurrentModel
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  knownCurrentModelSource,
+  currentKnownCurrentModel,
+  'ChatGPT known current model fallback',
+)
+chatgptUtils = replaceOnce(
+  chatgptUtils,
+  `        const labels = \${JSON.stringify(CHATGPT_MODEL_TARGETS)};
+        const findEntryForText = (text) => {`,
+  `        const labels = \${JSON.stringify(CHATGPT_MODEL_TARGETS)};
+        const slider = document.querySelector('[data-testid="composer-intelligence-picker-content"] [role="slider"]')
+            || document.querySelector('[role="menu"] [role="slider"]')
+            || document.querySelector('[data-model-reasoning-effort-slider] [role="slider"]');
+        const sliderValue = Number(slider?.getAttribute('aria-valuenow') || slider?.value);
+        if (slider instanceof HTMLElement && Number.isInteger(sliderValue)) {
+            const sliderEntry = Object.entries(labels).find(
+                ([, value]) => value.intelligenceOrder === sliderValue,
+            );
+            if (sliderEntry) {
+                return { model: sliderEntry[0], label: sliderEntry[1].label };
+            }
+        }
+        const findEntryForText = (text) => {`,
+  'ChatGPT current slider model readback',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  `        const labels = \${JSON.stringify(Object.values(CHATGPT_MODEL_TARGETS).flatMap((entry) => entry.labels))};
+        const composer = document.querySelector('[data-opencli-chatgpt-composer="1"]');`,
+  `        const labels = \${JSON.stringify(Object.values(CHATGPT_MODEL_TARGETS).flatMap((entry) => entry.labels))};
+        const triggerLabels = ['Thinking effort', 'Reasoning effort', '思考强度', '推理强度'];
+        const composer = document.querySelector('[data-opencli-chatgpt-composer="1"]');`,
+  'ChatGPT current thinking-effort trigger labels',
+)
+const upstreamThinkingEffortTrigger = `        let button = Array.from(form?.querySelectorAll('button') || []).find((node) =>
+            isVisible(node) && labels.some((label) => textMatchesLabel(node.textContent, label))
+        );`
+const previousThinkingEffortTrigger = `        let button = Array.from(form?.querySelectorAll('button') || []).find((node) =>
+            isVisible(node) && (
+                labels.some((label) => textMatchesLabel(node.textContent, label))
+                || triggerLabels.some((label) => textMatchesLabel(node.textContent, label))
+            )
+        );`
+const currentThinkingEffortTrigger = `        let button = Array.from(form?.querySelectorAll('button') || []).find((node) => {
+            if (!isVisible(node)) return false;
+            const accessibleText = [
+                node.textContent,
+                node.getAttribute('aria-label'),
+                node.getAttribute('title'),
+            ].filter(Boolean).join(' ');
+            return labels.some((label) => textMatchesLabel(accessibleText, label))
+                || triggerLabels.some((label) => textMatchesLabel(accessibleText, label));
+        });`
+const thinkingEffortTriggerSource = chatgptUtils.includes(previousThinkingEffortTrigger)
+  ? previousThinkingEffortTrigger
+  : upstreamThinkingEffortTrigger
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  thinkingEffortTriggerSource,
+  currentThinkingEffortTrigger,
+  'ChatGPT accessible thinking-effort trigger lookup',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  `    if (!menuButton.found) {
+        throw new CommandExecutionError('Could not find the ChatGPT model selector in the composer.');
+    }`,
+  `    if (!menuButton.found) {
+        if (allowedPolicyFallback) {
+            return { Status: 'Policy fallback', Model: allowedPolicyFallback.label };
+        }
+        throw new CommandExecutionError('Could not find the ChatGPT model selector in the composer.');
+    }`,
+  'ChatGPT known in-range fallback without a selector',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  `    const menuButton = requireObjectEvaluateResult(unwrapEvaluateResult(await page.evaluate(\`(() => {`,
+  `    const readMenuButton = async () => requireObjectEvaluateResult(unwrapEvaluateResult(await page.evaluate(\`(() => {`,
+  'ChatGPT delayed model selector reader',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  `    })()\`)), 'chatgpt model menu button');
+    if (!menuButton.found) {`,
+  `    })()\`)), 'chatgpt model menu button');
+    let menuButton = { found: false };
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+        menuButton = await readMenuButton();
+        if (menuButton.found) break;
+        const delayedCurrent = await getCurrentChatGPTModel(page);
+        if (rangePolicy && delayedCurrent.model) {
+            try {
+                allowedPolicyFallback = requireChatGPTModelInRange(delayedCurrent.model, rangePolicy);
+            }
+            catch {
+                allowedPolicyFallback = null;
+            }
+            if (delayedCurrent.model === target.key) {
+                return { Status: 'Already selected', Model: target.label };
+            }
+        }
+        if (attempt < 11) await page.wait(0.5);
+    }
+    if (!menuButton.found) {`,
+  'ChatGPT delayed model selector wait',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  `    if (sliderState.found) {
+        const targetValue = Number(target.intelligenceOrder);`,
+  `    if (sliderState.found) {
+        if (rangePolicy) {
+            try {
+                allowedPolicyFallback = requireChatGPTModelInRange(sliderState.current, rangePolicy);
+            }
+            catch {
+                allowedPolicyFallback = null;
+            }
+        }
+        const targetValue = Number(target.intelligenceOrder);`,
+  'ChatGPT slider model range fallback capture',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  `        if (afterSlider.model !== target.key) {
+            throw new CommandExecutionError(\`ChatGPT model did not switch to \${target.label}.\`);
+        }`,
+  `        if (afterSlider.model !== target.key) {
+            if (rangePolicy && afterSlider.model) {
+                try {
+                    allowedPolicyFallback = requireChatGPTModelInRange(afterSlider.model, rangePolicy);
+                }
+                catch {
+                    allowedPolicyFallback = null;
+                }
+            }
+            if (allowedPolicyFallback) {
+                await page.pressKey('Escape').catch(() => undefined);
+                return { Status: 'Policy fallback', Model: allowedPolicyFallback.label };
+            }
+            throw new CommandExecutionError(\`ChatGPT model did not switch to \${target.label}.\`);
+        }`,
+  'ChatGPT range fallback after a failed switch',
+)
 fs.writeFileSync(chatgptUtilsPath, chatgptUtils)
 
 let ask = fs.readFileSync(askPath, 'utf8')

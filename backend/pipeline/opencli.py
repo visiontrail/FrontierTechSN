@@ -76,6 +76,12 @@ def _environment(*, site_session_namespace: str | None = None) -> dict[str, str]
     env["OPENCLI_SITE_SESSION_NAMESPACE"] = (
         site_session_namespace or config.OPENCLI_SITE_SESSION_NAMESPACE
     )
+    # The project-local ChatGPT adapter first attempts the requested preferred
+    # level, then treats these values as its fallback range. A failed switch can
+    # keep Medium/High/Extra High, while Instant/Pro are rejected before a prompt
+    # can be sent.
+    env["OPENCLI_CHATGPT_MODEL_MIN"] = config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL
+    env["OPENCLI_CHATGPT_MODEL_MAX"] = config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL
     if runtime_mode() == ISOLATED_HEADLESS_RUNTIME:
         # Never let an isolated run auto-select among connected profiles. The
         # dedicated context id/alias is a fail-closed isolation boundary.

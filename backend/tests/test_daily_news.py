@@ -1438,7 +1438,9 @@ def test_review_recovery_requires_the_current_request_anchor():
 def test_story_review_uses_chatgpt_only_without_touching_gemini():
     async def command(args, **kwargs):
         if args[:2] == ["chatgpt", "model"]:
-            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+            return OpenCLIResult(
+                tuple(args), 0, '[{"Status":"Success","Model":"Medium"}]', ""
+            )
         if args[:2] == ["chatgpt", "ask"]:
             return OpenCLIResult(
                 tuple(args),
@@ -1478,7 +1480,9 @@ def test_chatgpt_late_recovery_accepts_only_its_owned_turn():
     async def command(args, **kwargs):
         nonlocal owned_prompt
         if args[:2] == ["chatgpt", "model"]:
-            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+            return OpenCLIResult(
+                tuple(args), 0, '[{"Status":"Success","Model":"Medium"}]', ""
+            )
         if args[:2] == ["chatgpt", "ask"]:
             owned_prompt = args[2]
             return OpenCLIResult(
@@ -1521,7 +1525,9 @@ def test_unowned_chatgpt_greeting_is_rejected_before_fresh_retry():
     async def command(args, **kwargs):
         nonlocal chatgpt_asks
         if args[:2] == ["chatgpt", "model"]:
-            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+            return OpenCLIResult(
+                tuple(args), 0, '[{"Status":"Success","Model":"Medium"}]', ""
+            )
         if args[:2] == ["chatgpt", "ask"]:
             chatgpt_asks += 1
             response = "[NO RESPONSE]" if chatgpt_asks == 1 else "W1P2P"
@@ -1566,7 +1572,9 @@ def test_chatgpt_late_recovery_polls_before_resubmitting_the_owned_request():
     async def command(args, **kwargs):
         nonlocal owned_prompt, chatgpt_asks, chatgpt_reads
         if args[:2] == ["chatgpt", "model"]:
-            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+            return OpenCLIResult(
+                tuple(args), 0, '[{"Status":"Success","Model":"Medium"}]', ""
+            )
         if args[:2] == ["chatgpt", "ask"]:
             chatgpt_asks += 1
             owned_prompt = args[2]
@@ -1678,12 +1686,12 @@ def test_chatgpt_fact_check_retries_transient_model_picker_failure():
     assert provider == "chatgpt"
     assert url.endswith("/retry")
     assert model_attempts == 2
-    assert "[CHATGPT MODEL ERROR 1/2]" in raw
-    assert any("model selection attempt 1/2 failed" in message for message in messages)
+    assert "[CHATGPT MODEL POLICY ERROR 1/3]" in raw
+    assert any("model policy check attempt 1/3 failed" in message for message in messages)
     sleep.assert_any_await(review._MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
 
-def test_chatgpt_fact_check_uses_current_model_when_picker_remains_unavailable():
+def test_chatgpt_fact_check_uses_in_range_model_after_preferred_switch_fails():
     model_attempts = 0
     chatgpt_asks = 0
     messages: list[str] = []
@@ -1692,7 +1700,12 @@ def test_chatgpt_fact_check_uses_current_model_when_picker_remains_unavailable()
         nonlocal model_attempts, chatgpt_asks
         if args[:2] == ["chatgpt", "model"]:
             model_attempts += 1
-            raise OpenCLIError("Could not find the ChatGPT model selector in the composer")
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"Status":"Policy fallback","Model":"High"}]',
+                "",
+            )
         if args[:2] == ["chatgpt", "ask"]:
             chatgpt_asks += 1
             return OpenCLIResult(
@@ -1718,10 +1731,56 @@ def test_chatgpt_fact_check_uses_current_model_when_picker_remains_unavailable()
     assert payload["approved"] is True
     assert provider == "chatgpt"
     assert url.endswith("/current")
-    assert model_attempts == 2
+    assert model_attempts == 1
     assert chatgpt_asks == 1
-    assert "[CHATGPT CURRENT MODEL]" in raw
-    assert any("current model" in message for message in messages)
+    assert "[CHATGPT MODEL POLICY]" in raw
+    assert "Allowed: medium..xhigh" in raw
+    assert "Status: Policy fallback" in raw
+    assert "Observed: High" in raw
+    assert any("Policy fallback at High" in message for message in messages)
+
+
+@pytest.mark.parametrize("outside_level", ["Instant", "Pro"])
+def test_chatgpt_fact_check_retries_out_of_range_model_without_submitting(
+    outside_level: str,
+):
+    model_attempts = 0
+    chatgpt_asks = 0
+    messages: list[str] = []
+
+    async def command(args, **kwargs):
+        nonlocal model_attempts, chatgpt_asks
+        if args[:2] == ["chatgpt", "model"]:
+            model_attempts += 1
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                json.dumps(
+                    [{"Status": "Policy fallback", "Model": outside_level}]
+                ),
+                "",
+            )
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_asks += 1
+        raise AssertionError(args)
+
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review.asyncio, "sleep", AsyncMock()) as sleep,
+        pytest.raises(RuntimeError, match="allowed medium..xhigh range after 3 attempts"),
+    ):
+        asyncio.run(
+            review._web_story_review(
+                "audit",
+                story_numbers=[1, 2],
+                log=messages.append,
+            )
+        )
+
+    assert model_attempts == 3
+    assert chatgpt_asks == 0
+    assert sleep.await_count == 2
+    assert any("model policy check attempt 2/3 failed" in message for message in messages)
 
 
 def test_chatgpt_fact_check_recovers_target_conversation_after_route_drift():
@@ -1731,7 +1790,9 @@ def test_chatgpt_fact_check_recovers_target_conversation_after_route_drift():
     async def command(args, **kwargs):
         nonlocal chatgpt_prompt
         if args[:2] == ["chatgpt", "model"]:
-            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+            return OpenCLIResult(
+                tuple(args), 0, '[{"Status":"Success","Model":"Medium"}]', ""
+            )
         if args[:2] == ["chatgpt", "ask"]:
             chatgpt_prompt = args[2]
             raise OpenCLIError(
@@ -1776,7 +1837,9 @@ def test_chatgpt_fact_check_retries_target_until_protocol_is_stable():
     async def command(args, **kwargs):
         nonlocal chatgpt_prompt, detail_reads
         if args[:2] == ["chatgpt", "model"]:
-            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+            return OpenCLIResult(
+                tuple(args), 0, '[{"Status":"Success","Model":"Medium"}]', ""
+            )
         if args[:2] == ["chatgpt", "ask"]:
             chatgpt_prompt = args[2]
             response = [{
@@ -1831,7 +1894,9 @@ def test_chatgpt_fact_check_retries_submission_without_using_gemini():
     async def command(args, **kwargs):
         nonlocal chatgpt_asks
         if args[:2] == ["chatgpt", "model"]:
-            return OpenCLIResult(tuple(args), 0, '[{"Status":"Success"}]', "")
+            return OpenCLIResult(
+                tuple(args), 0, '[{"Status":"Success","Model":"Medium"}]', ""
+            )
         if args[:2] == ["chatgpt", "ask"]:
             chatgpt_asks += 1
             if chatgpt_asks == 1:
@@ -1914,7 +1979,10 @@ def test_review_report_records_chatgpt_only(tmp_path: Path):
         )
 
     assert result.report["fallback_used"] is False
-    assert result.report["reviewer"] == "ChatGPT Web (medium) via project-local OpenCLI"
+    assert result.report["reviewer"] == (
+        "ChatGPT Web (current model constrained to medium..xhigh) "
+        "via project-local OpenCLI"
+    )
     assert result.report["attempts"][0]["providers"] == ["chatgpt"]
     assert web_review.await_args.kwargs["site_session_namespace"].startswith(
         "frontiertechsn-review-"

@@ -34,6 +34,22 @@ _CHATGPT_CONVERSATION_URL_RE = re.compile(
 )
 _RECOVERY_POLL_INTERVAL_SECONDS = 1.0
 _MODEL_SELECTION_RETRY_DELAY_SECONDS = 2.0
+_CHATGPT_REVIEW_LEVEL_ORDER = {"medium": 1, "high": 2, "xhigh": 3}
+_CHATGPT_OBSERVED_LEVELS = {
+    "balanced": "medium",
+    "medium": "medium",
+    "均衡": "medium",
+    "advanced": "high",
+    "high": "high",
+    "thinking": "high",
+    "高级": "high",
+    "思考": "high",
+    "veryhigh": "xhigh",
+    "extrahigh": "xhigh",
+    "ultra": "xhigh",
+    "xhigh": "xhigh",
+    "超高": "xhigh",
+}
 
 
 @dataclass(frozen=True)
@@ -59,6 +75,12 @@ def _field(row: dict[str, Any], name: str) -> str:
         if str(key).casefold() == name.casefold():
             return str(value or "").strip()
     return ""
+
+
+def _observed_chatgpt_review_level(value: str) -> str | None:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", normalized)
+    return _CHATGPT_OBSERVED_LEVELS.get(key)
 
 
 def _normalized_review_token(text: str) -> str:
@@ -793,16 +815,17 @@ async def _web_story_review(
         assert last_error is not None
         raise last_error
 
-    chatgpt_error: Exception | None = None
-    chatgpt_model_selection_error: Exception | None = None
-    chatgpt_model_attempts = 2
-    for model_attempt in range(1, chatgpt_model_attempts + 1):
+    chatgpt_model_policy_error: Exception | None = None
+    chatgpt_model_policy_attempts = 3
+    observed_chatgpt_model = ""
+    chatgpt_model_policy_status = ""
+    for policy_attempt in range(1, chatgpt_model_policy_attempts + 1):
         try:
-            await run_opencli(
+            policy_result = await run_opencli(
                 [
                     "chatgpt",
                     "model",
-                    config.DAILY_NEWS_CHATGPT_REVIEW_MODEL,
+                    config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL,
                     "--window",
                     "foreground",
                     "--site-session",
@@ -815,44 +838,90 @@ async def _web_story_review(
                 timeout=60,
                 site_session_namespace=review_session_namespace,
             )
-            chatgpt_error = None
+            policy_rows = _rows(first_json(policy_result.stdout))
+            observed_chatgpt_model = next(
+                (
+                    _field(row, "Model")
+                    for row in policy_rows
+                    if _field(row, "Model")
+                ),
+                "",
+            )
+            if not observed_chatgpt_model:
+                raise ValueError("ChatGPT model policy returned no observed level")
+            observed_chatgpt_level = _observed_chatgpt_review_level(
+                observed_chatgpt_model
+            )
+            minimum_order = _CHATGPT_REVIEW_LEVEL_ORDER[
+                config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL
+            ]
+            maximum_order = _CHATGPT_REVIEW_LEVEL_ORDER[
+                config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL
+            ]
+            observed_order = _CHATGPT_REVIEW_LEVEL_ORDER.get(
+                observed_chatgpt_level or ""
+            )
+            if (
+                observed_order is None
+                or observed_order < minimum_order
+                or observed_order > maximum_order
+            ):
+                raise ValueError(
+                    f"ChatGPT current model {observed_chatgpt_model} is outside "
+                    f"allowed range {config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
+                    f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL}"
+                )
+            chatgpt_model_policy_status = next(
+                (
+                    _field(row, "Status")
+                    for row in policy_rows
+                    if _field(row, "Status")
+                ),
+                "",
+            )
+            raw_attempts.append(
+                "[CHATGPT MODEL POLICY]\n"
+                f"Allowed: {config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
+                f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL}\n"
+                f"Status: {chatgpt_model_policy_status or 'verified'}\n"
+                f"Observed: {observed_chatgpt_model}"
+            )
+            chatgpt_model_policy_error = None
             if log:
                 log(
-                    "ChatGPT fact-check model: "
-                    f"{config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}"
+                    "ChatGPT fact-check current model policy passed: "
+                    f"{chatgpt_model_policy_status or 'verified'} at "
+                    f"{observed_chatgpt_model}, within "
+                    f"{config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
+                    f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL}; "
+                    "continuing after the preferred-model switch attempt"
                 )
             break
         except Exception as exc:  # noqa: BLE001 - fail closed after bounded retry
-            chatgpt_error = exc
-            chatgpt_model_selection_error = exc
+            chatgpt_model_policy_error = exc
             raw_attempts.append(
-                f"[CHATGPT MODEL ERROR {model_attempt}/{chatgpt_model_attempts}]\n{exc}"
+                f"[CHATGPT MODEL POLICY ERROR {policy_attempt}/"
+                f"{chatgpt_model_policy_attempts}]\n{exc}"
             )
-            if model_attempt < chatgpt_model_attempts and log:
+            if policy_attempt < chatgpt_model_policy_attempts and log:
                 log(
-                    "ChatGPT fact-check model selection attempt "
-                    f"{model_attempt}/{chatgpt_model_attempts} failed; retrying: {exc}"
+                    "ChatGPT fact-check model policy check attempt "
+                    f"{policy_attempt}/{chatgpt_model_policy_attempts} failed; "
+                    f"retrying: {exc}"
                 )
-            if model_attempt < chatgpt_model_attempts:
+            if policy_attempt < chatgpt_model_policy_attempts:
                 await asyncio.sleep(_MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
-    if chatgpt_error is not None:
-        # ChatGPT periodically removes or delays the composer model picker.
-        # That must not suppress the independent Web review itself: keep the
-        # model-selection failure in the evidence log, ask with the page's
-        # current model, and continue to require the exact W-prefixed protocol.
-        raw_attempts.append(
-            "[CHATGPT CURRENT MODEL]\n"
-            f"Explicit model selection unavailable: {chatgpt_model_selection_error}"
-        )
-        if log:
-            log(
-                "ChatGPT fact-check model selector is unavailable after bounded retries; "
-                "using the page's current model while retaining the mandatory live-Web "
-                "review gate"
-            )
-        chatgpt_error = None
+    if chatgpt_model_policy_error is not None:
+        raise RuntimeError(
+            "ChatGPT fact-check current model could not be verified within the "
+            f"allowed {config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
+            f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} range after "
+            f"{chatgpt_model_policy_attempts} attempts "
+            f"({chatgpt_model_policy_error})"
+        ) from chatgpt_model_policy_error
 
+    chatgpt_error: Exception | None = None
     chatgpt_attempts = 2
     for chatgpt_attempt in range(1, chatgpt_attempts + 1):
         conversation_url = ""
@@ -942,7 +1011,9 @@ async def _web_story_review(
                 )
 
     raise RuntimeError(
-        f"ChatGPT {config.DAILY_NEWS_CHATGPT_REVIEW_MODEL} {review_label} fact check "
+        "ChatGPT current-model "
+        f"{config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
+        f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} {review_label} fact check "
         f"failed after {chatgpt_attempts} attempts ({chatgpt_error})"
     ) from chatgpt_error
 
@@ -1080,7 +1151,9 @@ async def _review_daily_script(
         )
         providers = [result["provider"] for result in group_results]
         reviewer = (
-            f"ChatGPT Web ({config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}) "
+            "ChatGPT Web (current model constrained to "
+            f"{config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
+            f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL}) "
             "via project-local OpenCLI"
         )
         blocking = [
@@ -1179,8 +1252,12 @@ async def _review_daily_script(
     report = {
         "passed": False,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
-        "reviewer": f"ChatGPT Web ({config.DAILY_NEWS_CHATGPT_REVIEW_MODEL}) "
-        "via project-local OpenCLI",
+        "reviewer": (
+            "ChatGPT Web (current model constrained to "
+            f"{config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
+            f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL}) "
+            "via project-local OpenCLI"
+        ),
         "fallback_used": False,
         "attempts": attempts,
         "correction_count": correction_count,

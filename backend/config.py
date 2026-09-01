@@ -150,10 +150,32 @@ OPENCLI_RETRY_BASE_SECONDS = float(os.getenv("OPENCLI_RETRY_BASE_SECONDS", "3"))
 OPENCLI_WEB_REQUEST_INTERVAL_SECONDS = int(
     os.getenv("OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "180")
 )
-# Daily-news claim review uses ChatGPT at a deliberately non-Pro reasoning level.
-DAILY_NEWS_CHATGPT_REVIEW_MODEL = os.getenv(
-    "DAILY_NEWS_CHATGPT_REVIEW_MODEL", "medium"
-).strip() or "medium"
+# Daily-news claim review first prefers the minimum reasoning level, then accepts
+# the page's existing level only when switching fails inside the non-Pro range.
+# The legacy exact-model variable remains an environment-only seed for the new
+# minimum so existing deployments migrate without silently lowering quality.
+_LEGACY_DAILY_NEWS_CHATGPT_REVIEW_MODEL = os.getenv(
+    "DAILY_NEWS_CHATGPT_REVIEW_MODEL", ""
+).strip().lower()
+DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL = os.getenv(
+    "DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL",
+    _LEGACY_DAILY_NEWS_CHATGPT_REVIEW_MODEL or "medium",
+).strip().lower() or "medium"
+DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL = os.getenv(
+    "DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL", "xhigh"
+).strip().lower() or "xhigh"
+_DAILY_NEWS_CHATGPT_REVIEW_LEVELS = ("medium", "high", "xhigh")
+if DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL not in _DAILY_NEWS_CHATGPT_REVIEW_LEVELS:
+    DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL = "medium"
+if DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL not in _DAILY_NEWS_CHATGPT_REVIEW_LEVELS:
+    DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL = "xhigh"
+if _DAILY_NEWS_CHATGPT_REVIEW_LEVELS.index(
+    DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL
+) > _DAILY_NEWS_CHATGPT_REVIEW_LEVELS.index(
+    DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL
+):
+    DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL = "medium"
+    DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL = "xhigh"
 DAILY_NEWS_WEB_REVIEW_TIMEOUT = int(
     os.getenv("DAILY_NEWS_WEB_REVIEW_TIMEOUT", "90")
 )

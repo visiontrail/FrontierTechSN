@@ -33,6 +33,9 @@ _RETIRED_KEYS = {
     # Fact check is ChatGPT-only. Keep Gemini settings for video stages, but
     # discard the retired daily-news review override from older stores.
     "DAILY_NEWS_GEMINI_REVIEW_MODEL",
+    # Replaced by an allowed current-level range. A persisted legacy value is
+    # migrated to the new minimum before this key is pruned.
+    "DAILY_NEWS_CHATGPT_REVIEW_MODEL",
     # Provider routing is owned by Admin -> Models. Prune the former System
     # overrides so hidden settings cannot keep winning after the fields move.
     "AI_ENDPOINT",
@@ -42,6 +45,12 @@ _RETIRED_KEYS = {
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+}
+
+_CHATGPT_REVIEW_LEVEL_ORDER = {
+    "medium": 1,
+    "high": 2,
+    "xhigh": 3,
 }
 
 
@@ -691,11 +700,19 @@ SPECS: tuple[SettingSpec, ...] = (
                     "Choose 180–600 seconds (3–10 minutes).",
     ),
     SettingSpec(
-        "DAILY_NEWS_CHATGPT_REVIEW_MODEL", "footage",
-        "News review ChatGPT level", "choice",
-        options=("instant", "medium", "high", "xhigh"),
-        description="Thinking level used for every daily-news Fact check. "
-                    "Medium avoids Pro-mode latency.",
+        "DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL", "footage",
+        "News review minimum ChatGPT level", "choice",
+        options=("medium", "high", "xhigh"),
+        description="Preferred level attempted first and minimum fallback "
+                    "accepted for daily-news Fact check.",
+        allow_blank=False,
+    ),
+    SettingSpec(
+        "DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL", "footage",
+        "News review maximum ChatGPT level", "choice",
+        options=("medium", "high", "xhigh"),
+        description="Maximum fallback accepted after a failed switch. Pro is "
+                    "intentionally unavailable and is rejected.",
         allow_blank=False,
     ),
     SettingSpec(
@@ -804,6 +821,17 @@ def _read_store() -> dict[str, Any]:
     values = payload.get("values")
     if not isinstance(values, dict):
         return {}
+    legacy_review_level = values.get("DAILY_NEWS_CHATGPT_REVIEW_MODEL")
+    if (
+        legacy_review_level in _CHATGPT_REVIEW_LEVEL_ORDER
+        and "DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL" not in values
+        and legacy_review_level
+        != _DEFAULTS.get(
+            "DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL",
+            _config().DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL,
+        )
+    ):
+        values["DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL"] = legacy_review_level
     # Prune retired overrides rather than merely hiding them, so they cannot
     # return after restart or keep influencing an older runtime path.
     if any(key in values for key in _RETIRED_KEYS):
@@ -923,6 +951,19 @@ def _resolved(overrides: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
+def _validate_chatgpt_review_range(values: Mapping[str, Any]) -> None:
+    minimum = str(values.get("DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL", ""))
+    maximum = str(values.get("DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL", ""))
+    if minimum not in _CHATGPT_REVIEW_LEVEL_ORDER:
+        raise SettingsError("News review minimum ChatGPT level is invalid")
+    if maximum not in _CHATGPT_REVIEW_LEVEL_ORDER:
+        raise SettingsError("News review maximum ChatGPT level is invalid")
+    if _CHATGPT_REVIEW_LEVEL_ORDER[minimum] > _CHATGPT_REVIEW_LEVEL_ORDER[maximum]:
+        raise SettingsError(
+            "News review ChatGPT range: minimum level cannot exceed maximum level"
+        )
+
+
 def _tree_fingerprint(root: Path) -> tuple[tuple[str, str, int, str], ...]:
     """Content fingerprint for a small durable directory tree."""
     rows: list[tuple[str, str, int, str]] = []
@@ -1025,6 +1066,19 @@ def apply_saved() -> None:
     if not _DEFAULTS:
         _DEFAULTS = {spec.key: getattr(config, spec.key) for spec in SPECS}
     resolved = _resolved(_read_store())
+    try:
+        _validate_chatgpt_review_range(resolved)
+    except SettingsError:
+        # A stale or hand-edited store must not make startup unusable. Restore
+        # the known-safe built-in/.env range; interactive saves reject the same
+        # invalid order below instead of silently changing it.
+        resolved["DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL"] = _DEFAULTS[
+            "DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL"
+        ]
+        resolved["DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL"] = _DEFAULTS[
+            "DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL"
+        ]
+        _validate_chatgpt_review_range(resolved)
     _migrate_podcast_state(
         Path(config.OUTPUTS_DIR),
         Path(resolved["OUTPUTS_DIR"]),
@@ -1129,6 +1183,7 @@ def update(submitted: Mapping[str, Any]) -> list[str]:
             overrides[key] = _store_value(spec, value)
 
     after = _resolved(overrides)
+    _validate_chatgpt_review_range(after)
     _migrate_podcast_state(
         Path(_config().OUTPUTS_DIR),
         Path(after["OUTPUTS_DIR"]),

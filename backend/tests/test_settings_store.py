@@ -119,6 +119,20 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(config.RENDER_FPS, before)
         self.assertFalse(self.store.exists())
 
+    def test_rejects_inverted_chatgpt_review_range_without_persisting(self):
+        with self.assertRaises(settings_store.SettingsError) as ctx:
+            settings_store.update(
+                {
+                    "DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL": "xhigh",
+                    "DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL": "medium",
+                }
+            )
+
+        self.assertIn("minimum level cannot exceed maximum level", str(ctx.exception))
+        self.assertFalse(self.store.exists())
+        self.assertEqual(config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL, "medium")
+        self.assertEqual(config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL, "xhigh")
+
     def test_reset_restores_the_default_and_reports_restart_keys(self):
         live_outputs_dir = config.OUTPUTS_DIR
         settings_store.update({"RENDER_FPS": 42, "OUTPUTS_DIR": str(self.root / "out")})
@@ -288,14 +302,14 @@ class SettingsStoreTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.field("ORPHEUS_TTS_SPEED_PERCENT")
 
-    def test_retired_daily_news_gemini_model_is_pruned(self):
+    def test_legacy_daily_news_review_models_are_pruned_and_migrated(self):
         self.store.write_text(
             json.dumps(
                 {
                     "version": 1,
                     "values": {
                         "DAILY_NEWS_GEMINI_REVIEW_MODEL": "3.7-flash",
-                        "DAILY_NEWS_CHATGPT_REVIEW_MODEL": "medium",
+                        "DAILY_NEWS_CHATGPT_REVIEW_MODEL": "high",
                     },
                 }
             ),
@@ -305,9 +319,16 @@ class SettingsStoreTests(unittest.TestCase):
         settings_store.apply_saved()
 
         self.assertNotIn("DAILY_NEWS_GEMINI_REVIEW_MODEL", self.stored())
-        self.assertEqual(self.stored()["DAILY_NEWS_CHATGPT_REVIEW_MODEL"], "medium")
+        self.assertNotIn("DAILY_NEWS_CHATGPT_REVIEW_MODEL", self.stored())
+        self.assertEqual(
+            self.stored()["DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL"], "high"
+        )
+        self.assertEqual(config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL, "high")
+        self.assertEqual(config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL, "xhigh")
         with self.assertRaises(AssertionError):
             self.field("DAILY_NEWS_GEMINI_REVIEW_MODEL")
+        with self.assertRaises(AssertionError):
+            self.field("DAILY_NEWS_CHATGPT_REVIEW_MODEL")
 
     def test_provider_routing_settings_are_pruned_from_system_admin(self):
         provider_keys = {

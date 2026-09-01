@@ -1173,3 +1173,294 @@ test('ChatGPT does not toggle an already expanded model picker closed', async ()
   assert.equal(nativeClicks, 0)
   assert.deepEqual(pressed, ['ArrowLeft', 'Escape'])
 })
+
+test('ChatGPT falls back to an allowed current level after a failed preferred switch', async (t) => {
+  const savedMinimum = process.env.OPENCLI_CHATGPT_MODEL_MIN
+  const savedMaximum = process.env.OPENCLI_CHATGPT_MODEL_MAX
+  process.env.OPENCLI_CHATGPT_MODEL_MIN = 'medium'
+  process.env.OPENCLI_CHATGPT_MODEL_MAX = 'xhigh'
+  t.after(() => {
+    if (savedMinimum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MIN
+    else process.env.OPENCLI_CHATGPT_MODEL_MIN = savedMinimum
+    if (savedMaximum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MAX
+    else process.env.OPENCLI_CHATGPT_MODEL_MAX = savedMaximum
+  })
+
+  const pressed = []
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('hasComposer') && script.includes('hasLoginGate')) {
+        return {
+          url: 'https://chatgpt.com/',
+          title: 'ChatGPT',
+          hasComposer: true,
+          isLoggedIn: true,
+          hasLoginGate: false,
+        }
+      }
+      if (script.includes('findEntryForText')) {
+        return { model: 'very-high', label: 'Very High' }
+      }
+      if (script.includes('menuButtonSelectors')) return { found: true, x: 100, y: 50 }
+      if (script.includes('contentFound')) {
+        return { ready: true, expanded: true, contentFound: true }
+      }
+      if (script.includes('keyboardTarget')) {
+        return { found: true, current: 3, minimum: 0, maximum: 4 }
+      }
+      throw new Error(`Unexpected ChatGPT evaluate script: ${String(script).slice(0, 80)}`)
+    },
+    async nativeClick() {},
+    async pressKey(key) {
+      pressed.push(key)
+      // Simulate a UI that accepted key events but retained Extra High.
+    },
+    async wait() {},
+  }
+
+  const result = await selectChatGPTModel(page, 'medium')
+
+  assert.deepEqual(result, { Status: 'Policy fallback', Model: 'Very High' })
+  assert.deepEqual(pressed, ['ArrowLeft', 'ArrowLeft', 'Escape'])
+})
+
+test('ChatGPT closes an already-open model menu when the preferred level is selected', async (t) => {
+  const savedMinimum = process.env.OPENCLI_CHATGPT_MODEL_MIN
+  const savedMaximum = process.env.OPENCLI_CHATGPT_MODEL_MAX
+  process.env.OPENCLI_CHATGPT_MODEL_MIN = 'medium'
+  process.env.OPENCLI_CHATGPT_MODEL_MAX = 'xhigh'
+  t.after(() => {
+    if (savedMinimum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MIN
+    else process.env.OPENCLI_CHATGPT_MODEL_MIN = savedMinimum
+    if (savedMaximum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MAX
+    else process.env.OPENCLI_CHATGPT_MODEL_MAX = savedMaximum
+  })
+
+  const pressed = []
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('hasComposer') && script.includes('hasLoginGate')) {
+        return {
+          url: 'https://chatgpt.com/',
+          title: 'ChatGPT',
+          hasComposer: true,
+          isLoggedIn: true,
+          hasLoginGate: false,
+        }
+      }
+      if (script.includes('findEntryForText')) {
+        return { model: 'balanced', label: 'Medium' }
+      }
+      throw new Error(`Unexpected ChatGPT evaluate script: ${String(script).slice(0, 80)}`)
+    },
+    async nativeClick() {},
+    async pressKey(key) {
+      pressed.push(key)
+    },
+  }
+
+  const result = await selectChatGPTModel(page, 'medium')
+
+  assert.deepEqual(result, { Status: 'Already selected', Model: 'Medium' })
+  assert.deepEqual(pressed, ['Escape'])
+})
+
+test('ChatGPT accepts a known in-range current level when the selector is unavailable', async (t) => {
+  const savedMinimum = process.env.OPENCLI_CHATGPT_MODEL_MIN
+  const savedMaximum = process.env.OPENCLI_CHATGPT_MODEL_MAX
+  process.env.OPENCLI_CHATGPT_MODEL_MIN = 'medium'
+  process.env.OPENCLI_CHATGPT_MODEL_MAX = 'xhigh'
+  t.after(() => {
+    if (savedMinimum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MIN
+    else process.env.OPENCLI_CHATGPT_MODEL_MIN = savedMinimum
+    if (savedMaximum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MAX
+    else process.env.OPENCLI_CHATGPT_MODEL_MAX = savedMaximum
+  })
+
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('hasComposer') && script.includes('hasLoginGate')) {
+        return {
+          url: 'https://chatgpt.com/',
+          title: 'ChatGPT',
+          hasComposer: true,
+          isLoggedIn: true,
+          hasLoginGate: false,
+        }
+      }
+      if (script.includes('findEntryForText')) {
+        return { model: 'advanced', label: 'Advanced' }
+      }
+      if (script.includes('menuButtonSelectors')) return { found: false }
+      throw new Error(`Unexpected ChatGPT evaluate script: ${String(script).slice(0, 80)}`)
+    },
+    async nativeClick() {},
+    async wait() {},
+  }
+
+  const result = await selectChatGPTModel(page, 'medium')
+
+  assert.deepEqual(result, { Status: 'Policy fallback', Model: 'Advanced' })
+})
+
+test('ChatGPT waits for a delayed model selector before switching', async (t) => {
+  const savedMinimum = process.env.OPENCLI_CHATGPT_MODEL_MIN
+  const savedMaximum = process.env.OPENCLI_CHATGPT_MODEL_MAX
+  process.env.OPENCLI_CHATGPT_MODEL_MIN = 'medium'
+  process.env.OPENCLI_CHATGPT_MODEL_MAX = 'xhigh'
+  t.after(() => {
+    if (savedMinimum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MIN
+    else process.env.OPENCLI_CHATGPT_MODEL_MIN = savedMinimum
+    if (savedMaximum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MAX
+    else process.env.OPENCLI_CHATGPT_MODEL_MAX = savedMaximum
+  })
+
+  let menuReads = 0
+  let currentModel = null
+  const pressed = []
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('hasComposer') && script.includes('hasLoginGate')) {
+        return {
+          url: 'https://chatgpt.com/',
+          title: 'ChatGPT',
+          hasComposer: true,
+          isLoggedIn: true,
+          hasLoginGate: false,
+        }
+      }
+      if (script.includes('findEntryForText')) {
+        return currentModel
+          ? { model: currentModel, label: currentModel === 'balanced' ? 'Medium' : 'Advanced' }
+          : { model: null, label: null }
+      }
+      if (script.includes('menuButtonSelectors')) {
+        menuReads += 1
+        return menuReads >= 3 ? { found: true, x: 100, y: 50 } : { found: false }
+      }
+      if (script.includes('contentFound')) {
+        return { ready: true, expanded: true, contentFound: true }
+      }
+      if (script.includes('keyboardTarget')) {
+        return { found: true, current: 2, minimum: 0, maximum: 4 }
+      }
+      throw new Error(`Unexpected ChatGPT evaluate script: ${String(script).slice(0, 80)}`)
+    },
+    async nativeClick() {},
+    async pressKey(key) {
+      pressed.push(key)
+      if (key === 'ArrowLeft') currentModel = 'balanced'
+    },
+    async wait() {},
+  }
+
+  const result = await selectChatGPTModel(page, 'medium')
+
+  assert.deepEqual(result, { Status: 'Success', Model: 'Medium' })
+  assert.equal(menuReads, 3)
+  assert.deepEqual(pressed, ['ArrowLeft', 'Escape'])
+})
+
+test('ChatGPT never falls back to Pro when the preferred switch fails', async (t) => {
+  const savedMinimum = process.env.OPENCLI_CHATGPT_MODEL_MIN
+  const savedMaximum = process.env.OPENCLI_CHATGPT_MODEL_MAX
+  process.env.OPENCLI_CHATGPT_MODEL_MIN = 'medium'
+  process.env.OPENCLI_CHATGPT_MODEL_MAX = 'xhigh'
+  t.after(() => {
+    if (savedMinimum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MIN
+    else process.env.OPENCLI_CHATGPT_MODEL_MIN = savedMinimum
+    if (savedMaximum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MAX
+    else process.env.OPENCLI_CHATGPT_MODEL_MAX = savedMaximum
+  })
+
+  const pressed = []
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('hasComposer') && script.includes('hasLoginGate')) {
+        return {
+          url: 'https://chatgpt.com/',
+          title: 'ChatGPT',
+          hasComposer: true,
+          isLoggedIn: true,
+          hasLoginGate: false,
+        }
+      }
+      if (script.includes('findEntryForText')) return { model: 'pro', label: 'Pro' }
+      if (script.includes('menuButtonSelectors')) return { found: true, x: 100, y: 50 }
+      if (script.includes('contentFound')) {
+        return { ready: true, expanded: true, contentFound: true }
+      }
+      if (script.includes('keyboardTarget')) {
+        return { found: true, current: 4, minimum: 0, maximum: 4 }
+      }
+      throw new Error(`Unexpected ChatGPT evaluate script: ${String(script).slice(0, 80)}`)
+    },
+    async nativeClick() {},
+    async pressKey(key) {
+      pressed.push(key)
+      // Simulate a failed attempt that leaves Pro selected.
+    },
+    async wait() {},
+  }
+
+  await assert.rejects(
+    selectChatGPTModel(page, 'medium'),
+    /did not switch to Medium/,
+  )
+  assert.deepEqual(pressed, ['ArrowLeft', 'ArrowLeft', 'ArrowLeft'])
+})
+
+test('ChatGPT never falls back to Instant when the preferred switch fails', async (t) => {
+  const savedMinimum = process.env.OPENCLI_CHATGPT_MODEL_MIN
+  const savedMaximum = process.env.OPENCLI_CHATGPT_MODEL_MAX
+  process.env.OPENCLI_CHATGPT_MODEL_MIN = 'medium'
+  process.env.OPENCLI_CHATGPT_MODEL_MAX = 'xhigh'
+  t.after(() => {
+    if (savedMinimum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MIN
+    else process.env.OPENCLI_CHATGPT_MODEL_MIN = savedMinimum
+    if (savedMaximum === undefined) delete process.env.OPENCLI_CHATGPT_MODEL_MAX
+    else process.env.OPENCLI_CHATGPT_MODEL_MAX = savedMaximum
+  })
+
+  const pressed = []
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('hasComposer') && script.includes('hasLoginGate')) {
+        return {
+          url: 'https://chatgpt.com/',
+          title: 'ChatGPT',
+          hasComposer: true,
+          isLoggedIn: true,
+          hasLoginGate: false,
+        }
+      }
+      if (script.includes('findEntryForText')) return { model: 'fast', label: 'Fast' }
+      if (script.includes('menuButtonSelectors')) return { found: true, x: 100, y: 50 }
+      if (script.includes('contentFound')) {
+        return { ready: true, expanded: true, contentFound: true }
+      }
+      if (script.includes('keyboardTarget')) {
+        return { found: true, current: 0, minimum: 0, maximum: 4 }
+      }
+      throw new Error(`Unexpected ChatGPT evaluate script: ${String(script).slice(0, 80)}`)
+    },
+    async nativeClick() {},
+    async pressKey(key) {
+      pressed.push(key)
+      // Simulate a failed attempt that leaves Instant selected.
+    },
+    async wait() {},
+  }
+
+  await assert.rejects(
+    selectChatGPTModel(page, 'medium'),
+    /did not switch to Medium/,
+  )
+  assert.deepEqual(pressed, ['ArrowRight'])
+})
