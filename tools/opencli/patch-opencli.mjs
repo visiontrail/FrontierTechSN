@@ -203,7 +203,7 @@ const currentGeminiSubmitAction = `    const submitAction = await page.evaluate(
         console.error(\`[gemini/submit] action=\${JSON.stringify(submitAction)}\`);
     }
     const waitForComposerClear = async () => {
-        for (let attempt = 0; attempt < 8; attempt += 1) {
+        for (let attempt = 0; attempt < 40; attempt += 1) {
             await page.wait(0.25);
             const state = await page.evaluate(composerHasTextScript());
             if (!state?.hasText)
@@ -818,7 +818,7 @@ ask = replaceOnce(
                     pickerResult?.reason || 'Failed to open Gemini model picker for model discovery'
                 );
             }`,
-  `            const pickerAttempts = 4;
+  `            const pickerAttempts = 16;
             let pickerResult = null;
             for (let pickerAttempt = 0; pickerAttempt < pickerAttempts; pickerAttempt += 1) {
                 const pickerRaw = await page.evaluate(\`

@@ -1,7 +1,7 @@
 # OpenCLI integration
 
 - Upstream: `jackwener/opencli`
-- Project-local package: `@jackwener/opencli@1.8.6`
+- Project-local package: `@jackwener/opencli@1.8.7` (npm `latest` as of 2026-09-01)
 - Runtime install: `npm install --prefix tools/opencli`
 - Wrapper: `scripts/opencli.sh`
 - Upstream skills copied project-locally to `.claude/skills/opencli-*`

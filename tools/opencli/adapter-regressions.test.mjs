@@ -6,6 +6,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 import { selectChatGPTModel } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
 import {
   attachGeminiFile,
   sendGeminiMessage,
@@ -811,6 +812,81 @@ test('Gemini clicks a discovered semantic send button instead of pressing Enter'
   ])
 })
 
+test('Gemini ask waits through delayed model-picker hydration', async () => {
+  const prompt = 'Reply with exactly READY'
+  let pickerReads = 0
+  let composerText = ''
+  let submitted = false
+  const snapshot = () => submitted
+    ? {
+        url: 'https://gemini.google.com/app/delayed-picker',
+        turns: [
+          { Role: 'User', Text: prompt },
+          { Role: 'Assistant', Text: 'READY' },
+        ],
+        transcriptLines: [prompt, 'READY'],
+        composerHasText: false,
+        isGenerating: false,
+        structuredTurnsTrusted: true,
+      }
+    : {
+        url: 'https://gemini.google.com/app',
+        turns: [],
+        transcriptLines: [],
+        composerHasText: false,
+        isGenerating: false,
+        structuredTurnsTrusted: true,
+      }
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app'
+      if (script.includes('Gemini model picker button was not found')) {
+        pickerReads += 1
+        return pickerReads < 10
+          ? { ok: false, reason: 'Gemini model picker button was not found' }
+          : { ok: true }
+      }
+      if (script.includes('results.push({ model: modelId, thinkingValues: [] })')) {
+        return [{ model: '3.7-flash', thinkingValues: [] }]
+      }
+      if (script.includes("reason: 'Model picker not found'")) return { ok: true }
+      if (script.includes('const targetModelId = "3.7-flash"')) return { ok: true }
+      if (script.includes('return canonicalModelId(combined)')) return '3.7-flash'
+      if (script.includes('structuredTurnsTrusted')) return snapshot()
+      if (script.includes('bestButton instanceof HTMLElement')) {
+        return { action: 'button', label: 'Send message', x: 123, y: 456 }
+      }
+      if (script.includes('hasText: actual.length > 0')) {
+        return { hasText: composerText.length > 0, actual: composerText }
+      }
+      if (script.includes('Could not find Gemini composer')) return { ok: true }
+      if (script.includes('document.body.click()')) return undefined
+      throw new Error(`Unexpected Gemini ask script: ${String(script).slice(0, 120)}`)
+    },
+    async goto() {},
+    async wait() {},
+    async fillText(_selector, text) {
+      composerText = text
+      return { verified: true, actual: text }
+    },
+    async click() {
+      composerText = ''
+      submitted = true
+    },
+  }
+
+  const result = await geminiAskCommand.func(page, {
+    prompt,
+    model: '3.7-flash',
+    timeout: 30,
+    new: 'true',
+    thinking: null,
+  })
+
+  assert.equal(pickerReads, 10)
+  assert.deepEqual(result, [{ response: '💬 READY' }])
+})
+
 test('Gemini accepts an owned short reply already present at submission confirmation', async () => {
   const prompt = 'REVIEW_REQUEST_ID:0123456789abcdef0123456789abcdef\nReply exactly 1P2P'
   const current = {
@@ -871,6 +947,40 @@ test('Gemini does not click twice when the first click submits but reports an er
 
   assert.equal(result, 'button')
   assert.equal(clickCount, 1)
+})
+
+test('Gemini waits for a delayed composer-clear acknowledgement after submit', async () => {
+  let composerText = ''
+  let submitted = false
+  let acknowledgementPolls = 0
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app/test'
+      if (script.includes('bestButton instanceof HTMLElement')) {
+        return { action: 'button', label: 'Send message', x: 123, y: 456 }
+      }
+      if (script.includes('hasText: actual.length > 0')) {
+        return { hasText: composerText.length > 0, actual: composerText }
+      }
+      if (script.includes('Could not find Gemini composer')) return { ok: true }
+      throw new Error(`Unexpected Gemini evaluate script: ${String(script).slice(0, 100)}`)
+    },
+    async fillText(_selector, text) {
+      composerText = text
+      return { verified: true, actual: text }
+    },
+    async click() {
+      submitted = true
+    },
+    async wait() {
+      if (!submitted) return
+      acknowledgementPolls += 1
+      if (acknowledgementPolls === 20) composerText = ''
+    },
+  }
+
+  assert.equal(await sendGeminiMessage(page, 'hello'), 'button')
+  assert.equal(acknowledgementPolls, 20)
 })
 
 test('Gemini accepts exact DOM text when fill verification is unavailable without appending', async () => {
