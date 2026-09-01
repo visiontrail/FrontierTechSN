@@ -218,6 +218,12 @@ ACOUSTIC_EQUIVALENTS = {
     # unrelated near-matches remain rejected.
     "suarcese": "scorsese",
     "sorsese": "scorsese",
+    # The invented product name PhanthyMotus was rendered completely, but
+    # Whisper spelled the same pronunciation as FancyModus at normal/0.8x and
+    # Fantymodus at 0.7x. Limit the equivalence to those two observed full-name
+    # spellings; nearby words and partial names remain hard failures.
+    "fancymodus": "phanthymotus",
+    "fantymodus": "phanthymotus",
     # Singular possessive "Techmeme's" and plural possessive "TechMemes'"
     # have the same /z/ ending. Whisper used the latter spelling for a live,
     # otherwise exact utterance; TechMean remains intentionally distinct.

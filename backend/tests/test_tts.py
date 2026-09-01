@@ -1370,6 +1370,64 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(process.await_count, 1)
         self.assertIn("atempo=0.8", process.await_args.kwargs["command"])
 
+    async def test_orpheus_verifier_rechecks_qbitai_hubit_split_at_slower_speed(self):
+        expected = (
+            "QbitAI reports that the company behind PhanthyMotus has launched "
+            "a new plan."
+        )
+
+        def words(text: str) -> list[dict]:
+            return [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(text.split())
+            ]
+
+        original = words(
+            "Hubit AI reports that the company behind FancyModus has launched "
+            "a new plan"
+        )
+        slower = words(
+            "QBit AI reports that the company behind Fantymodus has launched "
+            "a new plan"
+        )
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcriber = AsyncMock(
+                side_effect=[
+                    (original, {"passed": True}),
+                    (slower, {"passed": True}),
+                ]
+            )
+            process = AsyncMock(return_value=(0, ""))
+            with (
+                patch(
+                    "backend.pipeline.av_sync.ensure_word_transcript",
+                    transcriber,
+                ),
+                patch.object(tts, "stream_subprocess", process),
+            ):
+                report = await tts._verify_orpheus_part(
+                    Path(temp_dir) / "qbitai.wav",
+                    expected,
+                    Path(temp_dir) / "verification",
+                    emit=messages.append,
+                )
+
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["verification_playback_speed"], 0.8)
+        self.assertEqual(transcriber.await_count, 2)
+        self.assertEqual(process.await_count, 1)
+        self.assertIn("exact name transcript recovered", " ".join(messages))
+
+    def test_orpheus_name_recheck_rejects_unsupported_qbitai_split(self):
+        expected = "QbitAI reports the result."
+        observed = [
+            {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+            for index, word in enumerate("Unit AI reports the result".split())
+        ]
+
+        self.assertFalse(tts._has_only_name_transcript_mismatches(expected, observed))
+
     async def test_orpheus_name_recheck_rejects_unsupported_single_token(self):
         expected = "Alibaba's Qwen Office."
 
@@ -2257,6 +2315,23 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["expected_words"], 12)
         self.assertEqual(report["transcript_words"], 12)
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
+    def test_orpheus_transcript_normalizes_phanthymotus_asr_spellings(self):
+        expected = "The company behind PhanthyMotus has launched a new plan."
+
+        def report(product_name: str) -> dict:
+            observed = (
+                f"The company behind {product_name} has launched a new plan"
+            ).split()
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed)
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        self.assertTrue(report("FancyModus")["verified"])
+        self.assertTrue(report("Fantymodus")["verified"])
+        self.assertFalse(report("FancyModels")["verified"])
 
     def test_orpheus_transcript_normalizes_skild_company_name(self):
         expected = (
