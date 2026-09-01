@@ -195,7 +195,45 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("bestaudio", command[command.index("-f") + 1])
 
-    async def test_youtube_section_403_falls_back_to_bounded_native_download(self):
+    async def test_youtube_section_403_retries_with_embedded_player(self):
+        candidate = {
+            "source_page_url": "https://www.youtube.com/watch?v=demo",
+            "duration_seconds": 900,
+        }
+        analysis = {"start_seconds": 66.0, "end_seconds": 81.0}
+
+        with TemporaryDirectory() as directory:
+            raw_dir = Path(directory)
+
+            async def fake_run(command, **_kwargs):
+                if "--extractor-args" not in command:
+                    raise web_footage.WebFootageError("ffmpeg returned 403 Forbidden")
+                (raw_dir / "demo.mp4").write_bytes(b"video")
+                return 0, "", ""
+
+            with (
+                patch.object(web_footage, "_yt_dlp_bin", return_value="yt-dlp"),
+                patch.object(
+                    web_footage,
+                    "_run_command",
+                    AsyncMock(side_effect=fake_run),
+                ) as runner,
+            ):
+                path, sectioned = await web_footage._download_youtube(
+                    candidate, raw_dir, analysis
+                )
+
+        self.assertEqual(path.name, "demo.mp4")
+        self.assertTrue(sectioned)
+        self.assertEqual(runner.await_count, 2)
+        embedded_command = runner.await_args_list[1].args[0]
+        self.assertIn("--download-sections", embedded_command)
+        self.assertEqual(
+            embedded_command[embedded_command.index("--extractor-args") + 1],
+            "youtube:player_client=web_embedded",
+        )
+
+    async def test_youtube_embedded_section_failure_uses_bounded_native_download(self):
         candidate = {
             "source_page_url": "https://www.youtube.com/watch?v=demo",
             "duration_seconds": 900,
@@ -207,7 +245,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
 
             async def fake_run(command, **_kwargs):
                 if "--download-sections" in command:
-                    raise web_footage.WebFootageError("ffmpeg returned 403 Forbidden")
+                    raise web_footage.WebFootageError("403 Forbidden")
                 (raw_dir / "demo-full.mp4").write_bytes(b"video")
                 return 0, "", ""
 
@@ -225,11 +263,14 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(path.name, "demo-full.mp4")
         self.assertFalse(sectioned)
-        self.assertEqual(runner.await_count, 2)
-        fallback_command = runner.await_args_list[1].args[0]
+        self.assertEqual(runner.await_count, 3)
+        fallback_command = runner.await_args_list[2].args[0]
         self.assertNotIn("--download-sections", fallback_command)
         self.assertIn("--max-filesize", fallback_command)
-        self.assertIn("bestvideo[height<=360]", fallback_command[fallback_command.index("-f") + 1])
+        self.assertIn(
+            "bestvideo[height<=360]",
+            fallback_command[fallback_command.index("-f") + 1],
+        )
 
     async def test_supplement_retries_next_unique_candidate_after_download_failure(self):
         with TemporaryDirectory() as directory:

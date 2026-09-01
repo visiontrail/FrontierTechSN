@@ -30,6 +30,10 @@ YOUTUBE_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch|youtu\.be
 GEMINI_RECOVERY_TIMEOUT_SECONDS = 60.0
 GEMINI_RECOVERY_POLL_SECONDS = 5.0
 MAX_CANDIDATE_ATTEMPTS_PER_QUERY = 3
+YOUTUBE_EMBEDDED_PLAYER_ARGS = (
+    "--extractor-args",
+    "youtube:player_client=web_embedded",
+)
 
 
 class WebFootageError(RuntimeError):
@@ -358,39 +362,91 @@ async def _download_youtube(
         await _run_command(command, timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT)
     except WebFootageError as section_error:
         if not sectioned:
-            raise
-        # YouTube's signed googlevideo URL can reject FFmpeg's range request
-        # even when yt-dlp itself can download the same media.  Fetch a bounded
-        # 360p source with yt-dlp's native downloader, then trim it locally.
-        # The byte ceiling prevents an unexpectedly long source from filling
-        # the task workspace.
-        fallback_template = raw_dir / "%(id)s-full.%(ext)s"
-        fallback_command = [
-            _yt_dlp_bin(),
-            *_yt_dlp_common_args(include_cookies=False),
-            "--no-playlist",
-            "-f",
-            (
-                "bestvideo[height<=360][ext=mp4]/"
-                "bestvideo[height<=360]/best[height<=360]"
-            ),
-            "--max-filesize",
-            str(config.FOOTAGE_MAX_BYTES),
-            "-o",
-            str(fallback_template),
-            candidate["source_page_url"],
-        ]
-        try:
-            await _run_command(
-                fallback_command,
-                timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT,
-            )
-        except WebFootageError as fallback_error:
-            raise WebFootageError(
-                "YouTube section download and bounded full-download fallback both failed: "
-                f"section={str(section_error)[-420:]}; fallback={str(fallback_error)[-420:]}"
-            ) from fallback_error
-        sectioned = False
+            embedded_command = [
+                _yt_dlp_bin(),
+                *_yt_dlp_common_args(include_cookies=False),
+                *YOUTUBE_EMBEDDED_PLAYER_ARGS,
+                "--no-playlist",
+                "-f",
+                "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+                "--max-filesize",
+                str(config.FOOTAGE_MAX_BYTES),
+                "-o",
+                str(template),
+                candidate["source_page_url"],
+            ]
+            try:
+                await _run_command(
+                    embedded_command,
+                    timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT,
+                )
+            except WebFootageError as embedded_error:
+                raise WebFootageError(
+                    "YouTube default and embedded-client downloads both failed: "
+                    f"default={str(section_error)[-420:]}; "
+                    f"embedded={str(embedded_error)[-420:]}"
+                ) from embedded_error
+        else:
+            # Current YouTube GVS enforcement can return signed Android/VR
+            # googlevideo URLs that list normally but reject both FFmpeg range
+            # requests and yt-dlp's native downloader with HTTP 403.  The
+            # unauthenticated web-embedded player uses a separately attested URL
+            # for embeddable public videos, so retry the same bounded interval
+            # before paying the cost of downloading the complete source.
+            embedded_section_command = [
+                _yt_dlp_bin(),
+                *_yt_dlp_common_args(include_cookies=False),
+                *YOUTUBE_EMBEDDED_PLAYER_ARGS,
+                "--no-playlist",
+                "-f",
+                "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+                "-o",
+                str(template),
+                "--download-sections",
+                f"*{start:.3f}-{end:.3f}",
+                "--force-keyframes-at-cuts",
+                candidate["source_page_url"],
+            ]
+            try:
+                await _run_command(
+                    embedded_section_command,
+                    timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT,
+                )
+            except WebFootageError as embedded_section_error:
+                # Some videos cannot be embedded. Fetch a bounded 360p source
+                # with yt-dlp's native downloader, then trim it locally. The
+                # byte ceiling prevents an unexpectedly long source from
+                # filling the task workspace.
+                fallback_template = raw_dir / "%(id)s-full.%(ext)s"
+                fallback_command = [
+                    _yt_dlp_bin(),
+                    *_yt_dlp_common_args(include_cookies=False),
+                    "--no-playlist",
+                    "-f",
+                    (
+                        "bestvideo[height<=360][ext=mp4]/"
+                        "bestvideo[height<=360]/best[height<=360]"
+                    ),
+                    "--max-filesize",
+                    str(config.FOOTAGE_MAX_BYTES),
+                    "-o",
+                    str(fallback_template),
+                    candidate["source_page_url"],
+                ]
+                try:
+                    await _run_command(
+                        fallback_command,
+                        timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT,
+                    )
+                except WebFootageError as fallback_error:
+                    raise WebFootageError(
+                        "YouTube section, embedded-section, and bounded "
+                        "full-download fallbacks all failed: "
+                        f"section={str(section_error)[-300:]}; "
+                        f"embedded={str(embedded_section_error)[-300:]}; "
+                        f"fallback={str(fallback_error)[-300:]}"
+                    ) from fallback_error
+                sectioned = False
     after = [
         path for path in raw_dir.glob("*")
         if path.is_file() and path.resolve() not in before and path.suffix.lower() in {".mp4", ".webm", ".mkv", ".mov"}
