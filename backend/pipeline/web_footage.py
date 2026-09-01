@@ -118,15 +118,11 @@ def _yt_dlp_bin() -> str:
 
 def _search_match_terms(value: str) -> set[str]:
     """Normalize discovery text while retaining product and entity names."""
-    words = [word.casefold() for word in SEARCH_WORD_RE.findall(value)]
+    words = [_normalize_search_word(word) for word in SEARCH_WORD_RE.findall(value)]
     terms: set[str] = set()
     for word in words:
         if word in SEARCH_STOPWORDS:
             continue
-        if word.endswith("ies") and len(word) > 5:
-            word = word[:-3] + "y"
-        elif word.endswith("s") and not word.endswith("ss") and len(word) > 4:
-            word = word[:-1]
         terms.add(word)
     # YouTube titles alternate freely between "robotaxi", "robo-taxi", and
     # "robo taxi". Adjacent compact forms make those spellings equivalent
@@ -139,10 +135,29 @@ def _search_match_terms(value: str) -> set[str]:
     return terms
 
 
+def _normalize_search_word(word: str) -> str:
+    value = word.casefold()
+    if value.endswith("ies") and len(value) > 5:
+        return value[:-3] + "y"
+    if value.endswith("s") and not value.endswith("ss") and len(value) > 4:
+        return value[:-1]
+    return value
+
+
 def _rank_youtube_candidates(candidates: list[dict], query: str) -> list[dict]:
     """Prefer query-specific results while preserving YouTube order for ties."""
     query_terms = _search_match_terms(query)
-    ranked: list[tuple[tuple[int, int, int], int, dict]] = []
+    ordered_query_terms = [
+        _normalize_search_word(word)
+        for word in SEARCH_WORD_RE.findall(query)
+        if word.casefold() not in SEARCH_STOPWORDS
+    ]
+    query_weights = {
+        term: len(ordered_query_terms) - index
+        for index, term in enumerate(ordered_query_terms)
+    }
+    primary_term = ordered_query_terms[0] if ordered_query_terms else ""
+    ranked: list[tuple[tuple[int, int, int, int, int], int, dict]] = []
     for index, candidate in enumerate(candidates):
         title_terms = _search_match_terms(str(candidate.get("title") or ""))
         metadata_terms = _search_match_terms(
@@ -156,12 +171,23 @@ def _rank_youtube_candidates(candidates: list[dict], query: str) -> list[dict]:
         )
         title_overlap = len(query_terms & title_terms)
         metadata_overlap = len(query_terms & metadata_terms)
-        # Title matches are the strongest evidence. Metadata coverage breaks
-        # ties, while the original YouTube rank remains the final stable key.
-        relevance = (title_overlap, metadata_overlap, -index)
+        weighted_title_overlap = sum(
+            query_weights.get(term, 1) for term in query_terms & title_terms
+        )
+        # The first query term normally identifies the subject entity, while
+        # later terms narrow the object, action, or location. Prefer that
+        # entity before weighted title coverage, then retain YouTube order for
+        # otherwise equivalent candidates.
+        relevance = (
+            int(bool(primary_term and primary_term in title_terms)),
+            weighted_title_overlap,
+            title_overlap,
+            metadata_overlap,
+            -index,
+        )
         enriched = {
             **candidate,
-            "query_relevance_score": title_overlap * 10 + metadata_overlap,
+            "query_relevance_score": weighted_title_overlap * 10 + metadata_overlap,
         }
         ranked.append((relevance, index, enriched))
     ranked.sort(key=lambda item: item[0], reverse=True)

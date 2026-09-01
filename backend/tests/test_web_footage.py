@@ -53,6 +53,12 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
                 "source_page_url": "https://www.youtube.com/watch?v=generic",
             },
             {
+                "title": "Driverless Robotaxis Begin Taking Customers in Beijing",
+                "creator": "City News",
+                "description": "A new autonomous taxi fleet enters service.",
+                "source_page_url": "https://www.youtube.com/watch?v=wrong-brand",
+            },
+            {
                 "title": "China Self-Driving DiDi RoboTaxi Fleet in Shanghai",
                 "creator": "Road Test",
                 "description": "Autonomous vehicles on public roads.",
