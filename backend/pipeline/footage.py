@@ -451,7 +451,7 @@ async def plan_footage_queries(
         grounded = _distinct_grounded_plan(
             supplied,
             script,
-            count,
+            candidate_count,
             excluded_purposes=excluded_purposes,
             keep_ungrounded=True,
         )

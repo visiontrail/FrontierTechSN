@@ -214,6 +214,36 @@ Thanks for watching, and subscribe for more."""
         self.assertGreater(len(plan), 2)
         self.assertEqual(len({item["script_excerpt"] for item in plan}), len(plan))
 
+    def test_manual_plan_keeps_supplied_alternates_beyond_clip_target(self):
+        script = "\n".join(
+            [
+                "Anthropic signed a Lambda cloud agreement in Texas.",
+                "Didi tested the Robotaxi R2 in Beijing.",
+                "The Faraday Museum displays Alessandro Volta's battery.",
+                "Chinese researchers built a light-driven soft robot.",
+            ]
+        )
+
+        plan, planner = __import__("asyncio").run(
+            footage.plan_footage_queries(
+                title="Frontier Tech Daily",
+                script=script,
+                count=2,
+                provider_id=None,
+                ai_endpoint=None,
+                ai_model=None,
+                supplied_queries=[
+                    "Anthropic Lambda Texas",
+                    "Didi Robotaxi Beijing",
+                    "Faraday Volta battery",
+                    "light-driven soft robot",
+                ],
+            )
+        )
+
+        self.assertEqual(planner, "user")
+        self.assertEqual(len(plan), 4)
+
 
 class WikimediaCandidateTests(unittest.TestCase):
     def test_two_term_query_requires_both_terms_in_candidate_metadata(self):
