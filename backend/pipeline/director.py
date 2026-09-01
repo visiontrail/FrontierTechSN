@@ -377,10 +377,14 @@ async def _run_agent(
     log: LogCallback | None,
     label: str = "authoring",
     system_prompt: str = SYSTEM_PROMPT,
+    max_attempts: int | None = None,
 ) -> tuple[list[str], str | None]:
     """Run one crew with the same configured-provider retry policy as text stages."""
     ids = list(ids)
-    maximum_attempts = max(1, int(config.AI_MAX_RETRIES) + 1)
+    maximum_attempts = max(
+        1,
+        int(max_attempts) if max_attempts is not None else int(config.AI_MAX_RETRIES) + 1,
+    )
     if log:
         log(f"Director crew {batch_no}/{batch_total}: {label} {', '.join(ids)}")
 
@@ -609,6 +613,9 @@ Read each file, fix it, and write it back."""
         log=log,
         label="repairing",
         system_prompt=_system_prompt(theme, frame),
+        # Layout repair is advisory and already has a deterministic fallback.
+        # Retrying a rate-limited provider here only delays the render.
+        max_attempts=1,
     )
     if error and log:
         log(f"Director: repair pass {error}")

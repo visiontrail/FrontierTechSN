@@ -220,3 +220,33 @@ def test_director_retries_selected_provider_until_a_later_attempt_succeeds(
     assert attempts == 3
     assert any("attempt 3/3" in line for line in logs)
     assert all("yhroot" not in line for line in logs)
+
+
+def test_agent_attempt_override_disables_retries(tmp_path, monkeypatch):
+    attempts = 0
+
+    async def fake_attempt(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        return 1, "rate limited"
+
+    monkeypatch.setattr(director, "_run_agent_attempt", fake_attempt)
+    monkeypatch.setattr(director.config, "AI_MAX_RETRIES", 9)
+
+    ids, error = asyncio.run(
+        director._run_agent(
+            tmp_path,
+            "repair prompt",
+            ["scene-01"],
+            batch_no=1,
+            batch_total=1,
+            model="model",
+            env={},
+            log=None,
+            max_attempts=1,
+        )
+    )
+
+    assert ids == ["scene-01"]
+    assert error == "rate limited"
+    assert attempts == 1
