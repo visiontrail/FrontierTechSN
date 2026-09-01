@@ -156,8 +156,7 @@ def _rank_youtube_candidates(candidates: list[dict], query: str) -> list[dict]:
         term: len(ordered_query_terms) - index
         for index, term in enumerate(ordered_query_terms)
     }
-    primary_term = ordered_query_terms[0] if ordered_query_terms else ""
-    ranked: list[tuple[tuple[int, int, int, int, int], int, dict]] = []
+    ranked: list[tuple[tuple[int, int, int, int], int, dict]] = []
     for index, candidate in enumerate(candidates):
         title_terms = _search_match_terms(str(candidate.get("title") or ""))
         metadata_terms = _search_match_terms(
@@ -174,20 +173,22 @@ def _rank_youtube_candidates(candidates: list[dict], query: str) -> list[dict]:
         weighted_title_overlap = sum(
             query_weights.get(term, 1) for term in query_terms & title_terms
         )
-        # The first query term normally identifies the subject entity, while
-        # later terms narrow the object, action, or location. Prefer that
-        # entity before weighted title coverage, then retain YouTube order for
-        # otherwise equivalent candidates.
+        # Distinct title-term coverage is the primary signal. Query order then
+        # breaks ties so a subject/object pair ("Didi Robotaxi") beats an
+        # object/location pair ("Robotaxi Beijing") without letting one early
+        # but ambiguous word ("Faraday" in "Faraday motor") outrank two later
+        # exact concepts ("Volta battery").
         relevance = (
-            int(bool(primary_term and primary_term in title_terms)),
-            weighted_title_overlap,
             title_overlap,
+            weighted_title_overlap,
             metadata_overlap,
             -index,
         )
         enriched = {
             **candidate,
-            "query_relevance_score": weighted_title_overlap * 10 + metadata_overlap,
+            "query_relevance_score": (
+                title_overlap * 100 + weighted_title_overlap * 10 + metadata_overlap
+            ),
         }
         ranked.append((relevance, index, enriched))
     ranked.sort(key=lambda item: item[0], reverse=True)

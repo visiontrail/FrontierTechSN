@@ -106,6 +106,32 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_youtube_candidate_coverage_beats_one_ambiguous_early_term(self):
+        candidates = [
+            {
+                "title": "Faraday Motor: How It Works",
+                "creator": "Electronics Tutorial",
+                "description": "Build a small spinning motor.",
+                "source_page_url": "https://www.youtube.com/watch?v=motor",
+            },
+            {
+                "title": "Alessandro Volta and Making a Battery",
+                "creator": "Science Museum",
+                "description": "The first electric battery and Luigi Galvani.",
+                "source_page_url": "https://www.youtube.com/watch?v=battery",
+            },
+        ]
+
+        ranked = web_footage._rank_youtube_candidates(
+            candidates,
+            "Faraday Museum Volta battery",
+        )
+
+        self.assertEqual(
+            ranked[0]["source_page_url"],
+            "https://www.youtube.com/watch?v=battery",
+        )
+
     async def test_non_youtube_candidate_is_rejected(self):
         candidate = {
             "platform": "bilibili",
