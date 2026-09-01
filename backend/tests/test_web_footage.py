@@ -9,6 +9,62 @@ from backend.pipeline.opencli import OpenCLIResult
 
 
 class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
+    def test_youtube_candidates_prefer_specific_story_terms_over_first_result(self):
+        candidates = [
+            {
+                "title": "How to Use Didi in China",
+                "creator": "Travel Guide",
+                "description": "Book taxis and rideshares with the Didi app.",
+                "source_page_url": "https://www.youtube.com/watch?v=generic",
+            },
+            {
+                "title": "China Self-Driving DiDi RoboTaxi Fleet in Shanghai",
+                "creator": "Road Test",
+                "description": "Autonomous vehicles on public roads.",
+                "source_page_url": "https://www.youtube.com/watch?v=robotaxi",
+            },
+        ]
+
+        ranked = web_footage._rank_youtube_candidates(
+            candidates,
+            "Didi Robotaxi Beijing",
+        )
+
+        self.assertEqual(
+            ranked[0]["source_page_url"],
+            "https://www.youtube.com/watch?v=robotaxi",
+        )
+        self.assertGreater(
+            ranked[0]["query_relevance_score"],
+            ranked[1]["query_relevance_score"],
+        )
+
+    def test_youtube_candidate_ranking_preserves_provider_order_for_ties(self):
+        candidates = [
+            {
+                "title": "First unrelated clip",
+                "creator": "One",
+                "description": "",
+                "source_page_url": "https://www.youtube.com/watch?v=first",
+            },
+            {
+                "title": "Second unrelated clip",
+                "creator": "Two",
+                "description": "",
+                "source_page_url": "https://www.youtube.com/watch?v=second",
+            },
+        ]
+
+        ranked = web_footage._rank_youtube_candidates(candidates, "Didi Robotaxi")
+
+        self.assertEqual(
+            [candidate["source_page_url"] for candidate in ranked],
+            [
+                "https://www.youtube.com/watch?v=first",
+                "https://www.youtube.com/watch?v=second",
+            ],
+        )
+
     async def test_non_youtube_candidate_is_rejected(self):
         candidate = {
             "platform": "bilibili",

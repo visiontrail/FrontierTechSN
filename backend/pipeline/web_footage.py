@@ -26,10 +26,14 @@ logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
+SEARCH_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 YOUTUBE_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch|youtu\.be/)")
 GEMINI_RECOVERY_TIMEOUT_SECONDS = 60.0
 GEMINI_RECOVERY_POLL_SECONDS = 5.0
 MAX_CANDIDATE_ATTEMPTS_PER_QUERY = 3
+SEARCH_STOPWORDS = frozenset(
+    "a an and are as at be by for from how in into is it of on or the this to use with".split()
+)
 YOUTUBE_EMBEDDED_PLAYER_ARGS = (
     "--extractor-args",
     "youtube:player_client=web_embedded",
@@ -112,6 +116,58 @@ def _yt_dlp_bin() -> str:
     raise WebFootageError("yt-dlp is not installed in the project virtualenv")
 
 
+def _search_match_terms(value: str) -> set[str]:
+    """Normalize discovery text while retaining product and entity names."""
+    words = [word.casefold() for word in SEARCH_WORD_RE.findall(value)]
+    terms: set[str] = set()
+    for word in words:
+        if word in SEARCH_STOPWORDS:
+            continue
+        if word.endswith("ies") and len(word) > 5:
+            word = word[:-3] + "y"
+        elif word.endswith("s") and not word.endswith("ss") and len(word) > 4:
+            word = word[:-1]
+        terms.add(word)
+    # YouTube titles alternate freely between "robotaxi", "robo-taxi", and
+    # "robo taxi". Adjacent compact forms make those spellings equivalent
+    # without adding a product-specific alias table.
+    terms.update(
+        left + right
+        for left, right in zip(words, words[1:])
+        if left not in SEARCH_STOPWORDS and right not in SEARCH_STOPWORDS
+    )
+    return terms
+
+
+def _rank_youtube_candidates(candidates: list[dict], query: str) -> list[dict]:
+    """Prefer query-specific results while preserving YouTube order for ties."""
+    query_terms = _search_match_terms(query)
+    ranked: list[tuple[tuple[int, int, int], int, dict]] = []
+    for index, candidate in enumerate(candidates):
+        title_terms = _search_match_terms(str(candidate.get("title") or ""))
+        metadata_terms = _search_match_terms(
+            " ".join(
+                [
+                    str(candidate.get("title") or ""),
+                    str(candidate.get("creator") or ""),
+                    str(candidate.get("description") or ""),
+                ]
+            )
+        )
+        title_overlap = len(query_terms & title_terms)
+        metadata_overlap = len(query_terms & metadata_terms)
+        # Title matches are the strongest evidence. Metadata coverage breaks
+        # ties, while the original YouTube rank remains the final stable key.
+        relevance = (title_overlap, metadata_overlap, -index)
+        enriched = {
+            **candidate,
+            "query_relevance_score": title_overlap * 10 + metadata_overlap,
+        }
+        ranked.append((relevance, index, enriched))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [candidate for _score, _index, candidate in ranked]
+
+
 async def search_youtube(query: str, *, limit: int = 4) -> list[dict]:
     command = [
         _yt_dlp_bin(),
@@ -145,7 +201,7 @@ async def search_youtube(query: str, *, limit: int = 4) -> list[dict]:
                 "search_score": int(row.get("view_count") or 0),
             }
         )
-    return candidates
+    return _rank_youtube_candidates(candidates, query)
 
 
 def matching_script_excerpt(script: str, query: str, *, limit: int = 1200) -> str:
