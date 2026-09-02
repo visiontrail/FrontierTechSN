@@ -93,6 +93,9 @@ def test_outro_scene_is_a_valid_editable_hyperframes_composition():
     ) == []
     assert "感谢观看" not in html
     assert 'data-outro-role="brand"' in html
+    assert 'data-outro-brand-part="espresso"' in html
+    assert "outro-badge" not in html
+    assert "font:700 66px/1.2" in html
     assert 'data-outro-role="thanks"' in html
     assert html.count("data-outro-action=") == 3
     assert "muted playsinline" in html

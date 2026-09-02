@@ -1211,7 +1211,7 @@ def _render_outro(plan: ScenePlan) -> str:
     panel_width = "calc(100% - 144px)" if portrait else "1180px"
     overlay_padding = "92px 72px 110px" if portrait else "70px 86px 62px"
     panel_padding = "52px 44px" if portrait else "46px 54px 42px"
-    logo_width = "400px" if portrait else "475px"
+    logo_width = "560px"
     headline_size_px = 72 if portrait else 91
     css = f"""
   #{plan.id} .outro-background {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
@@ -1226,14 +1226,12 @@ def _render_outro(plan: ScenePlan) -> str:
   #{plan.id} .outro-panel {{ align-self:center; width:{panel_width}; min-height:{'840px' if portrait else '585px'};
       padding:{panel_padding}; border:1px solid {border}; background:{panel};
       box-shadow:0 28px 80px rgba(7,20,39,.22); backdrop-filter:blur(16px) saturate(120%); }}
-  #{plan.id} .outro-brand-row {{ display:flex; align-items:center; gap:24px; flex-wrap:wrap; }}
-  #{plan.id} .outro-logo-shell {{ display:flex; align-items:center; width:{logo_width}; height:116px;
-      padding:18px 26px; overflow:hidden; border:1px solid rgba(16,36,63,.09); border-radius:16px;
-      background:rgba(255,255,255,.96); box-shadow:0 12px 34px rgba(7,20,39,.12); }}
-  #{plan.id} .outro-logo {{ display:block; width:100%; height:100%; object-fit:contain; }}
-  #{plan.id} .outro-badge {{ display:flex; align-items:center; height:50px; padding:0 21px;
-      border:1px solid rgba(201,135,88,.55); border-radius:999px; color:#C98758;
-      font:800 18px/1 'Courier New',monospace; letter-spacing:.21em; text-transform:uppercase; }}
+  #{plan.id} .outro-brand-row {{ display:flex; align-items:center; gap:26px; flex-wrap:wrap; }}
+  #{plan.id} .outro-logo-shell {{ display:flex; align-items:center; width:{logo_width}; }}
+  #{plan.id} .outro-logo {{ display:block; width:100%; height:auto; object-fit:contain; }}
+  #{plan.id} .outro-espresso {{ display:flex; align-items:center; padding-left:26px;
+      border-left:3px solid #C98758; color:{foreground}; white-space:nowrap;
+      font:700 66px/1.2 {SANS}; letter-spacing:-.045em; }}
   #{plan.id} .outro-message {{ margin-top:42px; }}
   #{plan.id} .outro-kicker {{ color:#C98758; font:800 19px/1.45 'Courier New',monospace;
       letter-spacing:.23em; text-transform:uppercase; }}
@@ -1257,7 +1255,7 @@ def _render_outro(plan: ScenePlan) -> str:
       <article class="outro-panel">
         <div class="outro-brand-row" data-outro-role="brand">
           <div class="outro-logo-shell"><img class="outro-logo" src="{_esc(plan.outro_logo_src)}" alt="ByteFront"></div>
-          <div class="outro-badge">Espresso</div>
+          <div class="outro-espresso" data-outro-brand-part="espresso">Espresso</div>
         </div>
         <div class="outro-message" data-outro-role="thanks">
           <div class="outro-kicker">{_esc(plan.kicker or 'SEE YOU IN THE NEXT SHOT')}</div>
@@ -1277,7 +1275,7 @@ def _render_outro(plan: ScenePlan) -> str:
     timeline = f"""        inAt("#{plan.id} .outro-topline", {{ y: -26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .55, ease: "power3.out" }}, .14);
         inAt("#{plan.id} .outro-panel", {{ x: -72, opacity: 0, scale: .985 }}, {{ x: 0, opacity: 1, scale: 1, duration: .82, ease: "expo.out" }}, .24);
         inAt("#{plan.id} .outro-logo-shell", {{ y: 20, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .56, ease: "power3.out" }}, .50);
-        inAt("#{plan.id} .outro-badge", {{ x: 22, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .48, ease: "power3.out" }}, .67);
+        inAt("#{plan.id} .outro-espresso", {{ x: 28, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .48, ease: "back.out(1.5)" }}, .67);
         inAt("#{plan.id} .outro-kicker", {{ y: 18, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .48, ease: "power2.out" }}, .76);
         inAt("#{plan.id} .outro-headline", {{ x: -48, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .72, ease: "expo.out" }}, .84);
         inAt("#{plan.id} .outro-subline", {{ y: 24, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .52, ease: "power3.out" }}, 1.06);

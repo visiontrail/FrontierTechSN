@@ -177,6 +177,7 @@ def outro_overlay_problems(text: str) -> list[str]:
     problems: list[str] = []
     required = {
         'data-outro-role="brand"': "missing editable brand overlay",
+        'data-outro-brand-part="espresso"': "missing prominent Espresso wordmark",
         'data-outro-role="thanks"': "missing editable closing-message overlay",
         'data-outro-role="actions"': "missing editable engagement-actions overlay",
         'data-outro-action="like"': "missing Like action",

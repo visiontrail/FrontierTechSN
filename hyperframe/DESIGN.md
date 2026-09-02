@@ -17,8 +17,9 @@ but aligned to a precise information grid.
 
 ## Typography
 
-- Brand and headlines: Inter/Helvetica Neue, strong but not oversized. `Espresso`
-  matches the apparent size and weight of `Bytefront` as one unified wordmark.
+- Brand and headlines: Inter/Helvetica Neue, strong but not oversized. In both
+  bookends, `Espresso` matches the apparent size and weight of `Bytefront` as
+  one unified wordmark.
 - Edition date: Georgia, high-contrast editorial serif.
 - Metadata: Courier New, uppercase, tabular, wide tracking.
 - Video-safe minimums: 18 px labels, 28 px support, 72 px hero type at

@@ -173,7 +173,9 @@ exact background and logo `src` values. Preserve these semantic hooks while
 you may freely improve their text, size, and position:
 `data-outro-role="brand"`, `data-outro-role="thanks"`,
 `data-outro-role="actions"`, and one each of `data-outro-action="like"`,
-`"comment"`, and `"share"`. Keep an English closing message, the ByteFront
+`"comment"`, and `"share"`. Preserve `data-outro-brand-part="espresso"` and
+keep `Espresso` at the same apparent type size and weight as `Bytefront`; do not
+render it as a small badge. Keep an English closing message, the ByteFront
 Espresso identity, and recognizable Like / Comment / Share icons. Do not place
 the removed Chinese closing phrase anywhere in the file. This scene has no
 captions, so it may use the full frame except for the normal 60px edge margin.
