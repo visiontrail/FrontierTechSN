@@ -115,11 +115,11 @@ def morning_opening(edition_date: date, language: str = "en") -> str:
     if language == "zh":
         return (
             f"早上好，今天是{edition_date.year}年{edition_date.month}月{edition_date.day}日，"
-            "这里是《前沿科技早报》，用几分钟带你掌握正在塑造未来的技术进展。"
+            "这里是 ByteFront Espresso，用几分钟带你掌握正在塑造未来的技术进展。"
         )
     return (
         f"Good morning. It's {edition_date.strftime('%A, %B')} {edition_date.day}, "
-        f"{edition_date.year}, and this is Frontier Tech Daily—your concise morning briefing "
+        f"{edition_date.year}, and this is ByteFront Espresso—your concise morning briefing "
         "on the ideas, systems, and companies shaping tomorrow."
     )
 
@@ -564,7 +564,7 @@ async def fit_daily_script_duration(
                 f"{working_report['unit_label']}."
             )
         )
-        system_prompt = f"""You are the length editor for Frontier Tech Daily.
+        system_prompt = f"""You are the length editor for ByteFront Espresso.
 {direction.capitalize()} the complete spoken script to fit a {target_duration_minutes}-minute edition.
 The final script must contain between {working_report['minimum_units']} and {working_report['maximum_units']} {working_report['unit_label']} (target {working_report['target_units']}).
 Use only facts already present in CURRENT SCRIPT or the supplied EVIDENCE DOSSIER. Never add generic commentary, repetition, speculation, invented transitions, or unsupported significance merely to reach the length.
@@ -739,7 +739,7 @@ async def generate_daily_script(
     spoken_unit_target = max(units_per_minute, target_duration_minutes * units_per_minute)
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
     language_label = "natural broadcast Mandarin Chinese" if language == "zh" else "natural broadcast English"
-    system_prompt = f"""You are the senior anchor and evidence editor for Frontier Tech Daily.
+    system_prompt = f"""You are the senior anchor and evidence editor for ByteFront Espresso.
 Write a solo morning-news video podcast script in {language_label}, about {spoken_unit_target} spoken {'characters' if language == 'zh' else 'words'}.
 
 NON-NEGOTIABLE EDITORIAL CONTRACT
@@ -896,7 +896,7 @@ async def revise_daily_script(
     correction_shape = json.dumps(
         {str(number): "corrected spoken paragraph" for number in failed_story_numbers}
     )
-    system_prompt = f"""You are the correction editor for Frontier Tech Daily.
+    system_prompt = f"""You are the correction editor for ByteFront Espresso.
 Rewrite only the failed story paragraphs to fix every blocking audit directive below.
 Use only the supplied evidence dossier. Remove unsupported precision instead of guessing.
 Preserve the natural broadcast tone.

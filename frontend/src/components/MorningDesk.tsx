@@ -308,7 +308,7 @@ export default function MorningDesk() {
             </div>
             <div className="morning-outro-stack">
               <label className="morning-music-field">
-                <span>ByteFront Espresso outro</span>
+                <span>ByteFront Espresso opening + outro</span>
                 <select
                   value={draft.outro_style}
                   disabled={outroPresetsAreLoading || outroPresetsAreError}
@@ -332,9 +332,9 @@ export default function MorningDesk() {
                   />
                   <div>
                     <strong>{selectedOutro.label}</strong>
-                    <small>{selectedOutro.description}</small>
-                    <span>Gemini motion · {selectedOutro.duration_seconds.toFixed(0)}s final scene</span>
-                    <p>ByteFront branding, the English closing message, and Like / Comment / Share remain editable HyperFrames layers authored by the video-editing agent.</p>
+                    <small>{selectedOutro.description} · Opening date and story count are injected by HyperFrames.</small>
+                    <span>Gemini motion · {selectedOutro.duration_seconds.toFixed(0)}s opening + {selectedOutro.duration_seconds.toFixed(0)}s final scene</span>
+                    <p>The video-editing agent can refine both HyperFrames overlays while the opening keeps its task date and story-count variables and the ending keeps its English message and Like / Comment / Share actions.</p>
                   </div>
                 </div>
               )}

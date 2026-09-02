@@ -164,7 +164,7 @@ async def create_daily_task(
         "news_daily",
         payload,
         task_config,
-        source_title=f"Frontier Tech Daily — {edition_date.isoformat()}",
+        source_title=f"ByteFront Espresso — {edition_date.isoformat()}",
         origin_type="daily_news",
         origin_id=edition_date.isoformat(),
         origin_label=f"Daily automation · {edition_date.isoformat()}",

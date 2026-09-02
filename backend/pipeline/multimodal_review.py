@@ -624,7 +624,11 @@ async def review_video(
     directory = Path(task_dir).resolve()
     review_dir = directory / REVIEW_DIR_NAME
     review_dir.mkdir(parents=True, exist_ok=True)
-    expected = list(storyboard.get("scenes") or [])
+    expected = [
+        scene
+        for scene in storyboard.get("scenes") or []
+        if scene.get("lines") and str(scene.get("text") or "").strip()
+    ]
     if not expected:
         return {
             "status": "failed",
@@ -635,7 +639,8 @@ async def review_video(
         }
 
     try:
-        frames = await extract_scene_frames(video_path, storyboard, review_dir)
+        review_storyboard = {**storyboard, "scenes": expected}
+        frames = await extract_scene_frames(video_path, review_storyboard, review_dir)
     except Exception as exc:  # noqa: BLE001 - preserve a report for the release gate
         return {
             "status": "failed",

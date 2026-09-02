@@ -57,7 +57,7 @@ def test_program_opening_copy_keeps_exact_show_title_and_date_visible():
         "scenes": [
             {
                 "text": (
-                    "It's Friday, August 28, 2026, and this is Frontier Tech Daily—"
+                    "It's Friday, August 28, 2026, and this is ByteFront Espresso—"
                     "your concise morning briefing."
                 )
             }
@@ -67,7 +67,7 @@ def test_program_opening_copy_keeps_exact_show_title_and_date_visible():
     composer._enforce_program_opening_copy(plans, board)
 
     assert plans[0]["kicker"] == "FRIDAY, AUGUST 28, 2026"
-    assert plans[0]["headline"] == "Frontier Tech Daily"
+    assert plans[0]["headline"] == "ByteFront Espresso"
 
 
 def _cache_board() -> dict:
@@ -136,6 +136,25 @@ def test_mount_list_starts_with_content_and_has_no_title_card():
 
     assert mounts[0] == {"id": "scene-01", "start": 0.0, "duration": 7.0}
     assert [mount["id"] for mount in mounts] == ["scene-01", "scene-02"]
+
+
+def test_mount_list_marks_the_branded_intro_for_foreground_layering():
+    board = {
+        "scenes": [
+            {
+                "id": "scene-intro",
+                "start": 0.0,
+                "duration": 6.0,
+                "scene_kind": "intro",
+            },
+            {"id": "scene-01", "start": 6.0, "duration": 7.0},
+        ]
+    }
+
+    mounts = composer._mount_list(board)
+
+    assert mounts[0]["scene_kind"] == "intro"
+    assert mounts[1] == {"id": "scene-01", "start": 6.0, "duration": 7.0}
 
 
 def test_kit_plans_preserve_the_fifth_narrative_item():

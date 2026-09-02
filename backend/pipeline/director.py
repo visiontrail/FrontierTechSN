@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from backend import config, skills_admin
-from backend.pipeline import outros, scene_kit
+from backend.pipeline import intros, outros, scene_kit
 from backend.pipeline.video_format import FrameSpec, LANDSCAPE
 
 logger = logging.getLogger(__name__)
@@ -181,6 +181,22 @@ Do not replace the Gemini motion with a CSS pan, zoom, gradient, or generated
 animation. The `<video>` must remain `muted playsinline`; the root program owns
 all audio.
 
+# Dedicated ByteFront Espresso intro
+
+When a brief says `dedicated intro scene`, the Gemini video is the moving
+background and you own only the editable, edition-aware HyperFrames overlay.
+Preserve the exact background and logo `src` values. Preserve these semantic
+hooks: `data-intro-role="brand"`, `data-intro-role="edition"`, and one each of
+`data-intro-field="date"`, `"weekday"`, `"label"`, and `"story-count"`.
+The visible field values must come from one synchronous
+`window.__hyperframes.getVariables()` call using the declared
+`edition_date`, `edition_weekday`, `edition_label`, and `edition_story_count`
+variables. Never compute the date in JavaScript. This scene has no narration or
+captions, so it may use the full frame except for the normal 60px edge margin.
+Do not replace the Gemini motion with a CSS pan, zoom, gradient, or generated
+animation. The `<video>` must remain `muted playsinline`; the root program owns
+all audio.
+
 # Working method
 
 1. Read `compositions/<scene-id>.html` — a deterministic draft already exists.
@@ -243,7 +259,7 @@ def _scene_brief(scene: dict, plan: dict, theme: scene_kit.Theme) -> str:
     if plan.get("items"):
         lines.append("draft items: " + " | ".join(plan["items"]))
     if plan.get("footage_src"):
-        if plan.get("archetype") == "outro":
+        if plan.get("archetype") in {"intro", "outro"}:
             lines.append(
                 f"Gemini background asset: {plan['footage_src']} "
                 "(preserve this exact src value in the existing video element)"
@@ -253,7 +269,19 @@ def _scene_brief(scene: dict, plan: dict, theme: scene_kit.Theme) -> str:
                 f"footage asset: {plan['footage_src']} (relative to the project root; "
                 f"reference it as ../{plan['footage_src']} from compositions/)"
             )
-    if plan.get("archetype") == "outro":
+    if plan.get("archetype") == "intro":
+        lines.extend(
+            [
+                "dedicated intro scene: no narration or captions",
+                f"exact logo asset: {plan.get('intro_logo_src', '')} "
+                "(reference it unchanged from compositions/)",
+                "dynamic HyperFrames variables: edition_date, edition_weekday, "
+                "edition_label, edition_story_count",
+                "overlay method: edit the existing ByteFront brand and edition metadata "
+                "layers while preserving every data-intro-role/data-intro-field hook",
+            ]
+        )
+    elif plan.get("archetype") == "outro":
         lines.extend(
             [
                 "dedicated outro scene: no narration or captions",
@@ -323,6 +351,12 @@ def validate_scene_html(
             source = str(plan.get(key) or "")
             if source and f'src="{source}"' not in text:
                 problems.append(f"outro dropped locked {key}")
+    if plan and plan.get("archetype") == "intro":
+        problems.extend(intros.intro_overlay_problems(text))
+        for key in ("footage_src", "intro_logo_src"):
+            source = str(plan.get(key) or "")
+            if source and f'src="{source}"' not in text:
+                problems.append(f"intro dropped locked {key}")
     return problems
 
 

@@ -34,6 +34,7 @@ from backend.pipeline import (
     collage_broll,
     director,
     footage,
+    intros,
     music,
     multimodal_review,
     news_images,
@@ -914,7 +915,7 @@ def _build_render_command(
         base = [str(local_bin)]
     else:
         base = ["npx", "--yes", f"hyperframes@{config.HYPERFRAMES_VERSION}"]
-    return base + [
+    command = base + [
         "render", str(project_dir),
         "--output", str(video_path),
         "--resolution", frame.render_resolution,
@@ -923,18 +924,30 @@ def _build_render_command(
         "-w", str(config.RENDER_WORKERS),
         "--protocol-timeout", str(config.RENDER_PROTOCOL_TIMEOUT_MS),
     ]
+    variables_path = project_dir / intros.INTRO_VARIABLES_FILENAME
+    if variables_path.is_file():
+        command.extend(["--variables-file", str(variables_path), "--strict-variables"])
+    return command
 
 
 def _mount_list(board: dict) -> list[dict]:
     """Every mount needed to cover the timeline with no gaps.
 
-    The first narrated scene begins at zero; there is no separate title-card
-    mount before the subject starts and no generic outro after it ends.
+    The branded intro/outro are ordinary timed mounts around the narrated
+    scenes. ``scene_kind`` survives here so the spine can keep the opener above
+    any preloaded content without making the model responsible for z-order.
     """
-    return [
-        {"id": scene["id"], "start": scene["start"], "duration": scene["duration"]}
-        for scene in board["scenes"]
-    ]
+    mounts: list[dict] = []
+    for scene in board["scenes"]:
+        mount = {
+            "id": scene["id"],
+            "start": scene["start"],
+            "duration": scene["duration"],
+        }
+        if scene.get("scene_kind"):
+            mount["scene_kind"] = scene["scene_kind"]
+        mounts.append(mount)
+    return mounts
 
 
 def _quality_warnings(
@@ -1068,6 +1081,7 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
             str(plan.get("footage_src") or ""),
             str(plan.get("news_webpage_src") or ""),
             str(plan.get("news_image_src") or ""),
+            str(plan.get("intro_logo_src") or ""),
             str(plan.get("outro_logo_src") or ""),
             *[
                 str(value or "")
@@ -1104,6 +1118,7 @@ async def compose_video(
     video_orientation: str = "landscape",
     opening_style: str = "editorial_motion",
     outro_style: str = outros.DEFAULT_OUTRO_STYLE,
+    edition_date: str | None = None,
     collage_broll_enabled: bool = False,
     collage_broll_count: int = 4,
     news_images_enabled: bool = True,
@@ -1521,14 +1536,27 @@ async def compose_video(
             "report": str((output_dir_path / "audio" / "music_mix_report.json").resolve()),
         }
 
-    # Cache only narration-driven direction. The branded outro is a configured
-    # render stage, not a scene the visual planner should regenerate on retry.
+    # Cache only narration-driven direction. Branded bookends are configured
+    # render stages, not scenes the visual planner should regenerate on retry.
     plans = scene_plans
     _write_visual_plan_checkpoint(output_dir_path, board, plans)
+    intro_plan = intros.stage_intro(
+        output_dir_path,
+        board,
+        outro_style,
+        edition_date=edition_date,
+    )
+    scene_plans.insert(0, intro_plan)
     outro_plan = outros.stage_outro(output_dir_path, board, outro_style)
     scene_plans.append(outro_plan)
     plans = scene_plans
     sb.write_storyboard(output_dir_path, board)
+    emit(
+        f"Intro: {intro_plan['intro_label']} staged as a "
+        f"{intros.INTRO_DURATION_SECONDS:.0f}s Gemini motion scene; "
+        f"HyperFrames variables inject {intro_plan['edition_weekday']}, "
+        f"{intro_plan['edition_date']} · {intro_plan['edition_story_count']}"
+    )
     emit(
         f"Outro: {outro_plan['outro_label']} staged as a {outros.OUTRO_DURATION_SECONDS:.0f}s "
         "Gemini motion scene with an editable HyperFrames agent overlay"
@@ -1554,13 +1582,13 @@ async def compose_video(
         emit(f"Provider lookup failed ({exc}); rendering the deterministic scenes")
         endpoint, model, api_key = None, None, None
 
-    # Licensed editorial media stays on the deterministic renderer. The outro
-    # is the deliberate exception: its Gemini video remains locked while the
-    # video-editing agent authors only the editable HyperFrames overlay.
+    # Licensed editorial media stays on the deterministic renderer. The branded
+    # intro/outro are deliberate exceptions: their Gemini videos remain locked
+    # while the video-editing agent authors only the editable HyperFrames overlay.
     director_plans = [
         plan
         for plan in scene_plans
-        if plan.get("archetype") == "outro"
+        if plan.get("archetype") in {"intro", "outro"}
         or (
             not plan.get("footage_src")
             and not plan.get("news_image")
@@ -1570,12 +1598,23 @@ async def compose_video(
     if config.DIRECTOR_ENABLED and director_plans and model:
         if config.DIRECTOR_MAX_SCENES:
             budget = director_plans[: config.DIRECTOR_MAX_SCENES]
-            configured_outro = next(
-                (plan for plan in director_plans if plan.get("archetype") == "outro"),
-                None,
-            )
-            if configured_outro and configured_outro not in budget and budget:
-                budget[-1] = configured_outro
+            configured_bookends = [
+                plan
+                for plan in director_plans
+                if plan.get("archetype") in {"intro", "outro"}
+            ]
+            for configured_bookend in configured_bookends:
+                if configured_bookend in budget or not budget:
+                    continue
+                replace_at = next(
+                    (
+                        index
+                        for index in range(len(budget) - 1, -1, -1)
+                        if budget[index].get("archetype") not in {"intro", "outro"}
+                    ),
+                    len(budget) - 1,
+                )
+                budget[replace_at] = configured_bookend
         else:
             budget = director_plans
         try:
@@ -1652,19 +1691,19 @@ async def compose_video(
         layout_ok, findings = assembler.inspect_project(output_dir_path, emit)
         blamed = director.scenes_named_in_findings(findings, outcome.authored, mounts)
         if not layout_ok and blamed:
-            outro_ids = {
+            bookend_ids = {
                 str(plan.get("id"))
                 for plan in scene_plans
-                if plan.get("archetype") == "outro"
+                if plan.get("archetype") in {"intro", "outro"}
             }
-            blamed_outros = [scene_id for scene_id in blamed if scene_id in outro_ids]
-            if blamed_outros:
-                director.revert_scenes(output_dir_path, blamed_outros, kit_plans)
+            blamed_bookends = [scene_id for scene_id in blamed if scene_id in bookend_ids]
+            if blamed_bookends:
+                director.revert_scenes(output_dir_path, blamed_bookends, kit_plans)
                 emit(
-                    "Layout: reverted the outro overlay to its verified editable draft "
+                    "Layout: reverted the branded bookend overlay to its verified editable draft "
                     "instead of letting a generic caption-safe repair rewrite it"
                 )
-                blamed = [scene_id for scene_id in blamed if scene_id not in outro_ids]
+                blamed = [scene_id for scene_id in blamed if scene_id not in bookend_ids]
         if not layout_ok and blamed:
             try:
                 await director.repair_scenes(

@@ -17,6 +17,7 @@ def _scene(scene_id: str, start: float, text: str) -> dict:
         "start": start,
         "duration": 8.0,
         "text": text,
+        "lines": [{"start": start, "duration": 8.0, "text": text}],
     }
 
 
@@ -245,6 +246,54 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("--file", args)
             self.assertIn("foreground", args)
             self.assertTrue((root / "multimodal_review" / "contact-sheet-01.jpg").is_file())
+
+    async def test_branded_bookends_are_excluded_from_narration_match_review(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            narrated = _scene("scene-01", 6, "A narrated technology story.")
+            storyboard = {
+                "title": "ByteFront Espresso",
+                "scenes": [
+                    {
+                        "id": "scene-intro",
+                        "start": 0.0,
+                        "duration": 6.0,
+                        "text": "Branded intro",
+                        "lines": [],
+                    },
+                    narrated,
+                    {
+                        "id": "scene-outro",
+                        "start": 14.0,
+                        "duration": 6.0,
+                        "text": "Branded outro",
+                        "lines": [],
+                    },
+                ],
+            }
+            frames = _frames(root, [narrated])
+            extract = AsyncMock(return_value=frames)
+            opencli = AsyncMock(return_value=_opencli_result(_matching_payload([narrated], 90)))
+            with (
+                patch.object(multimodal_review, "extract_scene_frames", extract),
+                patch.object(multimodal_review, "run_opencli", opencli),
+                patch.object(config, "AV_SYNC_GEMINI_BATCH_SIZE", 8),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_SCENE_SCORE", 70),
+                patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
+                patch.object(config, "AV_SYNC_GEMINI_TIMEOUT", 120),
+                patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+                patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""),
+            ):
+                report = await multimodal_review.review_video(
+                    root / "video.mp4",
+                    storyboard,
+                    root,
+                )
+
+            review_storyboard = extract.await_args.args[1]
+            self.assertEqual([scene["id"] for scene in review_storyboard["scenes"]], ["scene-01"])
+            self.assertTrue(report["passed"])
+            self.assertEqual(report["scene_count"], 1)
 
     async def test_malformed_gemini_response_is_retried_once(self):
         with TemporaryDirectory() as temporary:

@@ -1397,7 +1397,7 @@ def test_apple_podcast_feed_is_prepared_without_external_submission(tmp_path: Pa
     assert "podcasts_connect_account" in result["external_submission"]
     assert "<enclosure" in feed
     assert manifest["platforms"]["apple_podcast"]["identity"] == {
-        "feed_title": "Frontier Tech Daily",
+        "feed_title": "ByteFront Espresso",
         "author": "FrontierTechSN",
     }
 

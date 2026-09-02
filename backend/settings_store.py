@@ -196,7 +196,7 @@ SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         "VIDEO_PUBLISH_YOUTUBE_CHANNEL_NAME", "publication", "YouTube channel name", "string",
-        placeholder="Frontier Tech Daily",
+        placeholder="ByteFront Espresso",
         description="Exact visible channel name expected in YouTube Studio. Automatic "
                     "publishing refuses a blank or mismatched name.",
     ),
@@ -213,7 +213,7 @@ SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         "VIDEO_PUBLISH_X_HANDLE", "publication", "X account handle", "string",
-        placeholder="frontiertechdaily",
+        placeholder="bytefrontespresso",
         description="Expected account handle without the leading @. Automatic publishing "
                     "refuses a blank or mismatched handle.",
     ),
@@ -224,7 +224,7 @@ SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         "VIDEO_PUBLISH_APPLE_FEED_TITLE", "publication", "Podcast feed title", "string",
-        placeholder="Frontier Tech Daily", allow_blank=False,
+        placeholder="ByteFront Espresso", allow_blank=False,
         description="Public show title written into the generated RSS feed.",
     ),
     SettingSpec(

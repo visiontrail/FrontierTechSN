@@ -82,6 +82,24 @@ def test_adjacent_scenes_alternate_tracks_so_boundaries_cannot_overlap():
     ]
 
 
+def test_branded_intro_mount_stays_above_a_preloaded_content_scene():
+    mounts = [
+        {
+            "id": "scene-intro",
+            "start": 0.0,
+            "duration": 6.0,
+            "scene_kind": "intro",
+        },
+        {"id": "scene-01", "start": 6.0, "duration": 10.0},
+    ]
+
+    html = assembler.build_spine(board([]), audio_src="a.wav", mounts=mounts)
+
+    intro = re.search(r'<div id="mount-scene-intro"[^>]*>', html).group(0)
+    assert 'class="clip scene-mount brand-intro-mount"' in intro
+    assert ".brand-intro-mount { z-index:2; }" in html
+
+
 def test_captions_are_clamped_so_they_never_overlap_on_their_track():
     # Silence-map rounding routinely produces a caption that ends a hundredth of
     # a second after the next one starts, which lint reports as an overlap.

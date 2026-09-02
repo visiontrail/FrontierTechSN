@@ -563,7 +563,7 @@ async def hydrate_evidence(
 
 def dossier_markdown(dossier: ResearchDossier) -> str:
     lines = [
-        f"# Frontier Tech Daily evidence dossier — {dossier.edition_date}",
+        f"# ByteFront Espresso evidence dossier — {dossier.edition_date}",
         "",
         f"Generated at: {dossier.generated_at}",
         f"Source window: {dossier.window_hours} hours",

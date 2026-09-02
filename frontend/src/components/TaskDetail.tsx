@@ -326,8 +326,8 @@ export default function TaskDetail() {
               <dd title={task.config.closing_remarks}>{task.config.closing_remarks || 'Default close'}</dd>
             </div>
             <div>
-              <dt>Video outro</dt>
-              <dd>{OUTRO_LABELS[task.config.outro_style || 'morning-brief']} · editable HyperFrames overlay</dd>
+              <dt>Video bookends</dt>
+              <dd>{OUTRO_LABELS[task.config.outro_style || 'morning-brief']} · dynamic date intro + editable outro</dd>
             </div>
           </dl>
         </div>

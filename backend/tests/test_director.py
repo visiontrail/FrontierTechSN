@@ -143,6 +143,35 @@ def test_director_brief_assigns_the_editable_outro_overlay_to_the_agent():
     assert "narration spoken over this scene" not in prompt
 
 
+def test_director_brief_assigns_the_dynamic_intro_overlay_to_the_agent():
+    storyboard = {"thesis": "A content-specific thesis"}
+    scene = {
+        "id": "scene-intro",
+        "duration": 6.0,
+        "text": "Edition opener",
+        "scene_kind": "intro",
+    }
+    plan = {
+        "id": "scene-intro",
+        "archetype": "intro",
+        "footage_src": "assets/intro/background.mp4",
+        "intro_logo_src": "assets/intro/bytefront-logo.png",
+    }
+
+    prompt = director._batch_prompt(
+        storyboard,
+        [(scene, plan)],
+        batch_no=1,
+        batch_total=1,
+        theme=scene_kit.DEFAULT_THEME,
+    )
+
+    assert "dedicated intro scene: no narration or captions" in prompt
+    assert "edition_date, edition_weekday" in prompt
+    assert "data-intro-role/data-intro-field" in prompt
+    assert "narration spoken over this scene" not in prompt
+
+
 def test_revert_restores_the_deterministic_draft(tmp_path):
     plan = scene_kit.ScenePlan(id="scene-01", duration=8.0, headline="Kept")
     assembler.write_scene_files(tmp_path, [plan])

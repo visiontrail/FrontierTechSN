@@ -237,7 +237,7 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
         )
         content = ExtractedContent(
             source_type="news_daily",
-            title=f"Frontier Tech Daily — {edition_date.isoformat()}",
+            title=f"ByteFront Espresso — {edition_date.isoformat()}",
             text=dossier_markdown(dossier),
             metadata={
                 "origin": "daily_news",
@@ -657,6 +657,11 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
         video_orientation=task.config.video_orientation,
         opening_style=task.config.opening_style,
         outro_style=task.config.outro_style,
+        edition_date=(
+            _daily_edition_date(task).isoformat()
+            if task.source_type == SourceType.NEWS_DAILY
+            else None
+        ),
         collage_broll_enabled=task.config.collage_broll_enabled,
         collage_broll_count=task.config.collage_broll_count,
         news_images_enabled=task.config.news_images_enabled,

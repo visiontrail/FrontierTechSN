@@ -402,7 +402,7 @@ def reconcile_deleted_test_receipts(
 
 
 def _title(task: TaskResponse) -> str:
-    return task.generated_title or task.source_title or f"Frontier Tech Daily — {task.origin_id or task.id}"
+    return task.generated_title or task.source_title or f"ByteFront Espresso — {task.origin_id or task.id}"
 
 
 def _description(task: TaskResponse, marker: str | None = None) -> str:

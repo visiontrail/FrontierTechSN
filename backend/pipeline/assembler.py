@@ -16,6 +16,7 @@ Everything the earlier renders got wrong is enforced here:
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
 import shutil
@@ -239,8 +240,9 @@ def _scene_mounts(mounts: Sequence[dict]) -> list[str]:
     tags: list[str] = []
     for i, mount in enumerate(mounts):
         track = TRACK_SCENE_A if i % 2 == 0 else TRACK_SCENE_B
+        role_class = " brand-intro-mount" if mount.get("scene_kind") == "intro" else ""
         tags.append(
-            f'      <div id="mount-{mount["id"]}" class="clip scene-mount"\n'
+            f'      <div id="mount-{mount["id"]}" class="clip scene-mount{role_class}"\n'
             f'           data-composition-id="{mount["id"]}"\n'
             f'           data-composition-src="compositions/{mount["id"]}.html"\n'
             f'           data-start="{round(float(mount["start"]), 2)}" '
@@ -273,6 +275,7 @@ def _spine_css(theme: scene_kit.Theme, frame: FrameSpec = LANDSCAPE) -> str:
       * {{ margin:0; padding:0; box-sizing:border-box; }}
       html, body {{ width:{frame.width}px; height:{frame.height}px; overflow:hidden; background:{theme.bg}; }}
       .scene-mount {{ position:absolute; inset:0; z-index:1; isolation:isolate; }}
+      .brand-intro-mount {{ z-index:2; }}
 
       .caption {{
         position:absolute; left:210px; right:210px; bottom:96px;
@@ -333,10 +336,10 @@ def build_spine(
 ) -> str:
     """The root composition: mounts, captions, audio, progress chrome.
 
-    ``mounts`` is the full cover of the timeline — every storyboard scene from
-    zero through the end of narration — as ``{"id", "start", "duration"}``
-    records. Any gap left here renders as a black frame, so the composer builds
-    the list to span 0 to ``total_duration`` with no holes.
+    ``mounts`` is the full cover of the timeline — branded intro, narrated
+    scenes, and branded outro — as ``{"id", "start", "duration"}`` records.
+    Any gap left here renders as a black frame, so the composer builds the list
+    to span 0 to ``total_duration`` with no holes.
     """
     total = float(storyboard["total_duration"])
     content_start = float(storyboard["content_start"])
@@ -371,8 +374,20 @@ def build_spine(
       }}));
     </script>"""
 
+    composition_variables = storyboard.get("composition_variables") or []
+    variables_attr = (
+        "\n  data-composition-variables='"
+        + html.escape(
+            json.dumps(composition_variables, ensure_ascii=False, separators=(",", ":")),
+            quote=False,
+        )
+        + "'"
+        if composition_variables
+        else ""
+    )
+
     return f"""<!doctype html>
-<html lang="en">
+<html lang="en"{variables_attr}>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width={frame.width}, height={frame.height}" />
