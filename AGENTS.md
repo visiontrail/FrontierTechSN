@@ -28,6 +28,18 @@ Every implementation task that changes files MUST end with a git commit before t
 - `cd frontend && npm run build` type-checks and produces `frontend/dist/`.
 - For hot reload, run `uvicorn backend.main:app --reload --reload-dir backend --port 8101` and `cd frontend && npm run dev` separately.
 
+## JumpServer and Orpheus Host Access
+
+Orpheus is deployed on the ARM64 `nr-test` server (`10.60.11.3`; the service normally listens on port `8088`) behind JumpServer. Use the following interactive login path when deployment or remote verification is required:
+
+1. Run `ssh guoliang@relay.yhroot.com` and authenticate with the credentials already configured on the local machine or enter them interactively. Never store passwords, private keys, or session credentials in this repository.
+2. At `Opt>`, press Enter to open the asset list.
+3. Select the asset displayed as `nr-test` / `10.60.11.3`.
+4. Select the account displayed as `yhsudo`.
+5. After login, run `sudo su`, then `cd /home/guoliang`.
+
+JumpServer menu numbers can change. Always select the currently displayed asset and account labels instead of relying on historical numeric choices. Before changing, restarting, or redeploying Orpheus, inspect the remote working tree, running processes or containers, and current service state; preserve unrelated remote changes and perform an end-to-end request against the deployed service after the requested change.
+
 ## Coding Style & Naming Conventions
 
 Use four-space indentation and `snake_case` for Python functions, modules, and tests; use `PascalCase` for classes. Put shared configuration in `backend/config.py` or `backend/settings_store.py`. In TypeScript, follow the existing two-space, single-quote, semicolon-free style. Name React components and files in `PascalCase`, hooks as `useSomething`, and utilities in `camelCase`.
