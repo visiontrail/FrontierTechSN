@@ -29,6 +29,7 @@ _STORE_VERSION = 1
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off", ""}
 _RETIRED_KEYS = {
+    "ORPHEUS_TTS_SPEED_PERCENT",
     # Fact check is ChatGPT-only. Keep Gemini settings for video stages, but
     # discard the retired daily-news review override from older stores.
     "DAILY_NEWS_GEMINI_REVIEW_MODEL",
@@ -419,13 +420,6 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         "ORPHEUS_TTS_API_KEY", "tts", "Orpheus API key", "secret",
         description="Sent only as X-API-Key to the configured Orpheus service.",
-    ),
-    SettingSpec(
-        "ORPHEUS_TTS_SPEED_PERCENT", "tts", "Orpheus speech speed", "int", unit="%",
-        minimum=50, maximum=200,
-        description="Native Orpheus speech rate (100% = natural speed). The two "
-                    "installed VibeVoice models do not expose a native rate control. "
-                    "Scene timing always follows the measured finished WAV.",
     ),
     SettingSpec(
         "ORPHEUS_TTS_MAX_TOKENS", "tts", "Orpheus max tokens", "int",
@@ -1144,8 +1138,6 @@ def schema() -> list[dict[str, Any]]:
             "is_overridden": spec.key in overrides,
             "restart_required": spec.restart_required,
             "allow_blank": not _blank_resets(spec),
-            "minimum": spec.minimum,
-            "maximum": spec.maximum,
         }
         if spec.type == "secret":
             entry["masked"] = mask_secret(str(current))

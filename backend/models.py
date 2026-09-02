@@ -597,8 +597,6 @@ class TtsModelOption(BaseModel):
     label: str
     provider: str
     single_speaker: bool
-    speed_adjustable: bool = False
-    speed_percent_range: tuple[int, int] | None = None
     is_default: bool
 
 
@@ -616,8 +614,6 @@ class SettingField(BaseModel):
     is_overridden: bool = False
     restart_required: bool = False
     allow_blank: bool = True
-    minimum: int | None = None
-    maximum: int | None = None
     # Secrets only: the value is never sent back, just its shape.
     masked: Optional[str] = None
     default_masked: Optional[str] = None

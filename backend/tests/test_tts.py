@@ -766,7 +766,6 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             script.write_text("Speaker 1: Remote narration.")
             with (
                 patch.object(config, "ORPHEUS_TTS_API_KEY", "test-secret"),
-                patch.object(config, "ORPHEUS_TTS_SPEED_PERCENT", 125),
                 patch.object(tts.httpx, "AsyncClient", client_factory),
                 patch.object(
                     tts,
@@ -786,15 +785,15 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(submitted["top_p"], 0.95)
             self.assertEqual(submitted["top_k"], 40)
             self.assertEqual(submitted["min_p"], 0.05)
-            self.assertEqual(submitted["speed"], 1.25)
+            self.assertEqual(submitted["speed"], 1.0)
             self.assertEqual(requests[0].headers["X-API-Key"], "test-secret")
             manifest = json.loads((root / "audio" / "tts_manifest.json").read_text())
             self.assertEqual(
                 manifest["pacing_policy"],
                 tts.NARRATION_PACING_POLICY,
             )
-            self.assertEqual(manifest["synthesis_speed_ratio"], 1.25)
-            self.assertEqual(manifest["parts"][0]["synthesis_speed_ratio"], 1.25)
+            self.assertEqual(manifest["synthesis_speed_ratio"], 1.0)
+            self.assertEqual(manifest["parts"][0]["synthesis_speed_ratio"], 1.0)
             self.assertEqual(
                 [request.url.path for request in requests],
                 [
@@ -3327,22 +3326,26 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             512,
         )
 
-    def test_orpheus_cache_is_invalidated_when_configured_speed_changes(self):
+    def test_orpheus_cache_rejects_legacy_retimed_audio(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "part.wav"
             write_wav(path)
             text = "A fully verified utterance."
-            with patch.object(config, "ORPHEUS_TTS_SPEED_PERCENT", 100):
-                tts._write_orpheus_part_metadata(
-                    path,
-                    text,
-                    job_id="job-1",
-                    request_token_budget=512,
-                    integrity=self.verified_report(None, text, None),
-                )
-                self.assertIsNotNone(tts._load_cached_orpheus_part(path, text))
-            with patch.object(config, "ORPHEUS_TTS_SPEED_PERCENT", 140):
-                self.assertIsNone(tts._load_cached_orpheus_part(path, text))
+            metadata = tts._write_orpheus_part_metadata(
+                path,
+                text,
+                job_id="job-1",
+                request_token_budget=512,
+                integrity=self.verified_report(None, text, None),
+            )
+            self.assertIsNotNone(tts._load_cached_orpheus_part(path, text))
+
+            metadata["speed_percent"] = 140
+            tts._part_metadata_path(path).write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+
+            self.assertIsNone(tts._load_cached_orpheus_part(path, text))
 
     def test_orpheus_cache_requires_current_integrity_verifier_version(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3494,37 +3497,6 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(tts._load_cached_orpheus_part(path, text))
             verify.assert_awaited_once()
             self.assertTrue(any("accepted existing WAV" in item for item in messages))
-
-    async def test_orpheus_recovery_rejects_wav_from_a_different_speed(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            path = root / "part.wav"
-            text = "A speed-bound cached utterance."
-            write_wav(path, frames=24_000)
-            tts._write_orpheus_part_metadata(
-                path,
-                text,
-                job_id="old-speed-job",
-                request_token_budget=512,
-                integrity=self.verified_report(None, text, None),
-                speed_percent=100,
-            )
-            messages = []
-            verify = AsyncMock()
-
-            with patch.object(tts, "_verify_orpheus_part", verify):
-                metadata = await tts._recover_orpheus_part(
-                    path,
-                    text,
-                    root / "verification",
-                    request_token_budget=512,
-                    emit=messages.append,
-                    speed_percent=140,
-                )
-
-            self.assertIsNone(metadata)
-            verify.assert_not_awaited()
-            self.assertIn("different configured speed", " ".join(messages))
 
     def test_rejects_orpheus_audio_that_reaches_token_ceiling(self):
         with tempfile.TemporaryDirectory() as temp_dir:

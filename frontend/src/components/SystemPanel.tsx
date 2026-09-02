@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchSettingsSchema, fetchTtsModels, resetSettingsValues, updateSettingsValues } from '../api'
+import { fetchSettingsSchema, resetSettingsValues, updateSettingsValues } from '../api'
 import type { SettingField, SettingValue, SettingsSchema } from '../api'
 
 /**
@@ -16,10 +16,6 @@ export default function SystemPanel() {
     queryKey: ['settings-schema'],
     queryFn: fetchSettingsSchema,
   })
-  const { data: ttsModels = [] } = useQuery({
-    queryKey: ['tts-models'],
-    queryFn: fetchTtsModels,
-  })
 
   const groups = useMemo(() => data?.groups ?? [], [data?.groups])
   const [groupId, setGroupId] = useState<string | null>(null)
@@ -33,27 +29,15 @@ export default function SystemPanel() {
   const activeGroup = groups.find((g) => g.id === groupId) ?? groups[0] ?? null
   const fields = useMemo(() => groups.flatMap((g) => g.fields), [groups])
 
-  const defaultTtsModelField = fields.find((field) => field.key === 'TTS_DEFAULT_MODEL')
-  const selectedDefaultTtsModel = String(
-    drafts.TTS_DEFAULT_MODEL ?? defaultTtsModelField?.value ?? '',
-  )
-  const selectedTtsModel = ttsModels.find((model) => model.id === selectedDefaultTtsModel)
-
-  function isVisible(field: SettingField): boolean {
-    if (field.key !== 'ORPHEUS_TTS_SPEED_PERCENT') return true
-    return selectedTtsModel?.speed_adjustable === true
-  }
-
   function isDirty(field: SettingField): boolean {
     if (!(field.key in drafts)) return false
     if (field.type === 'secret') return drafts[field.key] !== '' || cleared.includes(field.key)
     return drafts[field.key] !== field.value
   }
 
-  const dirtyFields = fields.filter((field) => isVisible(field) && isDirty(field))
+  const dirtyFields = fields.filter(isDirty)
   const dirtyByGroup = (id: string) =>
-    (groups.find((g) => g.id === id)?.fields ?? [])
-      .filter((field) => isVisible(field) && isDirty(field)).length
+    (groups.find((g) => g.id === id)?.fields ?? []).filter(isDirty).length
 
   function setDraft(key: string, value: SettingValue) {
     setDrafts((d) => ({ ...d, [key]: value }))
@@ -125,8 +109,6 @@ export default function SystemPanel() {
         <div className="setting-inline">
           <input
             type="number"
-            min={field.minimum ?? undefined}
-            max={field.maximum ?? undefined}
             value={String(draft)}
             onChange={(e) => {
               // Keep half-typed input ("-", "1e") as text rather than NaN; the
@@ -220,7 +202,7 @@ export default function SystemPanel() {
                   <span className="list-item-title">{group.label}</span>
                   {pending > 0 && <span className="badge badge-warn">{pending}</span>}
                 </div>
-                <span className="badge badge-muted">{group.fields.filter(isVisible).length} settings</span>
+                <span className="badge badge-muted">{group.fields.length} settings</span>
               </button>
             )
           })}
@@ -232,7 +214,7 @@ export default function SystemPanel() {
               <p className="panel-sub" style={{ marginTop: 0 }}>{activeGroup.description}</p>
 
               <div className="setting-list">
-                {activeGroup.fields.filter(isVisible).map((field) => (
+                {activeGroup.fields.map((field) => (
                   <div key={field.key} className={`setting-row ${isDirty(field) ? 'is-dirty' : ''}`}>
                     <div className="setting-head">
                       <span className="setting-label">{field.label}</span>

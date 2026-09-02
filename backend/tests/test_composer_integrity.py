@@ -148,36 +148,7 @@ def test_narration_manifest_rejects_retimed_or_unproven_speed(tmp_path):
             script, audio, "vibevoice-0.5b"
         )
 
-        assert any("speed" in failure for failure in failures)
-
-
-def test_narration_manifest_accepts_supported_orpheus_speed(tmp_path):
-    script = tmp_path / "script.txt"
-    script.write_text("Configured narration owns the timeline.", encoding="utf-8")
-    audio_dir = tmp_path / "audio"
-    audio_dir.mkdir()
-    audio = audio_dir / "tts_input_generated.wav"
-    audio.write_bytes(b"generated narration")
-    manifest = {
-        "model": "orpheus-en",
-        "pacing_policy": tts.NARRATION_PACING_POLICY,
-        "synthesis_speed_ratio": 1.4,
-        "source_text_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
-        "output_audio_sha256": tts._file_sha256(audio),
-        "integrity": {"passed": True, "verified_source_coverage": 1.0},
-    }
-    (audio_dir / "tts_manifest.json").write_text(
-        json.dumps(manifest), encoding="utf-8"
-    )
-
-    assert composer._narration_manifest_failures(script, audio, "orpheus-en") == []
-
-    manifest["synthesis_speed_ratio"] = 2.01
-    (audio_dir / "tts_manifest.json").write_text(
-        json.dumps(manifest), encoding="utf-8"
-    )
-    failures = composer._narration_manifest_failures(script, audio, "orpheus-en")
-    assert any("outside the supported range" in failure for failure in failures)
+        assert any("natural 1.0x" in failure for failure in failures)
 
 
 def test_narration_manifest_rejects_non_object_root(tmp_path):

@@ -69,8 +69,7 @@ ORPHEUS_EVIDENCED_PHONETIC_PAIRS = {
     frozenset({"douyin", "duwayan"}),
 }
 ORPHEUS_EXACT_EDGE_ANCHOR_WORDS = 2
-NARRATION_PACING_POLICY = "configured_speech_visuals_follow_audio"
-LEGACY_NARRATION_PACING_POLICY = "natural_speech_visuals_follow_audio"
+NARRATION_PACING_POLICY = "natural_speech_visuals_follow_audio"
 NARRATION_SYNTHESIS_SPEED_RATIO = 1.0
 
 # VibeVoice reads some technology names as invented words instead of familiar
@@ -1523,7 +1522,6 @@ def _write_tts_manifest(
     wav_parts: list[Path],
     output: Path,
     deterministic: bool,
-    synthesis_speed_ratio: float = NARRATION_SYNTHESIS_SPEED_RATIO,
     integrity: dict | None = None,
 ) -> None:
     parts = []
@@ -1536,7 +1534,7 @@ def _write_tts_manifest(
                 "audio_sha256": _file_sha256(path),
                 "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "word_count": _spoken_word_count(text),
-                "synthesis_speed_ratio": synthesis_speed_ratio,
+                "synthesis_speed_ratio": NARRATION_SYNTHESIS_SPEED_RATIO,
                 **asdict(info),
             }
         )
@@ -1544,7 +1542,7 @@ def _write_tts_manifest(
         "model": model,
         "deterministic_decoding": deterministic,
         "pacing_policy": NARRATION_PACING_POLICY,
-        "synthesis_speed_ratio": synthesis_speed_ratio,
+        "synthesis_speed_ratio": NARRATION_SYNTHESIS_SPEED_RATIO,
         "source_text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
         "source_word_count": _spoken_word_count(source_text),
         "chunk_count": len(parts),
@@ -2634,12 +2632,7 @@ def _part_metadata_path(path: Path) -> Path:
     return path.with_suffix(".json")
 
 
-def _load_cached_orpheus_part(
-    path: Path,
-    text: str,
-    *,
-    speed_percent: int | None = None,
-) -> dict | None:
+def _load_cached_orpheus_part(path: Path, text: str) -> dict | None:
     metadata_path = _part_metadata_path(path)
     if not path.is_file() or not metadata_path.is_file():
         return None
@@ -2651,12 +2644,7 @@ def _load_cached_orpheus_part(
         return None
     if metadata.get("text_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest():
         return None
-    expected_speed_percent = (
-        config.ORPHEUS_TTS_SPEED_PERCENT
-        if speed_percent is None
-        else speed_percent
-    )
-    if metadata.get("speed_percent") != expected_speed_percent:
+    if metadata.get("speed_percent") != config.ORPHEUS_TTS_SPEED_PERCENT:
         return None
     verifier_version = metadata.get("integrity_verifier_version")
     if (
@@ -2684,8 +2672,6 @@ def _load_cached_orpheus_part(
 def _snapshot_reusable_orpheus_parts(
     output_dir: Path,
     chunks: list[str],
-    *,
-    speed_percent: int,
 ) -> dict[str, tuple[bytes, bytes, str]]:
     """Retain exact verified audio even when a revised script renumbers chunks.
 
@@ -2712,8 +2698,6 @@ def _snapshot_reusable_orpheus_parts(
             continue
         if not isinstance(metadata, dict):
             continue
-        if metadata.get("speed_percent") != speed_percent:
-            continue
         text_sha256 = metadata.get("text_sha256")
         if not isinstance(text_sha256, str) or text_sha256 not in chunks_by_hash:
             continue
@@ -2736,8 +2720,6 @@ def _restore_reusable_orpheus_part(
     path: Path,
     text: str,
     reusable: dict[str, tuple[bytes, bytes, str]],
-    *,
-    speed_percent: int,
 ) -> tuple[dict | None, str] | None:
     text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
     snapshot = reusable.get(text_sha256)
@@ -2754,11 +2736,7 @@ def _restore_reusable_orpheus_part(
     finally:
         staged_wav.unlink(missing_ok=True)
         staged_metadata.unlink(missing_ok=True)
-    metadata = _load_cached_orpheus_part(
-        path,
-        text,
-        speed_percent=speed_percent,
-    )
+    metadata = _load_cached_orpheus_part(path, text)
     return metadata, source_name
 
 
@@ -2769,19 +2747,13 @@ def _write_orpheus_part_metadata(
     job_id: str,
     request_token_budget: int,
     integrity: dict,
-    speed_percent: int | None = None,
 ) -> dict:
-    effective_speed_percent = (
-        config.ORPHEUS_TTS_SPEED_PERCENT
-        if speed_percent is None
-        else speed_percent
-    )
     payload = {
         "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "word_count": _spoken_word_count(text),
         "job_id": job_id,
         "request_token_budget": request_token_budget,
-        "speed_percent": effective_speed_percent,
+        "speed_percent": config.ORPHEUS_TTS_SPEED_PERCENT,
         "integrity_verifier_version": ORPHEUS_INTEGRITY_VERIFIER_VERSION,
         "wav": asdict(_read_pcm_wav(path)),
         "integrity": integrity,
@@ -2800,7 +2772,6 @@ async def _recover_orpheus_part(
     *,
     request_token_budget: int,
     emit: LogCallback,
-    speed_percent: int | None = None,
 ) -> dict | None:
     """Verify a downloaded part left without valid cache metadata.
 
@@ -2811,31 +2782,11 @@ async def _recover_orpheus_part(
     """
     if not path.is_file():
         return None
-    effective_speed_percent = (
-        config.ORPHEUS_TTS_SPEED_PERCENT
-        if speed_percent is None
-        else speed_percent
-    )
-    metadata_path = _part_metadata_path(path)
-    if metadata_path.is_file():
-        try:
-            existing_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            existing_metadata = None
-        if (
-            isinstance(existing_metadata, dict)
-            and existing_metadata.get("speed_percent") != effective_speed_percent
-        ):
-            emit(
-                "Orpheus recovery: existing WAV was synthesized at a different "
-                "configured speed; regenerating"
-            )
-            return None
     try:
         _validate_wav_part(
             path,
             text,
-            speed=effective_speed_percent / 100,
+            speed=config.ORPHEUS_TTS_SPEED_PERCENT / 100,
         )
         integrity = await _verify_orpheus_part(
             path,
@@ -2853,7 +2804,6 @@ async def _recover_orpheus_part(
         job_id="recovered-local-output",
         request_token_budget=request_token_budget,
         integrity=integrity,
-        speed_percent=effective_speed_percent,
     )
     emit("Orpheus recovery: accepted existing WAV after acoustic verification")
     return metadata
@@ -2895,8 +2845,6 @@ async def _generate_orpheus(
             "Admin -> System -> Voice & TTS."
         )
     token_budget = max_tokens or config.ORPHEUS_TTS_MAX_TOKENS
-    speed_percent = config.ORPHEUS_TTS_SPEED_PERCENT
-    speed_ratio = speed_percent / 100
     script_path_obj, output_dir_path, _tts_input, cleaned = _prepare_tts_input(
         script_path,
         output_dir,
@@ -2912,11 +2860,7 @@ async def _generate_orpheus(
         max_words=chunk_words,
     )
     reusable_parts = (
-        _snapshot_reusable_orpheus_parts(
-            output_dir_path,
-            chunks,
-            speed_percent=speed_percent,
-        )
+        _snapshot_reusable_orpheus_parts(output_dir_path, chunks)
         if verify_text
         else {}
     )
@@ -2938,11 +2882,7 @@ async def _generate_orpheus(
             expected_part = output_dir_path / f"{input_path.stem}_generated.wav"
             request_token_budget = _orpheus_request_token_budget(chunk, token_budget)
             if verify_text:
-                cached = _load_cached_orpheus_part(
-                    expected_part,
-                    chunk,
-                    speed_percent=speed_percent,
-                )
+                cached = _load_cached_orpheus_part(expected_part, chunk)
                 if cached is not None:
                     emit(
                         f"{name}: reusing acoustically verified Orpheus audio "
@@ -2955,7 +2895,6 @@ async def _generate_orpheus(
                     expected_part,
                     chunk,
                     reusable_parts,
-                    speed_percent=speed_percent,
                 )
                 if restored is not None:
                     cached, source_name = restored
@@ -2978,7 +2917,6 @@ async def _generate_orpheus(
                         output_dir_path / "verification" / input_path.stem,
                         request_token_budget=request_token_budget,
                         emit=emit,
-                        speed_percent=speed_percent,
                     )
                 else:
                     recovered = await _recover_orpheus_part(
@@ -2987,7 +2925,6 @@ async def _generate_orpheus(
                         output_dir_path / "verification" / input_path.stem,
                         request_token_budget=request_token_budget,
                         emit=emit,
-                        speed_percent=speed_percent,
                     )
                 if recovered is not None:
                     emit(f"{name}: reusing recovered acoustically verified Orpheus audio")
@@ -3010,9 +2947,9 @@ async def _generate_orpheus(
                 "min_p": 0.05,
                 "pre_buffer_size": 1.5,
                 "n_threads": config.ORPHEUS_TTS_N_THREADS,
-                # This is the provider's native synthesis rate, not an ffmpeg
-                # retime. The measured WAV still drives storyboard duration.
-                "speed": speed_ratio,
+                # Do not retime narration to hit a requested video length.  The
+                # measured natural-speed WAV drives storyboard/scene duration.
+                "speed": NARRATION_SYNTHESIS_SPEED_RATIO,
                 "response_format": "wav",
             }
             try:
@@ -3161,9 +3098,9 @@ async def _generate_orpheus(
                         if verify_text
                         else request_token_budget
                         / ORPHEUS_AUDIO_TOKENS_PER_SECOND
-                        / speed_ratio
+                        / NARRATION_SYNTHESIS_SPEED_RATIO
                     ),
-                    speed=speed_ratio,
+                    speed=NARRATION_SYNTHESIS_SPEED_RATIO,
                 )
             except TtsIntegrityError as exc:
                 raise TtsIntegrityError(str(exc), part_key=input_path.name) from exc
@@ -3190,7 +3127,6 @@ async def _generate_orpheus(
                 job_id=job_id,
                 request_token_budget=request_token_budget,
                 integrity=integrity,
-                speed_percent=speed_percent,
             )
             wav_parts.append(expected_part)
             part_metadata.append(metadata)
@@ -3224,7 +3160,6 @@ async def _generate_orpheus(
         wav_parts=wav_parts,
         output=expected,
         deterministic=False,
-        synthesis_speed_ratio=speed_ratio,
         integrity=integrity,
     )
     emit(

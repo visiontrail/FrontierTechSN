@@ -304,8 +304,6 @@ export interface SettingField {
   is_overridden: boolean;
   restart_required: boolean;
   allow_blank: boolean;
-  minimum: number | null;
-  maximum: number | null;
   /** Secrets only — the value itself is never sent to the client. */
   masked?: string | null;
   default_masked?: string | null;
@@ -488,8 +486,6 @@ export interface TtsModelOption {
   label: string;
   provider: string;
   single_speaker: boolean;
-  speed_adjustable: boolean;
-  speed_percent_range: [number, number] | null;
   is_default: boolean;
 }
 
