@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from backend import config, skills_admin
-from backend.pipeline import scene_kit
+from backend.pipeline import outros, scene_kit
 from backend.pipeline.video_format import FrameSpec, LANDSCAPE
 
 logger = logging.getLogger(__name__)
@@ -165,6 +165,22 @@ video, which is the exact bug this system was built to fix.
   subject beats a decorative blob. You have no image assets unless a scene's
   brief names one.
 
+# Dedicated ByteFront Espresso outro
+
+When a brief says `dedicated outro scene`, the Gemini video is the moving
+background and you own only the editable HyperFrames overlay. Preserve the
+exact background and logo `src` values. Preserve these semantic hooks while
+you may freely improve their text, size, and position:
+`data-outro-role="brand"`, `data-outro-role="thanks"`,
+`data-outro-role="actions"`, and one each of `data-outro-action="like"`,
+`"comment"`, and `"share"`. Keep an English closing message, the ByteFront
+Espresso identity, and recognizable Like / Comment / Share icons. Do not place
+the removed Chinese closing phrase anywhere in the file. This scene has no
+captions, so it may use the full frame except for the normal 60px edge margin.
+Do not replace the Gemini motion with a CSS pan, zoom, gradient, or generated
+animation. The `<video>` must remain `muted playsinline`; the root program owns
+all audio.
+
 # Working method
 
 1. Read `compositions/<scene-id>.html` — a deterministic draft already exists.
@@ -227,11 +243,28 @@ def _scene_brief(scene: dict, plan: dict, theme: scene_kit.Theme) -> str:
     if plan.get("items"):
         lines.append("draft items: " + " | ".join(plan["items"]))
     if plan.get("footage_src"):
-        lines.append(
-            f"footage asset: {plan['footage_src']} (relative to the project root; "
-            f"reference it as ../{plan['footage_src']} from compositions/)"
+        if plan.get("archetype") == "outro":
+            lines.append(
+                f"Gemini background asset: {plan['footage_src']} "
+                "(preserve this exact src value in the existing video element)"
+            )
+        else:
+            lines.append(
+                f"footage asset: {plan['footage_src']} (relative to the project root; "
+                f"reference it as ../{plan['footage_src']} from compositions/)"
+            )
+    if plan.get("archetype") == "outro":
+        lines.extend(
+            [
+                "dedicated outro scene: no narration or captions",
+                f"exact logo asset: {plan.get('outro_logo_src', '')} "
+                "(reference it unchanged from compositions/)",
+                "overlay method: edit the existing HyperFrames brand, English closing "
+                "message, and Like / Comment / Share layers; copy and positions remain editable",
+            ]
         )
-    lines.append(f"narration spoken over this scene:\n\"{scene['text']}\"")
+    else:
+        lines.append(f"narration spoken over this scene:\n\"{scene['text']}\"")
     return "\n".join(lines)
 
 
@@ -258,6 +291,7 @@ def validate_scene_html(
     text: str,
     scene_id: str,
     frame: FrameSpec = LANDSCAPE,
+    plan: dict | None = None,
 ) -> list[str]:
     """Structural problems that would break the render. Empty list means ship it."""
     problems: list[str] = []
@@ -283,6 +317,12 @@ def validate_scene_html(
     for pattern, why in _FORBIDDEN:
         if pattern.search(text):
             problems.append(why)
+    if plan and plan.get("archetype") == "outro":
+        problems.extend(outros.outro_overlay_problems(text))
+        for key in ("footage_src", "outro_logo_src"):
+            source = str(plan.get(key) or "")
+            if source and f'src="{source}"' not in text:
+                problems.append(f"outro dropped locked {key}")
     return problems
 
 
@@ -457,6 +497,7 @@ async def direct_scenes(
     outcome = DirectorOutcome()
     scenes = {scene["id"]: scene for scene in storyboard.get("scenes", [])}
     kit_by_id = {plan.id: plan for plan in kit_plans}
+    plans_by_id = {str(plan.get("id")): plan for plan in plans}
     theme = next(iter(kit_by_id.values())).theme if kit_by_id else scene_kit.DEFAULT_THEME
 
     pairs = [(scenes[plan["id"]], plan) for plan in plans if plan["id"] in scenes]
@@ -536,7 +577,12 @@ async def direct_scenes(
             # report a failed run as a success.
             outcome.rejected.append(scene_id)
             continue
-        problems = validate_scene_html(text, scene_id, frame)
+        problems = validate_scene_html(
+            text,
+            scene_id,
+            frame,
+            plan=plans_by_id.get(scene_id),
+        )
         if problems:
             outcome.rejected.append(scene_id)
             if log:

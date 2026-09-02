@@ -13,6 +13,7 @@ export interface TaskConfig {
   video_template?: string;
   video_orientation?: 'landscape' | 'portrait';
   opening_style?: 'editorial_motion' | 'paper_collage';
+  outro_style?: 'data-extraction' | 'morning-brief' | 'signal-shot';
   processing_mode?: string;
   ai_endpoint?: string;
   ai_model?: string;
@@ -217,6 +218,7 @@ export interface DailyAutomationSettings {
   footage_clip_count: number;
   background_music_provider: 'local_library' | 'gemini_create_music' | 'local';
   background_music_track_id: string;
+  outro_style: 'data-extraction' | 'morning-brief' | 'signal-shot';
   auto_publish: boolean;
   publish_targets: Array<'youtube' | 'x' | 'apple_podcast'>;
   publish_visibility: 'private' | 'unlisted' | 'public';
@@ -230,6 +232,17 @@ export interface ProgramMusicTrack {
   duration_seconds: number;
   sha256: string;
   is_default: boolean;
+}
+
+export interface OutroPreset {
+  id: DailyAutomationSettings['outro_style'];
+  label: string;
+  name: string;
+  tone: string;
+  description: string;
+  duration_seconds: number;
+  is_default: boolean;
+  available: boolean;
 }
 
 export interface DailyAutomationResponse {
@@ -788,6 +801,15 @@ export async function fetchProgramMusicLibrary(): Promise<ProgramMusicTrack[]> {
 
 export function programMusicAudioUrl(trackId: string): string {
   return `${BASE}/api/daily-news/music-library/${encodeURIComponent(trackId)}/audio`;
+}
+
+export async function fetchOutroLibrary(): Promise<OutroPreset[]> {
+  const payload = await dailyRequest<{ presets: OutroPreset[] }>('/outro-library');
+  return payload.presets;
+}
+
+export function outroBackgroundVideoUrl(style: OutroPreset['id']): string {
+  return `${BASE}/api/daily-news/outro-library/${encodeURIComponent(style)}/video`;
 }
 
 export function runDailyNow(testMode = true, durationMinutes: number | null = 1): Promise<Task> {

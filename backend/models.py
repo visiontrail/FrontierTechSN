@@ -71,6 +71,12 @@ class TaskConfig(BaseModel):
     # for older clients and is synchronized below.
     video_orientation: Literal["landscape", "portrait"] = "landscape"
     opening_style: Literal["editorial_motion", "paper_collage"] = "editorial_motion"
+    # A Gemini-generated motion plate selected here becomes a dedicated final
+    # scene. The downstream HyperFrames director agent owns its editable brand,
+    # closing-message, and engagement overlays.
+    outro_style: Literal[
+        "data-extraction", "morning-brief", "signal-shot"
+    ] = "morning-brief"
     processing_mode: str = "full_text"
     ai_endpoint: Optional[str] = None
     ai_model: Optional[str] = None
@@ -667,6 +673,9 @@ class DailyAutomationSettings(BaseModel):
         default="morning-blueprint",
         pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
     )
+    outro_style: Literal[
+        "data-extraction", "morning-brief", "signal-shot"
+    ] = "morning-brief"
     auto_publish: bool = True
     publish_targets: list[Literal["youtube", "x", "apple_podcast"]] = Field(
         default_factory=lambda: ["youtube", "x", "apple_podcast"]

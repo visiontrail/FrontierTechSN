@@ -656,6 +656,7 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
         video_template=task.config.video_template,
         video_orientation=task.config.video_orientation,
         opening_style=task.config.opening_style,
+        outro_style=task.config.outro_style,
         collage_broll_enabled=task.config.collage_broll_enabled,
         collage_broll_count=task.config.collage_broll_count,
         news_images_enabled=task.config.news_images_enabled,

@@ -4,10 +4,12 @@ import { Link } from 'react-router-dom'
 import {
   fetchDailyAutomation,
   fetchDailySources,
+  fetchOutroLibrary,
   fetchProgramMusicLibrary,
   fetchSettingsSchema,
   fetchTtsModels,
   fetchVoices,
+  outroBackgroundVideoUrl,
   programMusicAudioUrl,
   runDailyNow,
   updateDailyAutomation,
@@ -50,6 +52,11 @@ export default function MorningDesk() {
     isFetching: musicTracksAreLoading,
     isError: musicTracksAreError,
   } = useQuery({ queryKey: ['program-music-library'], queryFn: fetchProgramMusicLibrary })
+  const {
+    data: outroPresets = [],
+    isFetching: outroPresetsAreLoading,
+    isError: outroPresetsAreError,
+  } = useQuery({ queryKey: ['outro-library'], queryFn: fetchOutroLibrary })
   const { data: settingsSchema } = useQuery({ queryKey: ['settings-schema'], queryFn: fetchSettingsSchema })
   const {
     data: ttsModels = [],
@@ -61,6 +68,7 @@ export default function MorningDesk() {
     ...persisted,
     footage_clip_count: persisted.footage_clip_count ?? 8,
     news_image_count: persisted.news_image_count ?? 4,
+    outro_style: persisted.outro_style ?? 'morning-brief',
   } : null)
   const {
     data: voices = [],
@@ -181,6 +189,7 @@ export default function MorningDesk() {
   ]
   const selectedModel = ttsModels.find((model) => model.id === draft.tts_model)
   const selectedMusicTrack = musicTracks.find((track) => track.id === draft.background_music_track_id)
+  const selectedOutro = outroPresets.find((preset) => preset.id === draft.outro_style)
   const selectedVoiceIsValid = voices.some((voice) => voice.name === draft.voice)
   const effectiveVoice = selectedVoiceIsValid ? draft.voice : (voices[0]?.name ?? draft.voice)
   const effectiveVoiceIsValid = voices.some((voice) => voice.name === effectiveVoice)
@@ -191,8 +200,10 @@ export default function MorningDesk() {
     && (ttsModelsIsError || ttsModels.some((model) => model.id === draft.tts_model))
   const musicSelectionReady = draft.background_music_provider !== 'local_library'
     || (!musicTracksAreLoading && Boolean(selectedMusicTrack))
+  const outroSelectionReady = !outroPresetsAreLoading && Boolean(selectedOutro?.available)
   const configReady = catalogReady
     && musicSelectionReady
+    && outroSelectionReady
     && Boolean(draft.generation_time && draft.timezone.trim())
     && inRange(draft.target_duration_minutes, 1, 30)
     && inRange(draft.max_stories, 3, 12)
@@ -294,6 +305,40 @@ export default function MorningDesk() {
                 <span><strong>Public footage</strong><small>Scout eligible external B-roll</small></span>
               </label>
               <label><span>Clips / edition</span><input type="number" min="1" max="30" disabled={!draft.public_footage_enabled} value={draft.footage_clip_count} onChange={(event) => patch('footage_clip_count', Number(event.target.value))} /></label>
+            </div>
+            <div className="morning-outro-stack">
+              <label className="morning-music-field">
+                <span>ByteFront Espresso outro</span>
+                <select
+                  value={draft.outro_style}
+                  disabled={outroPresetsAreLoading || outroPresetsAreError}
+                  onChange={(event) => patch('outro_style', event.target.value as DailyAutomationSettings['outro_style'])}
+                >
+                  {outroPresets.map((preset) => (
+                    <option value={preset.id} key={preset.id} disabled={!preset.available}>{preset.label}</option>
+                  ))}
+                </select>
+              </label>
+              {selectedOutro && (
+                <div className="morning-outro-preview">
+                  <video
+                    key={selectedOutro.id}
+                    src={outroBackgroundVideoUrl(selectedOutro.id)}
+                    muted
+                    loop
+                    playsInline
+                    controls
+                    preload="metadata"
+                  />
+                  <div>
+                    <strong>{selectedOutro.label}</strong>
+                    <small>{selectedOutro.description}</small>
+                    <span>Gemini motion · {selectedOutro.duration_seconds.toFixed(0)}s final scene</span>
+                    <p>ByteFront branding, the English closing message, and Like / Comment / Share remain editable HyperFrames layers authored by the video-editing agent.</p>
+                  </div>
+                </div>
+              )}
+              {outroPresetsAreError && <p className="morning-panel-warning">The outro catalog could not be loaded. Saving is blocked until the three backgrounds are available.</p>}
             </div>
             <div className="morning-music-stack">
               <label className="morning-music-field">

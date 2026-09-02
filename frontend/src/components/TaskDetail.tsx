@@ -37,6 +37,11 @@ const STAGE_LABELS: Record<string, string> = {
   publishing: 'Publish',
   complete: 'Done',
 }
+const OUTRO_LABELS: Record<string, string> = {
+  'data-extraction': '1. 数据萃取｜深色、科技感',
+  'morning-brief': '2. 晨间简报｜温暖、编辑感',
+  'signal-shot': '3. 信号快讯｜克制、播报感',
+}
 
 function stageState(current: string, stage: string): 'done' | 'active' | '' {
   const ci = STAGES.indexOf(current as typeof STAGES[number])
@@ -319,6 +324,10 @@ export default function TaskDetail() {
             <div>
               <dt>Spoken ending</dt>
               <dd title={task.config.closing_remarks}>{task.config.closing_remarks || 'Default close'}</dd>
+            </div>
+            <div>
+              <dt>Video outro</dt>
+              <dd>{OUTRO_LABELS[task.config.outro_style || 'morning-brief']} · editable HyperFrames overlay</dd>
             </div>
           </dl>
         </div>

@@ -120,6 +120,29 @@ def test_director_brief_uses_content_context_without_exposing_working_title():
     assert "narration spoken over this scene" in prompt
 
 
+def test_director_brief_assigns_the_editable_outro_overlay_to_the_agent():
+    storyboard = {"thesis": "A content-specific thesis"}
+    scene = {"id": "scene-09", "duration": 6.0, "text": "End card", "scene_kind": "outro"}
+    plan = {
+        "id": "scene-09",
+        "archetype": "outro",
+        "footage_src": "assets/outro/background.mp4",
+        "outro_logo_src": "assets/outro/bytefront-logo.png",
+    }
+
+    prompt = director._batch_prompt(
+        storyboard,
+        [(scene, plan)],
+        batch_no=1,
+        batch_total=1,
+        theme=scene_kit.DEFAULT_THEME,
+    )
+
+    assert "dedicated outro scene: no narration or captions" in prompt
+    assert "Like / Comment / Share layers" in prompt
+    assert "narration spoken over this scene" not in prompt
+
+
 def test_revert_restores_the_deterministic_draft(tmp_path):
     plan = scene_kit.ScenePlan(id="scene-01", duration=8.0, headline="Kept")
     assembler.write_scene_files(tmp_path, [plan])

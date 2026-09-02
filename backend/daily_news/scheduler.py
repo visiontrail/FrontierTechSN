@@ -142,6 +142,7 @@ async def create_daily_task(
         background_music_enabled=True,
         background_music_provider=settings.background_music_provider,
         background_music_track_id=settings.background_music_track_id,
+        outro_style=settings.outro_style,
         program_music_pacing_enabled=True,
         program_music_intro_seconds=2.0,
         program_music_opening_gap_seconds=3.0,

@@ -38,6 +38,7 @@ def test_task_config_defaults_to_landscape_and_four_collages():
     assert config.news_images_enabled is True
     assert config.news_image_count == 4
     assert config.opening_style == "editorial_motion"
+    assert config.outro_style == "morning-brief"
 
 
 def test_task_orientation_controls_legacy_footage_orientation():

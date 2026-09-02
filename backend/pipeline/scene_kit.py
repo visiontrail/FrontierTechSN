@@ -124,6 +124,7 @@ ARCHETYPES = (
     "quote",
     "footage",
     "news_image",
+    "outro",
 )
 
 MAX_NARRATIVE_ITEMS = 5
@@ -412,6 +413,8 @@ class ScenePlan:
     news_webpage_url: str = ""
     news_webpage_source: str = ""
     news_webpage_headline: str = ""
+    outro_logo_src: str = ""
+    outro_style: str = ""
     theme: Theme = DEFAULT_THEME
     frame: FrameSpec = LANDSCAPE
 
@@ -488,6 +491,8 @@ class ScenePlan:
             news_webpage_url=str(data.get("news_webpage_url") or ""),
             news_webpage_source=str(data.get("news_webpage_source") or ""),
             news_webpage_headline=str(data.get("news_webpage_headline") or ""),
+            outro_logo_src=str(data.get("outro_logo_src") or ""),
+            outro_style=str(data.get("outro_style") or ""),
             theme=theme,
             frame=frame,
         )
@@ -1072,6 +1077,104 @@ def _render_news_webpage_overlay(plan: ScenePlan) -> str:
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
 
 
+def _render_outro(plan: ScenePlan) -> str:
+    """Known-good editable overlay over the selected Gemini motion plate."""
+    if not plan.footage_src or not plan.outro_logo_src:
+        plan.archetype = "statement"
+        return _render_statement(plan)
+    light = plan.outro_style in {"morning-brief", "signal-shot"}
+    foreground = "#10243F" if light else "#F8FAFC"
+    quiet = "rgba(16,36,63,.68)" if light else "rgba(248,250,252,.74)"
+    panel = "rgba(246,248,251,.82)" if light else "rgba(7,20,39,.74)"
+    border = "rgba(16,36,63,.14)" if light else "rgba(248,250,252,.20)"
+    action_bg = "rgba(255,255,255,.58)" if light else "rgba(248,250,252,.10)"
+    veil = (
+        "linear-gradient(90deg,rgba(246,248,251,.64),rgba(246,248,251,.18) 54%,transparent 82%)"
+        if light
+        else "linear-gradient(90deg,rgba(3,13,28,.36),rgba(3,13,28,.08) 48%,transparent 80%)"
+    )
+    portrait = plan.frame.is_portrait
+    panel_width = "calc(100% - 144px)" if portrait else "1180px"
+    overlay_padding = "92px 72px 110px" if portrait else "70px 86px 62px"
+    panel_padding = "52px 44px" if portrait else "46px 54px 42px"
+    logo_width = "400px" if portrait else "475px"
+    headline_size_px = 72 if portrait else 91
+    css = f"""
+  #{plan.id} .outro-background {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+  #{plan.id} .outro-veil {{ position:absolute; inset:0; background:{veil}; pointer-events:none; }}
+  #{plan.id} .outro-overlay {{ position:absolute; inset:0; display:grid; grid-template-rows:auto 1fr auto;
+      padding:{overlay_padding}; color:{foreground}; font-family:{SANS}; }}
+  #{plan.id} .outro-topline, #{plan.id} .outro-footer {{ display:flex; align-items:center;
+      justify-content:space-between; color:{quiet}; font:700 17px/1.2 'Courier New',monospace;
+      letter-spacing:.18em; text-transform:uppercase; }}
+  #{plan.id} .outro-topline span:first-child {{ display:flex; align-items:center; gap:16px; }}
+  #{plan.id} .outro-topline span:first-child::before {{ content:''; width:42px; height:3px; background:#C98758; }}
+  #{plan.id} .outro-panel {{ align-self:center; width:{panel_width}; min-height:{'840px' if portrait else '585px'};
+      padding:{panel_padding}; border:1px solid {border}; background:{panel};
+      box-shadow:0 28px 80px rgba(7,20,39,.22); backdrop-filter:blur(16px) saturate(120%); }}
+  #{plan.id} .outro-brand-row {{ display:flex; align-items:center; gap:24px; flex-wrap:wrap; }}
+  #{plan.id} .outro-logo-shell {{ display:flex; align-items:center; width:{logo_width}; height:116px;
+      padding:18px 26px; overflow:hidden; border:1px solid rgba(16,36,63,.09); border-radius:16px;
+      background:rgba(255,255,255,.96); box-shadow:0 12px 34px rgba(7,20,39,.12); }}
+  #{plan.id} .outro-logo {{ display:block; width:100%; height:100%; object-fit:contain; }}
+  #{plan.id} .outro-badge {{ display:flex; align-items:center; height:50px; padding:0 21px;
+      border:1px solid rgba(201,135,88,.55); border-radius:999px; color:#C98758;
+      font:800 18px/1 'Courier New',monospace; letter-spacing:.21em; text-transform:uppercase; }}
+  #{plan.id} .outro-message {{ margin-top:42px; }}
+  #{plan.id} .outro-kicker {{ color:#C98758; font:800 19px/1.45 'Courier New',monospace;
+      letter-spacing:.23em; text-transform:uppercase; }}
+  #{plan.id} .outro-headline {{ max-width:1020px; margin:24px 0 0; color:{foreground};
+      font:760 {headline_size_px}px/.98 {SANS}; letter-spacing:-.058em; }}
+  #{plan.id} .outro-subline {{ margin:22px 0 0; color:{quiet}; font:600 25px/1.35 {SANS}; }}
+  #{plan.id} .outro-actions {{ display:flex; gap:14px; margin-top:38px; flex-wrap:wrap; }}
+  #{plan.id} .outro-action {{ display:flex; align-items:center; gap:13px; min-width:220px; height:64px;
+      padding:0 20px; border:1px solid {border}; border-radius:14px; background:{action_bg};
+      color:{foreground}; font:800 17px/1 'Courier New',monospace; letter-spacing:.12em; text-transform:uppercase; }}
+  #{plan.id} .outro-action svg {{ width:27px; height:27px; flex:0 0 27px; color:#C98758; }}
+  #{plan.id} .outro-footer-rule {{ width:{'260px' if portrait else '390px'}; height:2px;
+      background:linear-gradient(90deg,#C98758,transparent); transform-origin:left center; }}
+  #{plan.id} .outro-fade {{ position:absolute; inset:0; background:#071427; opacity:0; pointer-events:none; }}
+"""
+    markup = f"""    <video id="{plan.id}-background" class="clip outro-background" src="{_esc(plan.footage_src)}"
+      data-start="0" data-duration="{plan.duration:.2f}" data-track-index="0" muted playsinline preload="auto" crossorigin="anonymous"></video>
+    <div class="outro-veil" data-layout-ignore></div>
+    <section class="outro-overlay">
+      <header class="outro-topline"><span>Your daily shot of frontier tech</span><span>ByteFront / Outro 06.00</span></header>
+      <article class="outro-panel">
+        <div class="outro-brand-row" data-outro-role="brand">
+          <div class="outro-logo-shell"><img class="outro-logo" src="{_esc(plan.outro_logo_src)}" alt="ByteFront"></div>
+          <div class="outro-badge">Espresso</div>
+        </div>
+        <div class="outro-message" data-outro-role="thanks">
+          <div class="outro-kicker">{_esc(plan.kicker or 'SEE YOU IN THE NEXT SHOT')}</div>
+          <h1 class="outro-headline">{_esc(plan.headline or 'THANKS FOR WATCHING')}</h1>
+          <p class="outro-subline">{_esc(plan.body)}</p>
+        </div>
+        <div class="outro-actions" data-outro-role="actions" aria-label="Engagement actions">
+          <div class="outro-action" data-outro-action="like"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v11H3V10h4Z"/><path d="M7 19h10.2a2 2 0 0 0 1.96-1.61l1.2-6A2 2 0 0 0 18.4 9H14l.72-3.08A2.45 2.45 0 0 0 12.34 3L7 10"/></svg><span>Like</span></div>
+          <div class="outro-action" data-outro-action="comment"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H6l-4 3V12a9 9 0 1 1 19 0Z"/><path d="M8 12h.01M12 12h.01M16 12h.01"/></svg><span>Comment</span></div>
+          <div class="outro-action" data-outro-action="share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 5l5-3v16l-5-3"/><path d="M19 10H9a6 6 0 0 0-6 6v3"/></svg><span>Share</span></div>
+        </div>
+      </article>
+      <footer class="outro-footer"><div class="outro-footer-rule"></div><span>ByteFront Espresso · Fresh signals, served daily</span></footer>
+    </section>
+    <div id="{plan.id}-fade" class="outro-fade" data-layout-ignore></div>
+"""
+    timeline = f"""        inAt("#{plan.id} .outro-topline", {{ y: -26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .55, ease: "power3.out" }}, .14);
+        inAt("#{plan.id} .outro-panel", {{ x: -72, opacity: 0, scale: .985 }}, {{ x: 0, opacity: 1, scale: 1, duration: .82, ease: "expo.out" }}, .24);
+        inAt("#{plan.id} .outro-logo-shell", {{ y: 20, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .56, ease: "power3.out" }}, .50);
+        inAt("#{plan.id} .outro-badge", {{ x: 22, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .48, ease: "power3.out" }}, .67);
+        inAt("#{plan.id} .outro-kicker", {{ y: 18, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .48, ease: "power2.out" }}, .76);
+        inAt("#{plan.id} .outro-headline", {{ x: -48, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .72, ease: "expo.out" }}, .84);
+        inAt("#{plan.id} .outro-subline", {{ y: 24, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .52, ease: "power3.out" }}, 1.06);
+        inAt("#{plan.id} .outro-action", {{ y: 30, opacity: 0, scale: .96 }}, {{ y: 0, opacity: 1, scale: 1, duration: .48, stagger: .13, ease: "back.out(1.4)" }}, 1.25);
+        inAt("#{plan.id} .outro-footer-rule", {{ scaleX: 0 }}, {{ scaleX: 1, duration: .72, ease: "power4.out" }}, 1.58);
+        inAt("#{plan.id} .outro-footer span", {{ y: 14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .55, ease: "power2.out" }}, 1.72);
+        outAt("#{plan.id}-fade", {{ opacity: 1, duration: .58, ease: "power2.inOut" }}, {max(0.1, plan.duration - 0.58):.2f});
+"""
+    return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
+
+
 def _render_news_image_inline(plan: ScenePlan) -> str:
     """Place a sourced image inside the HyperFrames editorial text flow."""
     accent = accent_hex(plan.accent, plan.theme)
@@ -1417,6 +1520,7 @@ _RENDERERS = {
     "quote": _render_quote,
     "footage": _render_footage,
     "news_image": _render_news_image_fullscreen,
+    "outro": _render_outro,
 }
 
 
@@ -1436,6 +1540,8 @@ def render_scene(plan: ScenePlan) -> str:
         plan.archetype = "topic"
     if plan.archetype == "news_image" and not plan.news_image_src:
         plan.archetype = "topic"
+    if plan.archetype == "outro" and not (plan.footage_src and plan.outro_logo_src):
+        plan.archetype = "statement"
     if plan.archetype == "stat" and not plan.stat:
         # Without a figure the renderer would blow a full sentence up to 130px.
         plan.archetype = "topic"

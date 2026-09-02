@@ -15,6 +15,7 @@ from backend.daily_news.scheduler import (
 from backend.daily_news.source_catalog import load_source_catalog
 from backend.models import DailyAutomationResponse, DailyAutomationSettings, TaskResponse
 from backend.pipeline.music import list_program_music_tracks, resolve_program_music_track
+from backend.pipeline.outros import list_outro_presets, resolve_outro_preset
 from backend.publishing import automatic_publication_configuration_errors
 
 router = APIRouter(prefix="/api/daily-news", tags=["daily-news"])
@@ -27,6 +28,10 @@ async def get_daily_automation():
 
 @router.put("", response_model=DailyAutomationResponse)
 async def update_daily_automation(body: DailyAutomationSettings):
+    try:
+        resolve_outro_preset(body.outro_style)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if body.background_music_provider == "local_library":
         try:
             resolve_program_music_track(body.background_music_track_id)
@@ -54,6 +59,25 @@ async def get_program_music_library():
         return {"tracks": list_program_music_tracks()}
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/outro-library")
+async def get_outro_library():
+    return {"presets": list_outro_presets()}
+
+
+@router.get("/outro-library/{style}/video")
+async def get_outro_background_video(style: str):
+    try:
+        preset = resolve_outro_preset(style)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        preset["background_path"],
+        media_type="video/mp4",
+        filename=f"{preset['id']}-gemini-background.mp4",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.get("/music-library/{track_id}/audio")

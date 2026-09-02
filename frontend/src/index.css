@@ -4386,6 +4386,14 @@ video {
 .morning-music-preview small { margin-top: 5px; color: var(--text-muted); font: 500 11px/1.45 var(--font-sans); }
 .morning-music-preview span { margin-top: 7px; color: var(--accent-2); font: 700 9px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .morning-music-preview audio { width: 100%; min-height: 34px; }
+.morning-outro-stack { margin-top: 16px; padding-top: 2px; border-top: 1px solid var(--rule); }
+.morning-outro-preview { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(0, 1fr); gap: 18px; align-items: center; margin-top: 12px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--rule)); background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
+.morning-outro-preview video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #071427; }
+.morning-outro-preview strong,.morning-outro-preview small,.morning-outro-preview span { display: block; }
+.morning-outro-preview strong { color: var(--text); font: 700 14px/1.25 var(--font-sans); }
+.morning-outro-preview small { margin-top: 5px; color: var(--text-muted); font: 500 11px/1.45 var(--font-sans); }
+.morning-outro-preview span { margin-top: 7px; color: var(--accent); font: 700 9px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.morning-outro-preview p { margin: 8px 0 0; color: var(--text-muted); font: 500 10px/1.5 var(--font-sans); }
 .morning-config-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px 30px; padding: 22px 0 0; }
 .morning-config-actions > div:first-child > small { display: block; margin-top: 6px; color: var(--text-muted); font-size: 10px; }
 .morning-save-state { display: flex; align-items: center; gap: 8px; font: 700 10px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
@@ -4459,7 +4467,7 @@ video {
 @media (max-width: 920px) { .morning-masthead,.morning-config-head,.morning-section-head,.morning-distribution-head { grid-template-columns: 1fr; } .morning-status { text-align: left; border-left: 0; border-top: 1px solid var(--rule); padding: 18px 0 0; } .morning-config-grid { grid-template-columns: 1fr; } .morning-distribution-controls { grid-template-columns: minmax(150px, .65fr) minmax(250px, 1fr); } }
 @media (max-width: 620px) { .morning-distribution-controls { grid-template-columns: 1fr; } .morning-distribution-master { min-width: 0; } .morning-distribution-foot { align-items: flex-start; flex-direction: column; gap: 10px; } }
 @media (max-width: 560px) { .morning-desk { padding: 24px 18px 48px; } .morning-masthead h1 { font-size: 48px; } .morning-config-head h2 { font-size: 42px; } .morning-field-grid,.morning-field-grid--four { grid-template-columns: 1fr; } .morning-visual-row { grid-template-columns: minmax(0, 1fr) 105px; padding: 14px; } .morning-config-actions { grid-template-columns: 1fr; } .morning-action-buttons { justify-content: stretch; } .morning-action-buttons button { flex: 1; } .morning-destination { grid-template-columns: 24px 44px minmax(0, 1fr) auto; padding: 16px 14px; } }
-@media (max-width: 700px) { .morning-music-preview { grid-template-columns: 1fr; } }
+@media (max-width: 700px) { .morning-music-preview,.morning-outro-preview { grid-template-columns: 1fr; } }
 
 /* Publishing console: an identity ledger, not a generic preference form. */
 .publishing-console { width: min(1180px, 100%); margin: 0 auto; padding: 0; }

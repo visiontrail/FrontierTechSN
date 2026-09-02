@@ -38,6 +38,7 @@ from backend.pipeline import (
     multimodal_review,
     news_images,
     news_webpages,
+    outros,
     scene_kit,
     storyboard as sb,
     visual_plan,
@@ -1067,6 +1068,7 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
             str(plan.get("footage_src") or ""),
             str(plan.get("news_webpage_src") or ""),
             str(plan.get("news_image_src") or ""),
+            str(plan.get("outro_logo_src") or ""),
             *[
                 str(value or "")
                 for value in plan.get("news_image_srcs") or []
@@ -1101,6 +1103,7 @@ async def compose_video(
     video_template: str = "podcast",
     video_orientation: str = "landscape",
     opening_style: str = "editorial_motion",
+    outro_style: str = outros.DEFAULT_OUTRO_STYLE,
     collage_broll_enabled: bool = False,
     collage_broll_count: int = 4,
     news_images_enabled: bool = True,
@@ -1518,8 +1521,18 @@ async def compose_video(
             "report": str((output_dir_path / "audio" / "music_mix_report.json").resolve()),
         }
 
+    # Cache only narration-driven direction. The branded outro is a configured
+    # render stage, not a scene the visual planner should regenerate on retry.
     plans = scene_plans
     _write_visual_plan_checkpoint(output_dir_path, board, plans)
+    outro_plan = outros.stage_outro(output_dir_path, board, outro_style)
+    scene_plans.append(outro_plan)
+    plans = scene_plans
+    sb.write_storyboard(output_dir_path, board)
+    emit(
+        f"Outro: {outro_plan['outro_label']} staged as a {outros.OUTRO_DURATION_SECONDS:.0f}s "
+        "Gemini motion scene with an editable HyperFrames agent overlay"
+    )
 
     # --- 3. Authoring ------------------------------------------------------
     mounts = _mount_list(board)
@@ -1541,18 +1554,30 @@ async def compose_video(
         emit(f"Provider lookup failed ({exc}); rendering the deterministic scenes")
         endpoint, model, api_key = None, None, None
 
-    # Image scenes stay on the deterministic renderer. This prevents an authoring
-    # agent from "improving" the composition by dropping a licensed asset whose
-    # exact placement is part of the delivery contract.
+    # Licensed editorial media stays on the deterministic renderer. The outro
+    # is the deliberate exception: its Gemini video remains locked while the
+    # video-editing agent authors only the editable HyperFrames overlay.
     director_plans = [
         plan
         for plan in scene_plans
-        if not plan.get("footage_src")
-        and not plan.get("news_image")
-        and not plan.get("news_webpage")
+        if plan.get("archetype") == "outro"
+        or (
+            not plan.get("footage_src")
+            and not plan.get("news_image")
+            and not plan.get("news_webpage")
+        )
     ]
     if config.DIRECTOR_ENABLED and director_plans and model:
-        budget = director_plans[: config.DIRECTOR_MAX_SCENES] if config.DIRECTOR_MAX_SCENES else director_plans
+        if config.DIRECTOR_MAX_SCENES:
+            budget = director_plans[: config.DIRECTOR_MAX_SCENES]
+            configured_outro = next(
+                (plan for plan in director_plans if plan.get("archetype") == "outro"),
+                None,
+            )
+            if configured_outro and configured_outro not in budget and budget:
+                budget[-1] = configured_outro
+        else:
+            budget = director_plans
         try:
             outcome = await director.direct_scenes(
                 output_dir_path,
@@ -1627,6 +1652,20 @@ async def compose_video(
         layout_ok, findings = assembler.inspect_project(output_dir_path, emit)
         blamed = director.scenes_named_in_findings(findings, outcome.authored, mounts)
         if not layout_ok and blamed:
+            outro_ids = {
+                str(plan.get("id"))
+                for plan in scene_plans
+                if plan.get("archetype") == "outro"
+            }
+            blamed_outros = [scene_id for scene_id in blamed if scene_id in outro_ids]
+            if blamed_outros:
+                director.revert_scenes(output_dir_path, blamed_outros, kit_plans)
+                emit(
+                    "Layout: reverted the outro overlay to its verified editable draft "
+                    "instead of letting a generic caption-safe repair rewrite it"
+                )
+                blamed = [scene_id for scene_id in blamed if scene_id not in outro_ids]
+        if not layout_ok and blamed:
             try:
                 await director.repair_scenes(
                     output_dir_path,
@@ -1654,6 +1693,10 @@ async def compose_video(
                         f"Layout still failing for {len(still_bad)} scene(s); "
                         "reverted them to the deterministic draft"
                     )
+
+    # A repair or future agent implementation must never drop the selected
+    # Gemini plate or exact ByteFront logo after the initial authoring gate.
+    _assert_locked_visual_assets(output_dir_path, scene_plans)
 
     # --- 5. Render ---------------------------------------------------------
     staged_video_path = output_dir_path / "video.next.mp4"

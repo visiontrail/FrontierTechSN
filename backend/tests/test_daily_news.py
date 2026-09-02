@@ -1180,6 +1180,7 @@ def test_daily_desk_defaults_to_unattended_next_run():
     assert settings.news_image_count == 4
     assert settings.background_music_provider == "local_library"
     assert settings.background_music_track_id == "morning-blueprint"
+    assert settings.outro_style == "morning-brief"
 
 
 def test_daily_desk_recipe_validates_tts_model_and_voice_before_saving():
@@ -1271,6 +1272,7 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
         footage_clip_count=11,
         background_music_provider="local",
         background_music_track_id="strategic-outlook",
+        outro_style="data-extraction",
         auto_publish=False,
     )
 
@@ -1298,6 +1300,7 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
     assert task_config.footage_clip_count == 11
     assert task_config.background_music_provider == "local"
     assert task_config.background_music_track_id == "strategic-outlook"
+    assert task_config.outro_style == "data-extraction"
     assert task_config.program_music_pacing_enabled is True
     assert task_config.program_music_intro_seconds == 2.0
     assert task_config.program_music_opening_gap_seconds == 3.0
