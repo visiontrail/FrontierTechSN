@@ -419,8 +419,6 @@ class ScenePlan:
     intro_style: str = ""
     edition_date: str = ""
     edition_weekday: str = ""
-    edition_label: str = ""
-    edition_story_count: str = ""
     outro_logo_src: str = ""
     outro_style: str = ""
     theme: Theme = DEFAULT_THEME
@@ -503,8 +501,6 @@ class ScenePlan:
             intro_style=str(data.get("intro_style") or ""),
             edition_date=str(data.get("edition_date") or ""),
             edition_weekday=str(data.get("edition_weekday") or ""),
-            edition_label=str(data.get("edition_label") or ""),
-            edition_story_count=str(data.get("edition_story_count") or ""),
             outro_logo_src=str(data.get("outro_logo_src") or ""),
             outro_style=str(data.get("outro_style") or ""),
             theme=theme,
@@ -1102,17 +1098,17 @@ def _render_intro(plan: ScenePlan) -> str:
     quiet = "rgba(16,36,63,.68)" if light else "rgba(248,250,252,.72)"
     panel = "rgba(250,248,243,.76)" if light else "rgba(5,18,37,.70)"
     border = "rgba(16,36,63,.16)" if light else "rgba(248,250,252,.22)"
-    rail = "rgba(255,255,255,.48)" if light else "rgba(248,250,252,.08)"
     veil = (
         "linear-gradient(90deg,rgba(244,240,231,.18),rgba(244,240,231,.04) 58%,transparent 84%)"
         if light
         else "linear-gradient(90deg,rgba(3,13,28,.30),rgba(3,13,28,.05) 58%,transparent 84%)"
     )
     portrait = plan.frame.is_portrait
-    shell_width = "calc(100% - 144px)" if portrait else "980px"
+    shell_width = "calc(100% - 144px)" if portrait else "1040px"
     shell_margin = "0 auto" if portrait else "0 auto 0 360px"
     shell_padding = "54px 46px 48px" if portrait else "46px 58px 42px"
-    logo_width = "680px" if portrait else "650px"
+    logo_width = "560px"
+    espresso_size = 66
     date_size = 62 if portrait else 66
     css = f"""
   #{plan.id} .intro-background {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
@@ -1127,23 +1123,18 @@ def _render_intro(plan: ScenePlan) -> str:
   #{plan.id} .intro-shell {{ align-self:center; width:{shell_width}; margin:{shell_margin}; padding:{shell_padding};
       border:1px solid {border}; background:{panel}; box-shadow:0 28px 86px rgba(7,20,39,.17);
       backdrop-filter:blur(12px) saturate(112%); }}
-  #{plan.id} .intro-brand {{ display:flex; align-items:center; gap:22px; }}
+  #{plan.id} .intro-brand {{ display:flex; align-items:center; gap:26px; }}
   #{plan.id} .intro-logo {{ display:block; width:{logo_width}; max-width:100%; height:auto; object-fit:contain; }}
-  #{plan.id} .intro-espresso {{ display:flex; align-items:center; height:48px; padding:0 19px;
-      border:1px solid rgba(201,135,88,.62); border-radius:999px; color:#C98758;
-      font:800 17px/1 'Courier New',monospace; letter-spacing:.20em; text-transform:uppercase; }}
+  #{plan.id} .intro-espresso {{ display:flex; align-items:center; padding-left:26px;
+      border-left:3px solid #C98758; color:{foreground}; white-space:nowrap;
+      font:700 {espresso_size}px/1.2 {SANS}; letter-spacing:-.045em; }}
   #{plan.id} .intro-copper-rule {{ width:100%; height:2px; margin:34px 0 30px;
       background:linear-gradient(90deg,#C98758 0 34%,rgba(201,135,88,.08) 78%,transparent); transform-origin:left center; }}
-  #{plan.id} .intro-edition {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:28px;
-      align-items:end; }}
+  #{plan.id} .intro-edition {{ display:block; }}
   #{plan.id} .intro-weekday {{ color:#C98758; font:800 18px/1.25 'Courier New',monospace;
       letter-spacing:.22em; text-transform:uppercase; }}
   #{plan.id} .intro-date {{ margin:12px 0 0; color:{foreground};
       font:700 {date_size}px/.98 {SERIF}; letter-spacing:-.035em; white-space:nowrap; }}
-  #{plan.id} .intro-meta {{ display:flex; flex-direction:column; gap:10px; align-items:flex-end; }}
-  #{plan.id} .intro-meta-chip {{ min-width:250px; padding:13px 17px; border-left:4px solid #C98758;
-      background:{rail}; color:{foreground}; font:800 16px/1.18 'Courier New',monospace;
-      letter-spacing:.13em; text-align:right; text-transform:uppercase; }}
   #{plan.id} .intro-footer-rule {{ width:{'270px' if portrait else '430px'}; height:2px;
       background:linear-gradient(90deg,#2F64AE,transparent); transform-origin:left center; }}
   #{plan.id} .intro-fade {{ position:absolute; inset:0; background:#F4F0E7; opacity:0; pointer-events:none; }}
@@ -1151,10 +1142,8 @@ def _render_intro(plan: ScenePlan) -> str:
 """
     if portrait:
         css += f"""
-  #{plan.id} .intro-edition {{ grid-template-columns:1fr; align-items:start; }}
+  #{plan.id} .intro-brand {{ flex-wrap:wrap; }}
   #{plan.id} .intro-date {{ white-space:normal; }}
-  #{plan.id} .intro-meta {{ align-items:flex-start; }}
-  #{plan.id} .intro-meta-chip {{ min-width:360px; text-align:left; }}
   #{plan.id} .intro-footer {{ gap:26px; }}
 """
 
@@ -1170,14 +1159,8 @@ def _render_intro(plan: ScenePlan) -> str:
         </div>
         <div class="intro-copper-rule"></div>
         <div class="intro-edition" data-intro-role="edition">
-          <div>
-            <div id="{plan.id}-weekday" class="intro-weekday" data-intro-field="weekday">{_esc(plan.edition_weekday)}</div>
-            <div id="{plan.id}-date" class="intro-date" data-intro-field="date">{_esc(plan.edition_date)}</div>
-          </div>
-          <div class="intro-meta">
-            <div id="{plan.id}-label" class="intro-meta-chip" data-intro-field="label">{_esc(plan.edition_label)}</div>
-            <div id="{plan.id}-story-count" class="intro-meta-chip" data-intro-field="story-count">{_esc(plan.edition_story_count)}</div>
-          </div>
+          <div id="{plan.id}-weekday" class="intro-weekday" data-intro-field="weekday">{_esc(plan.edition_weekday)}</div>
+          <div id="{plan.id}-date" class="intro-date" data-intro-field="date">{_esc(plan.edition_date)}</div>
         </div>
       </article>
       <footer class="intro-footer"><div class="intro-footer-rule"></div><span>{_esc(plan.body)}</span></footer>
@@ -1187,8 +1170,6 @@ def _render_intro(plan: ScenePlan) -> str:
     fallbacks = {
         "edition_date": plan.edition_date,
         "edition_weekday": plan.edition_weekday,
-        "edition_label": plan.edition_label,
-        "edition_story_count": plan.edition_story_count,
     }
     fallback_json = json.dumps(fallbacks, ensure_ascii=False)
     timeline = f"""        const variables = window.__hyperframes.getVariables();
@@ -1196,8 +1177,6 @@ def _render_intro(plan: ScenePlan) -> str:
         const value = (key) => String(variables[key] || fallbackValues[key] || "");
         q('[data-intro-field="date"]')[0].textContent = value("edition_date");
         q('[data-intro-field="weekday"]')[0].textContent = value("edition_weekday");
-        q('[data-intro-field="label"]')[0].textContent = value("edition_label");
-        q('[data-intro-field="story-count"]')[0].textContent = value("edition_story_count");
         inAt("#{plan.id} .intro-topline", {{ y: -24, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .55, ease: "power3.out" }}, .12);
         inAt("#{plan.id} .intro-shell", {{ y: 34, opacity: 0, scale: .985 }}, {{ y: 0, opacity: 1, scale: 1, duration: .82, ease: "expo.out" }}, .24);
         inAt("#{plan.id} .intro-logo", {{ x: -42, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .68, ease: "power4.out" }}, .44);
@@ -1205,7 +1184,6 @@ def _render_intro(plan: ScenePlan) -> str:
         inAt("#{plan.id} .intro-copper-rule", {{ scaleX: 0 }}, {{ scaleX: 1, duration: .78, ease: "power4.inOut" }}, .74);
         inAt("#{plan.id} .intro-weekday", {{ y: 18, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .48, ease: "power2.out" }}, .96);
         inAt("#{plan.id} .intro-date", {{ x: -44, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .76, ease: "expo.out" }}, 1.06);
-        inAt("#{plan.id} .intro-meta-chip", {{ x: 34, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .46, stagger: .14, ease: "power3.out" }}, 1.20);
         inAt("#{plan.id} .intro-footer-rule", {{ scaleX: 0 }}, {{ scaleX: 1, duration: .72, ease: "power3.out" }}, 1.56);
         inAt("#{plan.id} .intro-footer span", {{ y: 14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .52, ease: "power2.out" }}, 1.72);
         outAt("#{plan.id}-fade", {{ opacity: 1, duration: .42, ease: "power2.inOut" }}, {max(0.1, plan.duration - 0.42):.2f});

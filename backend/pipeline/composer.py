@@ -1555,7 +1555,7 @@ async def compose_video(
         f"Intro: {intro_plan['intro_label']} staged as a "
         f"{intros.INTRO_DURATION_SECONDS:.0f}s Gemini motion scene; "
         f"HyperFrames variables inject {intro_plan['edition_weekday']}, "
-        f"{intro_plan['edition_date']} · {intro_plan['edition_story_count']}"
+        f"{intro_plan['edition_date']}"
     )
     emit(
         f"Outro: {outro_plan['outro_label']} staged as a {outros.OUTRO_DURATION_SECONDS:.0f}s "

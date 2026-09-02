@@ -64,7 +64,7 @@ def test_stage_intro_prepends_bookend_shifts_narration_and_writes_variables(
     assert plan["archetype"] == "intro"
     assert plan["edition_weekday"] == "WEDNESDAY"
     assert plan["edition_date"] == "SEPTEMBER 02, 2026"
-    assert plan["edition_story_count"] == "01 STORY"
+    assert set(board["intro_variables"]) == {"edition_date", "edition_weekday"}
     assert board["scenes"][0]["id"] == intros.INTRO_SCENE_ID
     assert board["scenes"][1]["start"] == 6.0
     assert board["scenes"][1]["lines"][0]["start"] == 6.0
@@ -92,8 +92,6 @@ def test_intro_scene_reads_declared_hyperframes_variables_and_passes_agent_gate(
         intro_style="morning-brief",
         edition_date="SEPTEMBER 02, 2026",
         edition_weekday="WEDNESDAY",
-        edition_label="DAILY TECH BRIEFING",
-        edition_story_count="06 STORIES",
     )
 
     html = scene_kit.render_scene(plan)
@@ -109,7 +107,12 @@ def test_intro_scene_reads_declared_hyperframes_variables_and_passes_agent_gate(
     ) == []
     assert "window.__hyperframes.getVariables()" in html
     assert 'data-intro-field="date"' in html
-    assert 'data-intro-field="story-count"' in html
+    assert 'data-intro-field="weekday"' in html
+    assert 'data-intro-field="label"' not in html
+    assert 'data-intro-field="story-count"' not in html
+    assert "DAILY TECH BRIEFING" not in html
+    assert "intro-meta-chip" not in html
+    assert "font:700 66px/1.2" in html
     assert "Date.now" not in html
     assert "muted playsinline" in html
 
@@ -142,3 +145,23 @@ def test_intro_agent_contract_rejects_static_or_incomplete_metadata():
 
     assert "missing editable intro edition overlay" in problems
     assert "intro does not read HyperFrames variables" in problems
+
+
+def test_intro_agent_contract_rejects_removed_metadata_chips():
+    broken = """
+    <div data-intro-role="brand"></div>
+    <div data-intro-role="edition">
+      <span data-intro-field="date"></span>
+      <span data-intro-field="weekday"></span>
+      <span data-intro-field="label">DAILY TECH BRIEFING</span>
+      <span data-intro-field="story-count">01 STORY</span>
+    </div>
+    <script>window.__hyperframes.getVariables()</script>
+    """
+
+    problems = intros.intro_overlay_problems(broken)
+
+    assert "removed briefing-label field is still present" in problems
+    assert "removed story-count field is still present" in problems
+    assert "removed Daily Tech Briefing label is still present" in problems
+    assert "removed story-count label is still present" in problems

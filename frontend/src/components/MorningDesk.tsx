@@ -332,9 +332,9 @@ export default function MorningDesk() {
                   />
                   <div>
                     <strong>{selectedOutro.label}</strong>
-                    <small>{selectedOutro.description} · Opening date and story count are injected by HyperFrames.</small>
+                    <small>{selectedOutro.description} · Opening date and weekday are injected by HyperFrames.</small>
                     <span>Gemini motion · {selectedOutro.duration_seconds.toFixed(0)}s opening + {selectedOutro.duration_seconds.toFixed(0)}s final scene</span>
-                    <p>The video-editing agent can refine both HyperFrames overlays while the opening keeps its task date and story-count variables and the ending keeps its English message and Like / Comment / Share actions.</p>
+                    <p>The video-editing agent can refine both HyperFrames overlays while the opening keeps its task date and weekday variables and the ending keeps its English message and Like / Comment / Share actions.</p>
                   </div>
                 </div>
               )}

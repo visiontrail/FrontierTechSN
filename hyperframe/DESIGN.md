@@ -17,7 +17,8 @@ but aligned to a precise information grid.
 
 ## Typography
 
-- Brand and headlines: Inter/Helvetica Neue, strong but not oversized.
+- Brand and headlines: Inter/Helvetica Neue, strong but not oversized. `Espresso`
+  matches the apparent size and weight of `Bytefront` as one unified wordmark.
 - Edition date: Georgia, high-contrast editorial serif.
 - Metadata: Courier New, uppercase, tabular, wide tracking.
 - Video-safe minimums: 18 px labels, 28 px support, 72 px hero type at
@@ -34,7 +35,8 @@ but aligned to a precise information grid.
 
 ## Dynamic opening contract
 
-The workflow declares `edition_date`, `edition_weekday`, `edition_label`, and
-`edition_story_count` as HyperFrames composition variables. The opening scene
-reads them through `window.__hyperframes.getVariables()` so the edition data is
-set per render rather than burned into the reusable video plate.
+The workflow declares `edition_date` and `edition_weekday` as HyperFrames
+composition variables. The opening scene reads them through
+`window.__hyperframes.getVariables()` so the edition data is set per render
+rather than burned into the reusable video plate. Briefing-label and story-count
+chips are intentionally absent.

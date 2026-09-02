@@ -187,11 +187,13 @@ When a brief says `dedicated intro scene`, the Gemini video is the moving
 background and you own only the editable, edition-aware HyperFrames overlay.
 Preserve the exact background and logo `src` values. Preserve these semantic
 hooks: `data-intro-role="brand"`, `data-intro-role="edition"`, and one each of
-`data-intro-field="date"`, `"weekday"`, `"label"`, and `"story-count"`.
+`data-intro-field="date"` and `"weekday"`.
 The visible field values must come from one synchronous
 `window.__hyperframes.getVariables()` call using the declared
-`edition_date`, `edition_weekday`, `edition_label`, and `edition_story_count`
-variables. Never compute the date in JavaScript. This scene has no narration or
+`edition_date` and `edition_weekday` variables. Keep `Espresso` at the same
+apparent type size and weight as `Bytefront`; do not render it as a small badge.
+Never add a briefing-label or story-count chip. Never compute the date in
+JavaScript. This scene has no narration or
 captions, so it may use the full frame except for the normal 60px edge margin.
 Do not replace the Gemini motion with a CSS pan, zoom, gradient, or generated
 animation. The `<video>` must remain `muted playsinline`; the root program owns
@@ -275,10 +277,11 @@ def _scene_brief(scene: dict, plan: dict, theme: scene_kit.Theme) -> str:
                 "dedicated intro scene: no narration or captions",
                 f"exact logo asset: {plan.get('intro_logo_src', '')} "
                 "(reference it unchanged from compositions/)",
-                "dynamic HyperFrames variables: edition_date, edition_weekday, "
-                "edition_label, edition_story_count",
+                "dynamic HyperFrames variables: edition_date, edition_weekday",
                 "overlay method: edit the existing ByteFront brand and edition metadata "
-                "layers while preserving every data-intro-role/data-intro-field hook",
+                "layers while preserving every data-intro-role/data-intro-field hook; "
+                "keep Espresso the same apparent size as Bytefront and do not add "
+                "briefing-label or story-count chips",
             ]
         )
     elif plan.get("archetype") == "outro":

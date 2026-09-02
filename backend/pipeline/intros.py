@@ -1,13 +1,14 @@
 """ByteFront Espresso branded intro staging and runtime variables.
 
 The Gemini plate supplies the moving paper-collage background. HyperFrames owns
-the logo and edition metadata, so each render can inject its actual date and
-story count without regenerating or baking text into the video asset.
+the logo and edition date, so each render can inject its actual date without
+regenerating or baking text into the video asset.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from datetime import date, datetime
 from pathlib import Path
@@ -65,35 +66,18 @@ def _edition_date(value: str | date | datetime | None, storyboard: dict) -> date
     return datetime.now(ZoneInfo(DEFAULT_EDITION_TIMEZONE)).date()
 
 
-def _story_count(storyboard: dict) -> int | None:
-    scenes = list(storyboard.get("scenes") or [])
-    daily_news = [
-        scene
-        for scene in scenes
-        if str(scene.get("program_segment_kind") or "") == "news"
-    ]
-    return len(daily_news) or None
-
-
 def edition_variables(
     storyboard: dict,
     edition_date: str | date | datetime | None = None,
 ) -> dict[str, str]:
     """Return the exact string values injected into the HyperFrames intro."""
     resolved_date = _edition_date(edition_date, storyboard)
-    story_count = _story_count(storyboard)
     return {
         "edition_date": (
             f"{_MONTHS[resolved_date.month - 1]} {resolved_date.day:02d}, "
             f"{resolved_date.year}"
         ),
         "edition_weekday": _WEEKDAYS[resolved_date.weekday()],
-        "edition_label": "DAILY TECH BRIEFING",
-        "edition_story_count": (
-            f"{story_count:02d} {'STORY' if story_count == 1 else 'STORIES'}"
-            if story_count is not None
-            else "SPECIAL EDITION"
-        ),
     }
 
 
@@ -102,8 +86,6 @@ def composition_variable_specs(values: dict[str, str]) -> list[dict[str, str]]:
     labels = {
         "edition_date": "Edition date",
         "edition_weekday": "Edition weekday",
-        "edition_label": "Edition label",
-        "edition_story_count": "Edition story count",
     }
     return [
         {
@@ -168,10 +150,10 @@ def stage_intro(
         "lines": [],
         "text": (
             "ByteFront Espresso branded opening with the current edition date, "
-            "weekday, briefing label, and story count over the selected Gemini motion plate."
+            "weekday, and unified wordmark over the selected Gemini motion plate."
         ),
         "word_count": 0,
-        "keywords": ["ByteFront Espresso", values["edition_date"], values["edition_story_count"]],
+        "keywords": ["ByteFront Espresso", values["edition_date"]],
         "scene_kind": "intro",
         "intro_style": style,
     }
@@ -216,11 +198,20 @@ def intro_overlay_problems(text: str) -> list[str]:
         'data-intro-role="edition"': "missing editable intro edition overlay",
         'data-intro-field="date"': "missing dynamic edition date field",
         'data-intro-field="weekday"': "missing dynamic weekday field",
-        'data-intro-field="label"': "missing dynamic edition label field",
-        'data-intro-field="story-count"': "missing dynamic story-count field",
         "window.__hyperframes.getVariables()": "intro does not read HyperFrames variables",
     }
     for marker, message in required.items():
         if marker not in text:
             problems.append(message)
+    forbidden = {
+        'data-intro-field="label"': "removed briefing-label field is still present",
+        'data-intro-field="story-count"': "removed story-count field is still present",
+    }
+    for marker, message in forbidden.items():
+        if marker in text:
+            problems.append(message)
+    if "daily tech briefing" in text.lower():
+        problems.append("removed Daily Tech Briefing label is still present")
+    if re.search(r"\b(?:\d{1,3}\s+stor(?:y|ies)|special edition)\b", text, re.IGNORECASE):
+        problems.append("removed story-count label is still present")
     return problems
