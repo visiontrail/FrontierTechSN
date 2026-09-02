@@ -1,5 +1,6 @@
 import io
 import json
+import struct
 import tempfile
 import unittest
 import wave
@@ -27,6 +28,15 @@ def write_wav(path: Path, *, frames: int = 24_000, sample_rate: int = 24_000) ->
     path.write_bytes(wav_bytes(frames=frames, sample_rate=sample_rate))
 
 
+def pocket_streaming_wav_bytes(*, frames: int = 48_000) -> bytes:
+    payload = bytearray(wav_bytes(frames=frames))
+    # Match Pocket TTS' non-seekable HTTP writer: the true PCM follows a header
+    # that advertises one billion placeholder frames.
+    struct.pack_into("<I", payload, 4, 2_000_000_036)
+    struct.pack_into("<I", payload, 40, 2_000_000_000)
+    return bytes(payload)
+
+
 class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def verified_report(_path, text, _verification_dir, **_kwargs):
@@ -49,6 +59,80 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(chunks, ["One two three.\nFour five.", "Six seven eight."])
         self.assertEqual(" ".join(" ".join(chunks).split()), text)
+
+    def test_pocket_split_preserves_physical_story_lines(self):
+        text = (
+            "Opening sentence. A second opening sentence.\n"
+            "Story one stays together. It keeps its natural sentence boundary.\n"
+            "Closing line."
+        )
+
+        chunks = tts._split_pocket_tts_text(text, max_words=240)
+
+        self.assertEqual(chunks, text.splitlines())
+        self.assertNotIn("Opening sentence.", chunks)
+
+    def test_pocket_split_only_divides_long_lines_between_sentences(self):
+        text = "One two three four. Five six seven eight. Nine ten eleven twelve."
+
+        chunks = tts._split_pocket_tts_text(text, max_words=8)
+
+        self.assertEqual(
+            chunks,
+            ["One two three four. Five six seven eight.", "Nine ten eleven twelve."],
+        )
+        self.assertEqual(" ".join(chunks), text)
+
+    def test_normalizes_pocket_streaming_wav_placeholder_header(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "stream.wav"
+            path.write_bytes(pocket_streaming_wav_bytes(frames=48_000))
+            with wave.open(str(path), "rb") as source:
+                self.assertEqual(source.getnframes(), 1_000_000_000)
+
+            info = tts._normalize_pocket_streaming_wav(path)
+
+            self.assertEqual(info.frame_count, 48_000)
+            self.assertEqual(info.duration_seconds, 2.0)
+            self.assertEqual(tts._read_pcm_wav(path).frame_count, 48_000)
+
+    def test_measures_pocket_wav_edge_silence_in_fixed_windows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "edges.wav"
+            with wave.open(str(path), "wb") as destination:
+                destination.setnchannels(1)
+                destination.setsampwidth(2)
+                destination.setframerate(24_000)
+                destination.writeframes(
+                    struct.pack("<h", 0) * 2_400
+                    + struct.pack("<h", 10_000) * 4_800
+                    + struct.pack("<h", 0) * 7_200
+                )
+
+            edges = tts._wav_edge_silence_seconds(path)
+
+        self.assertEqual(edges, {"leading_seconds": 0.1, "trailing_seconds": 0.3})
+
+    def test_rejects_long_silence_inside_a_pocket_story(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "stutter.wav"
+            with wave.open(str(path), "wb") as destination:
+                destination.setnchannels(1)
+                destination.setsampwidth(2)
+                destination.setframerate(24_000)
+                destination.writeframes(
+                    struct.pack("<h", 10_000) * 4_800
+                    + struct.pack("<h", 0) * 21_600
+                    + struct.pack("<h", 10_000) * 4_800
+                )
+
+            report = tts._pocket_internal_silence_report(path)
+            with self.assertRaisesRegex(tts.TtsIntegrityError, "internal pause"):
+                tts._validate_pocket_internal_silence(path)
+
+        self.assertEqual(report["count"], 1)
+        self.assertEqual(report["max_seconds"], 0.9)
+        self.assertFalse(report["passed"])
 
     def test_split_tts_text_repeats_dialogue_metadata_without_repeating_words(self):
         text = "Speaker 1: One two three. Four five six.\nSpeaker 2: Seven eight."
@@ -3521,6 +3605,106 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaisesRegex(tts.TtsIntegrityError, "format changed"):
                 await tts._concat_wav_parts([first, second], root, log=None)
+
+    async def test_pocket_http_generates_verified_story_parts_and_manifest(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "audio/wav"},
+                content=pocket_streaming_wav_bytes(),
+            )
+
+        original_client = httpx.AsyncClient
+
+        def client_factory(**kwargs):
+            return original_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = root / "script.txt"
+            script.write_text(
+                "Speaker 1: Opening words stay together for natural delivery.\n"
+                "Speaker 1: This complete story remains a second physical paragraph."
+            )
+            verifier = AsyncMock(side_effect=self.verified_report)
+            with (
+                patch.object(config, "POCKET_TTS_URL", "http://pocket.test"),
+                patch.object(config, "POCKET_TTS_CHUNK_WORDS", 240),
+                patch.object(tts.httpx, "AsyncClient", client_factory),
+                patch.object(tts, "_verify_orpheus_part", verifier),
+            ):
+                result = await tts.generate_tts(
+                    str(script), str(root / "audio"), ["alba"], "pocket-tts-en"
+                )
+
+            output = Path(result)
+            manifest = json.loads((output.parent / "tts_manifest.json").read_text())
+            output_info = tts._read_pcm_wav(output)
+
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(request.url.path == "/tts" for request in requests))
+        self.assertTrue(all(b"voice_url=alba" in request.content for request in requests))
+        self.assertEqual(output_info.frame_count, 96_000)
+        self.assertEqual(manifest["model"], "pocket-tts-en")
+        self.assertEqual(manifest["chunk_count"], 2)
+        self.assertEqual(manifest["integrity"]["verified_source_coverage"], 1.0)
+        self.assertEqual(
+            manifest["continuity"]["strategy"],
+            "physical_script_lines_then_complete_sentences",
+        )
+        self.assertEqual(manifest["continuity"]["arbitrary_mid_sentence_splits"], 0)
+        self.assertEqual(manifest["continuity"]["physical_script_line_count"], 2)
+        self.assertEqual(manifest["continuity"]["intra_line_application_join_count"], 0)
+        self.assertEqual(
+            manifest["continuity"]["silence_measurement"]["join_seconds"],
+            [4.0],
+        )
+        self.assertEqual(
+            manifest["continuity"]["silence_measurement"]["internal_long_silence_count"],
+            0,
+        )
+        self.assertEqual(verifier.await_count, 2)
+
+    async def test_pocket_integrity_failure_retries_only_failed_part_budget(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = root / "script.txt"
+            script.write_text("A retryable Pocket paragraph.")
+            generate = AsyncMock(
+                side_effect=[
+                    tts.TtsIntegrityError("missing word", part_key="part-001"),
+                    "/verified.wav",
+                ]
+            )
+            with patch.object(tts, "_generate_pocket_tts", generate):
+                result = await tts.generate_tts(
+                    str(script), str(root / "audio"), ["alba"], "pocket-tts-en"
+                )
+
+        self.assertEqual(result, "/verified.wav")
+        self.assertEqual(generate.await_count, 2)
+
+    def test_pocket_cache_is_bound_to_voice_and_deployment_revision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "part.wav"
+            write_wav(path)
+            text = "A fully verified Pocket paragraph."
+            metadata = tts._write_pocket_part_metadata(
+                path,
+                text,
+                "alba",
+                integrity=self.verified_report(None, text, None),
+                generation_seconds=1.25,
+            )
+            self.assertIsNotNone(tts._load_cached_pocket_part(path, text, "alba"))
+            self.assertIsNone(tts._load_cached_pocket_part(path, text, "marius"))
+
+            with patch.object(config, "POCKET_TTS_MODEL_REVISION", "new-revision"):
+                self.assertIsNone(tts._load_cached_pocket_part(path, text, "alba"))
+            self.assertEqual(metadata["audio_sha256"], tts._file_sha256(path))
 
     async def test_orpheus_requires_api_key_before_network(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from backend import config
-from backend.pipeline.tts import _generate_orpheus
+from backend.pipeline.tts import _generate_orpheus, _generate_pocket_tts
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ async def ensure_voice_preview(voice: str, tts_model: str) -> Path:
     existing = config.voice_sample_path(voice, tts_model)
     if existing is not None:
         return existing
-    if model.get("kind") != "orpheus_http":
+    if not model.get("remote_preview"):
         raise FileNotFoundError(f"No preview sample installed for '{voice}'")
 
     key = (tts_model, voice)
@@ -41,15 +41,27 @@ async def ensure_voice_preview(voice: str, tts_model: str) -> Path:
             work_dir = Path(temp_dir)
             script = work_dir / "preview.txt"
             script.write_text(PREVIEW_TEXT, encoding="utf-8")
-            generated = await _generate_orpheus(
-                str(script),
-                str(work_dir / "audio"),
-                voice,
-                str(model.get("language") or "en"),
-                log=None,
-                emit=logger.info,
-                max_tokens=PREVIEW_MAX_TOKENS,
-            )
+            if model.get("kind") == "orpheus_http":
+                generated = await _generate_orpheus(
+                    str(script),
+                    str(work_dir / "audio"),
+                    voice,
+                    str(model.get("language") or "en"),
+                    log=None,
+                    emit=logger.info,
+                    max_tokens=PREVIEW_MAX_TOKENS,
+                )
+            elif model.get("kind") == "pocket_tts_http":
+                generated = await _generate_pocket_tts(
+                    str(script),
+                    str(work_dir / "audio"),
+                    voice,
+                    str(model.get("language") or "en"),
+                    log=None,
+                    emit=logger.info,
+                )
+            else:
+                raise FileNotFoundError(f"No remote preview generator for '{tts_model}'")
             # Copy to a sibling temporary file and atomically publish it, so a
             # concurrent list/read can never observe a partial WAV.
             staged = destination.with_suffix(".wav.tmp")
@@ -60,11 +72,14 @@ async def ensure_voice_preview(voice: str, tts_model: str) -> Path:
 
 async def preload_remote_voice_previews() -> None:
     """Warm every missing remote preview in the background at app startup."""
-    if not config.ORPHEUS_TTS_API_KEY:
-        logger.info("Skipping Orpheus voice preview preload: API key is not configured")
-        return
     for model_id, model in config.TTS_MODELS.items():
-        if model.get("kind") != "orpheus_http":
+        if not model.get("remote_preview"):
+            continue
+        if model.get("preload_previews", True) is False:
+            logger.info("Skipping eager %s preview preload; previews are generated on demand", model_id)
+            continue
+        if model.get("kind") == "orpheus_http" and not config.ORPHEUS_TTS_API_KEY:
+            logger.info("Skipping Orpheus voice preview preload: API key is not configured")
             continue
         for voice in config.voices_for_model(model_id):
             if config.voice_sample_path(voice, model_id) is not None:

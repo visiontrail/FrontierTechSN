@@ -1,0 +1,47 @@
+name: pocket-tts
+
+services:
+  pocket-tts:
+    build:
+      context: ${POCKET_TTS_SOURCE_DIR:-../pocket-tts}
+      dockerfile: ${POCKET_TTS_DOCKERFILE:-../pocket-tts-deploy/Dockerfile}
+    image: pocket-tts:adde0654
+    environment:
+      # Xet can collapse to a single slow transfer on the nr-test network;
+      # ordinary HTTPS retains resumable Hugging Face cache semantics.
+      HF_HUB_DISABLE_XET: "1"
+    command:
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --language
+      - english
+      - --default-voice
+      - alba
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "${POCKET_TTS_BIND_HOST:-0.0.0.0}:${POCKET_TTS_PORT:-8090}:8000"
+    volumes:
+      - pocket_tts_cache:/root/.cache/pocket_tts
+      - huggingface_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
+      interval: 15s
+      timeout: 8s
+      retries: 20
+      start_period: 10m
+
+volumes:
+  pocket_tts_cache:
+  huggingface_cache:

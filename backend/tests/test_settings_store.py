@@ -243,7 +243,11 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(
             self.field("TTS_DEFAULT_MODEL")["options"], sorted(config.TTS_MODELS)
         )
-        expected_voices = list(config.AVAILABLE_VOICES) + list(config.ORPHEUS_EN_VOICES)
+        expected_voices = (
+            list(config.AVAILABLE_VOICES)
+            + list(config.ORPHEUS_EN_VOICES)
+            + list(config.POCKET_TTS_EN_VOICES)
+        )
         self.assertEqual(self.field("TTS_DEFAULT_VOICE_1")["options"], expected_voices)
 
     def test_orpheus_api_key_is_masked(self):

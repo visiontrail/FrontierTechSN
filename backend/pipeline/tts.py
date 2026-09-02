@@ -5,8 +5,10 @@ import logging
 import math
 import os
 import re
+import sys
 import time
 import wave
+from array import array
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -86,6 +88,15 @@ ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
 ORPHEUS_INTEGRITY_VERIFIER_VERSION = 22
+POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
+# Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
+# is independent so provider-specific changes can invalidate only Pocket audio.
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 2
+POCKET_TTS_INTERNAL_MAX_TOKENS = 50
+POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
+POCKET_TTS_SILENCE_WINDOW_MS = 10
+POCKET_TTS_LONG_SILENCE_SECONDS = 0.5
+POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS = 0.8
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -1339,6 +1350,50 @@ def _split_tts_text(
     )
 
 
+def _split_pocket_tts_text(text: str, max_words: int) -> list[str]:
+    """Keep Pocket requests on natural script-line and sentence boundaries.
+
+    Pocket TTS is trained on single sentences and already splits a request with
+    its tokenizer. Reusing Orpheus' small word chunks would add a second layer
+    of arbitrary voice resets and audible joins. Each non-empty physical script
+    line therefore remains one request (the Morning Desk writes one opening,
+    story, or closing per line). Only an exceptionally long line is divided,
+    and then only between complete sentences.
+    """
+    physical_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not physical_lines:
+        return []
+    if max_words <= 0:
+        return physical_lines
+
+    chunks: list[str] = []
+    for line in physical_lines:
+        if _spoken_word_count(line) <= max_words:
+            chunks.append(line)
+            continue
+
+        sentences = [item.strip() for item in SENTENCE_BOUNDARY_RE.split(line) if item.strip()]
+        if len(sentences) <= 1:
+            # Pocket's own tokenizer can still split a punctuation-poor line on
+            # commas. Do not introduce a mid-phrase application seam here.
+            chunks.append(line)
+            continue
+
+        current: list[str] = []
+        current_words = 0
+        for sentence in sentences:
+            sentence_words = _spoken_word_count(sentence)
+            if current and current_words + sentence_words > max_words:
+                chunks.append(" ".join(current))
+                current = []
+                current_words = 0
+            current.append(sentence)
+            current_words += sentence_words
+        if current:
+            chunks.append(" ".join(current))
+    return chunks
+
+
 def _prepare_tts_input(
     script_path: str,
     output_dir: str,
@@ -1387,6 +1442,28 @@ def _write_chunk_inputs(
         max_words,
         preserve_speaker_labels=preserve_speaker_labels,
     )
+    if len(chunks) == 1:
+        return [output_dir / "tts_input.txt"], chunks
+    for stale in output_dir.glob("tts_input_part_*.txt"):
+        stale.unlink(missing_ok=True)
+    input_paths = [
+        output_dir / f"tts_input_part_{index:03d}.txt"
+        for index in range(1, len(chunks) + 1)
+    ]
+    for input_path, chunk in zip(input_paths, chunks):
+        input_path.write_text(chunk, encoding="utf-8")
+    return input_paths, chunks
+
+
+def _write_pocket_chunk_inputs(
+    text: str,
+    output_dir: Path,
+    *,
+    max_words: int,
+) -> tuple[list[Path], list[str]]:
+    chunks = _split_pocket_tts_text(text, max_words)
+    if not chunks:
+        raise ValueError("Pocket TTS input is empty after paragraph-aware splitting")
     if len(chunks) == 1:
         return [output_dir / "tts_input.txt"], chunks
     for stale in output_dir.glob("tts_input_part_*.txt"):
@@ -1450,7 +1527,11 @@ def _validate_wav_part(
     return info
 
 
-def _validate_downloaded_wav_container(path: Path) -> WavInfo:
+def _validate_downloaded_wav_container(
+    path: Path,
+    *,
+    provider: str = "Orpheus",
+) -> WavInfo:
     """Reject an invalid or truncated HTTP payload before replacing cached audio."""
     info = _read_pcm_wav(path)
     expected_pcm_bytes = info.frame_count * info.channels * info.sample_width
@@ -1459,14 +1540,204 @@ def _validate_downloaded_wav_container(path: Path) -> WavInfo:
             pcm_bytes = handle.readframes(info.frame_count)
     except (wave.Error, EOFError, OSError) as exc:
         raise TtsIntegrityError(
-            f"Orpheus downloaded an unreadable WAV payload at {path}: {exc}"
+            f"{provider} downloaded an unreadable WAV payload at {path}: {exc}"
         ) from exc
     if len(pcm_bytes) != expected_pcm_bytes:
         raise TtsIntegrityError(
-            "Orpheus downloaded a truncated WAV payload: "
+            f"{provider} downloaded a truncated WAV payload: "
             f"expected {expected_pcm_bytes} PCM bytes, received {len(pcm_bytes)}"
         )
     return info
+
+
+def _normalize_pocket_streaming_wav(path: Path) -> WavInfo:
+    """Rewrite Pocket's streaming WAV with its actual frame count.
+
+    The upstream HTTP server intentionally writes a one-billion-frame placeholder
+    because a chunked response is not seekable. Once downloaded, that header
+    would make ordinary WAV readers report hours of nonexistent audio. Rewriting
+    only the PCM container header preserves every generated sample and makes the
+    artifact safe for hashing, concatenation, Whisper, and the browser player.
+    """
+    try:
+        with wave.open(str(path), "rb") as source:
+            if source.getcomptype() != "NONE":
+                raise TtsIntegrityError(
+                    f"Pocket TTS output must be PCM WAV, got {source.getcomptype()}"
+                )
+            channels = source.getnchannels()
+            sample_width = source.getsampwidth()
+            sample_rate = source.getframerate()
+            pcm_bytes = source.readframes(source.getnframes())
+    except (wave.Error, EOFError, OSError) as exc:
+        raise TtsIntegrityError(
+            f"Pocket TTS returned an unreadable streaming WAV at {path}: {exc}"
+        ) from exc
+    frame_width = channels * sample_width
+    if frame_width <= 0 or not pcm_bytes or len(pcm_bytes) % frame_width:
+        raise TtsIntegrityError(
+            "Pocket TTS returned incomplete PCM data that cannot form whole audio frames"
+        )
+
+    normalized = path.with_suffix(".normalized.tmp.wav")
+    normalized.unlink(missing_ok=True)
+    try:
+        with wave.open(str(normalized), "wb") as destination:
+            destination.setnchannels(channels)
+            destination.setsampwidth(sample_width)
+            destination.setframerate(sample_rate)
+            destination.writeframes(pcm_bytes)
+        os.replace(normalized, path)
+    finally:
+        normalized.unlink(missing_ok=True)
+    return _validate_downloaded_wav_container(path, provider="Pocket TTS")
+
+
+def _wav_edge_silence_seconds(
+    path: Path,
+    *,
+    threshold_dbfs: float = POCKET_TTS_EDGE_SILENCE_DBFS,
+    window_ms: int = POCKET_TTS_SILENCE_WINDOW_MS,
+) -> dict[str, float]:
+    """Measure contiguous quiet windows at both edges of a 16-bit PCM WAV."""
+    quiet_windows = _wav_quiet_windows(
+        path,
+        threshold_dbfs=threshold_dbfs,
+        window_ms=window_ms,
+    )
+    leading_windows = next(
+        (index for index, quiet in enumerate(quiet_windows) if not quiet),
+        len(quiet_windows),
+    )
+    trailing_windows = next(
+        (index for index, quiet in enumerate(reversed(quiet_windows)) if not quiet),
+        len(quiet_windows),
+    )
+    return {
+        "leading_seconds": round(leading_windows * window_ms / 1000, 3),
+        "trailing_seconds": round(trailing_windows * window_ms / 1000, 3),
+    }
+
+
+def _wav_quiet_windows(
+    path: Path,
+    *,
+    threshold_dbfs: float = POCKET_TTS_EDGE_SILENCE_DBFS,
+    window_ms: int = POCKET_TTS_SILENCE_WINDOW_MS,
+) -> list[bool]:
+    with wave.open(str(path), "rb") as source:
+        if source.getcomptype() != "NONE" or source.getsampwidth() != 2:
+            raise TtsIntegrityError(
+                "Pocket TTS continuity analysis requires uncompressed 16-bit PCM WAV"
+            )
+        channels = source.getnchannels()
+        sample_rate = source.getframerate()
+        pcm_bytes = source.readframes(source.getnframes())
+    samples = array("h")
+    samples.frombytes(pcm_bytes)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    samples_per_window = max(1, int(sample_rate * window_ms / 1000)) * channels
+    quiet_threshold = 32767 * (10 ** (threshold_dbfs / 20))
+    quiet_windows: list[bool] = []
+    for start in range(0, len(samples), samples_per_window):
+        values = samples[start : start + samples_per_window]
+        rms = math.sqrt(sum(value * value for value in values) / max(1, len(values)))
+        quiet_windows.append(rms < quiet_threshold)
+
+    return quiet_windows
+
+
+def _pocket_internal_silence_report(path: Path) -> dict:
+    """Detect choppy pauses inside one natural program segment."""
+    quiet_windows = _wav_quiet_windows(path)
+    minimum_windows = math.ceil(
+        POCKET_TTS_LONG_SILENCE_SECONDS * 1000 / POCKET_TTS_SILENCE_WINDOW_MS
+    )
+    runs: list[float] = []
+    start: int | None = None
+    for index, quiet in enumerate([*quiet_windows, False]):
+        if quiet and start is None:
+            start = index
+            continue
+        if quiet or start is None:
+            continue
+        # Leading/trailing silence belongs to the physical program boundary,
+        # not to delivery inside the story. Only internal runs can be a stutter.
+        if start > 0 and index < len(quiet_windows) and index - start >= minimum_windows:
+            runs.append(round((index - start) * POCKET_TTS_SILENCE_WINDOW_MS / 1000, 3))
+        start = None
+    maximum = max(runs, default=0.0)
+    return {
+        "minimum_reported_seconds": POCKET_TTS_LONG_SILENCE_SECONDS,
+        "maximum_allowed_seconds": POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS,
+        "count": len(runs),
+        "durations_seconds": runs,
+        "max_seconds": round(maximum, 3),
+        "passed": maximum <= POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS,
+    }
+
+
+def _validate_pocket_internal_silence(path: Path) -> dict:
+    report = _pocket_internal_silence_report(path)
+    if not report["passed"]:
+        raise TtsIntegrityError(
+            "Pocket TTS produced an internal pause of "
+            f"{report['max_seconds']:.2f}s, above the "
+            f"{POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS:.2f}s continuity ceiling"
+        )
+    return report
+
+
+def _pocket_continuity_report(
+    source_text: str,
+    chunks: list[str],
+    wav_parts: list[Path],
+) -> dict:
+    """Record both structural joins and measured silence at request boundaries."""
+    physical_line_count = len(
+        [line for line in source_text.splitlines() if line.strip()]
+    )
+    edges = [_wav_edge_silence_seconds(path) for path in wav_parts]
+    internal_silence = [_pocket_internal_silence_report(path) for path in wav_parts]
+    joins = [
+        round(edges[index]["trailing_seconds"] + edges[index + 1]["leading_seconds"], 3)
+        for index in range(max(0, len(edges) - 1))
+    ]
+    ordered_joins = sorted(joins)
+    if not ordered_joins:
+        median_join = 0.0
+    elif len(ordered_joins) % 2:
+        median_join = ordered_joins[len(ordered_joins) // 2]
+    else:
+        middle = len(ordered_joins) // 2
+        median_join = (ordered_joins[middle - 1] + ordered_joins[middle]) / 2
+    return {
+        "strategy": "physical_script_lines_then_complete_sentences",
+        "external_chunk_word_limit": config.POCKET_TTS_CHUNK_WORDS,
+        "provider_internal_max_tokens": POCKET_TTS_INTERNAL_MAX_TOKENS,
+        "provider_fixed_trailing_padding_seconds": 0.2,
+        "physical_script_line_count": physical_line_count,
+        "external_part_count": len(chunks),
+        "application_join_count": max(0, len(chunks) - 1),
+        "intra_line_application_join_count": max(0, len(chunks) - physical_line_count),
+        "arbitrary_mid_sentence_splits": 0,
+        "silence_measurement": {
+            "threshold_dbfs": POCKET_TTS_EDGE_SILENCE_DBFS,
+            "window_ms": POCKET_TTS_SILENCE_WINDOW_MS,
+            "part_edges": edges,
+            "join_seconds": joins,
+            "median_join_seconds": round(median_join, 3),
+            "max_join_seconds": round(max(joins, default=0), 3),
+            "total_join_seconds": round(sum(joins), 3),
+            "internal_long_silence_count": sum(item["count"] for item in internal_silence),
+            "max_internal_silence_seconds": round(
+                max((item["max_seconds"] for item in internal_silence), default=0),
+                3,
+            ),
+            "internal_part_reports": internal_silence,
+        },
+    }
 
 
 async def _concat_wav_parts(
@@ -1523,6 +1794,7 @@ def _write_tts_manifest(
     output: Path,
     deterministic: bool,
     integrity: dict | None = None,
+    extra: dict | None = None,
 ) -> None:
     parts = []
     for text, path in zip(chunks, wav_parts):
@@ -1553,6 +1825,8 @@ def _write_tts_manifest(
     }
     if integrity is not None:
         payload["integrity"] = integrity
+    if extra:
+        payload.update(extra)
     (output_dir / "tts_manifest.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -2089,6 +2363,7 @@ async def _transcribe_orpheus_at_speed(
     speed: float,
     *,
     emit: LogCallback,
+    provider_label: str = "Orpheus",
 ) -> tuple[list[dict], dict]:
     """Re-transcribe the same waveform more slowly without changing pitch."""
     from backend.pipeline import av_sync
@@ -2097,7 +2372,7 @@ async def _transcribe_orpheus_at_speed(
     speed_label = f"{speed:g}x"
     slowed_path = verification_dir / f"{path.stem}.atempo-{speed_label}.wav"
     returncode, output = await stream_subprocess(
-        name=f"Orpheus playback verification ({speed_label})",
+        name=f"{provider_label} playback verification ({speed_label})",
         command=[
             "ffmpeg",
             "-hide_banner",
@@ -2204,6 +2479,7 @@ async def _adjudicate_orpheus_asr_mismatch(
     verification_dir: Path,
     *,
     emit: LogCallback,
+    provider_label: str = "Orpheus",
 ) -> dict | None:
     """Ask the configured LLM whether transcript deltas are ASR-only.
 
@@ -2296,7 +2572,7 @@ evidence, reject. Return JSON only with exactly these fields:
         model = adjudication_route.model
         api_key = adjudication_route.api_key
         emit(
-            "Orpheus ASR adjudication: using isolated judge route "
+            f"{provider_label} ASR adjudication: using isolated judge route "
             f"{adjudication_route.audit_label}"
         )
         raw = await _chat(
@@ -2306,7 +2582,7 @@ evidence, reject. Return JSON only with exactly these fields:
             model=model,
             api_key=api_key,
             log=emit,
-            label="Orpheus ASR adjudication",
+            label=f"{provider_label} ASR adjudication",
             max_tokens=700,
             enable_skills=False,
             disable_thinking=True,
@@ -2355,7 +2631,7 @@ evidence, reject. Return JSON only with exactly these fields:
         evidence["error"] = f"{type(exc).__name__}: {exc}"[:700]
         write_evidence()
         emit(
-            "Orpheus integrity: ASR adjudication unavailable; preserving strict "
+            f"{provider_label} integrity: ASR adjudication unavailable; preserving strict "
             f"failure ({type(exc).__name__}: {exc})"
         )
         return None
@@ -2368,6 +2644,7 @@ async def _verify_orpheus_part(
     *,
     emit: LogCallback,
     adjudicate_asr: bool = False,
+    provider_label: str = "Orpheus",
 ) -> dict:
     from backend.pipeline import av_sync
 
@@ -2380,14 +2657,14 @@ async def _verify_orpheus_part(
     if not words:
         failures = "; ".join(transcription.get("failure_reasons") or [])
         raise TtsIntegrityError(
-            "Orpheus narration cannot be integrity-verified because acoustic "
+            f"{provider_label} narration cannot be integrity-verified because acoustic "
             f"transcription is unavailable{': ' + failures if failures else ''}"
         )
     report = _orpheus_transcript_report(text, words)
     repeat_start = report.get("repeat_start_seconds")
     if repeat_start is not None and float(repeat_start) > 0.2:
         emit(
-            "Orpheus integrity: trimming repeated utterance at "
+            f"{provider_label} integrity: trimming repeated utterance at "
             f"{float(repeat_start):.2f}s and re-transcribing"
         )
         _trim_pcm_wav(path, float(repeat_start))
@@ -2399,7 +2676,7 @@ async def _verify_orpheus_part(
         )
         if not words:
             raise TtsIntegrityError(
-                "Orpheus narration could not be transcribed after repetition trimming"
+                f"{provider_label} narration could not be transcribed after repetition trimming"
             )
         report = _orpheus_transcript_report(text, words)
     if (
@@ -2419,10 +2696,11 @@ async def _verify_orpheus_part(
                     verification_dir,
                     speed,
                     emit=emit,
+                    provider_label=provider_label,
                 )
             except Exception as exc:  # noqa: BLE001 - keep the fallback fail-closed
                 emit(
-                    "Orpheus integrity: phonetic corroboration at "
+                    f"{provider_label} integrity: phonetic corroboration at "
                     f"{speed:g}x could not run ({type(exc).__name__}: {exc})"
                 )
                 continue
@@ -2431,7 +2709,7 @@ async def _verify_orpheus_part(
                     slower_transcription.get("failure_reasons") or []
                 )
                 emit(
-                    "Orpheus integrity: phonetic corroboration at "
+                    f"{provider_label} integrity: phonetic corroboration at "
                     f"{speed:g}x produced no transcript"
                     f"{': ' + failures if failures else ''}"
                 )
@@ -2447,7 +2725,7 @@ async def _verify_orpheus_part(
             )
             if not corroborates:
                 emit(
-                    "Orpheus integrity: phonetic corroboration at "
+                    f"{provider_label} integrity: phonetic corroboration at "
                     f"{speed:g}x did not confirm the same aligned substitution"
                 )
                 continue
@@ -2472,7 +2750,7 @@ async def _verify_orpheus_part(
             slower_report["repeat_start_seconds"] = None
             corroborated_report = slower_report
             emit(
-                "Orpheus integrity: aligned phonetic substitution corroborated "
+                f"{provider_label} integrity: aligned phonetic substitution corroborated "
                 f"from the same waveform at {speed:g}x playback"
             )
             break
@@ -2499,10 +2777,11 @@ async def _verify_orpheus_part(
                     verification_dir,
                     speed,
                     emit=emit,
+                    provider_label=provider_label,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve the strict original failure
                 emit(
-                    "Orpheus integrity: name verification at "
+                    f"{provider_label} integrity: name verification at "
                     f"{speed:g}x could not run ({type(exc).__name__}: {exc})"
                 )
                 continue
@@ -2511,7 +2790,7 @@ async def _verify_orpheus_part(
                     slower_transcription.get("failure_reasons") or []
                 )
                 emit(
-                    "Orpheus integrity: name verification at "
+                    f"{provider_label} integrity: name verification at "
                     f"{speed:g}x produced no transcript"
                     f"{': ' + failures if failures else ''}"
                 )
@@ -2519,7 +2798,7 @@ async def _verify_orpheus_part(
             slower_report = _orpheus_transcript_report(text, slower_words)
             if not slower_report["verified"]:
                 emit(
-                    "Orpheus integrity: name verification at "
+                    f"{provider_label} integrity: name verification at "
                     f"{speed:g}x remained non-exact ("
                     + "; ".join(slower_report["failure_reasons"])
                     + ")"
@@ -2538,13 +2817,13 @@ async def _verify_orpheus_part(
             slower_report["repeat_start_seconds"] = None
             report = slower_report
             emit(
-                "Orpheus integrity: exact name transcript recovered from the "
+                f"{provider_label} integrity: exact name transcript recovered from the "
                 f"same waveform at {speed:g}x playback"
             )
             break
     if not report["verified"] and adjudicate_asr:
         emit(
-            "Orpheus integrity: deterministic ASR check found a mismatch; "
+            f"{provider_label} integrity: deterministic ASR check found a mismatch; "
             "requesting fail-closed model adjudication"
         )
         slower_words: list[dict] = []
@@ -2554,19 +2833,20 @@ async def _verify_orpheus_part(
                 verification_dir,
                 ORPHEUS_NAME_RECHECK_SPEEDS[0],
                 emit=emit,
+                provider_label=provider_label,
             )
             if not slower_words:
                 failures = "; ".join(
                     slower_transcription.get("failure_reasons") or []
                 )
                 emit(
-                    "Orpheus integrity: model adjudication skipped because the "
+                    f"{provider_label} integrity: model adjudication skipped because the "
                     "slower corroborating transcript is unavailable"
                     f"{': ' + failures if failures else ''}"
                 )
         except Exception as exc:  # noqa: BLE001 - adjudication remains fail-closed
             emit(
-                "Orpheus integrity: model adjudication skipped because slower "
+                f"{provider_label} integrity: model adjudication skipped because slower "
                 f"transcription failed ({type(exc).__name__}: {exc})"
             )
         if slower_words:
@@ -2577,6 +2857,7 @@ async def _verify_orpheus_part(
                 report,
                 verification_dir,
                 emit=emit,
+                provider_label=provider_label,
             )
             if adjudication is not None:
                 original_failures = list(report["failure_reasons"])
@@ -2589,23 +2870,23 @@ async def _verify_orpheus_part(
                     "llm_asr_adjudication": adjudication,
                 }
                 emit(
-                    "Orpheus integrity: model adjudication approved ASR-only "
+                    f"{provider_label} integrity: model adjudication approved ASR-only "
                     f"transcription drift ({adjudication['reason']})"
                 )
             else:
                 emit(
-                    "Orpheus integrity: model adjudication rejected or lacked "
+                    f"{provider_label} integrity: model adjudication rejected or lacked "
                     "high-confidence evidence; preserving strict failure"
                 )
     if not report["verified"]:
         raise TtsIntegrityError(
-            "Orpheus narration does not match its input utterance: "
+            f"{provider_label} narration does not match its input utterance: "
             + "; ".join(report["failure_reasons"])
         )
     substitutions = report.get("phonetic_substitutions") or []
     if report.get("verification_mode") == "llm_asr_adjudication":
         emit(
-            "Orpheus integrity: utterance verified by two-level ASR plus model "
+            f"{provider_label} integrity: utterance verified by two-level ASR plus model "
             "adjudication; persisted evidence retains both transcripts and route"
         )
     elif substitutions:
@@ -2614,14 +2895,14 @@ async def _verify_orpheus_part(
             for item in substitutions
         )
         emit(
-            "Orpheus integrity: utterance verified "
+            f"{provider_label} integrity: utterance verified "
             f"({report['matched_acoustic_words']}/{report['expected_words']} acoustic "
             f"ASR words; {report['matched_exact_words']} exact; aligned phonetic "
             f"substitution {substitution_summary}; opening and closing anchors present)"
         )
     else:
         emit(
-            "Orpheus integrity: utterance verified "
+            f"{provider_label} integrity: utterance verified "
             f"({report['matched_exact_words']}/{report['expected_words']} exact ASR words; "
             "opening and closing anchors present)"
         )
@@ -3169,6 +3450,316 @@ async def _generate_orpheus(
     return str(expected)
 
 
+def _load_cached_pocket_part(path: Path, text: str, voice: str) -> dict | None:
+    metadata_path = _part_metadata_path(path)
+    if not path.is_file() or not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    expected = {
+        "provider": "pocket-tts",
+        "model_revision": config.POCKET_TTS_MODEL_REVISION,
+        "voice": voice,
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "integrity_verifier_version": POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
+    }
+    if any(metadata.get(key) != value for key, value in expected.items()):
+        return None
+    integrity = metadata.get("integrity")
+    if (
+        not isinstance(integrity, dict)
+        or not integrity.get("verified")
+        or integrity.get("method") == "duration_only_preview"
+    ):
+        return None
+    try:
+        info = _read_pcm_wav(path)
+    except TtsIntegrityError:
+        return None
+    if asdict(info) != metadata.get("wav"):
+        return None
+    if _file_sha256(path) != metadata.get("audio_sha256"):
+        return None
+    return metadata
+
+
+def _write_pocket_part_metadata(
+    path: Path,
+    text: str,
+    voice: str,
+    *,
+    integrity: dict,
+    generation_seconds: float,
+) -> dict:
+    payload = {
+        "provider": "pocket-tts",
+        "model_revision": config.POCKET_TTS_MODEL_REVISION,
+        "voice": voice,
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "word_count": _spoken_word_count(text),
+        "generation_seconds": round(generation_seconds, 3),
+        "integrity_verifier_version": POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
+        "wav": asdict(_read_pcm_wav(path)),
+        "audio_sha256": _file_sha256(path),
+        "integrity": integrity,
+    }
+    destination = _part_metadata_path(path)
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, destination)
+    return payload
+
+
+async def _recover_pocket_part(
+    path: Path,
+    text: str,
+    voice: str,
+    verification_dir: Path,
+    *,
+    emit: LogCallback,
+) -> dict | None:
+    """Recover a complete Pocket WAV left between download and sidecar write."""
+    if not path.is_file():
+        return None
+    try:
+        _validate_wav_part(path, text)
+        _validate_pocket_internal_silence(path)
+        integrity = await _verify_orpheus_part(
+            path,
+            text,
+            verification_dir,
+            emit=emit,
+            adjudicate_asr=True,
+            provider_label="Pocket TTS",
+        )
+    except TtsIntegrityError as exc:
+        emit(f"Pocket TTS recovery: existing WAV rejected ({exc}); regenerating")
+        path.unlink(missing_ok=True)
+        _part_metadata_path(path).unlink(missing_ok=True)
+        return None
+    metadata = _write_pocket_part_metadata(
+        path,
+        text,
+        voice,
+        integrity=integrity,
+        generation_seconds=0,
+    )
+    emit("Pocket TTS recovery: accepted existing WAV after acoustic verification")
+    return metadata
+
+
+def _pocket_http_headers() -> dict[str, str]:
+    return (
+        {"X-API-Key": config.POCKET_TTS_API_KEY}
+        if config.POCKET_TTS_API_KEY
+        else {}
+    )
+
+
+async def _generate_pocket_tts(
+    script_path: str,
+    output_dir: str,
+    voice: str,
+    language: str,
+    *,
+    log: LogCallback | None,
+    emit: LogCallback,
+    verify_text: bool = False,
+) -> str:
+    del language  # The deployed English server owns its language configuration.
+    if not config.POCKET_TTS_MODEL_REVISION:
+        raise RuntimeError("POCKET_TTS_MODEL_REVISION must identify the deployed build")
+    script_path_obj, output_dir_path, _tts_input, cleaned = _prepare_tts_input(
+        script_path,
+        output_dir,
+        strip_speaker_labels=True,
+    )
+    input_paths, chunks = _write_pocket_chunk_inputs(
+        cleaned,
+        output_dir_path,
+        max_words=config.POCKET_TTS_CHUNK_WORDS,
+    )
+    emit(f"TTS input: stripped speaker labels -> {output_dir_path / 'tts_input.txt'}")
+    emit(
+        "TTS input: Pocket continuity split into "
+        f"{len(input_paths)} physical paragraph/story request(s); only complete "
+        f"sentences may split above {config.POCKET_TTS_CHUNK_WORDS} words"
+    )
+
+    base_url = config.POCKET_TTS_URL.rstrip("/")
+    timeout_seconds = max(5, config.POCKET_TTS_REQUEST_TIMEOUT)
+    timeout = httpx.Timeout(timeout_seconds, connect=min(30, timeout_seconds))
+    wav_parts: list[Path] = []
+    part_metadata: list[dict] = []
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        headers=_pocket_http_headers(),
+        follow_redirects=False,
+    ) as client:
+        for index, input_path in enumerate(input_paths, start=1):
+            name = "TTS" if len(input_paths) == 1 else f"TTS part {index}/{len(input_paths)}"
+            chunk = chunks[index - 1]
+            expected_part = output_dir_path / f"{input_path.stem}_generated.wav"
+            if verify_text:
+                cached = _load_cached_pocket_part(expected_part, chunk, voice)
+                if cached is not None:
+                    emit(
+                        f"{name}: reusing acoustically verified Pocket TTS paragraph "
+                        f"({cached['word_count']} source words)"
+                    )
+                    wav_parts.append(expected_part)
+                    part_metadata.append(cached)
+                    continue
+                recovered = await _recover_pocket_part(
+                    expected_part,
+                    chunk,
+                    voice,
+                    output_dir_path / "verification" / input_path.stem,
+                    emit=emit,
+                )
+                if recovered is not None:
+                    wav_parts.append(expected_part)
+                    part_metadata.append(recovered)
+                    continue
+
+            staged_part = expected_part.with_suffix(".tmp.wav")
+            staged_part.unlink(missing_ok=True)
+            request_started = time.monotonic()
+            last_error: Exception | None = None
+            for request_attempt in range(1, 4):
+                try:
+                    response = await client.post(
+                        f"{base_url}/tts",
+                        data={"text": chunk, "voice_url": voice},
+                    )
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "").casefold()
+                    if "audio/wav" not in content_type and "audio/x-wav" not in content_type:
+                        raise TtsIntegrityError(
+                            "Pocket TTS returned a non-WAV response "
+                            f"({content_type or 'missing content type'})"
+                        )
+                    staged_part.write_bytes(response.content)
+                    _normalize_pocket_streaming_wav(staged_part)
+                    break
+                except (httpx.HTTPError, TtsIntegrityError, OSError) as exc:
+                    staged_part.unlink(missing_ok=True)
+                    last_error = exc
+                    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
+                    permanent = bool(300 <= status < 500 and status not in {408, 425, 429})
+                    if permanent or request_attempt >= 3:
+                        raise RuntimeError(
+                            f"{name} Pocket TTS request failed after {request_attempt} "
+                            f"attempt(s): {_orpheus_http_error_text(exc)}"
+                        ) from exc
+                    delay = 2 ** (request_attempt - 1)
+                    emit(
+                        f"{name}: transient Pocket TTS request error "
+                        f"({_orpheus_http_error_text(exc)}); retrying in {delay}s"
+                    )
+                    await asyncio.sleep(delay)
+            if last_error is not None and not staged_part.is_file():
+                raise RuntimeError(f"{name} Pocket TTS produced no WAV") from last_error
+
+            os.replace(staged_part, expected_part)
+            # Record provider latency before local acoustic verification.  ASR,
+            # slower-playback corroboration, and optional adjudication are
+            # integrity costs, not Pocket TTS inference time.
+            generation_seconds = time.monotonic() - request_started
+            try:
+                _validate_wav_part(expected_part, chunk)
+                _validate_pocket_internal_silence(expected_part)
+                if verify_text:
+                    integrity = await _verify_orpheus_part(
+                        expected_part,
+                        chunk,
+                        output_dir_path / "verification" / input_path.stem,
+                        emit=emit,
+                        adjudicate_asr=True,
+                        provider_label="Pocket TTS",
+                    )
+                else:
+                    integrity = {
+                        "verified": True,
+                        "method": "duration_only_preview",
+                        "expected_words": _spoken_word_count(chunk),
+                    }
+            except TtsIntegrityError as exc:
+                # A known rejected sample must be regenerated on the next outer
+                # integrity attempt; only crash-orphaned WAVs are recoverable.
+                expected_part.unlink(missing_ok=True)
+                _part_metadata_path(expected_part).unlink(missing_ok=True)
+                raise TtsIntegrityError(str(exc), part_key=input_path.name) from exc
+            metadata = _write_pocket_part_metadata(
+                expected_part,
+                chunk,
+                voice,
+                integrity=integrity,
+                generation_seconds=generation_seconds,
+            )
+            audio_seconds = float((metadata.get("wav") or {}).get("duration_seconds") or 0)
+            realtime_factor = audio_seconds / max(generation_seconds, 0.001)
+            emit(
+                f"{name}: Pocket TTS generated {audio_seconds:.2f}s in "
+                f"{generation_seconds:.2f}s ({realtime_factor:.2f}x realtime; voice={voice})"
+            )
+            wav_parts.append(expected_part)
+            part_metadata.append(metadata)
+
+    expected = await _concat_wav_parts(wav_parts, output_dir_path, log=log)
+    source_words = _spoken_word_count(cleaned)
+    verified_words = sum(
+        int(metadata.get("word_count") or 0)
+        for metadata in part_metadata
+        if (metadata.get("integrity") or {}).get("verified")
+    )
+    integrity = {
+        "method": "per_paragraph_mlx_whisper",
+        "required": verify_text,
+        "passed": verified_words == source_words,
+        "source_words": source_words,
+        "verified_source_words": verified_words,
+        "verified_source_coverage": round(verified_words / max(1, source_words), 4),
+        "part_reports": [metadata.get("integrity") or {} for metadata in part_metadata],
+    }
+    if verify_text and not integrity["passed"]:
+        raise TtsIntegrityError(
+            f"Pocket TTS verified only {verified_words}/{source_words} source words; "
+            "refusing to join incomplete narration"
+        )
+    generation_seconds = sum(float(item.get("generation_seconds") or 0) for item in part_metadata)
+    audio_seconds = _read_pcm_wav(expected).duration_seconds
+    _write_tts_manifest(
+        output_dir_path,
+        model="pocket-tts-en",
+        source_text=cleaned,
+        chunks=chunks,
+        wav_parts=wav_parts,
+        output=expected,
+        deterministic=False,
+        integrity=integrity,
+        extra={
+            "provider_revision": config.POCKET_TTS_MODEL_REVISION,
+            "voice": voice,
+            "continuity": _pocket_continuity_report(cleaned, chunks, wav_parts),
+            "performance": {
+                "generation_seconds": round(generation_seconds, 3),
+                "audio_seconds": round(audio_seconds, 3),
+                "realtime_factor": round(audio_seconds / max(generation_seconds, 0.001), 3),
+            },
+        },
+    )
+    emit(
+        f"TTS output: {expected} ({expected.stat().st_size / 1024:.0f} KB; "
+        f"source={script_path_obj})"
+    )
+    return str(expected)
+
+
 async def generate_tts(
     script_path: str,
     output_dir: str,
@@ -3199,6 +3790,32 @@ async def generate_tts(
             f"Voice(s) {unknown_voices} are unavailable for '{tts_model}'. Valid voices: "
             f"{', '.join(available_voices)}"
         )
+    if model.get("kind") == "pocket_tts_http":
+        if len(voices) > 1:
+            emit(f"Model '{tts_model}' is single-speaker; using only '{voices[0]}'")
+        integrity_attempts: dict[str, int] = {}
+        while True:
+            try:
+                return await _generate_pocket_tts(
+                    script_path,
+                    output_dir,
+                    voices[0],
+                    str(model.get("language") or "en"),
+                    log=log,
+                    emit=emit,
+                    verify_text=True,
+                )
+            except TtsIntegrityError as exc:
+                part_key = exc.part_key or "complete narration"
+                attempt = integrity_attempts.get(part_key, 0) + 1
+                integrity_attempts[part_key] = attempt
+                if attempt >= POCKET_TTS_MAX_INTEGRITY_ATTEMPTS:
+                    raise
+                emit(
+                    f"Pocket TTS integrity retry for {part_key} "
+                    f"{attempt}/{POCKET_TTS_MAX_INTEGRITY_ATTEMPTS - 1}: {exc}. "
+                    "Verified earlier paragraphs will be reused."
+                )
     if model.get("kind") == "orpheus_http":
         if len(voices) > 1:
             emit(f"Model '{tts_model}' is single-speaker; using only '{voices[0]}'")

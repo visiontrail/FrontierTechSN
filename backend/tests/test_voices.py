@@ -64,6 +64,14 @@ class VoiceSampleTests(unittest.TestCase):
                 )
                 self.assertTrue(config.voice_preview_supported("tara", "orpheus-en"))
 
+    def test_pocket_has_upstream_voice_catalog_and_on_demand_previews(self):
+        self.assertIn("alba", config.voices_for_model("pocket-tts-en"))
+        self.assertIn("marius", config.voices_for_model("pocket-tts-en"))
+        with tempfile.TemporaryDirectory() as cache:
+            with patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)):
+                self.assertIsNone(config.voice_sample_path("alba", "pocket-tts-en"))
+                self.assertTrue(config.voice_preview_supported("alba", "pocket-tts-en"))
+
 
 class VoiceRouteTests(unittest.TestCase):
     def setUp(self):
@@ -88,11 +96,21 @@ class VoiceRouteTests(unittest.TestCase):
         self.assertEqual([v["name"] for v in body], list(config.ORPHEUS_EN_VOICES))
         self.assertTrue(all(v["preview_available"] for v in body))
 
+    def test_lists_pocket_voices_only_for_pocket(self):
+        with tempfile.TemporaryDirectory() as cache:
+            with patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)):
+                body = self.client.get("/api/voices?tts_model=pocket-tts-en").json()
+        self.assertEqual([v["name"] for v in body], list(config.POCKET_TTS_EN_VOICES))
+        self.assertTrue(all(v["preview_available"] for v in body))
+
     def test_lists_tts_model_capabilities(self):
         body = self.client.get("/api/voices/models").json()
         orpheus = next(model for model in body if model["id"] == "orpheus-en")
         self.assertEqual(orpheus["provider"], "Orpheus")
         self.assertTrue(orpheus["single_speaker"])
+        pocket = next(model for model in body if model["id"] == "pocket-tts-en")
+        self.assertEqual(pocket["provider"], "Kyutai Pocket TTS")
+        self.assertTrue(pocket["single_speaker"])
 
     def test_rejects_unknown_voice_before_touching_the_filesystem(self):
         res = self.client.get("/api/voices/Bogus*/preview")

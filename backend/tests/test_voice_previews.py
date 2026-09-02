@@ -35,6 +35,29 @@ class VoicePreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         self.assertEqual(generate.await_count, 1)
 
+    async def test_generates_pocket_preview_on_demand(self):
+        async def fake_generate(script_path, output_dir, voice, language, **kwargs):
+            self.assertEqual((voice, language), ("alba", "en"))
+            self.assertNotIn("max_tokens", kwargs)
+            generated = Path(output_dir) / "preview_generated.wav"
+            generated.parent.mkdir(parents=True)
+            generated.write_bytes(b"RIFF" + b"0" * 64)
+            return str(generated)
+
+        with tempfile.TemporaryDirectory() as cache:
+            with (
+                patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)),
+                patch.object(
+                    voice_previews, "_generate_pocket_tts", side_effect=fake_generate
+                ) as generate,
+            ):
+                preview = await voice_previews.ensure_voice_preview(
+                    "alba", "pocket-tts-en"
+                )
+
+        self.assertEqual(preview.name, "alba.wav")
+        self.assertEqual(generate.await_count, 1)
+
     async def test_preload_skips_network_without_api_key(self):
         ensure = AsyncMock()
         with (

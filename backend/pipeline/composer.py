@@ -492,7 +492,7 @@ def _narration_manifest_failures(
         else _strip_speaker_labels(script)
     )
     manifest_source = canonical
-    if model.get("kind") != "orpheus_http":
+    if model.get("kind") == "local_subprocess":
         manifest_source, _ = _expand_vibevoice_pronunciations(canonical)
     source_hash = hashlib.sha256(manifest_source.encode("utf-8")).hexdigest()
     if source_hash != manifest.get("source_text_sha256"):
@@ -500,16 +500,17 @@ def _narration_manifest_failures(
     if _file_sha256(audio) != manifest.get("output_audio_sha256"):
         failures.append("the narration WAV changed after narration generation")
 
-    if model.get("kind") == "orpheus_http":
+    if model.get("acoustic_integrity"):
+        provider = str(model.get("provider") or effective_model)
         integrity = manifest.get("integrity") or {}
         if not isinstance(integrity, dict):
-            failures.append("Orpheus integrity report must be a JSON object")
+            failures.append(f"{provider} integrity report must be a JSON object")
             return failures
         if not integrity.get("passed"):
-            failures.append("Orpheus per-utterance acoustic verification did not pass")
+            failures.append(f"{provider} per-part acoustic verification did not pass")
         if float(integrity.get("verified_source_coverage") or 0) != 1.0:
             failures.append(
-                "Orpheus verified source coverage is not 100% "
+                f"{provider} verified source coverage is not 100% "
                 f"({float(integrity.get('verified_source_coverage') or 0):.1%})"
             )
     return failures
@@ -519,9 +520,9 @@ def _manifest_program_segments(
     audio_path: str | Path,
     physical_segments: list[dict],
 ) -> list[dict] | None:
-    """Recover exact line timing from verified concatenated Orpheus chunks.
+    """Recover exact line timing from verified concatenated TTS chunks.
 
-    Each Orpheus part is independently hash-bound and acoustically verified.
+    Each remote-provider part is independently hash-bound and acoustically verified.
     Matching the part texts back to physical script lines therefore provides a
     stronger program-boundary contract than transcribing the silence-padded
     full file again with Whisper.
@@ -581,7 +582,7 @@ def _manifest_program_segments(
                 **segment,
                 "start": cursor,
                 "duration": duration,
-                "timing_source": "orpheus_verified_chunk_manifest",
+                "timing_source": "verified_chunk_manifest",
             }
         )
         cursor += duration
@@ -594,6 +595,8 @@ def _apply_manifest_program_alignment(
     alignment: dict,
     pacing_report: dict,
     manifest_segments: list[dict] | None,
+    *,
+    provider_label: str = "Orpheus",
 ) -> dict:
     """Promote the exact verified chunk/program contract over whole-file ASR."""
     if not manifest_segments or pacing_report.get("passed") is not True:
@@ -602,7 +605,7 @@ def _apply_manifest_program_alignment(
     verified_words = sum(int(row.get("word_count") or 0) for row in manifest_segments)
     alignment.update(
         {
-            "method": "orpheus_manifest_program_timeline",
+            "method": f"{provider_label.casefold().replace(' ', '_')}_manifest_program_timeline",
             "script_words": verified_words,
             "transcript_words": verified_words,
             "matched_words": verified_words,
@@ -613,7 +616,7 @@ def _apply_manifest_program_alignment(
             "passed": True,
             "failure_reasons": [],
             "source_contract": {
-                "provider": "Orpheus",
+                "provider": provider_label,
                 "per_utterance_acoustic_coverage": 1.0,
                 "program_pacing_report_passed": True,
                 "physical_segment_count": len(manifest_segments),
@@ -1118,6 +1121,10 @@ async def compose_video(
     emit = lambda message: log(message) if log else logger.info(message)
 
     # --- 1. Storyboard -----------------------------------------------------
+    effective_tts_model = tts_model or config.TTS_DEFAULT_MODEL
+    tts_model_meta = config.TTS_MODELS.get(effective_tts_model, {})
+    source_contract_verified = bool(tts_model_meta.get("acoustic_integrity"))
+    tts_provider = str(tts_model_meta.get("provider") or effective_tts_model)
     manifest_failures = _narration_manifest_failures(script_path, audio_path, tts_model)
     if manifest_failures:
         detail = "; ".join(manifest_failures)
@@ -1126,8 +1133,10 @@ async def compose_video(
             "Narration audio does not retain a 100% verified script contract; "
             f"refusing to render. {detail}"
         )
-    if tts_model == "orpheus-en":
-        emit("Narration integrity: Orpheus manifest verifies 100% of source utterances")
+    if source_contract_verified:
+        emit(
+            f"Narration integrity: {tts_provider} manifest verifies 100% of source parts"
+        )
     emit("Narration pacing: natural 1.0x speech locked; scene timing follows measured audio")
     audio_duration = sb.get_audio_duration(audio_path)
     word_transcript, transcription = await av_sync.ensure_word_transcript(
@@ -1162,7 +1171,7 @@ async def compose_video(
             )
         manifest_program_segments = (
             _manifest_program_segments(audio_path, physical_segments)
-            if tts_model == "orpheus-en"
+            if source_contract_verified
             else None
         )
         if manifest_program_segments:
@@ -1223,11 +1232,12 @@ async def compose_video(
     board["alignment"]["transcription_attempts"] = transcription.get("attempts", 0)
     if transcription.get("failure_reasons"):
         board["alignment"]["transcription_failures"] = transcription["failure_reasons"]
-    if program_music_pacing_enabled and tts_model == "orpheus-en":
+    if program_music_pacing_enabled and source_contract_verified:
         _apply_manifest_program_alignment(
             board["alignment"],
             pacing_report,
             manifest_program_segments,
+            provider_label=tts_provider,
         )
         if manifest_program_segments:
             board = sb.build_program_storyboard(
@@ -1240,7 +1250,7 @@ async def compose_video(
     sb.write_storyboard(output_dir_path, board)
     completeness_failures = _narration_completeness_failures(
         board["alignment"],
-        source_contract_verified=(tts_model == "orpheus-en"),
+        source_contract_verified=source_contract_verified,
     )
     if completeness_failures:
         detail = "; ".join(completeness_failures)
@@ -1249,10 +1259,10 @@ async def compose_video(
             "Narration audio does not cover the full script; refusing to render "
             f"a truncated video. {detail}"
         )
-    if tts_model == "orpheus-en" and not board["alignment"].get("passed"):
+    if source_contract_verified and not board["alignment"].get("passed"):
         emit(
             "A/V sync warning: paced full-file ASR is incomplete, but the "
-            "hash-bound Orpheus manifest proves 100% per-utterance source coverage"
+            f"hash-bound {tts_provider} manifest proves 100% per-part source coverage"
         )
     if board["alignment"].get("passed"):
         emit(

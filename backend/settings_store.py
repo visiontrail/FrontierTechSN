@@ -448,6 +448,36 @@ SPECS: tuple[SettingSpec, ...] = (
         description="HTTP timeout per submit, status, or audio-download request. "
                     "The overall synthesis ceiling remains Total timeout.",
     ),
+    SettingSpec(
+        "POCKET_TTS_URL", "tts", "Pocket TTS service URL", "string",
+        placeholder="http://10.60.11.3:8090",
+        description="Base URL of the Docker-hosted Kyutai Pocket TTS service.",
+        allow_blank=False,
+    ),
+    SettingSpec(
+        "POCKET_TTS_API_KEY", "tts", "Pocket TTS API key", "secret",
+        description="Optional X-API-Key for a protected Pocket TTS gateway. "
+                    "Leave blank for the upstream service on a trusted private network.",
+    ),
+    SettingSpec(
+        "POCKET_TTS_MODEL_REVISION", "tts", "Pocket TTS revision", "string",
+        description="Exact upstream git revision deployed in Docker. It is part of "
+                    "the verified-audio cache identity.",
+        allow_blank=False,
+    ),
+    SettingSpec(
+        "POCKET_TTS_CHUNK_WORDS", "tts", "Pocket external chunk words", "int",
+        unit="words", minimum=0, maximum=2000,
+        description="Maximum words in one application-level Pocket request. Physical "
+                    "script lines/stories remain intact; only complete sentences split "
+                    "above this limit. 0 keeps every physical line intact.",
+    ),
+    SettingSpec(
+        "POCKET_TTS_REQUEST_TIMEOUT", "tts", "Pocket request timeout", "int",
+        unit="seconds", minimum=5, maximum=3600,
+        description="HTTP ceiling for one paragraph/story request. Pocket synthesis "
+                    "is synchronous and returns a streaming WAV response.",
+    ),
     # ── Audio / visual sync ──────────────────────────────────────────────
     SettingSpec(
         "AV_SYNC_LANGUAGE", "av_sync", "Narration language", "string",

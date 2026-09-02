@@ -47,7 +47,7 @@ async def preview_voice(voice: str, tts_model: str | None = Query(default=None))
 
     model_id = tts_model or config.TTS_DEFAULT_MODEL
     sample = config.voice_sample_path(voice, model_id)
-    if sample is None and config.TTS_MODELS.get(model_id, {}).get("kind") == "orpheus_http":
+    if sample is None and config.TTS_MODELS.get(model_id, {}).get("remote_preview"):
         try:
             sample = await ensure_voice_preview(voice, model_id)
         except Exception as exc:
