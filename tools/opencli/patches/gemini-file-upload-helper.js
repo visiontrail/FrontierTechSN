@@ -22,6 +22,13 @@ export async function attachGeminiFile(page, filePath) {
     // The zero-state composer appears before Gemini has hydrated the upload
     // entries. Opening the menu too early leaves an empty overlay indefinitely.
     await page.wait(2);
+    // A foreground site session can still lose focus while Chrome restores the
+    // prior user tab. Gemini ignores the native upload-menu click in that
+    // state, so explicitly activate the target before requesting user gesture.
+    if (typeof page.cdp === 'function') {
+        await page.cdp('Page.bringToFront', {}).catch(() => undefined);
+        await page.wait(0.25);
+    }
     try {
         await page.click('button[aria-label="Upload & tools"]');
     } catch (error) {
@@ -30,24 +37,44 @@ export async function attachGeminiFile(page, filePath) {
         );
     }
 
-    let pickerReady = false;
+    const fileInputSelectors = [
+        'input[name="Filedata"]',
+        'images-files-uploader input[type="file"]',
+        'uploader > input[type="file"]',
+        'input[type="file"]',
+    ];
+    let fileInputSelector = '';
     for (let attempt = 0; attempt < 12; attempt += 1) {
         await page.wait(attempt === 0 ? 1 : 0.5);
-        const picker = await page.evaluate(`(() => ({
-            input: !!document.querySelector('input[name="Filedata"]'),
-            button: !!document.querySelector('[data-test-id="local-images-files-uploader-button"]'),
-            expanded: document.querySelector('button[aria-label="Upload & tools"]')?.getAttribute('aria-expanded') === 'true',
-        }))()`);
-        if (picker?.input) {
-            pickerReady = true;
+        const picker = await page.evaluate(`(() => {
+            const selectors = ${JSON.stringify(fileInputSelectors)};
+            const inputSelector = selectors.find((selector) => document.querySelector(selector)) || '';
+            const legacyButton = '[data-test-id="local-images-files-uploader-button"]';
+            const currentButton = 'images-files-uploader button[aria-label^="Upload files"]';
+            const buttonSelector = document.querySelector(legacyButton)
+                ? legacyButton
+                : document.querySelector(currentButton)
+                    ? currentButton
+                    : '';
+            return {
+                inputSelector,
+                buttonSelector,
+                expanded: document.querySelector('button[aria-label="Upload & tools"]')?.getAttribute('aria-expanded') === 'true',
+            };
+        })()`);
+        if (picker?.inputSelector) {
+            fileInputSelector = picker.inputSelector;
             break;
         }
-        if (picker?.button) {
-            await page.click('[data-test-id="local-images-files-uploader-button"]');
+        if (picker?.buttonSelector) {
+            await page.click(picker.buttonSelector);
             await page.wait(0.5);
-            const exists = await page.evaluate('!!document.querySelector(\'input[name="Filedata"]\')');
-            if (exists) {
-                pickerReady = true;
+            const discovered = await page.evaluate(`(() => {
+                const selectors = ${JSON.stringify(fileInputSelectors)};
+                return selectors.find((selector) => document.querySelector(selector)) || '';
+            })()`);
+            if (discovered) {
+                fileInputSelector = discovered;
                 break;
             }
         } else if (attempt === 4 || attempt === 8) {
@@ -55,10 +82,13 @@ export async function attachGeminiFile(page, filePath) {
             // hydrated. Two trusted clicks close then reopen it.
             if (picker?.expanded) await page.click('button[aria-label="Upload & tools"]');
             await page.wait(0.5);
+            if (typeof page.cdp === 'function') {
+                await page.cdp('Page.bringToFront', {}).catch(() => undefined);
+            }
             await page.click('button[aria-label="Upload & tools"]');
         }
     }
-    if (!pickerReady) {
+    if (!fileInputSelector) {
         const diagnostic = await page.evaluate(`(() => ({
             url: location.href,
             uploadButtons: Array.from(document.querySelectorAll('button'))
@@ -78,9 +108,9 @@ export async function attachGeminiFile(page, filePath) {
     let uploaded = false;
     if (page.setFileInput) {
         try {
-            await page.setFileInput([absPath], 'input[name="Filedata"]');
+            await page.setFileInput([absPath], fileInputSelector);
             await page.evaluate(`(() => {
-                const input = document.querySelector('input[name="Filedata"]');
+                const input = document.querySelector(${JSON.stringify(fileInputSelector)});
                 if (!input) return false;
                 input.dispatchEvent(new Event('change', { bubbles: true }));
                 return true;
@@ -99,8 +129,8 @@ export async function attachGeminiFile(page, filePath) {
         const fileName = path.default.basename(absPath);
         const mimeType = fileName.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
         const fallback = await page.evaluate(`(() => {
-            const input = document.querySelector('input[name="Filedata"]');
-            if (!input) return { ok: false, reason: 'Gemini Filedata input disappeared' };
+            const input = document.querySelector(${JSON.stringify(fileInputSelector)});
+            if (!input) return { ok: false, reason: 'Gemini file input disappeared' };
             const binary = atob(${JSON.stringify(base64)});
             const bytes = new Uint8Array(binary.length);
             for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);

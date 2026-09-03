@@ -10,6 +10,12 @@ services:
       # Xet can collapse to a single slow transfer on the nr-test network;
       # ordinary HTTPS retains resumable Hugging Face cache semantics.
       HF_HUB_DISABLE_XET: "1"
+      # The 64-core host is split across eight NUMA nodes. Same-prompt remote
+      # benchmarks showed that 16 intra-op/BLAS threads outperform 4, 8, 32,
+      # and the unconstrained 64-thread default without pinning shared CPUs.
+      OMP_NUM_THREADS: "${POCKET_TTS_CPU_THREADS:-16}"
+      MKL_NUM_THREADS: "${POCKET_TTS_CPU_THREADS:-16}"
+      OPENBLAS_NUM_THREADS: "${POCKET_TTS_CPU_THREADS:-16}"
     command:
       - serve
       - --host
@@ -31,9 +37,6 @@ services:
     healthcheck:
       test:
         - CMD
-        - uv
-        - run
-        - --no-sync
         - python
         - -c
         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"

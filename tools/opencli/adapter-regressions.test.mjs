@@ -28,7 +28,7 @@ function videoFrameFixture(t, names = ['first-frame.png']) {
   })
 }
 
-function geminiAttachmentPage(nativeError) {
+function geminiAttachmentPage(nativeError, inputSelector = 'input[name="Filedata"]') {
   const actions = []
   return {
     actions,
@@ -45,10 +45,20 @@ function geminiAttachmentPage(nativeError) {
       actions.push(['setFileInput', files, selector])
       throw new Error(nativeError)
     },
+    async cdp(method, params) {
+      actions.push(['cdp', method, params])
+    },
     async evaluate(script) {
       if (script === 'window.location.href') return 'https://gemini.google.com/app'
-      if (script.includes("input: !!document.querySelector('input[name=\"Filedata\"]')")) {
-        return { input: true, button: true, expanded: true }
+      if (script.includes('const inputSelector = selectors.find')) {
+        return { inputSelector, buttonSelector: '', expanded: true }
+      }
+      if (
+        script.includes("input.dispatchEvent(new Event('change'")
+        && !script.includes('new DataTransfer()')
+      ) {
+        actions.push(['change', inputSelector])
+        return true
       }
       if (script.includes('const transfer = new DataTransfer()')) {
         actions.push(['DataTransfer'])
@@ -78,6 +88,25 @@ test('Gemini ask does not hide unrelated native upload failures', async (t) => {
 
   await assert.rejects(attachGeminiFile(page, image), /Browser target crashed/)
   assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
+})
+
+test('Gemini ask supports the current unnamed images-files-uploader input', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const inputSelector = 'images-files-uploader input[type="file"]'
+  const page = geminiAttachmentPage(null, inputSelector)
+  page.setFileInput = async (files, selector) => {
+    page.actions.push(['setFileInput', files, selector])
+  }
+
+  await assert.doesNotReject(attachGeminiFile(page, image))
+
+  const upload = page.actions.find(([action]) => action === 'setFileInput')
+  assert.equal(upload[2], inputSelector)
+  assert.equal(page.actions.some(([action]) => action === 'change'), true)
+  assert.equal(
+    page.actions.some(([action, method]) => action === 'cdp' && method === 'Page.bringToFront'),
+    true,
+  )
 })
 
 function videoUploadPage({
