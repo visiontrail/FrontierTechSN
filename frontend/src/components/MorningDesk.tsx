@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
@@ -13,8 +13,10 @@ import {
   programMusicAudioUrl,
   runDailyNow,
   updateDailyAutomation,
+  voicePreviewUrl,
   type DailyAutomationSettings,
 } from '../api'
+import { IconPlay, IconStop } from './Icons'
 
 const SOURCE_LABELS: Record<string, string> = {
   zh: '中文',
@@ -39,8 +41,21 @@ function inRange(value: number, minimum: number, maximum: number) {
   return Number.isFinite(value) && value >= minimum && value <= maximum
 }
 
+function voiceLabel(value: string) {
+  return value
+    .split('_')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+type VoicePreviewState = 'loading' | 'playing'
+
 export default function MorningDesk() {
   const queryClient = useQueryClient()
+  const previewAudioRef = useRef<HTMLAudioElement>(null)
+  const [previewVoice, setPreviewVoice] = useState<string | null>(null)
+  const [previewState, setPreviewState] = useState<VoicePreviewState | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
   const {
     data,
     isError: automationIsError,
@@ -79,6 +94,43 @@ export default function MorningDesk() {
     queryFn: () => fetchVoices(draft!.tts_model),
     enabled: Boolean(draft?.tts_model),
   })
+
+  const stopVoicePreview = () => {
+    const audio = previewAudioRef.current
+    if (audio) {
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+    }
+    setPreviewVoice(null)
+    setPreviewState(null)
+  }
+
+  const toggleVoicePreview = (voice: string) => {
+    if (!draft) return
+    if (previewVoice === voice) {
+      stopVoicePreview()
+      return
+    }
+
+    const audio = previewAudioRef.current
+    if (!audio) return
+    audio.pause()
+    setPreviewError(null)
+    setPreviewVoice(voice)
+    setPreviewState('loading')
+    audio.src = voicePreviewUrl(voice, draft.tts_model)
+    void audio.play().catch(() => {
+      setPreviewVoice(null)
+      setPreviewState(null)
+      setPreviewError(`Could not generate or play the ${voiceLabel(voice)} preview.`)
+    })
+  }
+
+  useEffect(() => () => {
+    const audio = previewAudioRef.current
+    audio?.pause()
+  }, [])
 
   const applySaved = (next: Awaited<ReturnType<typeof updateDailyAutomation>>) => {
     setDraftOverride(next.settings)
@@ -272,18 +324,90 @@ export default function MorningDesk() {
             <div className="morning-field-grid">
               <label>
                 <span>TTS model</span>
-                <select value={draft.tts_model} onChange={(event) => patch('tts_model', event.target.value)}>
+                <select value={draft.tts_model} onChange={(event) => {
+                  stopVoicePreview()
+                  setPreviewError(null)
+                  patch('tts_model', event.target.value)
+                }}>
                   {!ttsModels.some((model) => model.id === draft.tts_model) && <option value={draft.tts_model}>{draft.tts_model}</option>}
                   {ttsModels.map((model) => <option value={model.id} key={model.id}>{model.provider} — {model.label}</option>)}
                 </select>
               </label>
               <label>
                 <span>Host voice</span>
-                <select value={effectiveVoice} disabled={voicesAreLoading} onChange={(event) => patch('voice', event.target.value)}>
+                <select value={effectiveVoice} disabled={voicesAreLoading} onChange={(event) => {
+                  stopVoicePreview()
+                  setPreviewError(null)
+                  patch('voice', event.target.value)
+                }}>
                   {(voicesAreLoading || voicesAreError) && !selectedVoiceIsValid && <option value={draft.voice}>{voicesAreLoading ? 'Loading compatible voices…' : draft.voice}</option>}
-                  {voices.map((voice) => <option value={voice.name} key={voice.name}>{voice.name} · {voice.gender}</option>)}
+                  {voices.map((voice) => <option value={voice.name} key={voice.name}>{voiceLabel(voice.name)} · {voice.gender}</option>)}
                 </select>
               </label>
+            </div>
+            <div className="morning-voice-audition">
+              <div className="morning-voice-audition-head">
+                <div>
+                  <strong>Voice audition</strong>
+                  <small>
+                    {previewError
+                      ?? (previewVoice && previewState === 'loading'
+                        ? `Preparing ${voiceLabel(previewVoice)}… First play may take a moment.`
+                        : previewVoice
+                          ? `Playing ${voiceLabel(previewVoice)}`
+                          : `${voices.length} model-native voices · choose and preview independently`)}
+                  </small>
+                </div>
+                <span>{voices.filter((voice) => voice.preview_available).length}/{voices.length} previewable</span>
+              </div>
+              <div className="morning-voice-catalog" role="list" aria-label={`${selectedModel?.provider ?? 'TTS'} voice previews`}>
+                {voices.map((voice, index) => {
+                  const selected = voice.name === effectiveVoice
+                  const active = voice.name === previewVoice
+                  const loading = active && previewState === 'loading'
+                  return (
+                    <div className={`morning-voice-card ${selected ? 'is-selected' : ''} ${active ? 'is-playing' : ''}`} role="listitem" key={voice.name}>
+                      <button
+                        type="button"
+                        className="morning-voice-listen"
+                        onClick={() => toggleVoicePreview(voice.name)}
+                        disabled={!voice.preview_available}
+                        aria-label={active ? `Stop ${voiceLabel(voice.name)} preview` : `Preview ${voiceLabel(voice.name)}`}
+                        title={voice.preview_available ? `Preview ${voiceLabel(voice.name)}` : 'Preview unavailable'}
+                      >
+                        {active ? <IconStop /> : <IconPlay />}
+                      </button>
+                      <button
+                        type="button"
+                        className="morning-voice-pick"
+                        onClick={() => patch('voice', voice.name)}
+                        aria-pressed={selected}
+                      >
+                        <strong>{voiceLabel(voice.name)}</strong>
+                        <small>{voice.gender} · {voice.lang}</small>
+                      </button>
+                      <span className="morning-voice-index" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+                      {loading && <span className="morning-voice-loading" aria-hidden="true" />}
+                    </div>
+                  )
+                })}
+              </div>
+              <audio
+                ref={previewAudioRef}
+                hidden
+                onPlaying={() => setPreviewState('playing')}
+                onWaiting={() => previewVoice && setPreviewState('loading')}
+                onEnded={() => {
+                  setPreviewVoice(null)
+                  setPreviewState(null)
+                }}
+                onError={() => {
+                  if (!previewVoice) return
+                  setPreviewError(`Could not generate or play the ${voiceLabel(previewVoice)} preview.`)
+                  setPreviewVoice(null)
+                  setPreviewState(null)
+                }}
+              />
             </div>
             <div className="morning-contract-line"><span>Delivery</span><strong>Monologue · {selectedModel?.single_speaker ? 'single-speaker engine' : 'single host selected'}</strong></div>
             {(ttsModelsIsError || voicesAreError) && <p className="morning-panel-warning">The live voice catalog could not be loaded. Existing saved values remain available.</p>}

@@ -502,6 +502,11 @@ export async function fetchVoices(ttsModel?: string): Promise<VoiceOption[]> {
   return res.json();
 }
 
+export function voicePreviewUrl(voice: string, ttsModel?: string): string {
+  const qs = ttsModel ? `?tts_model=${encodeURIComponent(ttsModel)}` : '';
+  return `${BASE}/api/voices/${encodeURIComponent(voice)}/preview${qs}`;
+}
+
 export async function fetchProviders(): Promise<Provider[]> {
   const res = await fetch(`${BASE}/api/providers`);
   const data = await res.json();
