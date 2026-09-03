@@ -195,6 +195,7 @@ async def _agent_complete_single(
         ClaudeAgentOptions,
         ResultMessage,
         TextBlock,
+        ToolUseBlock,
         query,
     )
 
@@ -350,10 +351,18 @@ async def _agent_complete_single(
                                     if block.text:
                                         attempt_committed = True
                                         text_parts.append(block.text)
-                                else:
-                                    # Thinking and tool blocks are a real
-                                    # output boundary even though this helper
-                                    # only returns visible TextBlocks.
+                                elif (
+                                    isinstance(block, ToolUseBlock)
+                                    and block.name != "Skill"
+                                ):
+                                    # Project Skills only load read-only prompt
+                                    # context.  If the following model turn is
+                                    # rejected (for example by a 429), replaying
+                                    # that load through another key/provider is
+                                    # safe and is required for configured
+                                    # failover to work.  Keep the commit boundary
+                                    # for every other tool in case this helper is
+                                    # granted additional capabilities later.
                                     attempt_committed = True
                         elif isinstance(message, ResultMessage):
                             result = message

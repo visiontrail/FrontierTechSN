@@ -13,6 +13,16 @@ class FakeTextBlock:
         self.text = text
 
 
+class FakeThinkingBlock:
+    def __init__(self, thinking: str):
+        self.thinking = thinking
+
+
+class FakeToolUseBlock:
+    def __init__(self, name: str):
+        self.name = name
+
+
 class FakeAssistantMessage:
     def __init__(self, content, *, error=None):
         self.content = content
@@ -39,6 +49,8 @@ def fake_sdk(query):
         ClaudeAgentOptions=FakeClaudeAgentOptions,
         ResultMessage=FakeResultMessage,
         TextBlock=FakeTextBlock,
+        ThinkingBlock=FakeThinkingBlock,
+        ToolUseBlock=FakeToolUseBlock,
         query=query,
     )
 
@@ -112,7 +124,11 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
-            patch.object(model_router, "resolve_model_routes", AsyncMock(return_value=routes)),
+            patch.object(
+                model_router,
+                "resolve_model_routes",
+                AsyncMock(return_value=routes),
+            ),
             patch.object(config, "AI_PRIMARY_MAX_RETRIES", 0),
             patch.object(config, "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", 0),
             patch.object(config, "ANTHROPIC_BASE_URL", ""),
@@ -275,6 +291,86 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
             record_rate_limit.await_args.kwargs["provider_type"],
             "yinhe",
         )
+
+    async def test_rate_limit_after_skill_load_and_thinking_uses_backup(self):
+        attempts: list[str] = []
+        logs: list[str] = []
+
+        async def query(*, prompt, options):
+            base = options.env["ANTHROPIC_BASE_URL"]
+            attempts.append(base)
+            if "oneapi" in base:
+                yield FakeAssistantMessage(
+                    [
+                        FakeThinkingBlock("select the relevant writing skill"),
+                        FakeToolUseBlock("Skill"),
+                    ]
+                )
+                options.stderr("[ERROR] API error (attempt 1/1): 429 rate_limit")
+                yield FakeAssistantMessage(
+                    [FakeTextBlock("API Error: 429 request limit")],
+                    error="rate_limit",
+                )
+                raise Exception("primary second turn rejected")
+            yield FakeAssistantMessage([FakeTextBlock("backup answer")])
+
+        routes = (
+            model_router.ModelRoute(
+                slot="primary",
+                provider_id=1,
+                provider_type="yinhe",
+                provider_name="Galaxy OneAPI",
+                endpoint="http://oneapi.example",
+                model="yinhe-thinking",
+                api_key="primary-key",
+            ),
+            model_router.ModelRoute(
+                slot="backup",
+                provider_id=2,
+                provider_type="deepseek",
+                provider_name="DeepSeek",
+                endpoint="https://api.deepseek.com/anthropic",
+                model="deepseek-v4-flash",
+                api_key="backup-key",
+            ),
+        )
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(model_router, "resolve_model_routes", AsyncMock(return_value=routes)),
+            patch.object(config, "AI_PRIMARY_MAX_RETRIES", 0),
+            patch.object(config, "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", 0),
+            patch.object(config, "AI_BACKUP_MAX_RETRIES", 0),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(config, "ANTHROPIC_MODEL", ""),
+            patch.object(config, "ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            patch.object(skills_admin, "runtime_skill_names", return_value=([], [])),
+            patch.object(
+                provider_rate_limit,
+                "wait_for_request_slot",
+                AsyncMock(return_value=0.0),
+            ),
+            patch.object(
+                provider_rate_limit,
+                "record_rate_limit",
+                AsyncMock(return_value=65.0),
+            ),
+        ):
+            result = await agent.agent_complete(
+                "Return text.",
+                "content",
+                endpoint=routes[0].endpoint,
+                model=routes[0].model,
+                api_key=routes[0].api_key,
+                log=logs.append,
+            )
+
+        self.assertEqual(result, "backup answer")
+        self.assertEqual(
+            attempts,
+            ["http://oneapi.example", "https://api.deepseek.com/anthropic"],
+        )
+        self.assertTrue(any("switching to DeepSeek backup" in line for line in logs))
 
     async def test_primary_429_wait_does_not_consume_attempt_or_use_backup(self):
         attempts: list[str] = []
