@@ -87,11 +87,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 22
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 23
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 2
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 3
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -2436,24 +2436,54 @@ def _raw_transcript(words: list[dict]) -> str:
     )
 
 
+def _asr_overlapping_tokens(words: list[dict]) -> list[dict]:
+    """Expose materially overlapping ASR tokens as decoder-artifact evidence."""
+    overlaps: list[dict] = []
+    for index in range(1, len(words)):
+        start = float(words[index].get("start") or 0)
+        end = float(words[index].get("end") or 0)
+        previous_end = float(words[index - 1].get("end") or 0)
+        duration = end - start
+        overlap = previous_end - start
+        if duration <= 0 or overlap < 0.15 or overlap / duration < 0.5:
+            continue
+        overlaps.append(
+            {
+                "index": index,
+                "token": str(words[index].get("text") or "").strip(),
+                "previous_token": str(words[index - 1].get("text") or "").strip(),
+                "overlap_seconds": round(overlap, 3),
+                "overlap_fraction": round(overlap / duration, 3),
+            }
+        )
+    return overlaps
+
+
 def _medium_asr_verdict_is_corroborated(
     expected_tokens: list[str],
     normal_transcript: str,
     slower_transcript: str,
+    normal_words: list[dict] | None = None,
+    slower_words: list[dict] | None = None,
 ) -> bool:
     """Bound medium-confidence approvals to tightly corroborated ASR drift.
 
     Proper names can be spelled phonetically by Whisper even when two decodes
     hear the same complete waveform (for example ``Andreessen`` ->
-    ``Andreasen``).  A medium model verdict is usable only when both decodes
-    normalize identically, remain very close to the source at character level,
-    and the source has no mixed letter/digit token such as ``a16z``.  That last
-    guard prevents an alphanumeric brand or model number from being silently
-    changed into another entity.
+    ``Andreasen``).  Identical close decodes remain the normal medium-confidence
+    path.  Two non-identical decodes may also corroborate one another when each
+    contains one different, mostly timestamp-overlapped decoder token and
+    removing those two uncorroborated tokens yields the same close transcript.
+    This handles Whisper artifacts such as duplicate words sharing an end time
+    without accepting an extra word heard at the same position by both decodes.
+
+    The source must not contain a mixed letter/digit token such as ``a16z``;
+    that guard prevents an alphanumeric brand or model number from being
+    silently changed into another entity.
     """
     normal_tokens = re.findall(r"[a-z0-9]+", normal_transcript.casefold())
     slower_tokens = re.findall(r"[a-z0-9]+", slower_transcript.casefold())
-    if not normal_tokens or normal_tokens != slower_tokens:
+    if not normal_tokens or not slower_tokens:
         return False
     if any(
         any(character.isalpha() for character in token)
@@ -2462,13 +2492,78 @@ def _medium_asr_verdict_is_corroborated(
     ):
         return False
     expected_text = " ".join(expected_tokens)
-    observed_text = " ".join(normal_tokens)
-    if not expected_text or not observed_text:
+    if not expected_text:
         return False
-    length_ratio = len(observed_text) / len(expected_text)
-    if not 0.85 <= length_ratio <= 1.15:
+
+    def close_to_source(observed_tokens: list[str]) -> bool:
+        observed_text = " ".join(observed_tokens)
+        if not observed_text:
+            return False
+        length_ratio = len(observed_text) / len(expected_text)
+        return 0.85 <= length_ratio <= 1.15 and (
+            SequenceMatcher(None, expected_text, observed_text, autojunk=False).ratio()
+            >= 0.9
+        )
+
+    if normal_tokens == slower_tokens:
+        if normal_words and slower_words and (
+            _asr_overlapping_tokens(normal_words)
+            or _asr_overlapping_tokens(slower_words)
+        ):
+            return False
+        return close_to_source(normal_tokens)
+    if not normal_words or not slower_words:
         return False
-    return SequenceMatcher(None, expected_text, observed_text).ratio() >= 0.9
+
+    def compact_words(words: list[dict], removed_index: int) -> str:
+        return "".join(
+            re.findall(
+                r"[a-z0-9]+",
+                " ".join(
+                    str(word.get("text") or "")
+                    for index, word in enumerate(words)
+                    if index != removed_index
+                ).casefold(),
+            )
+        )
+
+    expected_compact = "".join(expected_tokens)
+    normal_candidates = [item["index"] for item in _asr_overlapping_tokens(normal_words)]
+    slower_candidates = [item["index"] for item in _asr_overlapping_tokens(slower_words)]
+    for normal_index in normal_candidates:
+        normal_token = "".join(
+            re.findall(
+                r"[a-z0-9]+",
+                str(normal_words[normal_index].get("text") or "").casefold(),
+            )
+        )
+        for slower_index in slower_candidates:
+            slower_token = "".join(
+                re.findall(
+                    r"[a-z0-9]+",
+                    str(slower_words[slower_index].get("text") or "").casefold(),
+                )
+            )
+            # The same token at the same relative location is corroborated
+            # added speech, not an independent decoder artifact.
+            if normal_token == slower_token or abs(
+                normal_index / len(normal_words) - slower_index / len(slower_words)
+            ) < 0.03:
+                continue
+            corrected_normal = compact_words(normal_words, normal_index)
+            corrected_slower = compact_words(slower_words, slower_index)
+            if not corrected_normal or corrected_normal != corrected_slower:
+                continue
+            length_ratio = len(corrected_normal) / max(1, len(expected_compact))
+            similarity = SequenceMatcher(
+                None,
+                expected_compact,
+                corrected_normal,
+                autojunk=False,
+            ).ratio()
+            if 0.95 <= length_ratio <= 1.05 and similarity >= 0.97:
+                return True
+    return False
 
 
 async def _adjudicate_orpheus_asr_mismatch(
@@ -2500,6 +2595,8 @@ async def _adjudicate_orpheus_asr_mismatch(
         "normalized_source_tokens": expected_tokens,
         "normal_speed_transcript": _raw_transcript(normal_words),
         "slower_speed_transcript": _raw_transcript(slower_words),
+        "normal_speed_overlapping_tokens": _asr_overlapping_tokens(normal_words),
+        "slower_speed_overlapping_tokens": _asr_overlapping_tokens(slower_words),
         "deterministic_check": {
             key: report.get(key)
             for key in (
@@ -2549,7 +2646,11 @@ punctuation, or word-boundary differences. Independently compare SOURCE TEXT
 with both raw transcripts before deciding. Reject any omitted, added, repeated,
 paraphrased, negated, number-changed, or entity-changed spoken content. Do not
 fill a missing word from context. If the two transcripts do not provide enough
-evidence, reject. Return JSON only with exactly these fields:
+evidence, reject. Word timestamps can overlap when Whisper emits a duplicate or
+hallucinated token. Treat an overlapping token as an ASR artifact only when the
+other transcript does not contain it at the same content position; do not treat
+the deterministic word count alone as proof of repeated speech. Return JSON
+only with exactly these fields:
 {
   "decision": "approve_asr_error" | "reject_audio_mismatch",
   "all_source_tokens_accounted_for": true | false,
@@ -2601,6 +2702,8 @@ evidence, reject. Return JSON only with exactly these fields:
                 expected_tokens,
                 normal_transcript,
                 slower_transcript,
+                normal_words,
+                slower_words,
             )
         )
         approved = bool(

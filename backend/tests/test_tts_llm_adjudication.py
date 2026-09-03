@@ -39,6 +39,51 @@ def test_medium_asr_verdict_requires_identical_close_non_alphanumeric_evidence()
     )
 
 
+def test_medium_asr_verdict_accepts_distinct_overlapped_decoder_artifacts():
+    source = (
+        "Tsubaki KabelSchlepp says in sponsored coverage. In sponsored coverage, "
+        "the outlet describes the Tsubaki KabelSchlepp Robotrax system."
+    )
+    normal = _words(
+        "Subaki Kabelschlep says in sponsored coverage In In sponsored coverage "
+        "the outlet describes the Tsubaki Kabelschlep RoboTrak system"
+    )
+    slower = _words(
+        "Subaki Kabelschlep says in sponsored coverage In sponsored coverage "
+        "the outlet describes the Tsubaki Bakke Kabelschlep Robo Trak system"
+    )
+    normal_duplicate = 7
+    slower_insertion = 14
+    normal[normal_duplicate]["start"] = normal[normal_duplicate - 1]["end"] - 0.16
+    normal[normal_duplicate]["end"] = normal[normal_duplicate - 1]["end"] + 0.04
+    slower[slower_insertion]["start"] = slower[slower_insertion - 1]["end"] - 0.16
+    slower[slower_insertion]["end"] = slower[slower_insertion - 1]["end"] + 0.04
+
+    assert tts._medium_asr_verdict_is_corroborated(
+        tts._lexical_tokens(source),
+        tts._raw_transcript(normal),
+        tts._raw_transcript(slower),
+        normal,
+        slower,
+    )
+
+
+def test_medium_asr_verdict_rejects_same_overlapped_added_word_in_both_decodes():
+    source = "The outlet describes the complete cable carrier system."
+    transcript = _words("The outlet really describes the complete cable carrier system")
+    insertion = 2
+    transcript[insertion]["start"] = transcript[insertion - 1]["end"] - 0.16
+    transcript[insertion]["end"] = transcript[insertion - 1]["end"] + 0.04
+
+    assert not tts._medium_asr_verdict_is_corroborated(
+        tts._lexical_tokens(source),
+        tts._raw_transcript(transcript),
+        tts._raw_transcript(transcript),
+        transcript,
+        transcript,
+    )
+
+
 @pytest.mark.asyncio
 async def test_llm_adjudication_persists_high_confidence_asr_only_approval(tmp_path):
     source = "Parts as made in Taiwan. The source is Nikkei Asia."
