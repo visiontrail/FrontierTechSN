@@ -15,6 +15,7 @@ from backend.models import (
     TaskConfig,
     TaskResponse,
 )
+from backend.daily_news.scriptwriter import morning_opening
 
 logger = logging.getLogger(__name__)
 _scheduler_task: asyncio.Task | None = None
@@ -119,6 +120,10 @@ async def create_daily_task(
         target_duration_minutes=duration_override or settings.target_duration_minutes,
         script_format=ScriptFormat.MONOLOGUE,
         voice_1=settings.voice,
+        opening_remarks=morning_opening(
+            edition_date, settings.language, settings.opening_template
+        ),
+        closing_remarks=settings.closing_remarks,
         tts_model=settings.tts_model,
         video_template="swiss",
         video_orientation="landscape",

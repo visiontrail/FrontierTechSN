@@ -111,17 +111,22 @@ def narration_duration_report(
     }
 
 
-def morning_opening(edition_date: date, language: str = "en") -> str:
-    if language == "zh":
-        return (
-            f"早上好，今天是{edition_date.year}年{edition_date.month}月{edition_date.day}日，"
-            "这里是 ByteFront Espresso，用几分钟带你掌握正在塑造未来的技术进展。"
-        )
-    return (
-        f"Good morning. It's {edition_date.strftime('%A, %B')} {edition_date.day}, "
-        f"{edition_date.year}, and this is ByteFront Espresso—your concise morning briefing "
-        "on the ideas, systems, and companies shaping tomorrow."
+def morning_opening(
+    edition_date: date,
+    language: str = "en",
+    template: str | None = None,
+) -> str:
+    from backend.models import DEFAULT_MORNING_OPENING_TEMPLATES
+
+    date_label = (
+        f"{edition_date.year}年{edition_date.month}月{edition_date.day}日"
+        if language == "zh"
+        else f"{edition_date.strftime('%A, %B')} {edition_date.day}, {edition_date.year}"
     )
+    selected = template or DEFAULT_MORNING_OPENING_TEMPLATES.get(
+        language, DEFAULT_MORNING_OPENING_TEMPLATES["en"]
+    )
+    return selected.replace("{date}", date_label)
 
 
 def _spoken_lines(value: str) -> list[str]:
@@ -457,6 +462,7 @@ async def fit_daily_script_duration(
     target_duration_minutes: int,
     language: str,
     closing_remarks: str,
+    opening_remarks: str | None = None,
     ai_endpoint: str | None,
     ai_model: str | None,
     provider_id: int | None,
@@ -480,7 +486,7 @@ async def fit_daily_script_duration(
             "Daily news duration correction: using direct-output model "
             f"{edit_model} instead of reasoning model {model}"
         )
-    opening = morning_opening(edition_date, language)
+    opening = opening_remarks or morning_opening(edition_date, language)
     language_rule = (
         "Use natural broadcast Mandarin Chinese."
         if language == "zh"
@@ -725,12 +731,13 @@ async def generate_daily_script(
     target_duration_minutes: int,
     language: str,
     closing_remarks: str,
+    opening_remarks: str | None = None,
     ai_endpoint: str | None,
     ai_model: str | None,
     provider_id: int | None,
     log: LogCallback | None = None,
 ) -> str:
-    opening = morning_opening(edition_date, language)
+    opening = opening_remarks or morning_opening(edition_date, language)
     units_per_minute = (
         DAILY_NEWS_CHINESE_CHARACTERS_PER_MINUTE
         if language == "zh"
@@ -860,13 +867,14 @@ async def revise_daily_script(
     *,
     language: str,
     closing_remarks: str,
+    opening_remarks: str | None = None,
     ai_endpoint: str | None,
     ai_model: str | None,
     provider_id: int | None,
     log: LogCallback | None = None,
 ) -> str:
     """Apply independent-review directives using the evidence-bound writing model."""
-    opening = morning_opening(edition_date, language)
+    opening = opening_remarks or morning_opening(edition_date, language)
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
     edit_model = _daily_news_edit_model(model)
     if log and edit_model != model:
@@ -973,9 +981,10 @@ def script_contract_report(
     *,
     language: str,
     closing_remarks: str,
+    opening_remarks: str | None = None,
     target_duration_minutes: int | None = None,
 ) -> dict:
-    opening = morning_opening(edition_date, language)
+    opening = opening_remarks or morning_opening(edition_date, language)
     script_folded = script.casefold()
     expected_publications: dict[str, str] = {}
     accepted_attributions: dict[str, dict[str, tuple[str, str]]] = {}

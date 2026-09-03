@@ -44,9 +44,28 @@ class ScriptFormat(str, Enum):
 
 
 DEFAULT_CLOSING_REMARKS = (
-    "If this gave you something to think about, subscribe for more. "
-    "Thanks for watching, and I'll see you in the next one."
+    "That's today's ByteFront Espresso. Subscribe to stay ahead of the next signal, "
+    "and I'll meet you back here tomorrow morning."
 )
+
+DEFAULT_MORNING_OPENING_TEMPLATES = {
+    "en": (
+        "Good morning. It's {date}, and this is ByteFront Espresso, a concentrated "
+        "shot of the frontier-tech signals shaping what comes next."
+    ),
+    "zh": (
+        "早上好，今天是{date}。这里是 ByteFront Espresso，"
+        "一杯浓缩的前沿科技信号，帮你看清下一步。"
+    ),
+}
+
+DEFAULT_MORNING_CLOSINGS = {
+    "en": DEFAULT_CLOSING_REMARKS,
+    "zh": (
+        "以上就是今天的 ByteFront Espresso。订阅我们，提前捕捉下一个信号，"
+        "明早见。"
+    ),
+}
 
 
 class TaskConfig(BaseModel):
@@ -58,6 +77,9 @@ class TaskConfig(BaseModel):
     speaker_count: int = 1
     voice_1: str = "Carter"
     voice_2: str = "Alice"
+    # Morning Desk snapshots the fully rendered, date-specific opener here.
+    # Older/manual tasks leave it unset and retain the software-owned default.
+    opening_remarks: Optional[str] = Field(default=None, max_length=500)
     # Spoken verbatim at the end of the generated script, so it flows through
     # TTS, storyboard timing, visual planning, and the final composition.
     closing_remarks: str = Field(default=DEFAULT_CLOSING_REMARKS, min_length=1, max_length=500)
@@ -651,6 +673,8 @@ class DailyAutomationSettings(BaseModel):
     catch_up_after_restart: bool = False
     target_duration_minutes: int = Field(default=3, ge=1, le=30)
     language: Literal["en", "zh"] = "en"
+    opening_template: Optional[str] = Field(default=None, max_length=500)
+    closing_remarks: Optional[str] = Field(default=None, max_length=500)
     max_stories: int = Field(default=6, ge=3, le=12)
     source_window_hours: int = Field(default=36, ge=12, le=96)
     tts_model: str = "orpheus-en"
@@ -685,6 +709,42 @@ class DailyAutomationSettings(BaseModel):
         if not match:
             raise ValueError("generation_time must use 24-hour HH:MM")
         return value.strip()
+
+    @model_validator(mode="before")
+    @classmethod
+    def backfill_branded_bookends(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        language = payload.get("language", "en")
+        if not payload.get("opening_template"):
+            payload["opening_template"] = DEFAULT_MORNING_OPENING_TEMPLATES.get(
+                language, DEFAULT_MORNING_OPENING_TEMPLATES["en"]
+            )
+        if not payload.get("closing_remarks"):
+            payload["closing_remarks"] = DEFAULT_MORNING_CLOSINGS.get(
+                language, DEFAULT_MORNING_CLOSINGS["en"]
+            )
+        return payload
+
+    @field_validator("opening_template")
+    @classmethod
+    def validate_opening_template(cls, value: str | None) -> str:
+        normalized = " ".join((value or "").split())
+        if normalized.count("{date}") != 1:
+            raise ValueError("opening_template must contain {date} exactly once")
+        unknown_fields = re.findall(r"\{([^{}]+)\}", normalized.replace("{date}", ""))
+        if unknown_fields:
+            raise ValueError("opening_template contains an unsupported placeholder")
+        return normalized
+
+    @field_validator("closing_remarks")
+    @classmethod
+    def normalize_daily_closing(cls, value: str | None) -> str:
+        normalized = " ".join((value or "").split())
+        if not normalized:
+            raise ValueError("closing_remarks cannot be blank")
+        return normalized
 
     @field_validator("timezone")
     @classmethod

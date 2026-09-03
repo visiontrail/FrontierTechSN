@@ -890,6 +890,7 @@ def test_fixed_morning_opening_and_contract_are_software_owned():
     assert final.startswith("Good morning. It's Tuesday, August 18, 2026")
     assert final.endswith(closing)
     assert final.count("Good morning") == 1
+    assert "a concentrated shot of the frontier-tech signals" in opening
     assert SOURCE_SPOKEN_ALIASES["量子位 QbitAI"] == ("QbitAI",)
 
 
@@ -1174,6 +1175,9 @@ def test_daily_desk_defaults_to_unattended_next_run():
     assert settings.target_duration_minutes == 3
     assert settings.tts_model == "orpheus-en"
     assert settings.voice == "leah"
+    assert settings.opening_template.count("{date}") == 1
+    assert "ByteFront Espresso" in settings.opening_template
+    assert settings.closing_remarks.startswith("That's today's ByteFront Espresso")
     assert settings.auto_publish is True
     assert settings.publish_targets == ["youtube", "x", "apple_podcast"]
     assert settings.publish_visibility == "public"
@@ -1195,6 +1199,9 @@ def test_daily_desk_recipe_validates_tts_model_and_voice_before_saving():
 
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         DailyAutomationSettings(footage_clip_count=0)
+
+    with pytest.raises(ValueError, match=r"contain \{date\} exactly once"):
+        DailyAutomationSettings(opening_template="Good morning from ByteFront Espresso.")
 
 
 def test_daily_desk_recipe_backfills_public_footage_count_for_old_settings():
@@ -1266,6 +1273,8 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
         target_duration_minutes=12,
         tts_model="orpheus-en",
         voice="tara",
+        opening_template="It is {date}. Your ByteFront Espresso is ready.",
+        closing_remarks="That is the signal. Meet me here tomorrow.",
         collage_broll_count=7,
         news_image_count=6,
         public_footage_enabled=True,
@@ -1292,6 +1301,8 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
     assert task_config.target_duration_minutes == 12
     assert task_config.tts_model == "orpheus-en"
     assert task_config.voice_1 == "tara"
+    assert task_config.opening_remarks == "It is Wednesday, August 19, 2026. Your ByteFront Espresso is ready."
+    assert task_config.closing_remarks == "That is the signal. Meet me here tomorrow."
     assert task_config.collage_broll_count == 7
     assert task_config.news_images_enabled is True
     assert task_config.news_image_count == 6

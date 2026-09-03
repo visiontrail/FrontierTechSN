@@ -32,6 +32,17 @@ const TIMEZONE_SUGGESTIONS = [
   'America/Los_Angeles',
 ]
 
+const DEFAULT_BOOKENDS = {
+  en: {
+    opening: 'Good morning. It\'s {date}, and this is ByteFront Espresso, a concentrated shot of the frontier-tech signals shaping what comes next.',
+    closing: 'That\'s today\'s ByteFront Espresso. Subscribe to stay ahead of the next signal, and I\'ll meet you back here tomorrow morning.',
+  },
+  zh: {
+    opening: '早上好，今天是{date}。这里是 ByteFront Espresso，一杯浓缩的前沿科技信号，帮你看清下一步。',
+    closing: '以上就是今天的 ByteFront Espresso。订阅我们，提前捕捉下一个信号，明早见。',
+  },
+}
+
 function formatDateTime(value: string | null) {
   if (!value) return 'Not scheduled'
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
@@ -257,6 +268,12 @@ export default function MorningDesk() {
     && musicSelectionReady
     && outroSelectionReady
     && Boolean(draft.generation_time && draft.timezone.trim())
+    && draft.opening_template.length <= 500
+    && draft.opening_template.split('{date}').length === 2
+    && !draft.opening_template.replace('{date}', '').includes('{')
+    && !draft.opening_template.replace('{date}', '').includes('}')
+    && draft.closing_remarks.trim().length > 0
+    && draft.closing_remarks.length <= 500
     && inRange(draft.target_duration_minutes, 1, 30)
     && inRange(draft.max_stories, 3, 12)
     && inRange(draft.source_window_hours, 12, 96)
@@ -312,7 +329,16 @@ export default function MorningDesk() {
             <header><span>02</span><div><strong>Editorial brief</strong><small>Length, language, and evidence window</small></div></header>
             <div className="morning-field-grid morning-field-grid--four">
               <label><span>Target length</span><div className="morning-unit-input"><input type="number" min="1" max="30" value={draft.target_duration_minutes} onChange={(event) => patch('target_duration_minutes', Number(event.target.value))} /><i>min</i></div></label>
-              <label><span>Language</span><select value={draft.language} onChange={(event) => patch('language', event.target.value as 'en' | 'zh')}><option value="en">English</option><option value="zh">中文</option></select></label>
+              <label><span>Language</span><select value={draft.language} onChange={(event) => {
+                const language = event.target.value as 'en' | 'zh'
+                const previousDefaults = DEFAULT_BOOKENDS[draft.language]
+                setDraftOverride((current) => ({
+                  ...(current ?? draft),
+                  language,
+                  opening_template: draft.opening_template === previousDefaults.opening ? DEFAULT_BOOKENDS[language].opening : draft.opening_template,
+                  closing_remarks: draft.closing_remarks === previousDefaults.closing ? DEFAULT_BOOKENDS[language].closing : draft.closing_remarks,
+                }))
+              }}><option value="en">English</option><option value="zh">中文</option></select></label>
               <label><span>Stories</span><input type="number" min="3" max="12" value={draft.max_stories} onChange={(event) => patch('max_stories', Number(event.target.value))} /></label>
               <label><span>Source window</span><div className="morning-unit-input"><input type="number" min="12" max="96" step="12" value={draft.source_window_hours} onChange={(event) => patch('source_window_hours', Number(event.target.value))} /><i>hr</i></div></label>
             </div>
@@ -411,6 +437,32 @@ export default function MorningDesk() {
             </div>
             <div className="morning-contract-line"><span>Delivery</span><strong>Monologue · {selectedModel?.single_speaker ? 'single-speaker engine' : 'single host selected'}</strong></div>
             {(ttsModelsIsError || voicesAreError) && <p className="morning-panel-warning">The live voice catalog could not be loaded. Existing saved values remain available.</p>}
+            <div className="morning-bookends" aria-label="Spoken opening and closing">
+              <div className="morning-bookends-head">
+                <div><strong>Show bookends</strong><small>Spoken verbatim around every edition</small></div>
+                <span>ByteFront Espresso</span>
+              </div>
+              <label>
+                <span>Opening · use {'{date}'} once</span>
+                <textarea
+                  rows={3}
+                  value={draft.opening_template}
+                  onChange={(event) => patch('opening_template', event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Closing</span>
+                <textarea
+                  rows={3}
+                  value={draft.closing_remarks}
+                  onChange={(event) => patch('closing_remarks', event.target.value)}
+                />
+              </label>
+              <p>The desk replaces {'{date}'} with the edition date, then locks both lines through script review, narration, and render.</p>
+              {(draft.opening_template.split('{date}').length !== 2 || !draft.closing_remarks.trim()) && (
+                <p className="morning-bookends-error">Opening must contain {'{date}'} exactly once, and closing cannot be blank.</p>
+              )}
+            </div>
           </article>
 
           <article className="morning-config-panel morning-config-panel--visual">

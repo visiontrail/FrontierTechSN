@@ -6,6 +6,7 @@ export interface TaskConfig {
   speaker_count: number;
   voice_1: string;
   voice_2: string;
+  opening_remarks?: string | null;
   closing_remarks: string;
   include_character: boolean;
   captions_enabled?: boolean;
@@ -212,6 +213,8 @@ export interface DailyAutomationSettings {
   source_window_hours: number;
   tts_model: string;
   voice: string;
+  opening_template: string;
+  closing_remarks: string;
   collage_broll_count: number;
   news_image_count: number;
   public_footage_enabled: boolean;
