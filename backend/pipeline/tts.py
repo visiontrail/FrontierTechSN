@@ -2496,13 +2496,29 @@ def _medium_asr_verdict_is_corroborated(
         return False
 
     def close_to_source(observed_tokens: list[str]) -> bool:
-        observed_text = " ".join(observed_tokens)
-        if not observed_text:
+        observed_compact = "".join(observed_tokens)
+        expected_compact = "".join(expected_tokens)
+        if not observed_compact or not expected_compact:
             return False
-        length_ratio = len(observed_text) / len(expected_text)
-        return 0.85 <= length_ratio <= 1.15 and (
-            SequenceMatcher(None, expected_text, observed_text, autojunk=False).ratio()
-            >= 0.9
+        length_ratio = len(observed_compact) / len(expected_compact)
+        return 0.95 <= length_ratio <= 1.05 and (
+            SequenceMatcher(
+                None,
+                expected_compact,
+                observed_compact,
+                autojunk=False,
+            ).ratio()
+            >= 0.965
+        )
+
+    def has_only_replacement_differences(observed_tokens: list[str]) -> bool:
+        return all(
+            tag not in {"insert", "delete"}
+            for tag, _i1, _i2, _j1, _j2 in SequenceMatcher(
+                a=expected_tokens,
+                b=observed_tokens,
+                autojunk=False,
+            ).get_opcodes()
         )
 
     if normal_tokens == slower_tokens:
@@ -2511,9 +2527,18 @@ def _medium_asr_verdict_is_corroborated(
             or _asr_overlapping_tokens(slower_words)
         ):
             return False
-        return close_to_source(normal_tokens)
+        return close_to_source(normal_tokens) and has_only_replacement_differences(
+            normal_tokens
+        )
     if not normal_words or not slower_words:
         return False
+    if (
+        close_to_source(normal_tokens)
+        and close_to_source(slower_tokens)
+        and has_only_replacement_differences(normal_tokens)
+        and has_only_replacement_differences(slower_tokens)
+    ):
+        return True
 
     def compact_words(words: list[dict], removed_index: int) -> str:
         return "".join(

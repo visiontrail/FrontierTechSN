@@ -68,12 +68,48 @@ def test_medium_asr_verdict_accepts_distinct_overlapped_decoder_artifacts():
     )
 
 
+def test_medium_asr_verdict_accepts_close_name_replacements_and_splits():
+    source = (
+        "Tsubaki KabelSchlepp says in sponsored coverage that the outlet describes "
+        "the Tsubaki KabelSchlepp Robotrax cable carrier system."
+    )
+    normal = _words(
+        "Subaki Kabelschlepp says in sponsored coverage that the outlet describes "
+        "the Tsubaki Kabelschlep Robotrack cable carrier system"
+    )
+    slower = _words(
+        "Subaki Kabo Schlepp says in sponsored coverage that the outlet describes "
+        "the Tsubaki Kabelschlep RoboTrak cable carrier system"
+    )
+
+    assert tts._medium_asr_verdict_is_corroborated(
+        tts._lexical_tokens(source),
+        tts._raw_transcript(normal),
+        tts._raw_transcript(slower),
+        normal,
+        slower,
+    )
+
+
 def test_medium_asr_verdict_rejects_same_overlapped_added_word_in_both_decodes():
     source = "The outlet describes the complete cable carrier system."
     transcript = _words("The outlet really describes the complete cable carrier system")
     insertion = 2
     transcript[insertion]["start"] = transcript[insertion - 1]["end"] - 0.16
     transcript[insertion]["end"] = transcript[insertion - 1]["end"] + 0.04
+
+    assert not tts._medium_asr_verdict_is_corroborated(
+        tts._lexical_tokens(source),
+        tts._raw_transcript(transcript),
+        tts._raw_transcript(transcript),
+        transcript,
+        transcript,
+    )
+
+
+def test_medium_asr_verdict_rejects_shared_omission_from_both_decodes():
+    source = "The outlet describes the complete cable carrier system."
+    transcript = _words("The outlet describes the cable carrier system")
 
     assert not tts._medium_asr_verdict_is_corroborated(
         tts._lexical_tokens(source),
