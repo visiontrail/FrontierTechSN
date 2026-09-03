@@ -3,6 +3,7 @@ import json
 import math
 import struct
 import wave
+import warnings
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -77,6 +78,18 @@ def test_article_page_json_ld_supplies_machine_verifiable_publication_date():
     published = research._extract_published_at(payload)
 
     assert published == datetime(2026, 8, 17, 22, 30, tzinfo=timezone.utc)
+
+
+def test_clean_text_does_not_parse_plain_url_as_html():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        cleaned = research._clean_text("https://www.example.com/story?a=1&amp;b=2")
+
+    assert cleaned == "https://www.example.com/story?a=1&b=2"
+
+
+def test_clean_text_still_removes_html_markup():
+    assert research._clean_text("<p>Hello&nbsp;<b>world</b></p>") == "Hello world"
 
 
 def test_balanced_selection_uses_distinct_sources_before_second_story():

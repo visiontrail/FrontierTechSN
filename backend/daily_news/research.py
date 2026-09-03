@@ -27,6 +27,7 @@ LogCallback = Callable[[str], None]
 
 TITLE_TOKEN_RE = re.compile(r"[\w\u3400-\u9fff]+", re.UNICODE)
 SPACE_RE = re.compile(r"\s+")
+HTML_TAG_RE = re.compile(r"<[/!?]?[a-zA-Z][^>]*>")
 TRACKING_QUERY_PREFIXES = ("utm_", "spm", "from", "source", "ref")
 MIN_HEADLINE_CHARS = 14
 MAX_ITEMS_PER_SOURCE = 40
@@ -136,7 +137,10 @@ def _log(log: LogCallback | None, message: str) -> None:
 def _clean_text(value: str | None) -> str:
     if not value:
         return ""
-    soup = BeautifulSoup(html.unescape(value), "html.parser")
+    decoded = html.unescape(value)
+    if not HTML_TAG_RE.search(decoded):
+        return SPACE_RE.sub(" ", decoded).strip()
+    soup = BeautifulSoup(decoded, "html.parser")
     return SPACE_RE.sub(" ", soup.get_text(" ", strip=True)).strip()
 
 
