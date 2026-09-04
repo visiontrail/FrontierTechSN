@@ -156,7 +156,7 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(report["max_seconds"], 0.9)
         self.assertTrue(report["runs"][0]["sentence_boundary"])
-        self.assertEqual(report["runs"][0]["maximum_allowed_seconds"], 1.0)
+        self.assertEqual(report["runs"][0]["maximum_allowed_seconds"], 1.2)
 
     def test_rejects_same_pause_without_sentence_boundary_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -187,12 +187,12 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
                 destination.setframerate(24_000)
                 destination.writeframes(
                     struct.pack("<h", 10_000) * 4_800
-                    + struct.pack("<h", 0) * 26_400
+                    + struct.pack("<h", 0) * 31_200
                     + struct.pack("<h", 10_000) * 4_800
                 )
             words = [
                 {"text": "Done.", "start": 0.0, "end": 0.2},
-                {"text": "Next", "start": 1.3, "end": 1.5},
+                {"text": "Next", "start": 1.5, "end": 1.7},
             ]
 
             with self.assertRaisesRegex(
