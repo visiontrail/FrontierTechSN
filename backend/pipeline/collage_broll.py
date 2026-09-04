@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFilter
 
 from backend import config
 from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
@@ -28,9 +28,8 @@ SOURCE_REPOSITORY = "https://github.com/pyang5166/gbro-collage-broll"
 SOURCE_COMMIT = "a1a4ee2e2abf7d44e460026b706d0c72c2cf8a91"
 CLIP_FPS = 24
 MOTION_SAMPLE_FPS = 4
-CACHE_CONTRACT_VERSION = 2
-SELECTION_POLICY_VERSION = 4
-LOCAL_MOTION_POLICY_VERSION = 2
+CACHE_CONTRACT_VERSION = 3
+SELECTION_POLICY_VERSION = 5
 PLAYBACK_POLICY = "play_once_then_hold_last_frame"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -51,20 +50,6 @@ _FALLBACK_COMPOSITIONS = (
     "an all-over composition with controlled density and multiple discovery points",
     "a layered window or portal that reveals depth through overlapping cut surfaces",
     "a split-field composition whose two visual systems collide at the narrative turning point",
-)
-_FALLBACK_MOTIONS = (
-    "pieces tear open and peel back in staggered layers before settling",
-    "elements unfold, hinge, and tumble into a slightly imperfect handmade arrangement",
-    "large shapes sweep across the frame while smaller details punctuate the rhythm",
-    "fragments emerge from different depths, overlap, and lock into a surreal final relationship",
-    "translucent layers drift, fan open, and align with restrained tactile motion",
-    "photocopied scraps slap, rip-reveal, jitter, and finally freeze into a deliberate zine spread",
-)
-_LOCAL_MOTION_FAMILIES = (
-    "torn_ribbons",
-    "folded_columns",
-    "diagonal_shards",
-    "radial_fan",
 )
 GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE = (
     "OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD"
@@ -570,7 +555,6 @@ def _final_contract_bindings(
         "frame": _frame_contract(frame),
         "target_duration_seconds": round(target_duration, 3),
         "clip_fps": CLIP_FPS,
-        "local_motion_policy_version": LOCAL_MOTION_POLICY_VERSION,
         "playback_policy": PLAYBACK_POLICY,
     }
     return {**inputs, "fingerprint": _fingerprint(inputs)}
@@ -692,12 +676,14 @@ def _fallback_spec(scene: dict, index: int) -> dict[str, Any]:
         "art_direction": _FALLBACK_ART_DIRECTIONS[direction_index],
         "color_direction": "choose the palette from the story rather than a fixed house combination",
         "composition_direction": _FALLBACK_COMPOSITIONS[direction_index],
-        "motion_direction": _FALLBACK_MOTIONS[direction_index],
+        "motion_direction": (
+            "Make the narration's central relationship and consequence change visibly. "
+            "Choose the intermediate visual logic, timing, and animation implementation freely."
+        ),
         "elements": [
             {"what": item, "role": "metaphor", "motion": "interpret freely", "placement": "choose for the composition"}
             for item in objects
         ],
-        "assembly_order": objects,
         "final_frame": "A resolved, story-specific collage whose visual relationship is clear without relying on a house layout.",
         "planner": "deterministic_fallback",
     }, scene)
@@ -714,11 +700,10 @@ def _normalize_spec(raw: dict, scene: dict, index: int) -> dict[str, Any]:
         for value in raw_accents
         if str(value).strip()
     ] if isinstance(raw_accents, list) else fallback["accent_colors"]
-    spec["accent_colors"] = accents[:6]
-    elements = [item for item in (spec.get("elements") or []) if isinstance(item, dict)][:8]
+    spec["accent_colors"] = accents
+    elements = [item for item in (spec.get("elements") or []) if isinstance(item, dict)]
     spec["elements"] = elements or fallback["elements"]
-    order = [str(value)[:100] for value in (spec.get("assembly_order") or []) if str(value).strip()]
-    spec["assembly_order"] = order[:8] or [item["what"] for item in spec["elements"]]
+    spec.pop("assembly_order", None)
     for key in (
         "script_meaning",
         "emotion",
@@ -882,8 +867,24 @@ async def plan_specs(
     ]
 
 
+def _element_behavior_brief(spec: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for item in spec.get("elements") or []:
+        if not isinstance(item, dict):
+            continue
+        what = str(item.get("what") or "unspecified visual ingredient").strip()
+        role = str(item.get("role") or "interpret from the story").strip()
+        motion = str(item.get("motion") or "interpret freely").strip()
+        placement = str(item.get("placement") or "choose for the composition").strip()
+        lines.append(
+            f"- {what} | narrative role: {role} | intended visible behavior: "
+            f"{motion} | final-frame relationship: {placement}"
+        )
+    return "\n".join(lines) or "- Interpret every depicted ingredient from the story."
+
+
 def image_prompt(spec: dict[str, Any], frame: FrameSpec) -> str:
-    elements = "; ".join(str(item.get("what") or "") for item in spec["elements"])
+    element_brief = _element_behavior_brief(spec)
     accents = ", ".join(spec["accent_colors"]) or "no mandatory accent swatches"
     return f"""Use case: documentary B-roll.
 Asset type: final still frame for a {frame.aspect_ratio} image-to-video clip.
@@ -892,29 +893,38 @@ Create an original editorial collage expressing this visual metaphor: {spec['vis
 Treat collage as an open medium, not a house style. Exercise broad creative control over the visual era, materials, edge treatment, mark-making, density, scale, depth, and balance. The result may be raw or refined, minimal or maximal, analog or graphic, playful or severe, as the story demands. Do not fall back to a generic centered halftone-paper template.
 
 Art direction: {spec['art_direction']}.
-Color direction: {spec['color_direction']}. The empty animation keyframe uses {spec['background_hex']} as its base color; integrate that anchor naturally rather than letting it dictate the whole palette. Optional planner swatches: {accents}.
+Color direction: {spec['color_direction']}. The first-frame boundary uses {spec['background_hex']} as its base color; integrate that anchor naturally rather than letting it dictate the whole palette. Optional planner swatches: {accents}.
 Composition direction: {spec['composition_direction']}.
-Conceptual ingredients: {elements}. Reinterpret, combine, crop, abstract, or subordinate them freely; they are narrative ingredients, not a rigid object checklist.
 Final relationship: {spec['final_frame']}
 
-Make this frame feel specifically authored for this narration beat and visibly distinct from the other collage shots in the same video. Preserve enough separable visual structure for an assemble-from-empty animation, but do not organize the artwork as a regular tile grid merely to make it easy to animate.
+Story ingredients and the behavior the later video must be able to express:
+{element_brief}
+
+Make this frame feel specifically authored for this narration beat and visibly distinct from the other collage shots in the same video. Reinterpret, combine, crop, abstract, or subordinate the ingredients freely while keeping their important story relationships available to the video model. Do not simplify, panelize, or pre-segment the artwork to accommodate an assumed animation method.
 
 Content exclusions only: no readable typography, letters, numerals, logos, watermarks, UI, or subtitles. These exclusions do not otherwise limit the collage aesthetic."""
 
 
 def video_prompt(spec: dict[str, Any], frame: FrameSpec) -> str:
-    order = " → ".join(spec["assembly_order"])
     target_duration = _seconds(spec.get("target_duration_seconds"), 8.0)
-    return f"""Animate an editorial collage from Image 1, the exact empty first frame, to Image 2, the exact completed last frame. Keep one continuous {frame.aspect_ratio} shot and resolve precisely to the supplied Image 2 composition.
+    element_brief = _element_behavior_brief(spec)
+    return f"""Create a {frame.aspect_ratio} editorial collage video. Image 1 and Image 2 are endpoint constraints only: begin from the supplied first frame and reach the supplied completed final frame in time to hold it at the end.
 
-Motion direction: {spec['motion_direction']}.
-Suggested narrative progression: {order}. Treat it as an expressive story arc, not a mandatory list of identical entrance moves. Animate the depicted objects, cut-paper silhouettes, and material layers according to their roles in the metaphor. Freely vary timing, overlaps, reveals, material behavior, depth, and local movement to suit the art direction. Subtle camera or parallax motion is allowed only when it settles back into the exact supplied final framing.
+Story meaning: {spec['script_meaning']}
+Visual metaphor: {spec['visual_metaphor']}
+Emotional intent: {spec['emotion']}
+Overall change to communicate: {spec['motion_direction']}
+Completed relationship: {spec['final_frame']}
+Visual-world context: {spec['art_direction']}. {spec['color_direction']}. {spec['composition_direction']}.
 
-Do not slice the completed image into a regular grid, equal rectangles, six panels, or a generic tiled mosaic. The movement must remain object-aware or material-aware: tear, peel, hinge, ripple, stamp, sweep, stack, or invent another treatment that follows the supplied motion direction.
+Element-level narrative behavior:
+{element_brief}
 
-Complete one non-repeating evolution across approximately {target_duration:.3f} seconds, then hold the supplied Image 2 composition. Never restart or loop any motion. Preserve the chosen collage language and do not introduce a generic stop-motion preset. Target running time: {target_duration:.3f} seconds.
+The video-generation model owns the entire intermediate visual grammar and implementation. No transition mechanism, shot structure, camera behavior, layer count, phase count, rhythm, or named animation technique is prescribed. The element entries communicate meaning and relationships, not a recipe: make every described dynamic relationship visibly legible, but freely reinterpret how it happens and invent any intermediate imagery needed to serve the story. Do not infer that the completed still should be divided and reassembled merely because two endpoint images were supplied.
 
-No scene cuts, unrelated new objects, readable text, letters, numbers, logos, watermark, UI, or sound."""
+Target running time: approximately {target_duration:.3f} seconds. Do not restart or loop the generated sequence; end by holding the supplied Image 2 composition.
+
+Content exclusions only: no unrelated subject matter, readable text, letters, numbers, logos, watermark, UI, or sound. These exclusions do not otherwise limit the motion design."""
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
@@ -1031,12 +1041,13 @@ def _is_gemini_video_upload_capability_failure(error: Exception) -> bool:
     message = " ".join(str(error).split()).lower()
     if GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE.lower() in message:
         return True
-    return all(
+    page_input_failed = "page.setfileinput" in message and (
+        ("-32000" in message and "not allowed" in message)
+        or ("page.filechooseropened" in message and "not received" in message)
+    )
+    return page_input_failed and all(
         token in message
         for token in (
-            "page.setfileinput",
-            "-32000",
-            "not allowed",
             "dom.setfileinputfiles",
             "cdp method not permitted",
             "runtime.evaluate",
@@ -1259,439 +1270,6 @@ async def _render_local_still(spec: dict[str, Any], item_dir: Path, frame: Frame
     return output
 
 
-def _local_motion_seed(spec: dict[str, Any] | None) -> int:
-    encoded = json.dumps(
-        spec or {}, sort_keys=True, ensure_ascii=False, default=str
-    ).encode("utf-8")
-    return int(hashlib.sha256(encoded).hexdigest()[:16], 16)
-
-
-def _local_motion_family(spec: dict[str, Any] | None) -> str:
-    """Route a fallback clip by its authored motion language, not a house preset."""
-    spec = spec or {}
-    direction = " ".join(
-        str(spec.get(key) or "").lower()
-        for key in ("motion_direction", "art_direction", "composition_direction")
-    )
-    routes = (
-        ("radial_fan", ("ripple", "wave", "radial", "ring", "orbit", "bloom")),
-        ("folded_columns", ("fold", "hinge", "fan", "page", "vellum", "unfurl")),
-        ("torn_ribbons", ("tear", "torn", "rip", "peel", "zine", "scrap", "newsprint")),
-        ("diagonal_shards", ("sweep", "shard", "tumble", "fragment", "collide", "diagonal")),
-    )
-    for family, words in routes:
-        if any(word in direction for word in words):
-            return family
-    return _LOCAL_MOTION_FAMILIES[
-        _local_motion_seed(spec) % len(_LOCAL_MOTION_FAMILIES)
-    ]
-
-
-def _local_piece_count(spec: dict[str, Any] | None, family: str) -> int:
-    """Vary visual granularity while explicitly avoiding the legacy six-panel grid."""
-    spec = spec or {}
-    element_count = len(spec.get("elements") or [])
-    options = {
-        "torn_ribbons": (5, 7, 9),
-        "folded_columns": (5, 7, 8),
-        "diagonal_shards": (7, 8, 9),
-        "radial_fan": (7, 9, 10),
-    }[family]
-    return options[(_local_motion_seed(spec) + element_count) % len(options)]
-
-
-def _torn_band_masks(
-    width: int,
-    height: int,
-    count: int,
-    rng: random.Random,
-    *,
-    vertical: bool = False,
-    slope: float = 0.0,
-) -> list[Image.Image]:
-    """Partition a frame into shared-edge irregular paper bands."""
-    if vertical:
-        return [
-            mask.transpose(Image.Transpose.TRANSPOSE)
-            for mask in _torn_band_masks(
-                height,
-                width,
-                count,
-                rng,
-                slope=slope,
-            )
-        ]
-
-    knot_count = max(7, min(13, width // 90))
-    xs = [round(index * width / (knot_count - 1)) for index in range(knot_count)]
-    spacing = height / count
-    boundaries: list[list[int]] = [[0] * knot_count]
-    for boundary_index in range(1, count):
-        phase = rng.uniform(0, math.tau)
-        values: list[int] = []
-        for knot_index, x in enumerate(xs):
-            wave = math.sin(phase + knot_index * 1.43) * spacing * 0.13
-            tooth = rng.uniform(-spacing * 0.10, spacing * 0.10)
-            lean = slope * spacing * (x / max(1, width) - 0.5)
-            value = round(boundary_index * spacing + wave + tooth + lean)
-            values.append(max(1, min(height - 1, value)))
-        boundaries.append(values)
-    boundaries.append([height] * knot_count)
-
-    masks: list[Image.Image] = []
-    for index in range(count):
-        polygon = [
-            *((xs[knot], boundaries[index][knot]) for knot in range(knot_count)),
-            *(
-                (xs[knot], boundaries[index + 1][knot])
-                for knot in range(knot_count - 1, -1, -1)
-            ),
-        ]
-        mask = Image.new("L", (width, height), 0)
-        ImageDraw.Draw(mask).polygon(polygon, fill=255)
-        masks.append(mask)
-    return masks
-
-
-def _radial_fan_masks(
-    width: int,
-    height: int,
-    count: int,
-    rng: random.Random,
-) -> list[Image.Image]:
-    """Partition a frame into irregular paper sectors around an off-axis focus."""
-    center_x = width * rng.uniform(0.38, 0.62)
-    center_y = height * rng.uniform(0.36, 0.64)
-    radius = math.hypot(width, height) * 1.7
-    step = math.tau / count
-    start_angle = rng.uniform(-math.pi, math.pi)
-    boundaries = [start_angle]
-    for index in range(1, count):
-        boundaries.append(
-            start_angle + index * step + rng.uniform(-step * 0.16, step * 0.16)
-        )
-    boundaries.append(start_angle + math.tau)
-
-    masks: list[Image.Image] = []
-    for index in range(count):
-        angle_start = boundaries[index] - 0.003
-        angle_end = boundaries[index + 1] + 0.003
-        arc_points = []
-        for sample in range(9):
-            angle = angle_start + (angle_end - angle_start) * sample / 8
-            arc_points.append(
-                (
-                    round(center_x + math.cos(angle) * radius),
-                    round(center_y + math.sin(angle) * radius),
-                )
-            )
-        mask = Image.new("L", (width, height), 0)
-        ImageDraw.Draw(mask).polygon(
-            [(round(center_x), round(center_y)), *arc_points], fill=255
-        )
-        masks.append(mask)
-    return masks
-
-
-def _local_piece_specs(
-    completed: Image.Image,
-    spec: dict[str, Any] | None,
-) -> tuple[str, list[dict[str, Any]]]:
-    """Cut a flattened still into varied, non-rectangular motion layers."""
-    width, height = completed.size
-    family = _local_motion_family(spec)
-    seed = _local_motion_seed(spec)
-    rng = random.Random(seed)
-    count = _local_piece_count(spec, family)
-    if family == "folded_columns":
-        masks = _torn_band_masks(width, height, count, rng, vertical=True)
-    elif family == "diagonal_shards":
-        masks = _torn_band_masks(
-            width,
-            height,
-            count,
-            rng,
-            slope=rng.choice((-1.65, 1.65)),
-        )
-    elif family == "radial_fan":
-        masks = _radial_fan_masks(width, height, count, rng)
-    else:
-        masks = _torn_band_masks(width, height, count, rng)
-
-    ordering = list(range(len(masks)))
-    if family == "folded_columns":
-        ordering.sort(key=lambda index: abs(index - (len(masks) - 1) / 2))
-    elif family == "torn_ribbons":
-        rng.shuffle(ordering)
-    rank_by_index = {piece_index: rank for rank, piece_index in enumerate(ordering)}
-
-    pieces: list[dict[str, Any]] = []
-    for index, mask in enumerate(masks):
-        bounds = mask.getbbox()
-        if bounds is None:
-            continue
-        piece = completed.crop(bounds).convert("RGBA")
-        piece.putalpha(mask.crop(bounds))
-        left, top, right, bottom = bounds
-        piece_center_x = (left + right) / 2
-        piece_center_y = (top + bottom) / 2
-        if family == "radial_fan":
-            delta_x = piece_center_x - width / 2
-            delta_y = piece_center_y - height / 2
-            length = max(1.0, math.hypot(delta_x, delta_y))
-            direction = (-delta_x / length, -delta_y / length)
-        elif family == "diagonal_shards":
-            direction = (
-                -1.0 if index % 2 == 0 else 1.0,
-                -0.7 if index % 3 == 0 else 0.7,
-            )
-        elif family == "folded_columns":
-            direction = (-1.0 if index % 2 == 0 else 1.0, 0.0)
-        else:
-            direction = (
-                -1.0 if index % 2 == 0 else 1.0,
-                rng.uniform(-0.18, 0.18),
-            )
-        pieces.append(
-            {
-                "image": piece,
-                "target": (left, top),
-                "direction": direction,
-                "rotation": rng.uniform(-11.0, 11.0),
-                "phase": rng.uniform(0, math.tau),
-                "rank": rank_by_index[index],
-            }
-        )
-    return family, pieces
-
-
-def _local_ease(progress: float, family: str) -> float:
-    progress = min(1.0, max(0.0, progress))
-    if family == "torn_ribbons":
-        shifted = progress - 1
-        return 1 + 2.70158 * shifted**3 + 1.70158 * shifted**2
-    if family == "folded_columns":
-        return 1 - (1 - progress) ** 4
-    if family == "radial_fan":
-        return progress * progress * (3 - 2 * progress)
-    return 1 - (1 - progress) ** 3
-
-
-def _composite_paper_piece(
-    canvas: Image.Image,
-    piece: Image.Image,
-    x: int,
-    y: int,
-    *,
-    shadow_offset: int,
-) -> None:
-    shadow_alpha = piece.getchannel("A").filter(ImageFilter.GaussianBlur(7))
-    shadow_layer = Image.new("RGBA", piece.size, (0, 0, 0, 70))
-    shadow_layer.putalpha(shadow_alpha)
-    canvas.alpha_composite(
-        shadow_layer,
-        (x + shadow_offset, y + shadow_offset + 2),
-    )
-    canvas.alpha_composite(piece, (x, y))
-
-
-async def _animate_still_locally(
-    first: Path,
-    last: Path,
-    item_dir: Path,
-    frame: FrameSpec,
-    target_duration: float,
-    spec: dict[str, Any] | None = None,
-) -> Path:
-    """Animate authored irregular paper layers once, then hold the exact still."""
-    video_dir = item_dir / "video"
-    video_dir.mkdir(parents=True, exist_ok=True)
-    raw = video_dir / "local-collage-motion-v2.mp4"
-    width, height = frame.media_width, frame.media_height
-    with Image.open(first) as source:
-        background = ImageOps.fit(source.convert("RGB"), (width, height))
-    with Image.open(last) as source:
-        completed = ImageOps.fit(source.convert("RGB"), (width, height))
-    family, piece_specs = _local_piece_specs(completed, spec)
-
-    process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-y",
-        "-loglevel",
-        "error",
-        "-f",
-        "rawvideo",
-        "-pixel_format",
-        "rgb24",
-        "-video_size",
-        f"{width}x{height}",
-        "-framerate",
-        str(CLIP_FPS),
-        "-i",
-        "pipe:0",
-        "-an",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        str(raw),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    assert process.stdin is not None
-    total_frames = max(1, round(target_duration * CLIP_FPS))
-    try:
-        for frame_index in range(total_frames):
-            progress = frame_index / max(1, total_frames - 1)
-            if progress >= 0.94:
-                canvas = completed.copy().convert("RGBA")
-                process.stdin.write(canvas.convert("RGB").tobytes())
-                if frame_index % 4 == 3:
-                    await process.stdin.drain()
-                continue
-
-            canvas = background.copy().convert("RGBA")
-            last_rank = max(1, len(piece_specs) - 1)
-            for piece_spec in piece_specs:
-                rank_fraction = piece_spec["rank"] / last_rank
-                entrance_start = 0.035 + rank_fraction * 0.55
-                entrance_duration = 0.24 + 0.08 * (
-                    0.5 + 0.5 * math.sin(piece_spec["phase"])
-                )
-                entrance_progress = min(
-                    1.0,
-                    max(0.0, (progress - entrance_start) / entrance_duration),
-                )
-                if entrance_progress <= 0:
-                    continue
-                eased = _local_ease(entrance_progress, family)
-                direction_x, direction_y = piece_spec["direction"]
-                target_x, target_y = piece_spec["target"]
-                travel = 1 - eased
-                ambient = math.sin(math.pi * progress / 0.94) * entrance_progress
-                drift_x = (
-                    math.sin(progress * math.tau * 1.17 + piece_spec["phase"])
-                    * max(2.0, width * 0.004)
-                    * ambient
-                )
-                drift_y = (
-                    math.cos(progress * math.tau * 0.83 + piece_spec["phase"])
-                    * max(2.0, height * 0.005)
-                    * ambient
-                )
-                source_piece = piece_spec["image"]
-                if family == "folded_columns":
-                    unfold = min(1.0, max(0.0, eased))
-                    unfolded_width = max(
-                        2, round(source_piece.width * (0.06 + 0.94 * unfold))
-                    )
-                    piece = source_piece.resize(
-                        (unfolded_width, source_piece.height),
-                        Image.Resampling.BICUBIC,
-                    )
-                    x = (
-                        target_x
-                        if direction_x < 0
-                        else target_x + source_piece.width - piece.width
-                    )
-                    y = round(target_y + drift_y)
-                elif family == "radial_fan":
-                    scale = 0.14 + 0.86 * min(1.0, max(0.0, eased))
-                    piece = source_piece.resize(
-                        (
-                            max(2, round(source_piece.width * scale)),
-                            max(2, round(source_piece.height * scale)),
-                        ),
-                        Image.Resampling.BICUBIC,
-                    )
-                    travel_x = direction_x * width * 0.24 * travel
-                    travel_y = direction_y * height * 0.24 * travel
-                    x = round(
-                        target_x
-                        + (source_piece.width - piece.width) / 2
-                        + travel_x
-                        + drift_x
-                    )
-                    y = round(
-                        target_y
-                        + (source_piece.height - piece.height) / 2
-                        + travel_y
-                        + drift_y
-                    )
-                else:
-                    distance = 0.76 if family == "torn_ribbons" else 0.58
-                    travel_x = direction_x * width * distance * travel
-                    travel_y = direction_y * height * distance * travel
-                    rotation = (
-                        piece_spec["rotation"] * travel
-                        + math.sin(progress * math.tau + piece_spec["phase"])
-                        * 1.8
-                        * ambient
-                    )
-                    piece = source_piece.rotate(
-                        rotation,
-                        resample=Image.Resampling.BICUBIC,
-                        expand=True,
-                    )
-                    x = round(
-                        target_x
-                        + travel_x
-                        + drift_x
-                        - (piece.width - source_piece.width) / 2
-                    )
-                    y = round(
-                        target_y
-                        + travel_y
-                        + drift_y
-                        - (piece.height - source_piece.height) / 2
-                    )
-                _composite_paper_piece(
-                    canvas,
-                    piece,
-                    round(x),
-                    round(y),
-                    shadow_offset=max(3, round(min(width, height) * 0.012)),
-                )
-
-            # Different families get different restrained global punctuation;
-            # none uses the legacy universal camera push.
-            if family == "diagonal_shards":
-                pan = round(math.sin(math.pi * progress / 0.94) * width * 0.006)
-                expanded = Image.new("RGBA", (width + abs(pan), height), background.getpixel((0, 0)))
-                expanded.alpha_composite(canvas, (max(0, pan), 0))
-                canvas = expanded.crop(
-                    (max(0, -pan), 0, max(0, -pan) + width, height)
-                )
-            elif family == "radial_fan":
-                pulse = 1.0 + 0.012 * math.sin(math.pi * progress / 0.94)
-                enlarged = canvas.resize(
-                    (round(width * pulse), round(height * pulse)),
-                    Image.Resampling.BICUBIC,
-                )
-                x_offset = (enlarged.width - width) // 2
-                y_offset = (enlarged.height - height) // 2
-                canvas = enlarged.crop(
-                    (x_offset, y_offset, x_offset + width, y_offset + height)
-                )
-            process.stdin.write(canvas.convert("RGB").tobytes())
-            if frame_index % 4 == 3:
-                await process.stdin.drain()
-        process.stdin.close()
-        await process.stdin.wait_closed()
-        _, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
-    except Exception:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise
-    if process.returncode:
-        raise RuntimeError(stderr.decode(errors="replace")[-1600:])
-    return raw
-
-
 async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, frame: FrameSpec) -> tuple[Path, str]:
     video_dir = item_dir / "video"
     video_dir.mkdir(parents=True, exist_ok=True)
@@ -1780,8 +1358,8 @@ async def probe_video(
         "fps": abs(fps - CLIP_FPS) <= 0.1,
         "no_audio": not audio,
         "sustained_motion": motion["active_seconds"] >= required_motion_seconds,
-        # The workflow starts on an empty field and ends on the assembled
-        # composition. Matching endpoints indicate a loop or failed assembly.
+        # The workflow starts and ends at distinct supplied boundary frames.
+        # Matching endpoints indicate a loop or failed transformation.
         "non_repeating_endpoints": motion["first_last_delta"] >= 1.0,
     }
     return {
@@ -1913,6 +1491,8 @@ async def generate_collage_broll(
         "planner": "claude_agent_sdk",
         "still_provider": "chatgpt_web_via_opencli",
         "video_provider": "gemini_web_create_video_via_opencli",
+        "motion_design_authority": "video_generation_model",
+        "procedural_motion_fallback_enabled": False,
         "gemini_video_upload_capability": {
             "status": "unknown",
             "error_code": None,
@@ -1924,7 +1504,6 @@ async def generate_collage_broll(
         "selection_mode": "ai" if count is None else "explicit",
         "requested_count": count,
         "gemini_max_clip_seconds": config.COLLAGE_GEMINI_MAX_SECONDS,
-        "local_motion_policy_version": LOCAL_MOTION_POLICY_VERSION,
         "playback_policy": PLAYBACK_POLICY,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "completed_at": None,
@@ -2075,7 +1654,6 @@ async def generate_collage_broll(
             "target_duration_seconds": target_duration,
             "playback_policy": PLAYBACK_POLICY,
             "qa": {},
-            "local_motion_family": None,
             "generation_warnings": [],
             "error": None,
         }
@@ -2191,47 +1769,36 @@ async def generate_collage_broll(
                 f"{target_duration:.3f}s in Gemini Web Create Video",
             )
             if gemini_video_upload_unavailable:
-                warning = (
-                    "Gemini video upload capability unavailable for this compose; "
-                    "skipped web generation and used content-aware local collage motion"
+                error_code = str(
+                    manifest["gemini_video_upload_capability"].get("error_code")
+                    or GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE
                 )
-                item["generation_warnings"].append(warning)
-                _log(log, f"Collage B-roll {index}/{len(specs)}: {warning}")
-                item["local_motion_family"] = _local_motion_family(spec)
-                raw = await _animate_still_locally(
-                    first, last, item_dir, frame, target_duration, spec
+                raise GeminiVideoUploadCapabilityError(
+                    "Gemini video upload capability is unavailable for this compose. "
+                    "Model-generated Paper-Collage motion is required; procedural "
+                    "animation fallback is disabled.",
+                    error_code=error_code,
                 )
-                gemini_url = ""
-                item["video_provider"] = "deterministic_local_collage_motion_v2"
-            else:
-                try:
-                    raw, gemini_url = await _generate_video(
-                        motion_prompt, first, last, item_dir, frame
+            try:
+                raw, gemini_url = await _generate_video(
+                    motion_prompt, first, last, item_dir, frame
+                )
+                item["video_provider"] = "gemini_web_create_video_via_opencli"
+                manifest["gemini_video_upload_capability"]["status"] = "available"
+            except Exception as exc:
+                if isinstance(exc, GeminiVideoUploadCapabilityError):
+                    gemini_video_upload_unavailable = True
+                    manifest["gemini_video_upload_capability"].update(
+                        {
+                            "status": "unavailable",
+                            "error_code": exc.error_code,
+                            "detected_at_scene_id": scene_id,
+                        }
                     )
-                    item["video_provider"] = "gemini_web_create_video_via_opencli"
-                    manifest["gemini_video_upload_capability"]["status"] = "available"
-                except Exception as exc:  # noqa: BLE001 - local animation preserves requested count
-                    if isinstance(exc, GeminiVideoUploadCapabilityError):
-                        gemini_video_upload_unavailable = True
-                        manifest["gemini_video_upload_capability"].update(
-                            {
-                                "status": "unavailable",
-                                "error_code": exc.error_code,
-                                "detected_at_scene_id": scene_id,
-                            }
-                        )
-                    warning = (
-                        f"Web video unavailable ({exc}); "
-                        "used content-aware local collage motion"
-                    )
-                    item["generation_warnings"].append(warning)
-                    _log(log, f"Collage B-roll {index}/{len(specs)}: {warning}")
-                    item["local_motion_family"] = _local_motion_family(spec)
-                    raw = await _animate_still_locally(
-                        first, last, item_dir, frame, target_duration, spec
-                    )
-                    gemini_url = ""
-                    item["video_provider"] = "deterministic_local_collage_motion_v2"
+                raise RuntimeError(
+                    f"Web video unavailable ({exc}). Model-generated Paper-Collage "
+                    "motion is required; procedural animation fallback is disabled."
+                ) from exc
             _assert_item_stage_paths_safe(item_dir)
             final = await _normalize_video(raw, item_dir, frame, target_duration)
             qa = await probe_video(final, frame, target_duration)
