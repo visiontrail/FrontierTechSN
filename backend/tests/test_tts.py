@@ -134,6 +134,73 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["max_seconds"], 0.9)
         self.assertFalse(report["passed"])
 
+    def test_allows_narrow_natural_pause_at_transcribed_sentence_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sentence-boundary.wav"
+            with wave.open(str(path), "wb") as destination:
+                destination.setnchannels(1)
+                destination.setsampwidth(2)
+                destination.setframerate(24_000)
+                destination.writeframes(
+                    struct.pack("<h", 10_000) * 4_800
+                    + struct.pack("<h", 0) * 21_600
+                    + struct.pack("<h", 10_000) * 4_800
+                )
+            words = [
+                {"text": "Done.", "start": 0.0, "end": 0.2},
+                {"text": "Next", "start": 1.1, "end": 1.3},
+            ]
+
+            report = tts._validate_pocket_internal_silence(path, words)
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["max_seconds"], 0.9)
+        self.assertTrue(report["runs"][0]["sentence_boundary"])
+        self.assertEqual(report["runs"][0]["maximum_allowed_seconds"], 1.0)
+
+    def test_rejects_same_pause_without_sentence_boundary_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "mid-sentence.wav"
+            with wave.open(str(path), "wb") as destination:
+                destination.setnchannels(1)
+                destination.setsampwidth(2)
+                destination.setframerate(24_000)
+                destination.writeframes(
+                    struct.pack("<h", 10_000) * 4_800
+                    + struct.pack("<h", 0) * 21_600
+                    + struct.pack("<h", 10_000) * 4_800
+                )
+            words = [
+                {"text": "Still,", "start": 0.0, "end": 0.2},
+                {"text": "speaking", "start": 1.1, "end": 1.3},
+            ]
+
+            with self.assertRaisesRegex(tts.TtsIntegrityError, "internal pause"):
+                tts._validate_pocket_internal_silence(path, words)
+
+    def test_rejects_excessive_pause_even_at_sentence_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "long-sentence-boundary.wav"
+            with wave.open(str(path), "wb") as destination:
+                destination.setnchannels(1)
+                destination.setsampwidth(2)
+                destination.setframerate(24_000)
+                destination.writeframes(
+                    struct.pack("<h", 10_000) * 4_800
+                    + struct.pack("<h", 0) * 26_400
+                    + struct.pack("<h", 10_000) * 4_800
+                )
+            words = [
+                {"text": "Done.", "start": 0.0, "end": 0.2},
+                {"text": "Next", "start": 1.3, "end": 1.5},
+            ]
+
+            with self.assertRaisesRegex(
+                tts.TtsIntegrityError,
+                "sentence-boundary pause",
+            ):
+                tts._validate_pocket_internal_silence(path, words)
+
     def test_split_tts_text_repeats_dialogue_metadata_without_repeating_words(self):
         text = "Speaker 1: One two three. Four five six.\nSpeaker 2: Seven eight."
 

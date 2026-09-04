@@ -91,12 +91,13 @@ ORPHEUS_INTEGRITY_VERIFIER_VERSION = 23
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 3
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 4
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
 POCKET_TTS_LONG_SILENCE_SECONDS = 0.5
 POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS = 0.8
+POCKET_TTS_MAX_SENTENCE_BOUNDARY_SILENCE_SECONDS = 1.0
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -1648,13 +1649,23 @@ def _wav_quiet_windows(
     return quiet_windows
 
 
-def _pocket_internal_silence_report(path: Path) -> dict:
-    """Detect choppy pauses inside one natural program segment."""
+def _pocket_internal_silence_report(
+    path: Path,
+    transcript_words: list[dict] | None = None,
+) -> dict:
+    """Detect choppy pauses without rejecting ordinary sentence cadence.
+
+    Pocket TTS performs its own sentence splitting. Its sentence joins can be
+    slightly longer than ordinary phrase pauses, so a single waveform-only
+    ceiling makes natural delivery fail nondeterministically. When the normal
+    acoustic transcript is available, permit a narrow sentence-boundary margin
+    while retaining the original ceiling everywhere else.
+    """
     quiet_windows = _wav_quiet_windows(path)
     minimum_windows = math.ceil(
         POCKET_TTS_LONG_SILENCE_SECONDS * 1000 / POCKET_TTS_SILENCE_WINDOW_MS
     )
-    runs: list[float] = []
+    raw_runs: list[dict[str, float]] = []
     start: int | None = None
     for index, quiet in enumerate([*quiet_windows, False]):
         if quiet and start is None:
@@ -1665,26 +1676,111 @@ def _pocket_internal_silence_report(path: Path) -> dict:
         # Leading/trailing silence belongs to the physical program boundary,
         # not to delivery inside the story. Only internal runs can be a stutter.
         if start > 0 and index < len(quiet_windows) and index - start >= minimum_windows:
-            runs.append(round((index - start) * POCKET_TTS_SILENCE_WINDOW_MS / 1000, 3))
+            raw_runs.append(
+                {
+                    "start_seconds": round(
+                        start * POCKET_TTS_SILENCE_WINDOW_MS / 1000,
+                        3,
+                    ),
+                    "end_seconds": round(
+                        index * POCKET_TTS_SILENCE_WINDOW_MS / 1000,
+                        3,
+                    ),
+                    "duration_seconds": round(
+                        (index - start) * POCKET_TTS_SILENCE_WINDOW_MS / 1000,
+                        3,
+                    ),
+                }
+            )
         start = None
-    maximum = max(runs, default=0.0)
+
+    words = [
+        word
+        for word in transcript_words or []
+        if str(word.get("text") or "").strip()
+    ]
+    runs: list[dict] = []
+    for raw_run in raw_runs:
+        run_start = raw_run["start_seconds"]
+        run_end = raw_run["end_seconds"]
+        preceding = [
+            word
+            for word in words
+            if float(word.get("end") or 0) <= run_start
+        ]
+        following = [
+            word
+            for word in words
+            if float(word.get("start") or 0) >= run_start
+        ]
+        previous_word = max(
+            preceding,
+            key=lambda word: float(word.get("end") or 0),
+            default=None,
+        )
+        next_word = min(
+            following,
+            key=lambda word: float(word.get("start") or 0),
+            default=None,
+        )
+        previous_text = str((previous_word or {}).get("text") or "").strip()
+        previous_end = float((previous_word or {}).get("end") or 0)
+        next_start = float((next_word or {}).get("start") or 0)
+        sentence_boundary = bool(
+            previous_word
+            and next_word
+            and re.search(r"[.!?][\"')\]]*$", previous_text)
+            and 0 <= run_start - previous_end <= 0.6
+            and run_start <= next_start <= run_end + 0.6
+        )
+        allowed_seconds = (
+            POCKET_TTS_MAX_SENTENCE_BOUNDARY_SILENCE_SECONDS
+            if sentence_boundary
+            else POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS
+        )
+        runs.append(
+            {
+                **raw_run,
+                "sentence_boundary": sentence_boundary,
+                "previous_word": previous_text or None,
+                "next_word": (
+                    str((next_word or {}).get("text") or "").strip() or None
+                ),
+                "maximum_allowed_seconds": allowed_seconds,
+                "passed": raw_run["duration_seconds"] <= allowed_seconds,
+            }
+        )
+
+    durations = [run["duration_seconds"] for run in runs]
+    maximum = max(durations, default=0.0)
     return {
         "minimum_reported_seconds": POCKET_TTS_LONG_SILENCE_SECONDS,
         "maximum_allowed_seconds": POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS,
+        "maximum_sentence_boundary_allowed_seconds": (
+            POCKET_TTS_MAX_SENTENCE_BOUNDARY_SILENCE_SECONDS
+        ),
         "count": len(runs),
-        "durations_seconds": runs,
+        "durations_seconds": durations,
         "max_seconds": round(maximum, 3),
-        "passed": maximum <= POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS,
+        "runs": runs,
+        "passed": all(run["passed"] for run in runs),
     }
 
 
-def _validate_pocket_internal_silence(path: Path) -> dict:
-    report = _pocket_internal_silence_report(path)
+def _validate_pocket_internal_silence(
+    path: Path,
+    transcript_words: list[dict] | None = None,
+) -> dict:
+    report = _pocket_internal_silence_report(path, transcript_words)
     if not report["passed"]:
+        violation = next(run for run in report["runs"] if not run["passed"])
+        boundary_label = (
+            " sentence-boundary" if violation["sentence_boundary"] else ""
+        )
         raise TtsIntegrityError(
-            "Pocket TTS produced an internal pause of "
-            f"{report['max_seconds']:.2f}s, above the "
-            f"{POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS:.2f}s continuity ceiling"
+            f"Pocket TTS produced an internal{boundary_label} pause of "
+            f"{violation['duration_seconds']:.2f}s, above the "
+            f"{violation['maximum_allowed_seconds']:.2f}s continuity ceiling"
         )
     return report
 
@@ -1693,13 +1789,26 @@ def _pocket_continuity_report(
     source_text: str,
     chunks: list[str],
     wav_parts: list[Path],
+    part_metadata: list[dict] | None = None,
 ) -> dict:
     """Record both structural joins and measured silence at request boundaries."""
     physical_line_count = len(
         [line for line in source_text.splitlines() if line.strip()]
     )
     edges = [_wav_edge_silence_seconds(path) for path in wav_parts]
-    internal_silence = [_pocket_internal_silence_report(path) for path in wav_parts]
+    internal_silence = []
+    for index, path in enumerate(wav_parts):
+        metadata = (
+            (part_metadata or [])[index]
+            if index < len(part_metadata or [])
+            else {}
+        )
+        persisted = (metadata.get("integrity") or {}).get("internal_silence")
+        internal_silence.append(
+            persisted
+            if isinstance(persisted, dict)
+            else _pocket_internal_silence_report(path)
+        )
     joins = [
         round(edges[index]["trailing_seconds"] + edges[index + 1]["leading_seconds"], 3)
         for index in range(max(0, len(edges) - 1))
@@ -2773,6 +2882,7 @@ async def _verify_orpheus_part(
     emit: LogCallback,
     adjudicate_asr: bool = False,
     provider_label: str = "Orpheus",
+    validate_pocket_continuity: bool = False,
 ) -> dict:
     from backend.pipeline import av_sync
 
@@ -3011,6 +3121,8 @@ async def _verify_orpheus_part(
             f"{provider_label} narration does not match its input utterance: "
             + "; ".join(report["failure_reasons"])
         )
+    if validate_pocket_continuity:
+        report["internal_silence"] = _validate_pocket_internal_silence(path, words)
     substitutions = report.get("phonetic_substitutions") or []
     if report.get("verification_mode") == "llm_asr_adjudication":
         emit(
@@ -3655,7 +3767,6 @@ async def _recover_pocket_part(
         return None
     try:
         _validate_wav_part(path, text)
-        _validate_pocket_internal_silence(path)
         integrity = await _verify_orpheus_part(
             path,
             text,
@@ -3663,6 +3774,7 @@ async def _recover_pocket_part(
             emit=emit,
             adjudicate_asr=True,
             provider_label="Pocket TTS",
+            validate_pocket_continuity=True,
         )
     except TtsIntegrityError as exc:
         emit(f"Pocket TTS recovery: existing WAV rejected ({exc}); regenerating")
@@ -3800,7 +3912,6 @@ async def _generate_pocket_tts(
             generation_seconds = time.monotonic() - request_started
             try:
                 _validate_wav_part(expected_part, chunk)
-                _validate_pocket_internal_silence(expected_part)
                 if verify_text:
                     integrity = await _verify_orpheus_part(
                         expected_part,
@@ -3809,12 +3920,15 @@ async def _generate_pocket_tts(
                         emit=emit,
                         adjudicate_asr=True,
                         provider_label="Pocket TTS",
+                        validate_pocket_continuity=True,
                     )
                 else:
+                    internal_silence = _validate_pocket_internal_silence(expected_part)
                     integrity = {
                         "verified": True,
                         "method": "duration_only_preview",
                         "expected_words": _spoken_word_count(chunk),
+                        "internal_silence": internal_silence,
                     }
             except TtsIntegrityError as exc:
                 # A known rejected sample must be regenerated on the next outer
@@ -3873,7 +3987,12 @@ async def _generate_pocket_tts(
         extra={
             "provider_revision": config.POCKET_TTS_MODEL_REVISION,
             "voice": voice,
-            "continuity": _pocket_continuity_report(cleaned, chunks, wav_parts),
+            "continuity": _pocket_continuity_report(
+                cleaned,
+                chunks,
+                wav_parts,
+                part_metadata,
+            ),
             "performance": {
                 "generation_seconds": round(generation_seconds, 3),
                 "audio_seconds": round(audio_seconds, 3),
