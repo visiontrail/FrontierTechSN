@@ -30,13 +30,40 @@ Every implementation task that changes files MUST end with a git commit before t
 
 ## JumpServer and Orpheus Host Access
 
-Orpheus is deployed on the ARM64 `nr-test` server (`10.60.11.3`; the service normally listens on port `8088`) behind JumpServer. Use the following interactive login path when deployment or remote verification is required:
+Connect to the bastion with SSH:
 
-1. Run `ssh guoliang@relay.yhroot.com` and authenticate with the credentials already configured on the local machine or enter them interactively. Never store passwords, private keys, or session credentials in this repository.
-2. At `Opt>`, press Enter to open the asset list.
-3. Select the asset displayed as `nr-test` / `10.60.11.3`.
-4. Select the account displayed as `yhsudo`.
-5. After login, run `sudo su`, then `cd /home/guoliang`.
+```sh
+ssh guoliang@relay.yhroot.com
+```
+
+- Authenticate with credentials already configured on the local machine, or enter them interactively. Never store passwords, private keys, or session credentials in this repository.
+- The SSH session opens the JumpServer interactive asset selector.
+- At the initial `Opt>` prompt, press Enter without selecting an option.
+
+## deployed tts server (`nr-test`, `10.60.11.3`)
+
+After connecting to JumpServer and reaching the asset list:
+
+1. At `[Host]>`, enter `4` to select `nr-test` (`10.60.11.3`).
+2. At the account `ID>` prompt, enter `1` to select the `yhsudo` account.
+3. After login, become root and enter the working directory:
+
+```sh
+sudo su
+cd /home/guoliang/
+```
+
+The complete expected interaction is:
+
+```text
+Opt> <press Enter>
+[Host]> 4
+ID> 1
+yhsudo@ubuntu:~$ sudo su
+root@ubuntu:/home/yhsudo# cd /home/guoliang/
+root@ubuntu:/home/guoliang#
+```
+
 
 JumpServer menu numbers can change. Always select the currently displayed asset and account labels instead of relying on historical numeric choices. Before changing, restarting, or redeploying Orpheus, inspect the remote working tree, running processes or containers, and current service state; preserve unrelated remote changes and perform an end-to-end request against the deployed service after the requested change.
 
