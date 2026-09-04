@@ -143,18 +143,18 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
                 destination.setframerate(24_000)
                 destination.writeframes(
                     struct.pack("<h", 10_000) * 4_800
-                    + struct.pack("<h", 0) * 21_600
+                    + struct.pack("<h", 0) * 26_400
                     + struct.pack("<h", 10_000) * 4_800
                 )
             words = [
                 {"text": "Done.", "start": 0.0, "end": 0.2},
-                {"text": "Next", "start": 1.1, "end": 1.3},
+                {"text": "Next", "start": 1.3, "end": 1.5},
             ]
 
             report = tts._validate_pocket_internal_silence(path, words)
 
         self.assertTrue(report["passed"])
-        self.assertEqual(report["max_seconds"], 0.9)
+        self.assertEqual(report["max_seconds"], 1.1)
         self.assertTrue(report["runs"][0]["sentence_boundary"])
         self.assertEqual(report["runs"][0]["maximum_allowed_seconds"], 1.2)
 
