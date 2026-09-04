@@ -1,6 +1,6 @@
-"""ByteFront Espresso outro library and render-task staging.
+"""ByteFront Espresso system bookend library and render-task staging.
 
-Gemini owns the moving picture in these outros. HyperFrames owns the editable
+The selected preset owns the moving picture. HyperFrames owns the editable
 brand, closing message, and engagement controls, which lets the video director
 agent revise copy and layout without regenerating the background video.
 """
@@ -118,7 +118,7 @@ def stage_outro(
     storyboard: dict,
     style: str,
 ) -> dict[str, Any]:
-    """Stage selected media, append the timed scene, and return its visual plan."""
+    """Stage selected media and bind it to the spoken closing scene."""
     preset = resolve_outro_preset(style)
     task_root = Path(task_dir)
     asset_dir = task_root / "assets" / "outro"
@@ -129,33 +129,26 @@ def stage_outro(
     shutil.copyfile(preset["background_path"], background_dest)
     shutil.copyfile(preset["logo_path"], logo_dest)
 
-    start = round(float(storyboard["total_duration"]), 2)
-    duration = OUTRO_DURATION_SECONDS
-    scene_id = f"scene-{len(storyboard.get('scenes') or []) + 1:02d}"
-    scene = {
-        "id": scene_id,
-        "index": len(storyboard.get("scenes") or []),
-        "start": start,
-        "duration": duration,
-        "lines": [],
-        "text": (
-            "ByteFront Espresso end card with the brand, an English closing message, "
-            "and Like, Comment, and Share actions over the selected Gemini motion background."
-        ),
-        "word_count": 0,
-        "keywords": ["ByteFront Espresso", "Like", "Comment", "Share"],
-        "scene_kind": "outro",
-        "outro_style": style,
-    }
-    storyboard.setdefault("scenes", []).append(scene)
+    scenes = list(storyboard.get("scenes") or [])
+    closing = next(
+        (scene for scene in reversed(scenes) if scene.get("program_segment_kind") == "closing"),
+        scenes[-1] if scenes else None,
+    )
+    if closing is None:
+        raise ValueError("storyboard has no timed scene for the branded outro")
+    start = round(float(closing.get("start") or 0), 2)
+    duration = round(float(closing.get("duration") or 0), 2)
+    if duration <= 0:
+        raise ValueError("spoken closing scene has no positive duration")
+    closing["scene_kind"] = "outro"
+    closing["outro_style"] = style
     storyboard["outro_start"] = start
     storyboard["outro_duration"] = duration
-    storyboard["total_duration"] = round(start + duration, 2)
-    storyboard["scene_count"] = len(storyboard["scenes"])
     storyboard["outro_style"] = style
 
     return {
-        "id": scene_id,
+        "id": str(closing["id"]),
+        "duration": duration,
         "archetype": "outro",
         "kicker": "SEE YOU IN THE NEXT SHOT",
         "headline": "THANKS FOR WATCHING",

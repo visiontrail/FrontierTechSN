@@ -1241,3 +1241,18 @@ def test_normalize_trims_without_replaying_the_source(tmp_path: Path):
     assert "-stream_loop" not in command
     assert command[command.index("-t") + 1] == str(target_duration)
     assert final.name == "final-6.25s-noaudio.mp4"
+
+
+def test_candidate_scenes_exclude_spoken_program_bookends():
+    storyboard = {
+        "scenes": [
+            {"id": "scene-01", "program_segment_kind": "opening"},
+            {"id": "scene-02", "program_segment_kind": "news"},
+            {"id": "scene-03", "program_segment_kind": "news"},
+            {"id": "scene-04", "program_segment_kind": "closing"},
+        ]
+    }
+
+    assert [
+        scene["id"] for scene in collage_broll._candidate_scenes(storyboard)
+    ] == ["scene-02", "scene-03"]

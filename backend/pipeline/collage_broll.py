@@ -269,7 +269,7 @@ def _planning_fingerprint(
     force_opening: bool,
     frame: FrameSpec,
 ) -> str:
-    scenes = list(storyboard.get("scenes") or [])
+    scenes = _candidate_scenes(storyboard)
     target_count = min(max(1, count), len(scenes)) if scenes else 0
     return _fingerprint(
         {
@@ -617,8 +617,17 @@ def _json_array(value: str) -> list[dict[str, Any]]:
     raise RuntimeError("Collage planning agent did not return a JSON array")
 
 
+def _candidate_scenes(storyboard: dict) -> list[dict]:
+    """Keep generated collage B-roll out of spoken program bookends."""
+    return [
+        scene
+        for scene in storyboard.get("scenes") or []
+        if scene.get("program_segment_kind") not in {"opening", "closing"}
+    ]
+
+
 def _scene_choices(storyboard: dict, count: int, force_opening: bool) -> list[dict]:
-    scenes = list(storyboard.get("scenes") or [])
+    scenes = _candidate_scenes(storyboard)
     if not scenes:
         return []
     count = min(max(1, count), len(scenes))
@@ -710,7 +719,7 @@ async def plan_specs(
     log: LogCallback | None = None,
 ) -> list[dict[str, Any]]:
     """Use a dedicated Agent SDK turn to select beats and design metaphors."""
-    scenes = list(storyboard.get("scenes") or [])
+    scenes = _candidate_scenes(storyboard)
     if not scenes:
         return []
     target_count = min(max(1, count), len(scenes))
@@ -1575,7 +1584,7 @@ async def generate_collage_broll(
     }
     cached_specs: list[dict[str, Any]] = []
     cache_hit = False
-    scenes = list(storyboard.get("scenes") or [])
+    scenes = _candidate_scenes(storyboard)
     target_count = min(max(1, count), len(scenes)) if scenes else 0
     if specs_path.is_file():
         try:

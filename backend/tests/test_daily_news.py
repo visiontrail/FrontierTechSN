@@ -1322,6 +1322,7 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
     assert task_config.footage_enabled is True
     assert task_config.footage_provider == "hybrid"
     assert task_config.footage_clip_count == 11
+    assert task_config.opening_style == "editorial_motion"
     assert task_config.background_music_provider == "local"
     assert task_config.background_music_track_id == "strategic-outlook"
     assert task_config.outro_style == "data-extraction"

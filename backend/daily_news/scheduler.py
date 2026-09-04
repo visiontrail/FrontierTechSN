@@ -127,7 +127,9 @@ async def create_daily_task(
         tts_model=settings.tts_model,
         video_template="swiss",
         video_orientation="landscape",
-        opening_style="paper_collage",
+        # The selected system preset owns the spoken opening and closing.
+        # Paper-Collage remains B-roll for news segments only.
+        opening_style="editorial_motion",
         footage_enabled=settings.public_footage_enabled,
         # The desk exposes one Public Footage switch, so an enabled run must
         # use the hybrid scout. Wikimedia remains the rights-first source and

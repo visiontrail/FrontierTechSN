@@ -47,7 +47,7 @@ def _storyboard() -> dict:
     }
 
 
-def test_stage_intro_prepends_bookend_shifts_narration_and_writes_variables(
+def test_stage_intro_replaces_spoken_opening_without_shifting_narration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -65,18 +65,34 @@ def test_stage_intro_prepends_bookend_shifts_narration_and_writes_variables(
     assert plan["edition_weekday"] == "WEDNESDAY"
     assert plan["edition_date"] == "SEPTEMBER 02, 2026"
     assert set(board["intro_variables"]) == {"edition_date", "edition_weekday"}
-    assert board["scenes"][0]["id"] == intros.INTRO_SCENE_ID
+    assert plan["id"] == "scene-01"
+    assert plan["duration"] == 6.0
+    assert board["scenes"][0]["id"] == "scene-01"
+    assert board["scenes"][0]["scene_kind"] == "intro"
+    assert board["scenes"][0]["start"] == 0.0
+    assert board["scenes"][0]["lines"][0]["start"] == 0.0
     assert board["scenes"][1]["start"] == 6.0
-    assert board["scenes"][1]["lines"][0]["start"] == 6.0
-    assert board["scenes"][2]["start"] == 12.0
-    assert board["content_start"] == 6.0
-    assert board["total_duration"] == 18.0
+    assert board["content_start"] == 0.0
+    assert board["total_duration"] == 12.0
+    assert board["intro_duration"] == 6.0
     assert board["edition_date"] == "2026-09-02"
     assert (tmp_path / "task/assets/intro/background.mp4").read_bytes() == b"video"
     assert (tmp_path / "task/assets/intro/bytefront-logo.png").read_bytes() == b"logo"
     assert json.loads(
         (tmp_path / "task" / intros.INTRO_VARIABLES_FILENAME).read_text()
     ) == board["intro_variables"]
+
+
+def test_stage_intro_rejects_storyboard_without_timed_scenes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _install_fake_library(tmp_path, monkeypatch)
+    board = _storyboard()
+    board["scenes"] = []
+
+    with pytest.raises(ValueError, match="no timed scene"):
+        intros.stage_intro(tmp_path / "task", board, "morning-brief")
 
 
 def test_intro_scene_reads_declared_hyperframes_variables_and_passes_agent_gate():

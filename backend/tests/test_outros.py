@@ -29,6 +29,7 @@ def _storyboard() -> dict:
                 "duration": 42.5,
                 "lines": [],
                 "text": "Narrated content",
+                "program_segment_kind": "closing",
             }
         ],
     }
@@ -47,7 +48,7 @@ def test_outro_catalog_has_three_presets_and_morning_default():
     )
 
 
-def test_stage_outro_extends_storyboard_and_copies_selected_media(
+def test_stage_outro_replaces_spoken_closing_without_extending_storyboard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -58,12 +59,27 @@ def test_stage_outro_extends_storyboard_and_copies_selected_media(
 
     assert plan["archetype"] == "outro"
     assert plan["outro_style"] == "signal-shot"
-    assert board["outro_start"] == 42.5
-    assert board["outro_duration"] == 6.0
-    assert board["total_duration"] == 48.5
+    assert plan["id"] == "scene-01"
+    assert plan["duration"] == 42.5
+    assert board["outro_start"] == 0.0
+    assert board["outro_duration"] == 42.5
+    assert board["total_duration"] == 42.5
+    assert len(board["scenes"]) == 1
     assert board["scenes"][-1]["scene_kind"] == "outro"
     assert (tmp_path / "task/assets/outro/background.mp4").read_bytes() == b"video"
     assert (tmp_path / "task/assets/outro/bytefront-logo.png").read_bytes() == b"logo"
+
+
+def test_stage_outro_rejects_storyboard_without_timed_scenes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _install_fake_library(tmp_path, monkeypatch)
+    board = _storyboard()
+    board["scenes"] = []
+
+    with pytest.raises(ValueError, match="no timed scene"):
+        outros.stage_outro(tmp_path / "task", board, "morning-brief")
 
 
 def test_outro_scene_is_a_valid_editable_hyperframes_composition():

@@ -1358,7 +1358,11 @@ async def compose_video(
     requested_footage = int((manifest or {}).get("requested_clip_count") or 0)
     acquired_footage = len((manifest or {}).get("clips") or [])
 
-    force_collage_opening = opening_style == "paper_collage"
+    # Morning Desk has explicit spoken opening/closing scenes. Those are owned
+    # by the selected system bookend preset, never by generated collage B-roll.
+    force_collage_opening = (
+        opening_style == "paper_collage" and not board.get("program_timeline")
+    )
     if collage_broll_enabled or force_collage_opening:
         requested_collages = collage_broll_count if collage_broll_enabled else 1
         collage_manifest = await collage_broll.generate_collage_broll(
@@ -1594,20 +1598,27 @@ async def compose_video(
         outro_style,
         edition_date=edition_date,
     )
-    scene_plans.insert(0, intro_plan)
+    intro_index = next(
+        index for index, plan in enumerate(scene_plans) if plan.get("id") == intro_plan["id"]
+    )
+    scene_plans[intro_index] = intro_plan
     outro_plan = outros.stage_outro(output_dir_path, board, outro_style)
-    scene_plans.append(outro_plan)
+    outro_index = next(
+        index for index, plan in enumerate(scene_plans) if plan.get("id") == outro_plan["id"]
+    )
+    scene_plans[outro_index] = outro_plan
     plans = scene_plans
     sb.write_storyboard(output_dir_path, board)
     emit(
-        f"Intro: {intro_plan['intro_label']} staged as a "
-        f"{intros.INTRO_DURATION_SECONDS:.0f}s Gemini motion scene; "
+        f"Intro: {intro_plan['intro_label']} bound to the "
+        f"{intro_plan['duration']:.2f}s spoken opening; "
         f"HyperFrames variables inject {intro_plan['edition_weekday']}, "
         f"{intro_plan['edition_date']}"
     )
     emit(
-        f"Outro: {outro_plan['outro_label']} staged as a {outros.OUTRO_DURATION_SECONDS:.0f}s "
-        "Gemini motion scene with an editable HyperFrames agent overlay"
+        f"Outro: {outro_plan['outro_label']} bound to the "
+        f"{outro_plan['duration']:.2f}s spoken closing with an editable "
+        "HyperFrames agent overlay"
     )
 
     # --- 3. Authoring ------------------------------------------------------

@@ -1,6 +1,6 @@
 """ByteFront Espresso branded intro staging and runtime variables.
 
-The Gemini plate supplies the moving paper-collage background. HyperFrames owns
+The configured system preset supplies the moving background. HyperFrames owns
 the logo and edition date, so each render can inject its actual date without
 regenerating or baking text into the video asset.
 """
@@ -98,27 +98,6 @@ def composition_variable_specs(values: dict[str, str]) -> list[dict[str, str]]:
     ]
 
 
-def _shift_narrated_timeline(storyboard: dict, offset: float) -> None:
-    for scene in storyboard.get("scenes") or []:
-        scene["start"] = round(float(scene.get("start") or 0) + offset, 2)
-        for line in scene.get("lines") or []:
-            line["start"] = round(float(line.get("start") or 0) + offset, 3)
-
-    storyboard["content_start"] = round(
-        float(storyboard.get("content_start") or 0) + offset,
-        2,
-    )
-    storyboard["outro_start"] = round(
-        float(storyboard.get("outro_start") or storyboard.get("total_duration") or 0)
-        + offset,
-        2,
-    )
-    storyboard["total_duration"] = round(
-        float(storyboard.get("total_duration") or 0) + offset,
-        2,
-    )
-
-
 def stage_intro(
     task_dir: str | Path,
     storyboard: dict,
@@ -126,9 +105,17 @@ def stage_intro(
     *,
     edition_date: str | date | datetime | None = None,
 ) -> dict[str, Any]:
-    """Stage media, prepend the intro scene, and shift narration by six seconds."""
+    """Stage media and bind the preset to the spoken opening scene."""
     if any(scene.get("scene_kind") == "intro" for scene in storyboard.get("scenes") or []):
         raise ValueError("storyboard already contains a branded intro")
+
+    scenes = list(storyboard.get("scenes") or [])
+    opening = next(
+        (scene for scene in scenes if scene.get("program_segment_kind") == "opening"),
+        scenes[0] if scenes else None,
+    )
+    if opening is None:
+        raise ValueError("storyboard has no timed scene for the branded intro")
 
     preset = outros.resolve_outro_preset(style)
     task_root = Path(task_dir)
@@ -140,25 +127,12 @@ def stage_intro(
     resolved_date = _edition_date(edition_date, storyboard)
     values = edition_variables(storyboard, resolved_date)
     resolved_iso_date = resolved_date.isoformat()
-    _shift_narrated_timeline(storyboard, INTRO_DURATION_SECONDS)
-
-    scene = {
-        "id": INTRO_SCENE_ID,
-        "index": -1,
-        "start": 0.0,
-        "duration": INTRO_DURATION_SECONDS,
-        "lines": [],
-        "text": (
-            "ByteFront Espresso branded opening with the current edition date, "
-            "weekday, and unified wordmark over the selected Gemini motion plate."
-        ),
-        "word_count": 0,
-        "keywords": ["ByteFront Espresso", values["edition_date"]],
-        "scene_kind": "intro",
-        "intro_style": style,
-    }
-    storyboard.setdefault("scenes", []).insert(0, scene)
-    storyboard["intro_duration"] = INTRO_DURATION_SECONDS
+    duration = round(float(opening.get("duration") or 0), 2)
+    if duration <= 0:
+        raise ValueError("spoken opening scene has no positive duration")
+    opening["scene_kind"] = "intro"
+    opening["intro_style"] = style
+    storyboard["intro_duration"] = duration
     storyboard["intro_style"] = style
     storyboard["edition_date"] = resolved_iso_date
     storyboard["intro_variables"] = values
@@ -172,7 +146,8 @@ def stage_intro(
     )
 
     return {
-        "id": INTRO_SCENE_ID,
+        "id": str(opening["id"]),
+        "duration": duration,
         "archetype": "intro",
         "kicker": "YOUR DAILY SHOT OF FRONTIER TECH",
         "headline": "ByteFront Espresso",
