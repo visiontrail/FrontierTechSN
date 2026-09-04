@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from backend.pipeline import collage_broll
 from backend.pipeline.video_format import FrameSpec, LANDSCAPE, PORTRAIT
@@ -156,6 +156,8 @@ def test_prompts_follow_orientation_keep_media_clean_and_leave_style_open():
     assert "Image 1, the exact empty first frame" in motion
     assert spec["motion_direction"] in motion
     assert "not a mandatory list of identical entrance moves" in motion
+    assert "Do not slice the completed image into a regular grid" in motion
+    assert "six panels" in motion
     assert "No scene cuts" in motion
     assert "Target running time: 6.000 seconds" in motion
     assert "Never restart or loop any motion" in motion
@@ -190,6 +192,38 @@ def test_normalize_spec_preserves_freeform_ai_art_direction_and_sparse_elements(
     assert spec["accent_colors"] == []
     assert spec["elements"] == raw["elements"]
     assert spec["assembly_order"] == raw["assembly_order"]
+
+
+def test_local_motion_uses_varied_irregular_layers_instead_of_six_tiles():
+    completed = Image.new("RGB", (320, 180), "#F2E7CF")
+    directions = {
+        "paper strips tear open and peel back": "torn_ribbons",
+        "vellum pages unfold and hinge outward": "folded_columns",
+        "large shapes sweep diagonally like shards": "diagonal_shards",
+        "concentric tissue rings ripple from the center": "radial_fan",
+    }
+
+    for motion_direction, expected_family in directions.items():
+        spec = {
+            "motion_direction": motion_direction,
+            "elements": [{"what": "subject"}, {"what": "consequence"}],
+        }
+        family, pieces = collage_broll._local_piece_specs(completed, spec)
+
+        assert family == expected_family
+        assert len(pieces) != 6
+        assert len({piece["image"].size for piece in pieces}) > 1
+        assert any(
+            piece["image"].getchannel("A").getextrema() == (0, 255)
+            for piece in pieces
+        )
+
+        coverage = Image.new("L", completed.size, 0)
+        for piece in pieces:
+            layer = Image.new("L", completed.size, 0)
+            layer.paste(piece["image"].getchannel("A"), piece["target"])
+            coverage = ImageChops.lighter(coverage, layer)
+        assert coverage.getextrema() == (255, 255)
 
 
 def test_clip_duration_matches_script_and_respects_gemini_ceiling():
@@ -771,6 +805,7 @@ def test_agent_selects_beats_from_the_full_timeline():
     planner_system = complete.await_args.args[0]
     assert "Paper collage is the medium, not a preset aesthetic" in planner_system
     assert "deliberately vary at least the composition strategy" in planner_system
+    assert "a fixed six-panel assembly" in planner_system
     assert '"art_direction"' in planner_system
     assert '"motion_direction"' in planner_system
 
@@ -996,8 +1031,8 @@ def test_generate_falls_back_locally_when_web_video_fails(tmp_path: Path):
         final.write_bytes(b"final")
         return final
 
-    async def local_video(_first, _last, item_dir, _frame, _target_duration):
-        raw = item_dir / "video" / "local-paper-assembly.mp4"
+    async def local_video(_first, _last, item_dir, _frame, _target_duration, _spec=None):
+        raw = item_dir / "video" / "local-collage-motion-v2.mp4"
         raw.parent.mkdir(parents=True, exist_ok=True)
         raw.write_bytes(b"local")
         return raw
@@ -1030,7 +1065,13 @@ def test_generate_falls_back_locally_when_web_video_fails(tmp_path: Path):
     assert [item["status"] for item in manifest["items"]] == ["ready", "ready"]
     assert [item["target_duration_seconds"] for item in manifest["items"]] == [6.0, 6.0]
     assert manifest["playback_policy"] == "play_once_then_hold_last_frame"
-    assert manifest["items"][1]["video_provider"] == "deterministic_local_paper_assembly"
+    assert manifest["items"][1]["video_provider"] == "deterministic_local_collage_motion_v2"
+    assert manifest["items"][1]["local_motion_family"] in {
+        "torn_ribbons",
+        "folded_columns",
+        "diagonal_shards",
+        "radial_fan",
+    }
     saved = json.loads((tmp_path / "collage_broll" / "manifest.json").read_text())
     assert saved["errors"] == []
     assert "quota exhausted" in saved["items"][1]["generation_warnings"][0]
@@ -1055,8 +1096,8 @@ def test_generate_reuses_nonretryable_upload_capability_failure_for_later_scenes
         last.write_bytes(b"last")
         return first, last
 
-    async def local_video(_first, _last, item_dir, _frame, _target_duration):
-        raw = item_dir / "video" / "local-paper-assembly.mp4"
+    async def local_video(_first, _last, item_dir, _frame, _target_duration, _spec=None):
+        raw = item_dir / "video" / "local-collage-motion-v2.mp4"
         raw.parent.mkdir(parents=True, exist_ok=True)
         raw.write_bytes(b"local")
         return raw
@@ -1106,7 +1147,8 @@ def test_generate_reuses_nonretryable_upload_capability_failure_for_later_scenes
     assert animate_local.await_count == 3
     assert {
         item["video_provider"] for item in manifest["items"]
-    } == {"deterministic_local_paper_assembly"}
+    } == {"deterministic_local_collage_motion_v2"}
+    assert all(item["local_motion_family"] for item in manifest["items"])
     assert manifest["gemini_video_upload_capability"] == {
         "status": "unavailable",
         "error_code": collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE,
@@ -1130,7 +1172,7 @@ def test_generate_falls_back_locally_when_web_still_fails(tmp_path: Path):
         last.write_bytes(b"last")
         return first, last
 
-    async def local_video(_first, _last, item_dir, _frame, _target_duration):
+    async def local_video(_first, _last, item_dir, _frame, _target_duration, _spec=None):
         raw = item_dir / "video" / "local.mp4"
         raw.parent.mkdir(parents=True)
         raw.write_bytes(b"local")
@@ -1161,7 +1203,7 @@ def test_generate_falls_back_locally_when_web_still_fails(tmp_path: Path):
     assert manifest["status"] == "ready"
     assert manifest["ready_count"] == 1
     assert manifest["items"][0]["still_provider"] == "deterministic_local_paper_collage"
-    assert manifest["items"][0]["video_provider"] == "deterministic_local_paper_assembly"
+    assert manifest["items"][0]["video_provider"] == "deterministic_local_collage_motion_v2"
     assert manifest["gemini_video_upload_capability"] == {
         "status": "unknown",
         "error_code": None,
@@ -1184,7 +1226,15 @@ def test_local_animation_assembles_once_and_ends_on_a_distinct_frame(tmp_path: P
     target_duration = 6.0
     raw = asyncio.run(
         collage_broll._animate_still_locally(
-            first, last, tmp_path, frame, target_duration
+            first,
+            last,
+            tmp_path,
+            frame,
+            target_duration,
+            {
+                "motion_direction": "paper layers tear open and peel back",
+                "elements": [{"what": "subject"}, {"what": "consequence"}],
+            },
         )
     )
     qa = asyncio.run(collage_broll.probe_video(raw, frame, target_duration))

@@ -58,7 +58,7 @@ Return a JSON array only. Each item must contain:
   "art_direction": "a distinctive, story-specific visual world",
   "color_direction": "how color should serve this beat",
   "composition_direction": "a distinctive spatial strategy",
-  "motion_direction": "how this collage should come alive",
+  "motion_direction": "a story-specific 2-4 phase choreography describing how the depicted objects and material layers behave",
   "elements": [
     {"what": "film clock", "role": "structure", "motion": "interpret freely", "placement": "choose for the composition"}
   ],
@@ -105,6 +105,12 @@ jitter, drift, or use another material-appropriate behavior. Vary rhythm,
 overlap, depth, and local movement across the batch. These examples are not a
 required vocabulary.
 
+Animate the depicted objects, cut-paper silhouettes, and material layers; do
+not animate a mechanical screen subdivision. A regular grid, equal rectangles,
+a fixed six-panel assembly, or any other generic tiled mosaic is invalid even
+when it technically reaches the final still. `motion_direction` must describe
+the narrative choreography rather than merely say that pieces slide into place.
+
 The motion must make one continuous, non-repeating evolution, then settle into
 and hold the exact supplied final composition. Subtle camera or parallax motion
 is allowed if it resolves to the supplied final framing. No cuts, unrelated new
@@ -115,6 +121,12 @@ orientation directly:
 - portrait task: 9:16 media, normalized to 720x1280.
 
 Never generate portrait media and crop it into landscape, or the reverse.
+
+If Gemini Web video generation is unavailable, the deterministic local fallback
+must select a motion family from the authored `motion_direction` and use
+irregular paper masks, folds, tears, shards, or radial reveals. It must never
+fall back to fixed screen tiles. Record the selected fallback motion family in
+the manifest so degraded output remains auditable.
 
 ## Automated QA
 
