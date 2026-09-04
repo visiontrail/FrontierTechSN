@@ -138,9 +138,9 @@ def test_director_brief_assigns_the_editable_outro_overlay_to_the_agent():
         theme=scene_kit.DEFAULT_THEME,
     )
 
-    assert "dedicated outro scene: no narration or captions" in prompt
+    assert "dedicated outro scene timed to this spoken closing narration" in prompt
     assert "Like / Comment / Share layers" in prompt
-    assert "narration spoken over this scene" not in prompt
+    assert 'narration spoken over this scene:\n"End card"' in prompt
 
 
 def test_director_brief_assigns_the_dynamic_intro_overlay_to_the_agent():
@@ -166,10 +166,10 @@ def test_director_brief_assigns_the_dynamic_intro_overlay_to_the_agent():
         theme=scene_kit.DEFAULT_THEME,
     )
 
-    assert "dedicated intro scene: no narration or captions" in prompt
+    assert "dedicated intro scene timed to this spoken opening narration" in prompt
     assert "edition_date, edition_weekday" in prompt
     assert "data-intro-role/data-intro-field" in prompt
-    assert "narration spoken over this scene" not in prompt
+    assert 'narration spoken over this scene:\n"Edition opener"' in prompt
 
 
 def test_revert_restores_the_deterministic_draft(tmp_path):

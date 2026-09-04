@@ -177,8 +177,9 @@ you may freely improve their text, size, and position:
 keep `Espresso` at the same apparent type size and weight as `Bytefront`; do not
 render it as a small badge. Keep an English closing message, the ByteFront
 Espresso identity, and recognizable Like / Comment / Share icons. Do not place
-the removed Chinese closing phrase anywhere in the file. This scene has no
-captions, so it may use the full frame except for the normal 60px edge margin.
+the removed Chinese closing phrase anywhere in the file. The scene is timed to
+the spoken closing narration; do not add audio or captions inside the scene.
+The root program owns both and may reserve its normal caption safe area.
 Do not replace the Gemini motion with a CSS pan, zoom, gradient, or generated
 animation. The `<video>` must remain `muted playsinline`; the root program owns
 all audio.
@@ -195,8 +196,9 @@ The visible field values must come from one synchronous
 `edition_date` and `edition_weekday` variables. Keep `Espresso` at the same
 apparent type size and weight as `Bytefront`; do not render it as a small badge.
 Never add a briefing-label or story-count chip. Never compute the date in
-JavaScript. This scene has no narration or
-captions, so it may use the full frame except for the normal 60px edge margin.
+JavaScript. The scene is timed to the spoken opening narration; do not add audio
+or captions inside the scene. The root program owns both and may reserve its
+normal caption safe area.
 Do not replace the Gemini motion with a CSS pan, zoom, gradient, or generated
 animation. The `<video>` must remain `muted playsinline`; the root program owns
 all audio.
@@ -276,7 +278,8 @@ def _scene_brief(scene: dict, plan: dict, theme: scene_kit.Theme) -> str:
     if plan.get("archetype") == "intro":
         lines.extend(
             [
-                "dedicated intro scene: no narration or captions",
+                "dedicated intro scene timed to this spoken opening narration",
+                f"narration spoken over this scene:\n\"{scene['text']}\"",
                 f"exact logo asset: {plan.get('intro_logo_src', '')} "
                 "(reference it unchanged from compositions/)",
                 "dynamic HyperFrames variables: edition_date, edition_weekday",
@@ -289,7 +292,8 @@ def _scene_brief(scene: dict, plan: dict, theme: scene_kit.Theme) -> str:
     elif plan.get("archetype") == "outro":
         lines.extend(
             [
-                "dedicated outro scene: no narration or captions",
+                "dedicated outro scene timed to this spoken closing narration",
+                f"narration spoken over this scene:\n\"{scene['text']}\"",
                 f"exact logo asset: {plan.get('outro_logo_src', '')} "
                 "(reference it unchanged from compositions/)",
                 "overlay method: edit the existing HyperFrames brand, English closing "
