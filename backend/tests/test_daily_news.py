@@ -1916,6 +1916,80 @@ def test_chatgpt_fact_check_retries_target_until_protocol_is_stable():
     sleep.assert_any_await(review._RECOVERY_POLL_INTERVAL_SECONDS)
 
 
+def test_chatgpt_fact_check_waits_for_slow_target_conversation_convergence():
+    chatgpt_prompt = ""
+    detail_reads = 0
+    target_url = "https://chatgpt.com/c/6a9a987d-9b10-83ec-a5fe-a4f892f2dddb"
+    messages: list[str] = []
+
+    async def command(args, **kwargs):
+        nonlocal chatgpt_prompt, detail_reads
+        if args[:2] == ["chatgpt", "model"]:
+            return OpenCLIResult(
+                tuple(args), 0, '[{"Status":"Success","Model":"Medium"}]', ""
+            )
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_prompt = args[2]
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                json.dumps([{
+                    "response": "Searching the web before returning W1E@1.3;2P",
+                    "conversationUrl": target_url,
+                }]),
+                "",
+            )
+        if args[:2] == ["chatgpt", "detail"]:
+            detail_reads += 1
+            answer = (
+                "Checking sources and citations..."
+                if detail_reads < 6
+                else "W1E@1.3;2P"
+            )
+            turns = [
+                {"Index": 1, "Role": "User", "Text": chatgpt_prompt},
+                {"Index": 2, "Role": "Assistant", "Text": answer},
+            ]
+            return OpenCLIResult(tuple(args), 0, json.dumps(turns), "")
+        raise AssertionError(args)
+
+    command_mock = AsyncMock(side_effect=command)
+    with (
+        patch.object(review, "run_opencli", command_mock),
+        patch.object(review.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        payload, raw, url, provider = asyncio.run(
+            review._web_story_review(
+                "audit",
+                story_numbers=[1, 2],
+                claim_catalog={
+                    1: {"1.3": "Story one unsupported claim."},
+                    2: {"2.1": "Story two claim."},
+                },
+                log=messages.append,
+            )
+        )
+
+    assert payload["approved"] is False
+    assert payload["issues"][0]["claim_ids"] == ["1.3"]
+    assert provider == "chatgpt"
+    assert url == target_url
+    assert detail_reads == 6
+    assert len([
+        mock_call
+        for mock_call in command_mock.await_args_list
+        if mock_call.args[0][:2] == ["chatgpt", "ask"]
+    ]) == 1
+    recovery_attempts = len(review._target_recovery_poll_delays()) + 1
+    assert f"[CHATGPT RECOVERY INVALID 5/{recovery_attempts}]" in raw
+    assert "[CHATGPT RECOVERY]\nW1E@1.3;2P" in raw
+    assert [mock_call.args[0] for mock_call in sleep.await_args_list] == list(
+        review._target_recovery_poll_delays()[:5]
+    )
+    assert sum(review._target_recovery_poll_delays()) == 180
+    assert any("rereading its target conversation" in message for message in messages)
+
+
 def test_chatgpt_fact_check_retries_submission_without_using_gemini():
     chatgpt_asks = 0
 

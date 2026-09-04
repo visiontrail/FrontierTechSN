@@ -33,6 +33,8 @@ _CHATGPT_CONVERSATION_URL_RE = re.compile(
     re.I,
 )
 _RECOVERY_POLL_INTERVAL_SECONDS = 1.0
+_TARGET_RECOVERY_MAX_POLL_INTERVAL_SECONDS = 30.0
+_TARGET_RECOVERY_MAX_TOTAL_SECONDS = 180.0
 _MODEL_SELECTION_RETRY_DELAY_SECONDS = 2.0
 _CHATGPT_REVIEW_LEVEL_ORDER = {"medium": 1, "high": 2, "xhigh": 3}
 _CHATGPT_OBSERVED_LEVELS = {
@@ -56,6 +58,33 @@ _CHATGPT_OBSERVED_LEVELS = {
 class ScriptReviewResult:
     script: str
     report: dict[str, Any]
+
+
+class _WebStoryReviewError(RuntimeError):
+    """A web review failed after producing provider diagnostics."""
+
+    def __init__(self, message: str, attempt_log: str):
+        super().__init__(message)
+        self.attempt_log = attempt_log
+
+
+def _target_recovery_poll_delays() -> tuple[float, ...]:
+    """Give an owned web-research turn extra time to settle after ask returns."""
+    remaining = min(
+        _TARGET_RECOVERY_MAX_TOTAL_SECONDS,
+        max(
+            _RECOVERY_POLL_INTERVAL_SECONDS,
+            float(config.DAILY_NEWS_WEB_REVIEW_TIMEOUT) * 2,
+        ),
+    )
+    delay = _RECOVERY_POLL_INTERVAL_SECONDS
+    delays: list[float] = []
+    while remaining > 0:
+        current = min(delay, remaining)
+        delays.append(current)
+        remaining -= current
+        delay = min(delay * 2, _TARGET_RECOVERY_MAX_POLL_INTERVAL_SECONDS)
+    return tuple(delays)
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
@@ -784,12 +813,22 @@ async def _web_story_review(
                 "json",
             ]
         )
-        # ChatGPT can expose a transient assistant snapshot immediately after
-        # generation. Keep parsing strict, but allow the owned page to
-        # settle to its final protocol token before failing the whole review.
-        recovery_attempts = 3
+        # ChatGPT can expose a transient assistant snapshot while live-web
+        # research and citation hydration are still settling. When ask gives us
+        # the exact conversation URL, keep polling that owned conversation for
+        # up to two review-timeout windows instead of submitting the
+        # expensive prompt again. Active-page recovery has no such immutable
+        # target, so retain the short bounded poll there to avoid accepting an
+        # unrelated turn.
+        poll_delays = (
+            _target_recovery_poll_delays()
+            if provider == "chatgpt" and conversation_url
+            else (_RECOVERY_POLL_INTERVAL_SECONDS,) * 2
+        )
+        recovery_attempts = len(poll_delays) + 1
         last_error: Exception | None = None
         for recovery_attempt in range(1, recovery_attempts + 1):
+            assistant_text = ""
             try:
                 read_result = await run_opencli(
                     command,
@@ -810,8 +849,21 @@ async def _web_story_review(
                 return payload, assistant_text
             except Exception as exc:  # noqa: BLE001 - bounded late-response poll
                 last_error = exc
+                if assistant_text:
+                    raw_attempts.append(
+                        f"[{provider.upper()} RECOVERY INVALID "
+                        f"{recovery_attempt}/{recovery_attempts}]\n{assistant_text}"
+                    )
                 if recovery_attempt < recovery_attempts:
-                    await asyncio.sleep(_RECOVERY_POLL_INTERVAL_SECONDS)
+                    delay = poll_delays[recovery_attempt - 1]
+                    if log and conversation_url:
+                        log(
+                            f"ChatGPT {review_label} response is not yet a valid "
+                            "final protocol token; rereading its target conversation "
+                            f"after {delay:.0f}s ({recovery_attempt}/"
+                            f"{recovery_attempts - 1})"
+                        )
+                    await asyncio.sleep(delay)
         assert last_error is not None
         raise last_error
 
@@ -1010,11 +1062,12 @@ async def _web_story_review(
                     f"{chatgpt_error}"
                 )
 
-    raise RuntimeError(
+    raise _WebStoryReviewError(
         "ChatGPT current-model "
         f"{config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
         f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} {review_label} fact check "
-        f"failed after {chatgpt_attempts} attempts ({chatgpt_error})"
+        f"failed after {chatgpt_attempts} attempts ({chatgpt_error})",
+        "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
     ) from chatgpt_error
 
 
@@ -1114,13 +1167,20 @@ async def _review_daily_script(
                     )
             else:
                 prompt_path.write_text(prompt, encoding="utf-8")
-                group_payload, raw, conversation_url, provider = await _web_story_review(
-                    prompt,
-                    story_numbers=story_numbers,
-                    claim_catalog={number: claims[number] for number in story_numbers},
-                    site_session_namespace=review_session_namespace,
-                    log=log,
-                )
+                try:
+                    group_payload, raw, conversation_url, provider = await _web_story_review(
+                        prompt,
+                        story_numbers=story_numbers,
+                        claim_catalog={number: claims[number] for number in story_numbers},
+                        site_session_namespace=review_session_namespace,
+                        log=log,
+                    )
+                except _WebStoryReviewError as exc:
+                    failure_path = review_dir / (
+                        f"story-review-failure-{audit_round}-group-{group_index}.txt"
+                    )
+                    failure_path.write_text(exc.attempt_log, encoding="utf-8")
+                    raise
                 response_path.write_text(raw, encoding="utf-8")
             group_results.append({
                 "payload": group_payload,
