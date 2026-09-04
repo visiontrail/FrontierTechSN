@@ -1128,6 +1128,11 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
                 str(value or "")
                 for value in plan.get("news_image_srcs") or []
             ],
+            *[
+                str(item.get("src") or "")
+                for item in plan.get("footage_sequence") or []
+                if isinstance(item, dict)
+            ],
         ]
         required = list(dict.fromkeys(value for value in required if value))
         if not required:
@@ -1161,9 +1166,9 @@ async def compose_video(
     outro_style: str = outros.DEFAULT_OUTRO_STYLE,
     edition_date: str | None = None,
     collage_broll_enabled: bool = False,
-    collage_broll_count: int = 4,
+    collage_broll_count: int | None = None,
     news_images_enabled: bool = True,
-    news_image_count: int = 4,
+    news_image_count: int | None = None,
     is_monologue: bool = False,
     ai_endpoint: str | None = None,
     ai_model: str | None = None,
@@ -1379,13 +1384,14 @@ async def compose_video(
         collage_attached = collage_broll.attach_collage(
             plans, collage_manifest, output_dir_path
         )
+        planned_collages = int(collage_manifest.get("planned_count") or 0)
         emit(
-            f"Collage B-roll: {collage_attached}/{requested_collages} generated "
+            f"Collage B-roll: {collage_attached}/{planned_collages} AI-selected "
             f"clip(s) placed as {frame.aspect_ratio} full-bleed scenes"
         )
 
     final_public_footage = sum(
-        1
+        max(1, len(plan.get("footage_sequence") or []))
         for plan in plans
         if plan.get("archetype") == "footage" and not plan.get("collage_broll")
     )
@@ -1398,10 +1404,10 @@ async def compose_video(
             "An enabled Public Footage request may not silently fall back to template visuals."
         )
     if collage_broll_enabled or force_collage_opening:
-        if final_collages != requested_collages:
+        if final_collages != planned_collages:
             raise RuntimeError(
                 "Collage B-roll placement incomplete: "
-                f"{final_collages}/{requested_collages} requested clips reached final scenes"
+                f"{final_collages}/{planned_collages} planned clips reached final scenes"
             )
 
     news_image_inventory = {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
@@ -1437,7 +1443,7 @@ async def compose_video(
         news_image_inventory = news_images.attach_news_images(
             plans, board, image_manifest, output_dir_path
         )
-        required_count = min(news_image_count, len(eligible_image_scene_ids))
+        required_count = int(image_manifest.get("planned_image_count") or 0)
         attached_images = int(news_image_inventory["attached"])
         image_modes = news_image_inventory["placement_modes"]
         manifest_images = image_manifest.get("images") or []

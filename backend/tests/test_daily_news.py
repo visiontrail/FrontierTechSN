@@ -1194,7 +1194,9 @@ def test_daily_desk_defaults_to_unattended_next_run():
     assert settings.auto_publish is True
     assert settings.publish_targets == ["youtube", "x", "apple_podcast"]
     assert settings.publish_visibility == "public"
-    assert settings.news_image_count == 4
+    assert "news_image_count" not in settings.model_dump()
+    assert "collage_broll_count" not in settings.model_dump()
+    assert "footage_clip_count" not in settings.model_dump()
     assert settings.background_music_provider == "local_library"
     assert settings.background_music_track_id == "morning-blueprint"
     assert settings.outro_style == "morning-brief"
@@ -1210,14 +1212,11 @@ def test_daily_desk_recipe_validates_tts_model_and_voice_before_saving():
     settings = DailyAutomationSettings(tts_model="orpheus-en", voice="tara")
     assert settings.voice == "tara"
 
-    with pytest.raises(ValueError, match="greater than or equal to 1"):
-        DailyAutomationSettings(footage_clip_count=0)
-
     with pytest.raises(ValueError, match=r"contain \{date\} exactly once"):
         DailyAutomationSettings(opening_template="Good morning from ByteFront Espresso.")
 
 
-def test_daily_desk_recipe_backfills_public_footage_count_for_old_settings():
+def test_daily_desk_recipe_discards_retired_visual_count_settings():
     settings = DailyAutomationSettings.model_validate(
         {
             "tts_model": "vibevoice-0.5b",
@@ -1226,9 +1225,10 @@ def test_daily_desk_recipe_backfills_public_footage_count_for_old_settings():
         }
     )
 
-    assert settings.footage_clip_count == 8
-    assert settings.collage_broll_count == 5
-    assert settings.news_image_count == 4
+    payload = settings.model_dump()
+    assert "footage_clip_count" not in payload
+    assert "collage_broll_count" not in payload
+    assert "news_image_count" not in payload
 
 
 def test_load_settings_migrates_a_retired_tts_recipe(tmp_path: Path):
@@ -1316,12 +1316,12 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
     assert task_config.voice_1 == "tara"
     assert task_config.opening_remarks == "It is Wednesday, August 19, 2026. Your ByteFront Espresso is ready."
     assert task_config.closing_remarks == "That is the signal. Meet me here tomorrow."
-    assert task_config.collage_broll_count == 7
+    assert task_config.collage_broll_count is None
     assert task_config.news_images_enabled is True
-    assert task_config.news_image_count == 6
+    assert task_config.news_image_count is None
     assert task_config.footage_enabled is True
     assert task_config.footage_provider == "hybrid"
-    assert task_config.footage_clip_count == 11
+    assert task_config.footage_clip_count is None
     assert task_config.opening_style == "editorial_motion"
     assert task_config.background_music_provider == "local"
     assert task_config.background_music_track_id == "strategic-outlook"

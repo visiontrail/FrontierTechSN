@@ -182,6 +182,7 @@ def test_locked_visual_asset_gate_requires_every_media_source_in_scene_html(tmp_
     compositions.mkdir()
     (compositions / "scene-02.html").write_text(
         '<video src="../footage/clip-01.mp4"></video>'
+        '<video src="../footage/clip-02.mp4"></video>'
         '<img src="../news_webpages/page-01.png">',
         encoding="utf-8",
     )
@@ -189,6 +190,10 @@ def test_locked_visual_asset_gate_requires_every_media_source_in_scene_html(tmp_
         {
             "id": "scene-02",
             "footage_src": "../footage/clip-01.mp4",
+            "footage_sequence": [
+                {"src": "../footage/clip-01.mp4"},
+                {"src": "../footage/clip-02.mp4"},
+            ],
             "news_webpage_src": "../news_webpages/page-01.png",
         }
     ]

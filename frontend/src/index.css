@@ -4412,6 +4412,7 @@ video {
 .morning-visual-copy b,.morning-visual-copy small { display: block; }
 .morning-visual-copy b { font: 700 16px/1.1 Georgia, 'Times New Roman', serif; }
 .morning-visual-copy small { margin-top: 5px; color: var(--text-muted); font-size: 10px; }
+.morning-visual-auto { justify-self:end; color:var(--accent-2); font:700 9px/1.2 var(--font-mono); letter-spacing:.1em; text-transform:uppercase; }
 .morning-inline-switch--compact { margin: 0; padding: 0; border: 0; }
 .morning-music-field { display: block; margin-top: 16px; }
 .morning-music-stack { margin-top: 16px; padding-top: 2px; border-top: 1px solid var(--rule); }

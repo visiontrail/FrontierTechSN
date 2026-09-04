@@ -52,7 +52,10 @@ export default function FootagePanel({ task }: { task: Task }) {
     !!task.script_path &&
     ['awaiting_review', 'complete', 'failed'].includes(task.status)
   const acquired = manifest.clips.length
-  const requested = manifest.requested_clip_count || task.config.footage_clip_count || 0
+  const requested = manifest.planned_clip_count ?? manifest.requested_clip_count ?? task.config.footage_clip_count
+  const inventory = requested == null
+    ? `${acquired} clips · AI deciding quantity`
+    : `${acquired}/${requested} clips`
 
   return (
     <section className="footage-workbench">
@@ -61,7 +64,7 @@ export default function FootagePanel({ task }: { task: Task }) {
           <span className="eyebrow">Rights-ledgered assets</span>
           <h3>Public Footage Workbench</h3>
           <p>
-            {acquired}/{requested} clips prepared from {manifest.provider}
+            {inventory} prepared from {manifest.provider}
             {manifest.planner && <> · planned by {manifest.planner.replace('ai:', 'AI / ')}</>}
           </p>
         </div>

@@ -325,9 +325,33 @@ def test_english_news_webpage_capture_overlays_public_video():
     assert validate_scene_html(html, "scene-01") == []
     video = re.search(r"<video[^>]*>", html).group(0)
     assert 'src="../footage/clip-01.mp4"' in video
-    assert 'data-duration="12.00"' in video
-    assert "muted" in video and "playsinline" in video and " loop" in video
+    assert 'data-duration="5.00"' in video
+    assert "muted" in video and "playsinline" in video and " loop" not in video
     assert 'src="../news_webpages/page-01.png"' in html
+
+
+def test_news_webpage_overlay_preserves_ai_public_footage_sequence():
+    html = sk.render_scene(
+        plan(
+            archetype="footage",
+            footage_src="../footage/clip-01.mp4",
+            footage_kind="video",
+            footage_sequence=(
+                {"src": "../footage/clip-01.mp4", "duration_seconds": 4.0},
+                {"src": "../footage/clip-02.mp4", "duration_seconds": 3.0},
+            ),
+            news_webpage_src="../news_webpages/page-01.png",
+            news_webpage_source="IEEE Spectrum",
+        )
+    )
+
+    videos = re.findall(r"<video[^>]*>", html)
+    assert len(videos) == 2
+    assert 'data-start="0.00"' in videos[0]
+    assert 'data-duration="4.00"' in videos[0]
+    assert 'data-start="4.00"' in videos[1]
+    assert 'data-duration="3.00"' in videos[1]
+    assert all(" loop" not in video for video in videos)
 
 
 def test_fullscreen_news_image_uses_escaped_quote_when_body_is_empty():
@@ -365,11 +389,35 @@ def test_video_footage_declares_hyperframes_media_timing():
     )
     assert validate_scene_html(html, "scene-01") == []
     video = re.search(r"<video[^>]*>", html).group(0)
-    assert 'data-start="0"' in video
-    assert 'data-duration="12.00"' in video
+    assert 'data-start="0.00"' in video
+    assert 'data-duration="5.00"' in video
     assert 'data-track-index="0"' in video
     assert "muted" in video and "playsinline" in video
-    assert " loop" in video
+    assert " loop" not in video
+    assert "public-footage-fallback" in html
+
+
+def test_public_footage_sequence_plays_each_clip_once_then_reveals_hyperframe():
+    html = sk.render_scene(
+        plan(
+            archetype="footage",
+            footage_src="footage/first.mp4",
+            footage_kind="video",
+            footage_sequence=(
+                {"src": "footage/first.mp4", "duration_seconds": 4.0},
+                {"src": "footage/second.mp4", "duration_seconds": 3.5},
+            ),
+        )
+    )
+
+    videos = re.findall(r"<video[^>]*>", html)
+    assert len(videos) == 2
+    assert 'data-start="0.00"' in videos[0]
+    assert 'data-duration="4.00"' in videos[0]
+    assert 'data-start="4.00"' in videos[1]
+    assert 'data-duration="3.50"' in videos[1]
+    assert all(" loop" not in video for video in videos)
+    assert "public-footage-fallback" in html
 
 
 def test_collage_footage_keeps_media_contract_and_adds_seekable_lower_third():

@@ -400,6 +400,7 @@ class ScenePlan:
     footage_src: str = ""
     footage_kind: str = ""
     footage_credit: str = ""
+    footage_sequence: tuple[dict, ...] = ()
     collage_broll: bool = False
     collage_hold_src: str = ""
     collage_target_duration_seconds: float = 0.0
@@ -468,6 +469,11 @@ class ScenePlan:
             footage_src=str(data.get("footage_src") or ""),
             footage_kind=str(data.get("footage_kind") or ""),
             footage_credit=str(data.get("footage_credit") or ""),
+            footage_sequence=tuple(
+                dict(item)
+                for item in data.get("footage_sequence") or []
+                if isinstance(item, dict) and str(item.get("src") or "").strip()
+            ),
             collage_broll=bool(data.get("collage_broll")),
             collage_hold_src=str(data.get("collage_hold_src") or ""),
             collage_target_duration_seconds=float(
@@ -902,11 +908,10 @@ def _render_footage(plan: ScenePlan) -> str:
     """Render a full-bleed media plate that remains populated for the full scene."""
     accent = accent_hex(plan.accent, plan.theme)
     if plan.footage_kind == "video":
-        # Public footage may loop to cover a longer narration beat. Generated
-        # paper-collage motion is a one-pass assembly. HyperFrames capture does
-        # not reliably retain an ended video's last frame, so collage scenes
-        # switch to an explicit still layer for the remaining narration beat.
-        loop_attribute = "" if plan.collage_broll else " loop"
+        # Every public clip is one-pass.  AI-selected clips may be sequenced;
+        # when their combined duration is shorter than the narration, the
+        # animated HyperFrame plate underneath carries the remainder.  Never
+        # hide a short source with loop/boomerang playback.
         video_duration = plan.duration
         hold_media = ""
         if plan.collage_broll and plan.collage_hold_src:
@@ -923,12 +928,41 @@ def _render_footage(plan: ScenePlan) -> str:
                     f'data-duration="{hold_duration:.2f}" data-track-index="0" alt="" '
                     f'crossorigin="anonymous">\n'
                 )
-        media = (
-            f'      <video id="{plan.id}-media" class="clip media" src="{_esc(plan.footage_src)}" '
-            f'data-start="0" data-duration="{video_duration:.2f}" data-track-index="0" '
-            f'muted playsinline{loop_attribute} crossorigin="anonymous"></video>\n'
-            + hold_media
-        )
+        if plan.collage_broll:
+            media = (
+                f'      <video id="{plan.id}-media" class="clip media" src="{_esc(plan.footage_src)}" '
+                f'data-start="0" data-duration="{video_duration:.2f}" data-track-index="0" '
+                'muted playsinline crossorigin="anonymous"></video>\n'
+                + hold_media
+            )
+        else:
+            sequence = plan.footage_sequence or (
+                {
+                    "src": plan.footage_src,
+                    "kind": plan.footage_kind,
+                    "duration_seconds": min(5.0, plan.duration),
+                    "credit": plan.footage_credit,
+                },
+            )
+            sequence_markup: list[str] = []
+            cursor = 0.0
+            for index, item in enumerate(sequence):
+                if cursor >= plan.duration:
+                    break
+                source_duration = max(0.0, float(item.get("duration_seconds") or 0))
+                if source_duration <= 0:
+                    source_duration = min(5.0, plan.duration - cursor)
+                duration = min(source_duration, plan.duration - cursor)
+                if duration <= 0:
+                    continue
+                sequence_markup.append(
+                    f'      <video id="{plan.id}-media-{index + 1}" class="clip media public-footage-once" '
+                    f'src="{_esc(str(item.get("src") or ""))}" data-start="{cursor:.2f}" '
+                    f'data-duration="{duration:.2f}" data-track-index="0" muted playsinline '
+                    'crossorigin="anonymous"></video>\n'
+                )
+                cursor += duration
+            media = "".join(sequence_markup)
     else:
         media = f'      <img id="{plan.id}-media" class="media" src="{_esc(plan.footage_src)}" alt="">\n'
     css = f"""
@@ -1000,8 +1034,16 @@ def _render_footage(plan: ScenePlan) -> str:
             wash=(50, 50),
         )
 
+    fallback_plate = (
+        '    <div class="plate public-footage-fallback"><div class="wash"></div></div>\n'
+        + _motif_block(
+            plan,
+            style="left:50%; top:50%; width:1180px; height:1180px; margin:-590px 0 0 -590px; opacity:.2;",
+        )
+    )
     markup = (
-        f'    <div class="frame" id="{plan.id}-frame">\n'
+        fallback_plate
+        + f'    <div class="frame" id="{plan.id}-frame" data-layout-allow-overflow>\n'
         + media
         + '    </div>\n'
         + '    <div class="scrim"></div>\n'
@@ -1013,7 +1055,9 @@ def _render_footage(plan: ScenePlan) -> str:
         + (f'      <div class="body" id="{plan.id}-body">{_esc(plan.body)}</div>\n' if plan.body else "")
         + '    </div>\n'
     )
-    timeline = f"""        inAt("#{plan.id}-media", {{ scale: 1.06, x: -14 }}, {{ scale: 1.16, x: 14, duration: {max(2.0, plan.duration):.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0);
+    primary_media_id = f"{plan.id}-media" if plan.collage_broll else f"{plan.id}-media-1"
+    timeline = f"""        inAt("#{primary_media_id}", {{ scale: 1.04, opacity: 0 }}, {{ scale: 1.12, opacity: 1, duration: 0.35, ease: "power1.out" }}, 0.05);
+        inAt("#{plan.id}-motif", {{ scale: .84, opacity: 0, rotate: -10 }}, {{ scale: 1, opacity: .2, rotate: 0, duration: {max(2.0, plan.duration):.2f}, ease: "sine.out", transformOrigin: "50% 50%" }}, 0.05);
         inAt("#{plan.id}-kicker", {{ x: -36, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .55, ease: "power3.out" }}, 0.25);
         inAt("#{plan.id}-head", {{ y: 56, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .85, ease: "expo.out" }}, 0.4);
         inAt("#{plan.id}-body", {{ y: 26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .65, ease: "power2.out" }}, 0.62);
@@ -1026,12 +1070,31 @@ def _render_news_webpage_overlay(plan: ScenePlan) -> str:
     """Layer a captured English article page over image or moving footage."""
     accent = accent_hex(plan.accent, plan.theme)
     if plan.footage_src and plan.footage_kind == "video":
-        background = (
-            f'      <video id="{plan.id}-background" class="clip news-web-background" '
-            f'src="{_esc(plan.footage_src)}" data-start="0" '
-            f'data-duration="{plan.duration:.2f}" data-track-index="0" muted playsinline loop '
-            'crossorigin="anonymous"></video>\n'
+        sequence = plan.footage_sequence or (
+            {"src": plan.footage_src, "duration_seconds": min(5.0, plan.duration)},
         )
+        background_parts: list[str] = []
+        cursor = 0.0
+        for index, item in enumerate(sequence):
+            if cursor >= plan.duration:
+                break
+            source_duration = max(0.0, float(item.get("duration_seconds") or 0))
+            duration = min(source_duration or 5.0, plan.duration - cursor)
+            if duration <= 0:
+                continue
+            element_id = (
+                f"{plan.id}-background"
+                if index == 0
+                else f"{plan.id}-background-{index + 1}"
+            )
+            background_parts.append(
+                f'      <video id="{element_id}" class="clip news-web-background" '
+                f'src="{_esc(str(item.get("src") or ""))}" data-start="{cursor:.2f}" '
+                f'data-duration="{duration:.2f}" data-track-index="0" muted playsinline '
+                'crossorigin="anonymous"></video>\n'
+            )
+            cursor += duration
+        background = "".join(background_parts)
     else:
         background_src = plan.footage_src or plan.news_image_src
         background = (

@@ -193,7 +193,8 @@ export interface FootageManifest {
   provider_id: string;
   license_policy: string;
   license_allowlist: string[];
-  requested_clip_count: number;
+  requested_clip_count?: number;
+  planned_clip_count?: number;
   planner: string;
   queries: FootageQuery[];
   clips: FootageClip[];
@@ -215,10 +216,7 @@ export interface DailyAutomationSettings {
   voice: string;
   opening_template: string;
   closing_remarks: string;
-  collage_broll_count: number;
-  news_image_count: number;
   public_footage_enabled: boolean;
-  footage_clip_count: number;
   background_music_provider: 'local_library' | 'gemini_create_music' | 'local';
   background_music_track_id: string;
   outro_style: 'data-extraction' | 'morning-brief' | 'signal-shot';

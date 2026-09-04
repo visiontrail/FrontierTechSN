@@ -1,9 +1,10 @@
+import asyncio
 import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from backend import config
 from backend.pipeline import footage
@@ -129,6 +130,40 @@ class FootagePlanTests(unittest.TestCase):
             grounded[1]["script_excerpt"],
             "AQuA agents improve research using a factor loop and model loop.",
         )
+
+    def test_ai_quantity_plan_can_select_two_sequential_shots_for_one_long_beat(self):
+        script = "Engineers assemble and test a reusable lunar rocket engine."
+        answer = json.dumps(
+            {
+                "queries": [
+                    {"query": "rocket engine assembly", "purpose": script},
+                    {"query": "rocket engine test fire", "purpose": script},
+                ]
+            }
+        )
+        with (
+            patch.object(
+                footage,
+                "_resolve_provider",
+                AsyncMock(return_value=("https://example.test", "model", "key")),
+            ),
+            patch.object(footage, "_chat", AsyncMock(return_value=answer)) as chat,
+        ):
+            plan, planner = asyncio.run(
+                footage.plan_footage_queries(
+                    title="Lunar engine",
+                    script=script,
+                    count=None,
+                    provider_id=None,
+                    ai_endpoint=None,
+                    ai_model=None,
+                )
+            )
+
+        self.assertEqual(len(plan), 2)
+        self.assertEqual({item["script_excerpt"] for item in plan}, {script})
+        self.assertEqual(planner, "ai:model")
+        self.assertIn("no quota or fixed", chat.await_args.args[1])
 
     def test_hybrid_web_plan_skips_scene_already_filled_by_commons(self):
         rocket = "NASA engineers test a new rocket engine concept."

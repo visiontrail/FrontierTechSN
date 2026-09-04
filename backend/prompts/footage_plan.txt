@@ -6,15 +6,18 @@ Wikimedia Commons. Return JSON only, with this exact shape:
 {"queries":[{"query":"concrete English search phrase","purpose":"what this shot illustrates"}]}
 
 Rules:
-- Produce the requested number of queries.
+- When the request delegates quantity, choose the natural number of shots from
+  the narration instead of filling a quota. Omit beats that do not benefit from
+  real footage.
 - Each query must contain 2-6 concrete, visually searchable English words.
 - Prefer people, places, objects, actions, nature, technology, or archival scenes.
 - Translate non-English concepts into English.
 - Do not search for trademarks, logos, celebrities, copyrighted characters, or
   abstract phrases such as "the future of ideas".
 - Make every query meaningfully different.
-- Target a different narration story or scene with every query. Do not return
-  two angles, locations, or objects for the same narrated event.
+- Normally target a different narration story or scene with every query. For a
+  long beat, you may return multiple clearly different shots for the same
+  narrated event so they can play sequentially instead of repeating one clip.
 - In purpose, include the concrete narrated entity/action that makes the
   intended story unambiguous; do not use a generic label such as "technology".
 - Do not include markdown fences or any text outside the JSON.

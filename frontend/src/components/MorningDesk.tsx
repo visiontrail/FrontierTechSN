@@ -92,8 +92,6 @@ export default function MorningDesk() {
   const persisted = data?.settings
   const draft = draftOverride ?? (persisted ? {
     ...persisted,
-    footage_clip_count: persisted.footage_clip_count ?? 8,
-    news_image_count: persisted.news_image_count ?? 4,
     outro_style: persisted.outro_style ?? 'morning-brief',
   } : null)
   const {
@@ -277,9 +275,6 @@ export default function MorningDesk() {
     && inRange(draft.target_duration_minutes, 1, 30)
     && inRange(draft.max_stories, 3, 12)
     && inRange(draft.source_window_hours, 12, 96)
-    && inRange(draft.collage_broll_count, 2, 10)
-    && inRange(draft.news_image_count, 2, 12)
-    && inRange(draft.footage_clip_count, 1, 30)
   const dirty = JSON.stringify(recipe) !== JSON.stringify(data.settings)
   const actionPending = save.isPending || runTest.isPending || runNow.isPending
   const actionError = save.error || runTest.error || runNow.error
@@ -466,21 +461,21 @@ export default function MorningDesk() {
           </article>
 
           <article className="morning-config-panel morning-config-panel--visual">
-            <header><span>04</span><div><strong>Visual recipe</strong><small>Collage, news imagery, and footage are separate</small></div></header>
+            <header><span>04</span><div><strong>Visual recipe</strong><small>AI chooses the natural mix for each edition</small></div></header>
             <div className="morning-visual-row">
-              <div className="morning-visual-copy"><b>Paper-Collage</b><small>Generated visual metaphors · always on</small></div>
-              <label><span>Clips / edition</span><input type="number" min="2" max="10" value={draft.collage_broll_count} onChange={(event) => patch('collage_broll_count', Number(event.target.value))} /></label>
+              <div className="morning-visual-copy"><b>Paper-Collage</b><small>AI-selected visual metaphors · quantity follows the story</small></div>
+              <span className="morning-visual-auto">AI directed</span>
             </div>
             <div className="morning-visual-row is-enabled">
-              <div className="morning-visual-copy"><b>News imagery</b><small>OpenCLI-grounded logos and event stills · inline + full screen</small></div>
-              <label><span>Images / edition</span><input type="number" min="2" max="12" value={draft.news_image_count} onChange={(event) => patch('news_image_count', Number(event.target.value))} /></label>
+              <div className="morning-visual-copy"><b>News imagery</b><small>AI-selected grounded logos and event stills · inline + full screen</small></div>
+              <span className="morning-visual-auto">AI directed</span>
             </div>
             <div className={`morning-visual-row ${draft.public_footage_enabled ? 'is-enabled' : ''}`}>
               <label className="morning-inline-switch morning-inline-switch--compact">
                 <input type="checkbox" checked={draft.public_footage_enabled} onChange={(event) => patch('public_footage_enabled', event.target.checked)} />
                 <span><strong>Public footage</strong><small>Scout eligible external B-roll</small></span>
               </label>
-              <label><span>Clips / edition</span><input type="number" min="1" max="30" disabled={!draft.public_footage_enabled} value={draft.footage_clip_count} onChange={(event) => patch('footage_clip_count', Number(event.target.value))} /></label>
+              <span className="morning-visual-auto">AI directed</span>
             </div>
             <div className="morning-outro-stack">
               <label className="morning-music-field">

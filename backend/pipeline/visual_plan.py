@@ -541,6 +541,7 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
         term for term, frequency in document_frequency.items() if frequency >= common_threshold
     }
     used: set[str] = set()
+    allow_sequences = str((manifest or {}).get("selection_mode") or "") == "ai"
     attached = 0
 
     # Web-scouted clips carry the exact narration excerpt they were selected
@@ -613,7 +614,7 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
 
         best_id, best_score, best_matches, best_excerpt_matches = None, 0.0, [], []
         for plan in plans:
-            if plan["id"] in used:
+            if plan["id"] in used and not allow_sequences:
                 continue
             scene = scenes_by_id.get(plan["id"])
             if not scene:
@@ -645,10 +646,23 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
             continue
 
         plan = next(p for p in plans if p["id"] == best_id)
+        clip_duration = max(0.0, float(clip.get("duration_seconds") or 0))
+        sequence = list(plan.get("footage_sequence") or [])
+        sequence.append(
+            {
+                "src": rel,
+                "kind": "video" if path.suffix.lower() in {".webm", ".mp4", ".ogv"} else "image",
+                "duration_seconds": round(clip_duration, 3),
+                "credit": _footage_credit(clip),
+                "query": str(clip.get("query") or "")[:160],
+            }
+        )
         plan["archetype"] = "footage"
         plan["footage_src"] = rel
         plan["footage_kind"] = "video" if path.suffix.lower() in {".webm", ".mp4", ".ogv"} else "image"
         plan["footage_credit"] = _footage_credit(clip)
+        plan["footage_sequence"] = sequence
+        plan["footage_playback_policy"] = "play_each_once_then_hyperframe"
         plan["footage_query"] = str(clip.get("query") or "")[:160]
         plan["footage_match_terms"] = best_matches
         plan["footage_candidate_match_terms"] = sorted(

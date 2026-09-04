@@ -204,6 +204,36 @@ def test_external_video_credit_uses_creator_and_title_not_acquisition_tool(
     assert "yt-dlp" not in plans[0]["footage_credit"]
 
 
+def test_ai_selected_public_clips_can_share_one_scene_as_a_sequence(tmp_path: Path):
+    data = board(1)
+    data["scenes"][0]["text"] = "Engineers assemble and test a reusable lunar rocket engine."
+    data["scenes"][0]["keywords"] = ["rocket", "engine", "test"]
+    plans = visual_plan.fallback_plan(data)
+    footage_dir = tmp_path / "footage"
+    footage_dir.mkdir()
+    clips = []
+    for index, query in enumerate(("rocket engine assembly", "rocket engine test"), start=1):
+        path = footage_dir / f"clip-{index:02d}.mp4"
+        path.write_bytes(b"video")
+        clips.append(
+            {
+                "local_path": f"footage/{path.name}",
+                "query": query,
+                "purpose": data["scenes"][0]["text"],
+                "script_excerpt": data["scenes"][0]["text"],
+                "duration_seconds": 4 + index,
+            }
+        )
+
+    manifest = {"selection_mode": "ai", "clips": clips}
+    assert visual_plan.attach_footage(plans, data, manifest, tmp_path) == 2
+    assert [item["src"] for item in plans[0]["footage_sequence"]] == [
+        "footage/clip-01.mp4",
+        "footage/clip-02.mp4",
+    ]
+    assert plans[0]["footage_playback_policy"] == "play_each_once_then_hyperframe"
+
+
 def test_open_license_credit_remains_unchanged(tmp_path: Path):
     data = board(1)
     plans = visual_plan.fallback_plan(data)

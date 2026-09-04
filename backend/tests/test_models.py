@@ -28,15 +28,16 @@ def test_closing_remarks_are_trimmed_and_cannot_be_blank():
         TaskConfig(closing_remarks=" \n ")
 
 
-def test_task_config_defaults_to_landscape_and_four_collages():
+def test_task_config_defaults_to_ai_directed_visual_inventory():
     config = TaskConfig()
 
     assert config.video_orientation == "landscape"
     assert config.footage_orientation == "landscape"
     assert config.collage_broll_enabled is True
-    assert config.collage_broll_count == 4
+    assert config.collage_broll_count is None
     assert config.news_images_enabled is True
-    assert config.news_image_count == 4
+    assert config.news_image_count is None
+    assert config.footage_clip_count is None
     assert config.opening_style == "editorial_motion"
     assert config.outro_style == "morning-brief"
 

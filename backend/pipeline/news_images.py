@@ -1985,7 +1985,7 @@ def _normalise_plan(
     value: object,
     *,
     eligible_scene_ids: list[str],
-    count: int,
+    count: int | None,
 ) -> list[dict]:
     if isinstance(value, dict):
         rows = value.get("images")
@@ -2026,10 +2026,10 @@ def _normalise_plan(
             }
         )
         used.add(scene_id)
-        if len(output) >= count:
+        if count is not None and len(output) >= count:
             break
 
-    if not output:
+    if not output and count is not None:
         raise ValueError("News image planner returned no usable scene assignments")
     _ensure_placement_mode_mix(output)
     return output
@@ -2510,7 +2510,11 @@ def _prepare_primary_plan(
     return output[:target]
 
 
-def _planner_prompt(scenes: list[dict], count: int, scene_hints: dict[str, dict] | None = None) -> str:
+def _planner_prompt(
+    scenes: list[dict],
+    count: int | None,
+    scene_hints: dict[str, dict] | None = None,
+) -> str:
     payload = [
         {
             "id": scene.get("id"),
@@ -2521,9 +2525,16 @@ def _planner_prompt(scenes: list[dict], count: int, scene_hints: dict[str, dict]
         }
         for scene in scenes
     ]
+    quantity_direction = (
+        "Choose the natural number of eligible scenes that genuinely deserve a real still image. "
+        "There is no quota: omit scenes better served by motion graphics, collage, or footage. "
+        if count is None
+        else f"Choose exactly {count} different eligible scenes that deserve a real still image. "
+    )
     return (
-        "You are the picture editor for a factual technology-news video. Choose exactly "
-        f"{count} different eligible scenes that deserve a real still image. Prefer an exact "
+        "You are the picture editor for a factual technology-news video. "
+        + quantity_direction
+        + "Prefer an exact "
         "brand logo when a named brand is central, and a concrete event/person/place/product photo "
         "when the narration describes one. Do not invent a subject. Return JSON only with shape "
         '{"images":[{"scene_id":"scene-02","search_query":"NVIDIA logo",'
@@ -2543,14 +2554,15 @@ async def plan_news_images(
     storyboard: dict,
     *,
     eligible_scene_ids: list[str],
-    count: int,
+    count: int | None,
     scene_hints: dict[str, dict] | None = None,
     log: LogCallback | None = None,
 ) -> tuple[list[dict], str, str]:
     scenes_by_id = {str(scene.get("id") or ""): scene for scene in storyboard.get("scenes") or []}
     scenes = [scenes_by_id[scene_id] for scene_id in eligible_scene_ids if scene_id in scenes_by_id]
-    target = min(max(0, count), len(scenes))
-    if not target:
+    automatic = count is None
+    target = min(max(0, count), len(scenes)) if count is not None else None
+    if target == 0 or not scenes:
         return [], "none", ""
 
     try:
@@ -2580,8 +2592,13 @@ async def plan_news_images(
             label="OpenCLI news-image planning",
         )
         response, conversation_url = _response_text(result.stdout)
-        planned = _normalise_plan(first_json(response), eligible_scene_ids=eligible_scene_ids, count=target)
-        plan = _complete_plan(planned, scenes, target, scene_hints)
+        planned = _normalise_plan(
+            first_json(response),
+            eligible_scene_ids=eligible_scene_ids,
+            count=target,
+        )
+        plan = planned if automatic else _complete_plan(planned, scenes, target, scene_hints)
+        target = len(plan) if automatic else target
         filled = len(plan) - len(planned)
         if filled:
             _emit(
@@ -2599,7 +2616,8 @@ async def plan_news_images(
         return plan, planner, conversation_url
     except Exception as exc:  # noqa: BLE001 - deterministic planning remains available
         _emit(log, f"News images: OpenCLI planning fallback ({exc})")
-        return _fallback_plan(scenes, target, scene_hints), "deterministic-fallback", ""
+        fallback_target = len(scenes) if automatic else target
+        return _fallback_plan(scenes, fallback_target, scene_hints), "deterministic-fallback", ""
 
 
 def _reference_rows(value: object) -> list[dict]:
@@ -3313,7 +3331,7 @@ async def acquire_news_images(
     storyboard: dict,
     task_dir: Path,
     *,
-    count: int,
+    count: int | None,
     excluded_scene_ids: set[str] | None = None,
     scene_hints: dict[str, dict] | None = None,
     log: LogCallback | None = None,
@@ -3331,10 +3349,25 @@ async def acquire_news_images(
         for scene in storyboard.get("scenes") or []
         if str(scene.get("id") or "") and str(scene.get("id") or "") not in excluded
     ]
-    target = min(max(0, count), len(eligible))
+    automatic = count is None
+    preplanned: list[dict] | None = None
+    planner = ""
+    conversation_url = ""
+    if automatic:
+        preplanned, planner, conversation_url = await plan_news_images(
+            storyboard,
+            eligible_scene_ids=eligible,
+            count=None,
+            scene_hints=scene_hints,
+            log=log,
+        )
+        target = len(preplanned)
+    else:
+        target = min(max(0, count), len(eligible))
+    requested_count = target if automatic else count
     contract_sha256 = acquisition_contract_fingerprint(
         storyboard_sha256=fingerprint,
-        requested_count=count,
+        requested_count=requested_count,
         target_count=target,
         eligible_scene_ids=eligible,
         excluded_scene_ids=excluded,
@@ -3346,7 +3379,7 @@ async def acquire_news_images(
         fingerprint,
         contract_sha256,
         storyboard,
-        expected_requested_count=count,
+        expected_requested_count=requested_count,
         expected_target=target,
         expected_eligible_scene_ids=eligible,
         expected_excluded_scene_ids=excluded,
@@ -3394,7 +3427,8 @@ async def acquire_news_images(
         "created_at": _now(),
         "updated_at": _now(),
         "storyboard_sha256": fingerprint,
-        "requested_image_count": count,
+        "selection_mode": "ai" if automatic else "explicit",
+        "requested_image_count": requested_count,
         "eligible_scene_count": len(eligible),
         "eligible_scene_ids": eligible,
         "excluded_scene_ids": sorted(str(item) for item in excluded),
@@ -3422,13 +3456,15 @@ async def acquire_news_images(
         _write_manifest(task_dir, manifest)
         return manifest
 
-    plan, planner, conversation_url = await plan_news_images(
-        storyboard,
-        eligible_scene_ids=eligible,
-        count=target,
-        scene_hints=scene_hints,
-        log=log,
-    )
+    plan = preplanned
+    if plan is None:
+        plan, planner, conversation_url = await plan_news_images(
+            storyboard,
+            eligible_scene_ids=eligible,
+            count=target,
+            scene_hints=scene_hints,
+            log=log,
+        )
     scenes_by_id = {str(scene.get("id") or ""): scene for scene in storyboard.get("scenes") or []}
     eligible_scenes = [scenes_by_id[scene_id] for scene_id in eligible if scene_id in scenes_by_id]
     plan = _prepare_primary_plan(plan, eligible_scenes, target, scene_hints)

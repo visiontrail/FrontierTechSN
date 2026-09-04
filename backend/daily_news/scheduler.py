@@ -135,11 +135,8 @@ async def create_daily_task(
         # use the hybrid scout. Wikimedia remains the rights-first source and
         # YouTube fills otherwise-empty slots with explicit review blockers.
         footage_provider="hybrid",
-        footage_clip_count=settings.footage_clip_count,
         collage_broll_enabled=True,
-        collage_broll_count=settings.collage_broll_count,
         news_images_enabled=True,
-        news_image_count=settings.news_image_count,
         thumbnail_enabled=True,
         auto_render=True,
         news_language=settings.language,

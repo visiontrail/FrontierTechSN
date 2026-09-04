@@ -109,19 +109,22 @@ class TaskConfig(BaseModel):
     footage_enabled: bool = False
     footage_provider: str = "wikimedia"  # wikimedia | hybrid | opencli_web
     footage_license_policy: str = "open_only"
-    footage_clip_count: int = Field(default=8, ge=1, le=30)
+    # ``None`` delegates visual inventory to the footage planner.  Explicit
+    # values remain accepted only for replaying older task snapshots and
+    # operator-directed rework.
+    footage_clip_count: Optional[int] = Field(default=None, ge=1)
     footage_orientation: Literal["landscape", "portrait"] = "landscape"
     footage_multimodal_analyzer: str = "gemini_web"
-    # Generated editorial paper-collage B-roll. Four gives a multi-minute video
-    # a visible recurring motif without making every scene visually identical.
+    # Generated editorial paper-collage B-roll.  The planner owns how many
+    # narration beats benefit from this treatment.
     collage_broll_enabled: bool = True
-    collage_broll_count: int = Field(default=4, ge=2, le=10)
+    collage_broll_count: Optional[int] = Field(default=None, ge=1)
     # Scene-grounded still imagery is a third visual source, separate from
     # generated Paper-Collage motion and public video footage. It is enabled for
     # new and migrated task payloads so daily editions cannot silently regress
     # to typography-only scenes.
     news_images_enabled: bool = True
-    news_image_count: int = Field(default=4, ge=2, le=12)
+    news_image_count: Optional[int] = Field(default=None, ge=1)
     # Generate a script-driven cover through the signed-in ChatGPT web app.
     # This runs before TTS and can therefore be tested independently.
     thumbnail_enabled: bool = True
@@ -679,13 +682,9 @@ class DailyAutomationSettings(BaseModel):
     source_window_hours: int = Field(default=36, ge=12, le=96)
     tts_model: str = "orpheus-en"
     voice: str = "leah"
-    collage_broll_count: int = Field(default=4, ge=2, le=10)
-    news_image_count: int = Field(default=4, ge=2, le=12)
     public_footage_enabled: bool = False
-    # Public-footage and Paper-Collage clips are separate visual sources. Keep
-    # both counts in the desk recipe so scheduled editions never fall back to
-    # a generic manual-task default that the operator cannot see.
-    footage_clip_count: int = Field(default=8, ge=1, le=30)
+    # Visual quantities are intentionally absent from the desk recipe.  The
+    # picture editors select a content-driven mix for every edition.
     background_music_provider: Literal[
         "local_library", "gemini_create_music", "local"
     ] = "local_library"

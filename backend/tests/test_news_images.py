@@ -681,6 +681,43 @@ async def test_planner_timeout_uses_narrated_entities_and_unique_qwen_story_owne
 
 
 @pytest.mark.asyncio
+async def test_picture_editor_chooses_image_quantity_without_backfilling(monkeypatch):
+    planned = {
+        "images": [
+            {
+                "scene_id": "scene-02",
+                "search_query": "Falcon 9 launch",
+                "news_query": "Falcon 9 launch",
+                "expected_subject": "Falcon 9",
+                "kind": "event",
+                "display_mode": "fullscreen",
+                "purpose": "Launch event",
+                "caption": "Falcon 9 launch",
+            }
+        ]
+    }
+    result = SimpleNamespace(
+        stdout=json.dumps(
+            [{"Response": json.dumps(planned), "ConversationUrl": "https://chat.example/auto"}]
+        )
+    )
+    run = AsyncMock(return_value=result)
+    monkeypatch.setattr(news_images, "run_opencli_with_retries", run)
+
+    plan, planner, _ = await news_images.plan_news_images(
+        extended_board(),
+        eligible_scene_ids=["scene-01", "scene-02", "scene-03"],
+        count=None,
+    )
+
+    assert [item["scene_id"] for item in plan] == ["scene-02"]
+    assert planner == "opencli:chatgpt-picture-editor"
+    prompt = run.await_args.args[0][2]
+    assert "There is no quota" in prompt
+    assert "Choose exactly" not in prompt
+
+
+@pytest.mark.asyncio
 async def test_real_split_story_timeout_backfills_eight_semantic_subjects(
     monkeypatch,
 ):

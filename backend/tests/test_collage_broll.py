@@ -775,6 +775,30 @@ def test_agent_selects_beats_from_the_full_timeline():
     assert '"motion_direction"' in planner_system
 
 
+def test_agent_chooses_collage_quantity_when_no_count_is_configured():
+    answer = json.dumps(
+        [{"scene_id": "scene-03", "visual_metaphor": "a hinge reveals a hidden system"}]
+    )
+    complete = AsyncMock(return_value=answer)
+    with (
+        patch(
+            "backend.pipeline.digester._resolve_provider",
+            AsyncMock(return_value=("https://example.test", "model", "key")),
+        ),
+        patch("backend.pipeline.agent.agent_complete", complete),
+    ):
+        specs = asyncio.run(
+            collage_broll.plan_specs(
+                _board(), count=None, force_opening=False, frame=LANDSCAPE
+            )
+        )
+
+    assert [spec["scene_id"] for spec in specs] == ["scene-03"]
+    planner_system = complete.await_args.args[0]
+    assert "there is no target count or quota" in planner_system
+    assert "Select exactly" not in planner_system
+
+
 def test_agent_reserves_abstract_scene_for_collage_instead_of_grounded_scene():
     board = {
         "thesis": "Named systems produce an uncertain future",

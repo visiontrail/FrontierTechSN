@@ -265,18 +265,19 @@ def _frame_contract(frame: FrameSpec) -> dict[str, Any]:
 def _planning_fingerprint(
     storyboard: dict,
     *,
-    count: int,
+    count: int | None,
     force_opening: bool,
     frame: FrameSpec,
 ) -> str:
     scenes = _candidate_scenes(storyboard)
-    target_count = min(max(1, count), len(scenes)) if scenes else 0
+    target_count = min(max(1, count), len(scenes)) if scenes and count is not None else None
     return _fingerprint(
         {
             "cache_contract_version": CACHE_CONTRACT_VERSION,
             "selection_policy_version": SELECTION_POLICY_VERSION,
             "contract": "collage_visual_spec",
             "video_thesis": _normalized_text(storyboard.get("thesis")),
+            "selection_mode": "ai" if count is None else "explicit",
             "target_count": target_count,
             "force_opening_scene": bool(force_opening),
             "frame": _frame_contract(frame),
@@ -651,6 +652,23 @@ def _scene_choices(storyboard: dict, count: int, force_opening: bool) -> list[di
     return sorted(selected, key=lambda scene: float(scene.get("start") or 0))
 
 
+def _content_driven_scene_choices(storyboard: dict, force_opening: bool) -> list[dict]:
+    """Fallback selection based on visual need rather than an inventory quota."""
+    scenes = _candidate_scenes(storyboard)
+    if not scenes:
+        return []
+    from backend.pipeline import news_images
+
+    selected = [
+        scene for scene in scenes if news_images.grounded_visual_subject_count(scene) == 0
+    ]
+    if force_opening and scenes[0] not in selected:
+        selected.insert(0, scenes[0])
+    if not selected:
+        selected = [max(scenes, key=lambda scene: float(scene.get("duration") or 0))]
+    return sorted(selected, key=lambda scene: float(scene.get("start") or 0))
+
+
 def _fallback_spec(scene: dict, index: int) -> dict[str, Any]:
     text = str(scene.get("text") or "").strip()
     meaning = re.split(r"(?<=[.!?。！？])\s*", text)[0][:220] or "A hidden process becomes visible"
@@ -710,7 +728,7 @@ def _normalize_spec(raw: dict, scene: dict, index: int) -> dict[str, Any]:
 async def plan_specs(
     storyboard: dict,
     *,
-    count: int,
+    count: int | None,
     force_opening: bool,
     frame: FrameSpec,
     provider_id: int | None = None,
@@ -722,8 +740,13 @@ async def plan_specs(
     scenes = _candidate_scenes(storyboard)
     if not scenes:
         return []
-    target_count = min(max(1, count), len(scenes))
-    fallback_choices = _scene_choices(storyboard, target_count, force_opening)
+    automatic = count is None
+    target_count = min(max(1, count), len(scenes)) if count is not None else None
+    fallback_choices = (
+        _content_driven_scene_choices(storyboard, force_opening)
+        if automatic
+        else _scene_choices(storyboard, target_count, force_opening)
+    )
     from backend.pipeline import agent
     from backend.pipeline.digester import _resolve_provider
 
@@ -732,8 +755,14 @@ async def plan_specs(
     system += (
         "\n\nFor this planning turn, do not use tools and do not generate media. "
         "Return exactly the JSON array described in the Agent visual-spec contract. "
-        f"Select exactly {target_count} visually rich beats from the supplied candidate scenes, "
-        f"use only their scene ids, distribute the choices across the timeline, and target {frame.aspect_ratio}. "
+        + (
+            "Choose only the beats that genuinely benefit from a generated collage. Decide the "
+            "quantity from the content; there is no target count or quota. Return fewer or more "
+            "items as the story requires, and leave concrete footage/photo beats unselected. "
+            if automatic
+            else f"Select exactly {target_count} visually rich beats from the supplied candidate scenes, "
+        )
+        + f"use only their scene ids, distribute the choices across the timeline, and target {frame.aspect_ratio}. "
         + (f"The first item must be {scenes[0]['id']}. " if force_opening else "")
     )
     payload = {
@@ -755,7 +784,12 @@ async def plan_specs(
     choices = fallback_choices
     try:
         endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
-        _log(log, f"Collage B-roll agent: selecting and designing {target_count} visual metaphor(s)")
+        _log(
+            log,
+            "Collage B-roll agent: choosing a content-driven set of visual metaphors"
+            if automatic
+            else f"Collage B-roll agent: selecting and designing {target_count} visual metaphor(s)",
+        )
         answer = await agent.agent_complete(
             system,
             json.dumps(payload, indent=2, ensure_ascii=False),
@@ -777,13 +811,14 @@ async def plan_specs(
                 selected_ids.append(scene_id)
         if force_opening and str(scenes[0]["id"]) not in selected_ids:
             selected_ids.insert(0, str(scenes[0]["id"]))
-        for scene in fallback_choices:
-            scene_id = str(scene["id"])
-            if len(selected_ids) >= target_count:
-                break
-            if scene_id not in selected_ids:
-                selected_ids.append(scene_id)
-        selected_ids = selected_ids[:target_count]
+        if not automatic:
+            for scene in fallback_choices:
+                scene_id = str(scene["id"])
+                if len(selected_ids) >= target_count:
+                    break
+                if scene_id not in selected_ids:
+                    selected_ids.append(scene_id)
+            selected_ids = selected_ids[:target_count]
 
         # Collage is the correct treatment for abstract narration that cannot
         # support a strictly grounded licensed still.  If the agent selected a
@@ -1530,7 +1565,7 @@ async def generate_collage_broll(
     storyboard: dict,
     task_dir: Path,
     *,
-    count: int,
+    count: int | None,
     force_opening: bool,
     frame: FrameSpec,
     provider_id: int | None = None,
@@ -1574,6 +1609,7 @@ async def generate_collage_broll(
         "gemini_api_key_used": False,
         "orientation": frame.orientation,
         "aspect_ratio": frame.aspect_ratio,
+        "selection_mode": "ai" if count is None else "explicit",
         "requested_count": count,
         "gemini_max_clip_seconds": config.COLLAGE_GEMINI_MAX_SECONDS,
         "playback_policy": PLAYBACK_POLICY,
@@ -1585,7 +1621,7 @@ async def generate_collage_broll(
     cached_specs: list[dict[str, Any]] = []
     cache_hit = False
     scenes = _candidate_scenes(storyboard)
-    target_count = min(max(1, count), len(scenes)) if scenes else 0
+    target_count = min(max(1, count), len(scenes)) if scenes and count is not None else None
     if specs_path.is_file():
         try:
             payload = json.loads(specs_path.read_text(encoding="utf-8"))
@@ -1608,7 +1644,7 @@ async def generate_collage_broll(
                 and payload.get("planning_fingerprint") == planning_fingerprint
                 and payload.get("specs_sha256") == candidate_specs_sha256
                 and isinstance(candidate_specs, list)
-                and len(candidate_specs) == target_count
+                and (target_count is None or len(candidate_specs) == target_count)
                 and len(candidate_ids) == len(set(candidate_ids))
                 and (
                     not force_opening
@@ -1664,6 +1700,7 @@ async def generate_collage_broll(
             timed_spec = _fallback_spec(scene, index)
         safe_specs.append(timed_spec)
     specs = safe_specs
+    manifest["planned_count"] = len(specs)
     specs_sha256 = _fingerprint(specs)
     manifest["specs_sha256"] = specs_sha256
     _write_json(

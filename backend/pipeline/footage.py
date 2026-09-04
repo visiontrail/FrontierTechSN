@@ -231,7 +231,7 @@ def _unoccupied_web_plan(query_plan: list[dict[str, str]], clips: list[dict]) ->
     ]
 
 
-def _parse_plan(value: str, count: int) -> list[dict[str, str]]:
+def _parse_plan(value: str, count: int | None) -> list[dict[str, str]]:
     parsed = json.loads(_strip_json_fence(value))
     raw_queries = parsed.get("queries") if isinstance(parsed, dict) else None
     if not isinstance(raw_queries, list):
@@ -253,14 +253,14 @@ def _parse_plan(value: str, count: int) -> list[dict[str, str]]:
             continue
         seen.add(key)
         output.append({"query": query, "purpose": purpose})
-        if len(output) >= count:
+        if count is not None and len(output) >= count:
             break
-    if not output:
+    if not output and count is not None:
         raise ValueError("Footage planner returned no usable queries")
     return output
 
 
-def _fallback_plan(title: str, script: str, count: int) -> list[dict[str, str]]:
+def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str, str]]:
     """Build story-specific queries when the model plan cannot be decoded.
 
     Daily-news scripts use one nonblank paragraph per editorial story.  The old
@@ -361,7 +361,7 @@ def _fallback_plan(title: str, script: str, count: int) -> list[dict[str, str]]:
             continue
         seen_queries.add(query.casefold())
         output.append({"query": query, "purpose": paragraph})
-        if len(output) >= count:
+        if count is not None and len(output) >= count:
             break
     return output
 
@@ -369,10 +369,11 @@ def _fallback_plan(title: str, script: str, count: int) -> list[dict[str, str]]:
 def _distinct_grounded_plan(
     plan: list[dict[str, str]],
     script: str,
-    count: int,
+    count: int | None,
     *,
     excluded_purposes: list[str] | None = None,
     keep_ungrounded: bool = False,
+    allow_same_scene: bool = False,
 ) -> list[dict[str, str]]:
     """Bind each search query to a different narration segment.
 
@@ -403,7 +404,8 @@ def _distinct_grounded_plan(
             continue
         if not excerpt:
             continue
-        if _purpose_conflicts_with_reserved(excerpt, occupied):
+        conflict_pool = (excluded_purposes or []) if allow_same_scene else occupied
+        if _purpose_conflicts_with_reserved(excerpt, conflict_pool):
             continue
         output.append(
             {
@@ -412,8 +414,9 @@ def _distinct_grounded_plan(
                 "script_excerpt": excerpt,
             }
         )
-        occupied.append(excerpt)
-        if len(output) >= count:
+        if not allow_same_scene:
+            occupied.append(excerpt)
+        if count is not None and len(output) >= count:
             break
     return output
 
@@ -422,7 +425,7 @@ async def plan_footage_queries(
     *,
     title: str,
     script: str,
-    count: int,
+    count: int | None,
     provider_id: int | None,
     ai_endpoint: str | None,
     ai_model: str | None,
@@ -430,7 +433,8 @@ async def plan_footage_queries(
     excluded_purposes: list[str] | None = None,
     log: LogCallback | None = None,
 ) -> tuple[list[dict[str, str]], str]:
-    candidate_count = max(count * 3, count + 2)
+    automatic = count is None
+    candidate_count = None if automatic else max(count * 3, count + 2)
     supplied = [
         {
             "query": query,
@@ -454,15 +458,25 @@ async def plan_footage_queries(
             candidate_count,
             excluded_purposes=excluded_purposes,
             keep_ungrounded=True,
+            allow_same_scene=automatic,
         )
         return grounded, "user"
 
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
     system_prompt = (config.PROMPTS_DIR / "footage_plan.txt").read_text(encoding="utf-8")
+    quantity_direction = (
+        "Choose the number of final shots yourself from the narration. Use no quota or fixed "
+        "per-edition count. A longer narration beat may receive multiple sequential shots when "
+        "one source clip would be too short; otherwise use one shot or none.\n"
+        if automatic
+        else (
+            f"Requested candidate queries: {candidate_count}\n"
+            f"Final clips: {count}; every candidate must target a different narration story.\n"
+        )
+    )
     user_content = (
-        f"Requested candidate queries: {candidate_count}\n"
-        f"Final clips: {count}; every candidate must target a different narration story.\n"
-        f"Title: {title}\n"
+        quantity_direction
+        + f"Title: {title}\n"
         f"Narration meanings already reserved for collage (do not target these): "
         f"{json.dumps(excluded_purposes or [], ensure_ascii=False)}\n"
         f"Narration:\n{script[:12000]}"
@@ -484,8 +498,9 @@ async def plan_footage_queries(
             script,
             candidate_count,
             excluded_purposes=excluded_purposes,
+            allow_same_scene=automatic,
         )
-        if not plan:
+        if not plan and not automatic:
             raise ValueError("Footage planner targeted only collage-reserved narration")
         _emit(log, f"Footage agent planned {len(plan)} visual search queries")
         return plan, f"ai:{model}"
@@ -496,6 +511,7 @@ async def plan_footage_queries(
             script,
             candidate_count,
             excluded_purposes=excluded_purposes,
+            allow_same_scene=automatic,
         )
         return fallback, "deterministic-fallback"
 
@@ -888,6 +904,7 @@ async def acquire_public_footage(
     ai_endpoint: str | None,
     ai_model: str | None,
     supplied_queries: list[str] | None = None,
+    planned_queries: list[dict[str, str]] | None = None,
     log: LogCallback | None = None,
 ) -> dict:
     """Plan, search, license-check, and download public footage for one task."""
@@ -952,17 +969,21 @@ async def acquire_public_footage(
         _emit(log, f"Public footage scout reused {len(preserved_clips)}/{clip_count} verified clips")
         return manifest
 
-    plan, planner = await plan_footage_queries(
-        title=title,
-        script=script,
-        count=remaining_count,
-        provider_id=provider_id,
-        ai_endpoint=ai_endpoint,
-        ai_model=ai_model,
-        supplied_queries=supplied_queries,
-        excluded_purposes=occupied_purposes,
-        log=log,
-    )
+    if planned_queries is not None:
+        plan = list(planned_queries)
+        planner = "ai:auto-quantity"
+    else:
+        plan, planner = await plan_footage_queries(
+            title=title,
+            script=script,
+            count=remaining_count,
+            provider_id=provider_id,
+            ai_endpoint=ai_endpoint,
+            ai_model=ai_model,
+            supplied_queries=supplied_queries,
+            excluded_purposes=occupied_purposes,
+            log=log,
+        )
     manifest["planner"] = planner
     manifest["queries"] = plan
     manifest["status"] = "searching"
@@ -1093,7 +1114,7 @@ async def acquire_footage(
     task_dir: Path,
     title: str,
     script_path: Path,
-    clip_count: int,
+    clip_count: int | None,
     orientation: str,
     license_policy: str,
     provider_id: int | None,
@@ -1108,6 +1129,44 @@ async def acquire_footage(
     then fills the remaining slots from YouTube.
     """
     provider = (media_provider or "wikimedia").strip().lower()
+    script = script_path.read_text(encoding="utf-8")
+    automatic = clip_count is None
+    automatic_plan: list[dict[str, str]] | None = None
+    automatic_planner = ""
+    if automatic:
+        automatic_plan, automatic_planner = await plan_footage_queries(
+            title=title,
+            script=script,
+            count=None,
+            provider_id=provider_id,
+            ai_endpoint=ai_endpoint,
+            ai_model=ai_model,
+            supplied_queries=supplied_queries,
+            log=log,
+        )
+        clip_count = len(automatic_plan)
+        _emit(log, f"Footage agent selected {clip_count} content-driven final shot(s)")
+        if clip_count == 0:
+            manifest = {
+                "task_id": task_id,
+                "status": "no_results",
+                "created_at": _now(),
+                "updated_at": _now(),
+                "provider": "AI-directed public footage",
+                "provider_id": provider,
+                "license_policy": license_policy,
+                "license_allowlist": ["Public Domain", "CC0", "CC BY", "CC BY-SA"],
+                "orientation": orientation,
+                "requested_clip_count": 0,
+                "planned_clip_count": 0,
+                "selection_mode": "ai",
+                "planner": automatic_planner,
+                "queries": [],
+                "clips": [],
+                "errors": [],
+            }
+            _write_manifest(task_dir, manifest)
+            return manifest
     common = {
         "task_id": task_id,
         "task_dir": task_dir,
@@ -1120,22 +1179,29 @@ async def acquire_footage(
         "ai_endpoint": ai_endpoint,
         "ai_model": ai_model,
         "supplied_queries": supplied_queries,
+        "planned_queries": automatic_plan,
         "log": log,
     }
     if provider == "wikimedia" or not config.WEB_FOOTAGE_ENABLED:
-        return await acquire_public_footage(**common)
+        manifest = await acquire_public_footage(**common)
+        manifest["selection_mode"] = "ai" if automatic else "explicit"
+        manifest["planned_clip_count"] = clip_count
+        _write_manifest(task_dir, manifest)
+        return manifest
 
-    script = script_path.read_text(encoding="utf-8")
-    query_plan, planner = await plan_footage_queries(
-        title=title,
-        script=script,
-        count=clip_count,
-        provider_id=provider_id,
-        ai_endpoint=ai_endpoint,
-        ai_model=ai_model,
-        supplied_queries=supplied_queries,
-        log=log,
-    )
+    if automatic_plan is not None:
+        query_plan, planner = automatic_plan, automatic_planner
+    else:
+        query_plan, planner = await plan_footage_queries(
+            title=title,
+            script=script,
+            count=clip_count,
+            provider_id=provider_id,
+            ai_endpoint=ai_endpoint,
+            ai_model=ai_model,
+            supplied_queries=supplied_queries,
+            log=log,
+        )
 
     if provider == "hybrid":
         commons_quota = max(1, clip_count // 2)
@@ -1144,6 +1210,7 @@ async def acquire_footage(
                 **common,
                 "clip_count": commons_quota,
                 "supplied_queries": [item["query"] for item in query_plan[:commons_quota]],
+                "planned_queries": query_plan[:commons_quota],
             }
         )
     elif provider == "opencli_web":
@@ -1170,16 +1237,31 @@ async def acquire_footage(
 
     manifest["planner"] = planner
     manifest["queries"] = query_plan
+    manifest["selection_mode"] = "ai" if automatic else "explicit"
+    manifest["planned_clip_count"] = clip_count
     _write_manifest(task_dir, manifest)
 
     # Lazy import avoids a module cycle: web_footage reuses the query/search
     # helpers above, but footage remains the manifest-facing public API.
     from backend.pipeline.web_footage import supplement_web_footage
 
-    web_query_plan = _unoccupied_web_plan(
-        query_plan,
-        [clip for clip in manifest.get("clips") or [] if isinstance(clip, dict)],
-    )
+    active_clips = [
+        clip for clip in manifest.get("clips") or [] if isinstance(clip, dict)
+    ]
+    if automatic:
+        # In AI mode, two different queries may intentionally illustrate the
+        # same longer beat.  Remove only queries Commons already fulfilled;
+        # scene-level filtering would incorrectly discard the continuation.
+        fulfilled_queries = {
+            str(clip.get("query") or "").strip().casefold() for clip in active_clips
+        }
+        web_query_plan = [
+            shot
+            for shot in query_plan
+            if str(shot.get("query") or "").strip().casefold() not in fulfilled_queries
+        ]
+    else:
+        web_query_plan = _unoccupied_web_plan(query_plan, active_clips)
 
     return await supplement_web_footage(
         task_dir=task_dir,
