@@ -169,7 +169,9 @@ video, which is the exact bug this system was built to fix.
 
 When a brief says `dedicated outro scene`, the Gemini video is the moving
 background and you own only the editable HyperFrames overlay. Preserve the
-exact background and logo `src` values. Preserve these semantic hooks while
+exact background and logo `src` values. Preserve the inline bookend stacking
+contract: background `z-index:0`, veil `z-index:1`, overlay `z-index:2`, and
+fade `z-index:3`. Preserve these semantic hooks while
 you may freely improve their text, size, and position:
 `data-outro-role="brand"`, `data-outro-role="thanks"`,
 `data-outro-role="actions"`, and one each of `data-outro-action="like"`,
@@ -188,7 +190,9 @@ all audio.
 
 When a brief says `dedicated intro scene`, the Gemini video is the moving
 background and you own only the editable, edition-aware HyperFrames overlay.
-Preserve the exact background and logo `src` values. Preserve these semantic
+Preserve the exact background and logo `src` values and the inline bookend
+stacking contract: background `z-index:0`, veil `z-index:1`, overlay `z-index:2`,
+and fade `z-index:3`. Preserve these semantic
 hooks: `data-intro-role="brand"`, `data-intro-role="edition"`, and one each of
 `data-intro-field="date"` and `"weekday"`.
 The visible field values must come from one synchronous

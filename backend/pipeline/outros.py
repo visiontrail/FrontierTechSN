@@ -176,6 +176,8 @@ def outro_overlay_problems(text: str) -> list[str]:
         'data-outro-action="like"': "missing Like action",
         'data-outro-action="comment"': "missing Comment action",
         'data-outro-action="share"': "missing Share action",
+        'data-bookend-layer="background" style="z-index:0"': "outro background stacking contract is missing",
+        'data-bookend-layer="overlay" style="z-index:2"': "outro overlay stacking contract is missing",
     }
     for marker, message in required.items():
         if marker not in text:

@@ -1147,10 +1147,10 @@ def _render_intro(plan: ScenePlan) -> str:
   #{plan.id} .intro-footer {{ gap:26px; }}
 """
 
-    markup = f"""    <video id="{plan.id}-background" class="clip intro-background" src="{_esc(plan.footage_src)}"
+    markup = f"""    <video id="{plan.id}-background" class="clip intro-background" data-bookend-layer="background" style="z-index:0" src="{_esc(plan.footage_src)}"
       data-start="0" data-duration="{plan.duration:.2f}" data-track-index="0" muted playsinline preload="auto" crossorigin="anonymous"></video>
-    <div class="intro-veil" data-layout-ignore></div>
-    <section class="intro-overlay">
+    <div class="intro-veil" data-bookend-layer="veil" style="z-index:1" data-layout-ignore></div>
+    <section class="intro-overlay" data-bookend-layer="overlay" style="z-index:2">
       <header class="intro-topline"><span>{_esc(plan.kicker)}</span><span>ByteFront / Intro 06.00</span></header>
       <article class="intro-shell">
         <div class="intro-brand" data-intro-role="brand">
@@ -1165,7 +1165,7 @@ def _render_intro(plan: ScenePlan) -> str:
       </article>
       <footer class="intro-footer"><div class="intro-footer-rule"></div><span>{_esc(plan.body)}</span></footer>
     </section>
-    <div id="{plan.id}-fade" class="intro-fade" data-layout-ignore></div>
+    <div id="{plan.id}-fade" class="intro-fade" data-bookend-layer="fade" style="z-index:3" data-layout-ignore></div>
 """
     fallbacks = {
         "edition_date": plan.edition_date,
@@ -1247,10 +1247,10 @@ def _render_outro(plan: ScenePlan) -> str:
       background:linear-gradient(90deg,#C98758,transparent); transform-origin:left center; }}
   #{plan.id} .outro-fade {{ position:absolute; inset:0; background:#071427; opacity:0; pointer-events:none; }}
 """
-    markup = f"""    <video id="{plan.id}-background" class="clip outro-background" src="{_esc(plan.footage_src)}"
+    markup = f"""    <video id="{plan.id}-background" class="clip outro-background" data-bookend-layer="background" style="z-index:0" src="{_esc(plan.footage_src)}"
       data-start="0" data-duration="{plan.duration:.2f}" data-track-index="0" muted playsinline preload="auto" crossorigin="anonymous"></video>
-    <div class="outro-veil" data-layout-ignore></div>
-    <section class="outro-overlay">
+    <div class="outro-veil" data-bookend-layer="veil" style="z-index:1" data-layout-ignore></div>
+    <section class="outro-overlay" data-bookend-layer="overlay" style="z-index:2">
       <header class="outro-topline"><span>Your daily shot of frontier tech</span><span>ByteFront / Outro 06.00</span></header>
       <article class="outro-panel">
         <div class="outro-brand-row" data-outro-role="brand">
@@ -1270,7 +1270,7 @@ def _render_outro(plan: ScenePlan) -> str:
       </article>
       <footer class="outro-footer"><div class="outro-footer-rule"></div><span>ByteFront Espresso · Fresh signals, served daily</span></footer>
     </section>
-    <div id="{plan.id}-fade" class="outro-fade" data-layout-ignore></div>
+    <div id="{plan.id}-fade" class="outro-fade" data-bookend-layer="fade" style="z-index:3" data-layout-ignore></div>
 """
     timeline = f"""        inAt("#{plan.id} .outro-topline", {{ y: -26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .55, ease: "power3.out" }}, .14);
         inAt("#{plan.id} .outro-panel", {{ x: -72, opacity: 0, scale: .985 }}, {{ x: 0, opacity: 1, scale: 1, duration: .82, ease: "expo.out" }}, .24);

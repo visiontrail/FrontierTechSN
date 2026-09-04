@@ -131,6 +131,8 @@ def test_intro_scene_reads_declared_hyperframes_variables_and_passes_agent_gate(
     assert "font:700 66px/1.2" in html
     assert "Date.now" not in html
     assert "muted playsinline" in html
+    assert 'data-bookend-layer="background" style="z-index:0"' in html
+    assert 'data-bookend-layer="overlay" style="z-index:2"' in html
 
 
 def test_spine_declares_intro_variables_for_hyperframes_studio_and_render():
@@ -161,6 +163,7 @@ def test_intro_agent_contract_rejects_static_or_incomplete_metadata():
 
     assert "missing editable intro edition overlay" in problems
     assert "intro does not read HyperFrames variables" in problems
+    assert "intro background stacking contract is missing" in problems
 
 
 def test_intro_agent_contract_rejects_removed_metadata_chips():

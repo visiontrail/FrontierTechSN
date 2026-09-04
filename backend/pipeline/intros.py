@@ -174,6 +174,8 @@ def intro_overlay_problems(text: str) -> list[str]:
         'data-intro-field="date"': "missing dynamic edition date field",
         'data-intro-field="weekday"': "missing dynamic weekday field",
         "window.__hyperframes.getVariables()": "intro does not read HyperFrames variables",
+        'data-bookend-layer="background" style="z-index:0"': "intro background stacking contract is missing",
+        'data-bookend-layer="overlay" style="z-index:2"': "intro overlay stacking contract is missing",
     }
     for marker, message in required.items():
         if marker not in text:

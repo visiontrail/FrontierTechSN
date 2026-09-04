@@ -115,6 +115,8 @@ def test_outro_scene_is_a_valid_editable_hyperframes_composition():
     assert 'data-outro-role="thanks"' in html
     assert html.count("data-outro-action=") == 3
     assert "muted playsinline" in html
+    assert 'data-bookend-layer="background" style="z-index:0"' in html
+    assert 'data-bookend-layer="overlay" style="z-index:2"' in html
 
 
 def test_outro_agent_contract_rejects_removed_phrase_and_missing_actions():
@@ -124,3 +126,4 @@ def test_outro_agent_contract_rejects_removed_phrase_and_missing_actions():
 
     assert "the removed Chinese closing phrase is still present" in problems
     assert "missing editable engagement-actions overlay" in problems
+    assert "outro background stacking contract is missing" in problems
