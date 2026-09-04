@@ -2170,6 +2170,35 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report["verified"])
         self.assertEqual(report["exact_asr_word_coverage"], 1.0)
 
+    def test_orpheus_transcript_normalizes_hyphenated_numeric_range(self):
+        expected = "The window is roughly two to three seconds."
+
+        for spoken in (
+            "The window is roughly 2 -3 seconds".split(),
+            "The window is roughly 2-3 seconds".split(),
+        ):
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(spoken)
+            ]
+            report = tts._orpheus_transcript_report(expected, words)
+
+            self.assertTrue(report["verified"])
+            self.assertEqual(report["exact_asr_word_coverage"], 1.0)
+
+    def test_orpheus_transcript_does_not_invent_numeric_range_separator(self):
+        expected = "The window is roughly two to three seconds."
+
+        def report(spoken: str) -> dict:
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(spoken.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        self.assertFalse(report("The window is roughly 2 3 seconds")["verified"])
+        self.assertFalse(report("The window is roughly 2 -4 seconds")["verified"])
+
     def test_orpheus_transcript_normalizes_numeric_calendar_ordinal(self):
         expected = (
             "QbitAI reports that Perfect World's 2026 semiannual report, "

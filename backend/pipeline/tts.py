@@ -91,7 +91,7 @@ ORPHEUS_INTEGRITY_VERIFIER_VERSION = 23
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 4
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 5
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -431,6 +431,7 @@ def _lexical_tokens(text: str) -> list[str]:
             _canonicalize_acoustic_phrase_tokens(normalized)
         )
     )
+    normalized = _canonicalize_numeric_range_tokens(normalized)
     normalized = _canonicalize_compound_ordinal_tokens(normalized)
     return _canonicalize_calendar_date_tokens(normalized)
 
@@ -706,6 +707,43 @@ def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
     return canonical
 
 
+def _canonicalize_numeric_range_tokens_with_indexes(
+    tokens: list[str],
+    word_indexes: list[int],
+) -> tuple[list[str], list[int]]:
+    """Collapse an exact integer ``from/to`` range without losing its values."""
+    if len(tokens) != len(word_indexes):
+        raise ValueError("Range tokens and word indexes must have equal length")
+    result: list[str] = []
+    result_indexes: list[int] = []
+    index = 0
+    while index < len(tokens):
+        if (
+            tokens[index].isdigit()
+            and index + 2 < len(tokens)
+            and tokens[index + 1] == "to"
+            and tokens[index + 2].isdigit()
+        ):
+            result.append(
+                f"numberrange{tokens[index]}to{tokens[index + 2]}"
+            )
+            result_indexes.append(word_indexes[index])
+            index += 3
+            continue
+        result.append(tokens[index])
+        result_indexes.append(word_indexes[index])
+        index += 1
+    return result, result_indexes
+
+
+def _canonicalize_numeric_range_tokens(tokens: list[str]) -> list[str]:
+    canonical, _ = _canonicalize_numeric_range_tokens_with_indexes(
+        tokens,
+        list(range(len(tokens))),
+    )
+    return canonical
+
+
 def _word_indexes_are_contiguous(word_indexes: list[int]) -> bool:
     """Allow multiple tokens from one word or consecutive ASR words only."""
     return bool(word_indexes) and all(
@@ -720,6 +758,30 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
     index = 0
     while index < len(words):
         word_text = str(words[index].get("text") or "")
+        range_match = re.fullmatch(
+            r"\s*([0-9]+)\s*[-–—−]\s*([0-9]+)[,.;:!?]?\s*",
+            word_text,
+        )
+        range_values = (
+            (range_match.group(1), range_match.group(2))
+            if range_match is not None
+            else None
+        )
+        consumed_range_words = 1
+        if range_values is None and index + 1 < len(words):
+            range_start = re.fullmatch(r"\s*([0-9]+)\s*", word_text)
+            range_end = re.fullmatch(
+                r"\s*[-–—−]\s*([0-9]+)[,.;:!?]?\s*",
+                str(words[index + 1].get("text") or ""),
+            )
+            if range_start is not None and range_end is not None:
+                range_values = (range_start.group(1), range_end.group(1))
+                consumed_range_words = 2
+        if range_values is not None:
+            tokens.extend([range_values[0], "to", range_values[1]])
+            word_indexes.extend([index, index, index + consumed_range_words - 1])
+            index += consumed_range_words
+            continue
         currency_match = CURRENCY_TRANSCRIPT_AMOUNT_RE.fullmatch(word_text)
         if currency_match is not None:
             integer = currency_match.group(1)
@@ -832,6 +894,10 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
     canonical, canonical_indexes = _canonicalize_number_tokens_with_indexes(
         tokens,
         word_indexes,
+    )
+    canonical, canonical_indexes = _canonicalize_numeric_range_tokens_with_indexes(
+        canonical,
+        canonical_indexes,
     )
     canonical, canonical_indexes = _canonicalize_compound_ordinal_tokens_with_indexes(
         canonical,
