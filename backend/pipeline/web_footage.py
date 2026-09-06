@@ -838,13 +838,18 @@ async def supplement_web_footage(
         )
         raw_path: Path | None = None
         try:
-            analysis = await analyze_candidate_link(candidate, excerpt)
+            if manifest.get("url_inspection_unavailable"):
+                analysis = await _analyze_candidate_preview(candidate, excerpt, task_dir)
+            else:
+                analysis = await analyze_candidate_link(candidate, excerpt)
             rejection = analysis_rejection(analysis)
             if rejection and (
                 analysis.get("status") == "fallback"
                 or re.search(r"unavailable|unviewable|not possible|cannot (?:view|access|verify)|unable to", rejection, re.I)
             ):
                 _emit(log, "Web footage: URL inspection unavailable; reviewing actual preview frames")
+                manifest["url_inspection_unavailable"] = True
+                _write_manifest(manifest_file, manifest)
                 analysis = await _analyze_candidate_preview(candidate, excerpt, task_dir)
                 rejection = analysis_rejection(analysis)
             if rejection:
