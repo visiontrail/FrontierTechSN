@@ -121,11 +121,17 @@ def _script_purpose_for_query(query: str, script: str) -> str:
             term = term[:-1]
         return term
 
-    query_terms = {
-        match_term(word)
-        for word in WORD_RE.findall(query)
-        if word.casefold() not in PURPOSE_MATCH_STOPWORDS
-    }
+    def terms(value: str) -> set[str]:
+        # Hyphenated modifiers still contain the entity being searched:
+        # catgirl-themed must anchor "catgirl", not lose to a generic "AI".
+        return {
+            match_term(part)
+            for word in WORD_RE.findall(value)
+            for part in (word, *re.split(r"[-']", word))
+            if len(part) >= 2 and part.casefold() not in PURPOSE_MATCH_STOPWORDS
+        }
+
+    query_terms = terms(query)
     if not query_terms:
         return ""
     sentences = [
@@ -135,11 +141,7 @@ def _script_purpose_for_query(query: str, script: str) -> str:
     ]
     scored = []
     for index, sentence in enumerate(sentences):
-        sentence_terms = {
-            match_term(word)
-            for word in WORD_RE.findall(sentence)
-            if word.casefold() not in PURPOSE_MATCH_STOPWORDS
-        }
+        sentence_terms = terms(sentence)
         overlap = query_terms & sentence_terms
         if overlap:
             scored.append((len(overlap), -index, sentence))

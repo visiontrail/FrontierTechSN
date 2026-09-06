@@ -702,30 +702,56 @@ async def _analyze_candidate_preview(candidate: dict, excerpt: str, task_dir: Pa
     key = hashlib.sha256(candidate["source_page_url"].encode()).hexdigest()[:16]
     folder = task_dir / "footage" / "evidence" / "previews" / key
     folder.mkdir(parents=True, exist_ok=True)
-    interval = _fallback_analysis(candidate, reason="Unreviewed preview proposal")
-    raw, sectioned = await _download_youtube(candidate, folder, interval)
-    media = await _probe(raw)
-    if not sectioned:
-        interval = _fit_analysis_to_media(interval, media["duration_seconds"])
-    edit = {"start_seconds": 0, "end_seconds": interval["end_seconds"] - interval["start_seconds"]} if sectioned else interval
-    preview = folder / "preview.mp4"
-    await _trim(raw, preview, edit, "landscape")
+    proposal = _fallback_analysis(candidate, reason="Unreviewed preview proposal")
+    duration = float(candidate.get("duration_seconds") or 0)
+    length = proposal["end_seconds"] - proposal["start_seconds"]
+    starts = sorted({
+        proposal["start_seconds"],
+        *([min(max(0, duration - length), duration * fraction) for fraction in (0.33, 0.67)]
+          if duration > length * 2 else []),
+    })
+    intervals: list[dict] = []
+    sheets: list[Path] = []
+    for index, start in enumerate(starts):
+        window = folder / f"window-{index}"
+        window.mkdir(exist_ok=True)
+        interval = {**proposal, "start_seconds": start, "end_seconds": start + length}
+        raw, sectioned = await _download_youtube(candidate, window, interval)
+        media = await _probe(raw)
+        if not sectioned:
+            interval = _fit_analysis_to_media(interval, media["duration_seconds"])
+        edit = ({"start_seconds": 0, "end_seconds": interval["end_seconds"] - interval["start_seconds"]}
+                if sectioned else interval)
+        preview = window / "preview.mp4"
+        await _trim(raw, preview, edit, "landscape")
+        row = window / "frames.jpg"
+        await _run_command([
+            "ffmpeg", "-y", "-v", "error", "-i", str(preview),
+            "-vf", "fps=1/3,scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2,tile=5x1",
+            "-frames:v", "1", str(row),
+        ], timeout=60)
+        intervals.append(interval)
+        sheets.append(row)
     sheet = folder / "contact-sheet.jpg"
+    inputs = [arg for row in sheets for arg in ("-i", str(row))]
     await _run_command([
-        "ffmpeg", "-y", "-v", "error", "-i", str(preview),
-        "-vf", "fps=1,scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2,tile=4x4",
+        "ffmpeg", "-y", "-v", "error", *inputs,
+        "-filter_complex", f"vstack=inputs={len(sheets)}" if len(sheets) > 1 else "null",
         "-frames:v", "1", str(sheet),
     ], timeout=60)
     prompt = (
         "Evaluate the attached contact sheet of REAL downloaded video frames, "
-        "sampled at one frame per second in row-major order. Black final cells are padding. "
+        "Each row is a different 15-second candidate interval with five frames sampled "
+        "three seconds apart. Rows are numbered from zero, top to bottom. Black final cells are padding. "
+        f"Available row indices: {list(range(len(intervals)))}. "
         "Judge only visible pixels, not what the source title or narration suggests. "
         f"Narration: {excerpt}\nSource title: {candidate.get('title', '')}\n"
         "Does this preview depict the narrated people, product or action, or provide "
         "clearly relevant contextual B-roll without misrepresenting a different event? "
         "Reject unrelated footage and text-only/talking-head filler. "
         "Return JSON with image_received (boolean), suitable (boolean), confidence (0..1), "
-        "visible_content (concrete visual description), reason. If the image is absent, "
+        "selected_window (integer row index of the best suitable interval), "
+        "visible_content (concrete visual description of THAT row), reason. If the image is absent, "
         "unreadable or insufficient to establish relevance, suitable must be false."
     )
     from backend.pipeline.multimodal_review import _response_payload, _review_command
@@ -741,8 +767,11 @@ async def _analyze_candidate_preview(candidate: dict, excerpt: str, task_dir: Pa
     rejection = analysis_rejection(verdict)
     if rejection or not str(verdict.get("visible_content") or "").strip():
         raise WebFootageError(f"Preview visual review rejected: {rejection or 'Missing visible-content evidence'}")
+    selected = verdict.get("selected_window")
+    if type(selected) is not int or not 0 <= selected < len(intervals):
+        raise WebFootageError("Preview visual review did not select a valid sampled interval")
     return {
-        **interval, **verdict, "analyzer": "gemini-web-contact-sheet",
+        **intervals[selected], **verdict, "analyzer": "gemini-web-contact-sheet",
         "status": "analyzed", "preview_evidence": sheet.relative_to(task_dir).as_posix(),
     }
 

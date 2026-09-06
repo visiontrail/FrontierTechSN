@@ -714,7 +714,7 @@ class WebFootagePreviewTests(unittest.IsolatedAsyncioTestCase):
             ({'image_received': False, 'suitable': True, 'confidence': 0.99}, False),
             ({'image_received': True, 'suitable': False, 'confidence': 0.99}, False),
             ({'image_received': True, 'suitable': True, 'confidence': 0.9,
-              'visible_content': 'Robotaxi driving on city streets', 'reason': 'Relevant vehicle demo'}, True),
+              'visible_content': 'Robotaxi driving on city streets', 'reason': 'Relevant vehicle demo', 'selected_window': 1}, True),
         ]:
             with self.subTest(verdict=verdict), TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -730,6 +730,7 @@ class WebFootagePreviewTests(unittest.IsolatedAsyncioTestCase):
                     if accepted:
                         result = await web_footage._analyze_candidate_preview(candidate, 'Robotaxi narration', root)
                         self.assertEqual(result['analyzer'], 'gemini-web-contact-sheet')
+                        self.assertAlmostEqual(result['start_seconds'], 19.8)
                         self.assertIn('--file', ask.await_args.args[0])
                     else:
                         with self.assertRaises(web_footage.WebFootageError):
