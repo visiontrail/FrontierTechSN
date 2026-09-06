@@ -685,3 +685,13 @@ def test_hyphenated_product_beats_generic_ai_sentence():
     script = ("Bilibili closed its AI competition. "
               "The top prize went to Project N.E.K.O., a catgirl-themed product.")
     assert footage._script_purpose_for_query("Project NEKO catgirl AI companion", script).startswith("The top prize")
+
+
+def test_model_bookend_query_cannot_target_only_the_subscription_sentence():
+    script = ("World Labs released a spatial model.\n\n"
+              "That's today's ByteFront Espresso. Subscribe to stay ahead of the next signal.")
+    plan = footage._distinct_grounded_plan([
+        {"query": "next signal", "purpose": "Stay ahead"},
+        {"query": "World Labs", "purpose": "Spatial model"},
+    ], script, None)
+    assert [shot["query"] for shot in plan] == ["World Labs"]

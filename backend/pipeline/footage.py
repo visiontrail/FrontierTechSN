@@ -394,6 +394,10 @@ def _distinct_grounded_plan(
     clips planned for one story from being forced onto an unrelated second
     scene merely to satisfy the requested clip count.
     """
+    bookends = [
+        part.strip() for part in re.split(r"\n\s*\n|\n+", script)
+        if _is_program_bookend(part)
+    ]
     output: list[dict[str, str]] = []
     occupied = list(excluded_purposes or [])
     for raw in plan:
@@ -406,7 +410,10 @@ def _distinct_grounded_plan(
         excerpt = _script_purpose_for_query(query, scope)
         if not excerpt:
             excerpt = _script_purpose_for_query(purpose, script)
-        if _is_program_bookend(purpose) or _is_program_bookend(excerpt):
+        if (
+            _is_program_bookend(purpose) or _is_program_bookend(excerpt)
+            or (excerpt and any(excerpt in paragraph for paragraph in bookends))
+        ):
             continue
         if not query:
             continue
