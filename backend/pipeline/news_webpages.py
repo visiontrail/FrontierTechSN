@@ -41,7 +41,9 @@ STOP_WORDS = {
     "according",
     "after",
     "again",
+    "all",
     "also",
+    "and",
     "been",
     "being",
     "could",
@@ -59,6 +61,7 @@ STOP_WORDS = {
     "source",
     "sources",
     "that",
+    "the",
     "their",
     "there",
     "these",
@@ -118,9 +121,13 @@ def _tokens(value: object) -> set[str]:
 
 
 def _story_text(article: dict) -> str:
+    # Evidence excerpts can contain archive boilerplate, publication dates,
+    # and unrelated navigation copy.  Assignment identity must come from the
+    # selected headline and feed summary; evidence is still retained for the
+    # script/fact-check pipeline, but must not map an article to a visual scene.
     return " ".join(
         str(article.get(key) or "")
-        for key in ("title", "summary", "evidence_text", "source_name")
+        for key in ("title", "summary", "source_name")
     )
 
 

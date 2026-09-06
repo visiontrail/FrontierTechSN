@@ -308,6 +308,10 @@ def test_overlay_assignment_rejects_generic_reporting_word_overlap():
                 "source_name": "Techmeme",
                 "title": "Google patches a Chrome flaw that could allow code execution",
                 "summary": "A security publication reports that Google shipped the fix.",
+                "evidence_text": (
+                    "This archive page shows how the site appeared in September. "
+                    "The current version is available at the home page."
+                ),
                 "url": "https://www.techmeme.com/example",
             }
         ]
