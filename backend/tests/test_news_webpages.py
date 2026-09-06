@@ -300,6 +300,39 @@ def test_overlay_assignment_preserves_copy_free_three_image_collage():
     assert news_webpages.select_overlay_assignments(dossier, storyboard, plans) == []
 
 
+def test_overlay_assignment_rejects_generic_reporting_word_overlap():
+    dossier = {
+        "selected": [
+            {
+                "language": "en",
+                "source_name": "Techmeme",
+                "title": "Google patches a Chrome flaw that could allow code execution",
+                "summary": "A security publication reports that Google shipped the fix.",
+                "url": "https://www.techmeme.com/example",
+            }
+        ]
+    }
+    storyboard = {
+        "scenes": [
+            {
+                "id": "scene-05",
+                "text": (
+                    "DeepTech China reports that the Commerce Department could seek "
+                    "input on artificial intelligence export controls."
+                ),
+            }
+        ]
+    }
+    plans = [
+        {
+            "id": "scene-05",
+            "news_image_src": "../news_images/the-information.png",
+        }
+    ]
+
+    assert news_webpages.select_overlay_assignments(dossier, storyboard, plans) == []
+
+
 @pytest.mark.asyncio
 async def test_capture_uses_later_english_story_when_a_publisher_blocks(
     monkeypatch, tmp_path
