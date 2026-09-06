@@ -30,7 +30,7 @@ from PIL import Image, UnidentifiedImageError
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 MAX_PAGE_OVERLAYS = 2
 VIEWPORT_WIDTH = 1440
 VIEWPORT_HEIGHT = 900
@@ -187,9 +187,12 @@ def select_overlay_assignments(
     return assignments
 
 
-def _fingerprint(assignments: list[dict], storyboard: dict) -> str:
+def _fingerprint(
+    assignments: list[dict], storyboard: dict, requested_count: int
+) -> str:
     payload = {
         "assignments": assignments,
+        "requested_count": requested_count,
         "scenes": [
             {
                 "id": str(scene.get("id") or ""),
@@ -388,16 +391,29 @@ _PAGE_INFO_SCRIPT = r"""
       .map((word) => word.toLowerCase()));
     return [...terms].filter((word) => expectedTerms.has(word)).length;
   }));
+  const bodyPreview = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+  const blockerText = `${document.title || ''} ${bodyPreview}`;
+  const blockingReason = /human verification|confirm you are human|security check before continuing|performing security verification|verif(?:y|ies) you are not a bot|captcha|just a moment/i.test(blockerText)
+    ? 'human verification challenge'
+    : /access denied|request blocked|temporarily unavailable/i.test(blockerText)
+      ? 'access denied page'
+      : '';
   return {
     ready_state: document.readyState,
+    page_url: location.href,
     document_language: (document.documentElement.lang || '').trim().toLowerCase(),
     page_title: document.title || '',
+    publisher_name: document.querySelector('meta[property="og:site_name"]')?.content || '',
     headline: headline ? (headline.innerText || '').replace(/\s+/g, ' ').trim() : '',
+    headline_href: headline
+      ? (headline.closest('a[href]')?.href || headline.querySelector('a[href]')?.href || '')
+      : '',
     headline_match_words: [...headlineTerms].filter((word) => expectedTerms.has(word)).length,
     metadata_match_words: metadataMatchWords,
     paragraph_characters: paragraphs.join(' ').length,
     english_word_count: (sample.match(/[A-Za-z][A-Za-z0-9'-]{2,}/g) || []).length,
     cjk_character_count: (sample.match(/[\u3400-\u9fff]/g) || []).length,
+    blocking_reason: blockingReason,
   };
 })()
 """
@@ -573,17 +589,53 @@ def _page_is_english(info: dict) -> bool:
     language = str(info.get("document_language") or "")
     words = int(info.get("english_word_count") or 0)
     cjk = int(info.get("cjk_character_count") or 0)
+    headline_evidence = max(
+        int(info.get("headline_match_words") or 0),
+        int(info.get("metadata_match_words") or 0),
+    )
     return bool(
-        info.get("headline")
-        and max(
-            int(info.get("headline_match_words") or 0),
-            int(info.get("metadata_match_words") or 0),
-        )
-        >= 2
+        not info.get("blocking_reason")
+        and info.get("headline")
+        and headline_evidence >= 2
         and int(info.get("paragraph_characters") or 0) >= 80
         and words >= 30
-        and (language.startswith("en") or (words >= 50 and cjk <= max(3, words // 12)))
+        and (
+            language.startswith("en")
+            or (
+                # Many legitimate publishers, including Techmeme, omit the
+                # root ``lang`` attribute.  In that case require strong title
+                # grounding as well as English prose instead of treating an
+                # arbitrary 50-word boundary as language evidence.
+                not language
+                and headline_evidence >= 3
+                and cjk <= max(3, words // 12)
+            )
+        )
     )
+
+
+def _article_relay_url(info: dict, assignment: dict) -> str:
+    """Return Techmeme's matched original-publisher link when it is safe."""
+    source = urlsplit(str(assignment.get("source_url") or ""))
+    current = urlsplit(str(info.get("page_url") or ""))
+    headline_link = urlsplit(str(info.get("headline_href") or ""))
+    source_host = (source.hostname or "").casefold().removeprefix("www.")
+    current_host = (current.hostname or "").casefold().removeprefix("www.")
+    target_host = (headline_link.hostname or "").casefold().removeprefix("www.")
+    headline_evidence = max(
+        int(info.get("headline_match_words") or 0),
+        int(info.get("metadata_match_words") or 0),
+    )
+    if (
+        source_host != "techmeme.com"
+        or current_host != "techmeme.com"
+        or headline_link.scheme not in {"http", "https"}
+        or not target_host
+        or target_host == "techmeme.com"
+        or headline_evidence < 3
+    ):
+        return ""
+    return headline_link.geturl()
 
 
 async def _capture_page(
@@ -638,6 +690,7 @@ async def _capture_page(
         prepare_capture_script = _PREPARE_CAPTURE_SCRIPT.replace(
             "__EXPECTED_HEADLINE__", expected_headline_json
         )
+        relay_url = ""
         while loop.time() < deadline:
             try:
                 value = await _runtime_value(socket, counter, page_info_script)
@@ -645,10 +698,49 @@ async def _capture_page(
                 await asyncio.sleep(0.35)
                 continue
             info = value if isinstance(value, dict) else {}
-            if info.get("ready_state") in {"interactive", "complete"} and _page_is_english(info):
+            relay_url = _article_relay_url(info, assignment)
+            if info.get("ready_state") in {"interactive", "complete"} and (
+                _page_is_english(info) or info.get("blocking_reason") or relay_url
+            ):
                 break
             await asyncio.sleep(0.6)
+        if relay_url:
+            relay_source_host = (
+                urlsplit(str(info.get("page_url") or "")).hostname or ""
+            ).casefold().removeprefix("www.")
+            await _cdp_command(
+                socket,
+                counter,
+                "Page.navigate",
+                {"url": relay_url},
+            )
+            deadline = loop.time() + PAGE_LOAD_TIMEOUT_SECONDS
+            info = {}
+            while loop.time() < deadline:
+                try:
+                    value = await _runtime_value(socket, counter, page_info_script)
+                except RuntimeError:
+                    await asyncio.sleep(0.35)
+                    continue
+                info = value if isinstance(value, dict) else {}
+                current_host = (
+                    urlsplit(str(info.get("page_url") or "")).hostname or ""
+                ).casefold().removeprefix("www.")
+                if (
+                    current_host != relay_source_host
+                    and info.get("ready_state") in {"interactive", "complete"}
+                    and (
+                        _page_is_english(info) or info.get("blocking_reason")
+                    )
+                ):
+                    break
+                await asyncio.sleep(0.6)
         if not _page_is_english(info):
+            if info.get("blocking_reason"):
+                raise RuntimeError(
+                    "Rendered source blocked article capture: "
+                    f"{info['blocking_reason']}"
+                )
             raise RuntimeError(
                 "Rendered source did not expose an English headline and article body "
                 f"(lang={info.get('document_language') or 'unknown'}, "
@@ -699,8 +791,18 @@ async def acquire_news_webpages(
         dossier = json.loads(dossier_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         dossier = {}
-    assignments = select_overlay_assignments(dossier, storyboard, plans, limit=limit)
-    fingerprint = _fingerprint(assignments, storyboard)
+    # Keep later eligible stories as capture fallbacks.  Publisher bot gates
+    # and transient delivery failures are page-specific; they must not turn a
+    # healthy edition into a 0/N result when another grounded English article
+    # scene is available.
+    assignments = select_overlay_assignments(
+        dossier,
+        storyboard,
+        plans,
+        limit=max(max(0, limit), len(plans)),
+    )
+    requested_count = min(max(0, limit), len(assignments))
+    fingerprint = _fingerprint(assignments, storyboard, requested_count)
     cached = _cached_manifest(task_dir, fingerprint)
     if cached:
         _emit(log, f"News webpages: reusing {len(cached['pages'])} verified capture(s)")
@@ -719,17 +821,18 @@ async def acquire_news_webpages(
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "fingerprint": fingerprint,
-        "status": "capturing" if assignments else "not_needed",
+        "status": "capturing" if requested_count else "not_needed",
         "created_at": _now(),
         "updated_at": _now(),
-        "requested_count": len(assignments),
+        "requested_count": requested_count,
+        "candidate_count": len(assignments),
         "english_only": True,
         "assignments": assignments,
         "pages": [],
         "errors": [],
     }
     _write_manifest(task_dir, manifest)
-    if not assignments:
+    if not requested_count:
         _emit(log, "News webpages: no English selected story matched an image/footage scene")
         return manifest
 
@@ -738,10 +841,12 @@ async def acquire_news_webpages(
     try:
         process, browser_ws_url, profile = await _start_chrome()
         for index, assignment in enumerate(assignments, start=1):
+            if len(manifest["pages"]) >= requested_count:
+                break
             destination = root / f"page-{index:02d}.png"
             _emit(
                 log,
-                f"News webpage {index}/{len(assignments)}: capturing English source "
+                f"News webpage candidate {index}/{len(assignments)}: capturing English source "
                 f"{urlsplit(assignment['source_url']).hostname}",
             )
             try:
@@ -759,6 +864,10 @@ async def acquire_news_webpages(
                 continue
             item = {
                 **assignment,
+                "captured_url": str(info.get("page_url") or assignment["source_url"]),
+                "captured_source_name": str(
+                    info.get("publisher_name") or assignment["source_name"]
+                ),
                 "document_language": str(info.get("document_language") or ""),
                 "page_title": str(info.get("page_title") or ""),
                 "captured_headline": str(info.get("headline") or ""),
@@ -793,14 +902,15 @@ async def acquire_news_webpages(
     captured = len(manifest["pages"])
     manifest["status"] = (
         "ready"
-        if captured == len(assignments)
+        if captured == requested_count
         else ("partial" if captured else "no_results")
     )
     manifest["updated_at"] = _now()
     _write_manifest(task_dir, manifest)
     _emit(
         log,
-        f"News webpages: {captured}/{len(assignments)} English article capture(s) ready",
+        f"News webpages: {captured}/{requested_count} English article capture(s) ready "
+        f"from {len(assignments)} eligible candidate(s)",
     )
     return manifest
 
@@ -817,7 +927,7 @@ def attach_news_webpages(plans: list[dict], manifest: dict | None, task_dir: Pat
         if not isinstance(item, dict) or not _asset_is_intact(task_dir, item):
             continue
         scene_id = str(item.get("scene_id") or "")
-        source_url = str(item.get("source_url") or "")
+        source_url = str(item.get("captured_url") or item.get("source_url") or "")
         plan = by_id.get(scene_id)
         if (
             not plan
@@ -834,7 +944,9 @@ def attach_news_webpages(plans: list[dict], manifest: dict | None, task_dir: Pat
                 "news_webpage": True,
                 "news_webpage_src": f"../{item['local_path']}",
                 "news_webpage_url": source_url,
-                "news_webpage_source": item.get("source_name") or "English news source",
+                "news_webpage_source": item.get("captured_source_name")
+                or item.get("source_name")
+                or "English news source",
                 "news_webpage_headline": item.get("captured_headline") or "",
                 "news_webpage_sha256": item.get("sha256") or "",
                 "news_webpage_language": "en",
