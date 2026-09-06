@@ -361,6 +361,22 @@ utils = replaceOnce(
     'Gemini short model label read-back',
   )
 }
+// Upgrade already-patched installations as well as clean installs.
+utils = replaceWithinFunction(
+  utils,
+  'export async function sendGeminiMessage(page, text) {',
+  'function normalizeGeminiExportUrls(value) {',
+  "                throw new CommandExecutionError('Gemini did not accept the composer submission');",
+  `                if (typeof page.nativeClick === 'function') {
+                    const fresh = await page.evaluate(submitComposerScript());
+                    if (fresh?.action === 'button' && /send|submit|发送|提交/i.test(String(fresh.label || ''))) {
+                        await page.nativeClick(Number(fresh.x), Number(fresh.y));
+                        if (await waitForComposerClear()) return 'button';
+                    }
+                }
+                throw new CommandExecutionError('Gemini did not accept the composer submission');`,
+  'Gemini no-op selector native retry',
+)
 utils = replaceOnce(
   utils,
   `      return {

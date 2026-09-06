@@ -96,7 +96,7 @@ async def _acquire_task_footage(
     supplied_queries: list[str] | None = None,
 ):
     script_path = Path(task.script_path or task_dir / "script.txt")
-    return await acquire_footage(
+    manifest = await acquire_footage(
         media_provider=task.config.footage_provider,
         task_id=task.id,
         task_dir=task_dir,
@@ -111,6 +111,16 @@ async def _acquire_task_footage(
         supplied_queries=supplied_queries,
         log=task_log,
     )
+
+    requested = int(manifest.get("requested_clip_count") or 0)
+    acquired = len(manifest.get("clips") or [])
+    if acquired < requested:
+        raise RuntimeError(
+            f"Public-footage acquisition incomplete: {acquired}/{requested} eligible clips; "
+            "review footage/manifest.json for rejected candidates and search failures. "
+            "Retry footage acquisition before rendering."
+        )
+    return manifest
 
 
 async def _generate_task_thumbnail(
@@ -369,9 +379,8 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
         except Exception as exc:
             task_log(f"Thumbnail generation could not complete; continuing without cover art: {exc}")
 
-    # Stage 5: AI-planned public B-roll. Footage is a production enhancement,
-    # not a reason to lose an otherwise valid narration, so provider/network
-    # failures are logged and the audio pipeline continues.
+    # Enabled footage is a delivery requirement. Fail before expensive TTS
+    # when scouting cannot fulfill the plan; saved scripts remain resumable.
     if task.config.footage_enabled:
         task_log("Stage 5: Scouting open-license public footage")
         await update_task(task.id, status=TaskStatus.SOURCING.value)
@@ -383,7 +392,8 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
                 title=publication_title,
             )
         except Exception as exc:
-            task_log(f"Public footage scout could not complete; continuing without B-roll: {exc}")
+            task_log(f"Public footage scout blocked delivery: {exc}")
+            raise
 
     # Stage 6: TTS
     task_log(f"Stage 6: Generating TTS audio with {task.config.tts_model}")

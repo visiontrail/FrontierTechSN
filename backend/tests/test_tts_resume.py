@@ -1898,3 +1898,14 @@ class ManualPublicationRouteTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FootageAcquisitionContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_partial_scout_fails_before_later_pipeline_stages(self):
+        task = make_task('partial-footage', status=TaskStatus.FAILED,
+                         script_path='/tmp/script.txt', output_dir='/tmp/partial-footage')
+        with patch.object(orchestrator, 'acquire_footage', AsyncMock(return_value={
+            'requested_clip_count': 6, 'clips': [{'id': 'clip-01'}],
+        })):
+            with self.assertRaisesRegex(RuntimeError, '1/6 eligible clips'):
+                await orchestrator._acquire_task_footage(task, Path(task.output_dir), lambda _: None)

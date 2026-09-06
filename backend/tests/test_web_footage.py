@@ -395,6 +395,99 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
             fallback_command[fallback_command.index("-f") + 1],
         )
 
+    async def test_supplement_retries_rejected_candidate_before_download(self):
+        with TemporaryDirectory() as directory:
+            task_dir = Path(directory)
+            (task_dir / "footage").mkdir()
+            manifest = {"provider_id": "hybrid", "clips": [], "errors": []}
+            candidates = [
+                {
+                    "platform": "youtube",
+                    "provider": "YouTube",
+                    "provider_id": "youtube-ytdlp",
+                    "title": "Blocked candidate",
+                    "creator": "Channel A",
+                    "source_page_url": "https://www.youtube.com/watch?v=blocked",
+                    "duration_seconds": 90,
+                },
+                {
+                    "platform": "youtube",
+                    "provider": "YouTube",
+                    "provider_id": "youtube-ytdlp",
+                    "title": "Working candidate",
+                    "creator": "Channel B",
+                    "source_page_url": "https://www.youtube.com/watch?v=working",
+                    "duration_seconds": 90,
+                },
+            ]
+
+            async def fake_download(candidate, raw_dir, _analysis):
+                if candidate["source_page_url"].endswith("blocked"):
+                    raise web_footage.WebFootageError("403 Forbidden")
+                path = raw_dir / "working.mp4"
+                path.write_bytes(b"raw-video")
+                return path, True
+
+            async def fake_trim(_raw, destination, _analysis, _orientation):
+                destination.write_bytes(b"trimmed-video")
+
+            with (
+                patch.object(
+                    web_footage,
+                    "search_youtube",
+                    AsyncMock(return_value=candidates),
+                ) as search,
+                patch.object(
+                    web_footage,
+                    "analyze_candidate_link",
+                    AsyncMock(side_effect=[
+                        {"suitable": False, "confidence": 0.5, "reason": "no visual connection"},
+                        {"suitable": True, "confidence": 0.9, "start_seconds": 4,
+                         "end_seconds": 14, "analyzer": "test"},
+                    ]),
+                ) as analyze,
+                patch.object(
+                    web_footage,
+                    "_download_youtube",
+                    AsyncMock(side_effect=fake_download),
+                ) as download,
+                patch.object(
+                    web_footage,
+                    "_probe",
+                    AsyncMock(return_value={"duration_seconds": 10, "width": 1280, "height": 720}),
+                ),
+                patch.object(web_footage, "_trim", AsyncMock(side_effect=fake_trim)),
+                patch.object(
+                    web_footage,
+                    "_evidence_frames",
+                    AsyncMock(return_value=["frame-01.jpg", "frame-02.jpg"]),
+                ),
+            ):
+                result = await web_footage.supplement_web_footage(
+                    task_dir=task_dir,
+                    manifest=manifest,
+                    query_plan=[
+                        {
+                            "query": "chip factory",
+                            "purpose": "story",
+                            "script_excerpt": "Exact persisted narration segment.",
+                        }
+                    ],
+                    target_total=1,
+                    orientation="landscape",
+                    script="The chip factory is expanding production.",
+                )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["clips"][0]["title"], "Working candidate")
+        self.assertEqual(download.await_count, 1)
+        self.assertEqual(len(result["rejected_candidates"]), 1)
+        self.assertEqual(search.await_count, 2)
+        self.assertEqual(
+            analyze.await_args.args[1], "Exact persisted narration segment."
+        )
+        self.assertEqual(result["errors"][0]["candidate_attempt"], 1)
+
     async def test_supplement_retries_next_unique_candidate_after_download_failure(self):
         with TemporaryDirectory() as directory:
             task_dir = Path(directory)
@@ -445,6 +538,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
                             "start_seconds": 4,
                             "end_seconds": 14,
                             "analyzer": "test",
+                            "confidence": 0.9,
                         }
                     ),
                 ) as analyze,
@@ -538,7 +632,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     web_footage,
                     "analyze_candidate_link",
-                    AsyncMock(return_value={"start_seconds": 1, "end_seconds": 11, "analyzer": "test"}),
+                    AsyncMock(return_value={"start_seconds": 1, "end_seconds": 11, "analyzer": "test", "confidence": 0.9}),
                 ),
                 patch.object(
                     web_footage,
@@ -574,3 +668,69 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_rejection_without_timestamps_survives_normalization_and_late_read():
+    verdict = {"suitable": False, "confidence": 0.9, "reason": "Unrelated drama"}
+    result = web_footage._normalise_analysis(verdict, {"duration_seconds": 300})
+    assert result["status"] == "rejected"
+    assert "start_seconds" not in result
+    turns = [{"Role": "user", "Text": "https://youtu.be/example"},
+             {"Role": "assistant", "Text": json.dumps(verdict)}]
+    assert web_footage._analysis_from_gemini_turns(json.dumps(turns), "https://youtu.be/example") == verdict
+
+
+def test_legacy_irrelevant_and_low_confidence_analysis_is_rejected():
+    for verdict in [
+        {"confidence": 0.9, "reason": "no visual connection to AI development"},
+        {"confidence": 0.45, "reason": "biblical themes"},
+        {"suitable": "false", "confidence": 0.99},
+        {"status": "fallback", "confidence": 0.25},
+    ]:
+        assert web_footage.analysis_rejection(verdict)
+
+
+class WebFootageEmptySearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_search_broadens_subject_without_dropping_narration(self):
+        with TemporaryDirectory() as directory:
+            with patch.object(web_footage, 'search_youtube', AsyncMock(return_value=[])) as search:
+                result = await web_footage.supplement_web_footage(
+                    task_dir=Path(directory), manifest={'clips': []},
+                    query_plan=[{'query': 'Bilibili AI Creation Competition Project NEKO',
+                                 'script_excerpt': 'Bilibili held its AI competition.'}],
+                    target_total=1, orientation='landscape', script='Bilibili held its AI competition.',
+                )
+        self.assertEqual([call.args[0] for call in search.await_args_list],
+                         ['Bilibili AI Creation Competition Project NEKO', 'Bilibili AI Creation'])
+        self.assertEqual(result['requested_clip_count'], 1)
+        self.assertEqual(result['status'], 'no_results')
+
+
+class WebFootagePreviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_preview_requires_explicit_received_image_and_suitability(self):
+        candidate = {'source_page_url': 'https://youtu.be/test', 'duration_seconds': 60,
+                     'title': 'Test footage'}
+        for verdict, accepted in [
+            ({'image_received': False, 'suitable': True, 'confidence': 0.99}, False),
+            ({'image_received': True, 'suitable': False, 'confidence': 0.99}, False),
+            ({'image_received': True, 'suitable': True, 'confidence': 0.9,
+              'visible_content': 'Robotaxi driving on city streets', 'reason': 'Relevant vehicle demo'}, True),
+        ]:
+            with self.subTest(verdict=verdict), TemporaryDirectory() as directory:
+                root = Path(directory)
+                with (
+                    patch.object(web_footage, '_download_youtube', AsyncMock(return_value=(root / 'raw.mp4', True))),
+                    patch.object(web_footage, '_probe', AsyncMock(return_value={'duration_seconds': 15})),
+                    patch.object(web_footage, '_trim', AsyncMock()),
+                    patch.object(web_footage, '_run_command', AsyncMock()),
+                    patch.object(web_footage, 'run_opencli', AsyncMock(return_value=OpenCLIResult(
+                        args=[], returncode=0, stdout=json.dumps(verdict), stderr='',
+                    ))) as ask,
+                ):
+                    if accepted:
+                        result = await web_footage._analyze_candidate_preview(candidate, 'Robotaxi narration', root)
+                        self.assertEqual(result['analyzer'], 'gemini-web-contact-sheet')
+                        self.assertIn('--file', ask.await_args.args[0])
+                    else:
+                        with self.assertRaises(web_footage.WebFootageError):
+                            await web_footage._analyze_candidate_preview(candidate, 'Robotaxi narration', root)

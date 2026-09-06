@@ -656,3 +656,26 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_bytefront_fallback_excludes_bookends_and_preserves_short_entities():
+    script = "\n\n".join([
+        "It's Sunday, September 6. This is ByteFront Espresso, your frontier-tech signal.",
+        "QbitAI reports that Bilibili has closed its first AI Creation Open Competition.",
+        "DeepTech reports the Ig Nobel Prizes have been announced.",
+        "That's today's ByteFront Espresso. Subscribe to stay ahead of the next signal.",
+    ])
+    plan = footage._fallback_plan("ByteFront Espresso", script, None)
+    assert len(plan) == 2
+    assert "Bilibili" in plan[0]["query"] and "AI" in plan[0]["query"]
+    assert "Ig Nobel" in plan[1]["query"]
+
+
+def test_query_binding_does_not_switch_to_longer_unrelated_story_sentence():
+    paragraph = ("World Labs released a spatial intelligence model. "
+                 "The same outlet reports that Feidu Technology won a summit prize for "
+                 "flood simulation that helps cities make emergency decisions before rain falls.")
+    plan = footage._distinct_grounded_plan(
+        [{"query": "World Labs spatial intelligence", "purpose": paragraph}], paragraph, None,
+    )
+    assert plan[0]["script_excerpt"] == "World Labs released a spatial intelligence model."

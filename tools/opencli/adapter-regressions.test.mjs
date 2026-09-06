@@ -841,6 +841,64 @@ test('Gemini clicks a discovered semantic send button instead of pressing Enter'
   ])
 })
 
+test('Gemini retries a no-op selector click with observed native coordinates', async () => {
+  const actions = []
+  let composerText = ''
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app/test'
+      if (script.includes('bestButton instanceof HTMLElement')) {
+        return {
+          action: 'button',
+          label: 'Send message',
+          x: 123,
+          y: 456,
+        }
+      }
+      if (script.includes('hasText: actual.length > 0')) {
+        return { hasText: composerText.length > 0, actual: composerText }
+      }
+      if (script.includes('inputText') && script.includes('InputEvent')) {
+        return { hasText: composerText.length > 0, actual: composerText }
+      }
+      if (script.includes('Could not find Gemini composer')) return { ok: true }
+      throw new Error(`Unexpected Gemini evaluate script: ${String(script).slice(0, 100)}`)
+    },
+    async nativeType(text) {
+      actions.push(['nativeType', text])
+      composerText += text
+    },
+    async fillText(selector, text) {
+      actions.push(['fillText', selector, text])
+      composerText = text
+      return { verified: true, actual: text }
+    },
+    async nativeClick(x, y) {
+      actions.push(['nativeClick', x, y])
+      composerText = ''
+    },
+    async nativeKeyPress(key) {
+      actions.push(['nativeKeyPress', key])
+    },
+    async click(selector) {
+      actions.push(['click', selector])
+    },
+    async wait() {},
+  }
+
+  const result = await sendGeminiMessage(page, 'hello')
+
+  assert.equal(result, 'button')
+  assert.deepEqual(actions, [
+    ['fillText', '[contenteditable="true"][aria-label*="Gemini"]', 'hello'],
+    [
+      'click',
+      'button[aria-label="Send message"], button[aria-label="发送消息"], button[aria-label="提交"]',
+    ],
+    ['nativeClick', 123, 456],
+  ])
+})
+
 test('Gemini ask waits through delayed model-picker hydration', async () => {
   const prompt = 'Reply with exactly READY'
   let pickerReads = 0

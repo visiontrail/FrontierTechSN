@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -260,7 +261,31 @@ def _fallback_analysis(candidate: dict, *, reason: str) -> dict:
     }
 
 
+def analysis_rejection(analysis: dict) -> str:
+    """Use the same minimum suitability as placement, before downloading."""
+    verdict = str(analysis.get("suitable", "")).strip().casefold()
+    reason = str(analysis.get("reason") or "")
+    if verdict in {"false", "no", "0", "unsuitable"}:
+        return reason or "Gemini rejected this candidate"
+    if re.search(
+        r"no (?:visual )?connection|unrelated|not suitable|does not (?:match|depict)"
+        r"|unavailable|cannot (?:view|access|verify)", reason, re.I,
+    ):
+        return reason
+    confidence = float(analysis.get("confidence") or 0)
+    if not math.isfinite(confidence) or confidence < 0.65:
+        return reason or "Visual suitability confidence is below 0.65"
+    return ""
+
+
 def _normalise_analysis(parsed: dict, candidate: dict) -> dict:
+    rejection = analysis_rejection(parsed)
+    if rejection:
+        return {
+            "suitable": False, "status": "rejected",
+            "confidence": float(parsed.get("confidence") or 0),
+            "reason": rejection, "analyzer": "gemini-web-via-opencli",
+        }
     duration = float(candidate.get("duration_seconds") or 0)
     maximum = float(config.WEB_FOOTAGE_CLIP_SECONDS)
     minimum = float(config.WEB_FOOTAGE_CLIP_MIN_SECONDS)
@@ -322,7 +347,7 @@ def _analysis_from_gemini_turns(value: str, source_page_url: str) -> dict | None
             parsed = first_json(text)
         except OpenCLIError:
             continue
-        if isinstance(parsed, dict) and "start_seconds" in parsed and "end_seconds" in parsed:
+        if isinstance(parsed, dict) and ("suitable" in parsed or ("start_seconds" in parsed and "end_seconds" in parsed)):
             return parsed
     return None
 
@@ -374,7 +399,11 @@ async def analyze_candidate_link(candidate: dict, script_excerpt: str) -> dict:
         f"this public YouTube video: {candidate['source_page_url']}\n"
         f"Candidate duration: {duration:.1f} seconds.\n"
         f"Narration excerpt:\n{script_excerpt}\n\n"
-        "Return ONLY one compact JSON object with numeric start_seconds, end_seconds, "
+        "First determine whether you can inspect the actual video and whether it depicts "
+        "the narrated subject. Do not infer visuals from the narration or invent imagery. "
+        f"Source title: {candidate.get('title', '')}\n"
+        "If unrelated or unviewable, return suitable:false, confidence and reason, without timestamps. "
+        "Otherwise return ONLY one compact JSON object with suitable:true, numeric start_seconds, end_seconds, "
         "confidence (0 to 1), and a short reason. "
         f"Select a visually coherent interval of AT LEAST {min_seconds} seconds and AT MOST "
         f"{max_seconds} seconds — aim for close to {max_seconds} seconds so the clip can "
@@ -405,7 +434,7 @@ async def analyze_candidate_link(candidate: dict, script_excerpt: str) -> dict:
             raise OpenCLIError("Gemini trim analysis was not a JSON object")
         analysis = _normalise_analysis(parsed, candidate)
         if recovered:
-            analysis["status"] = "analyzed_after_timeout"
+            analysis["status"] = "rejected_after_timeout" if analysis.get("suitable") is False else "analyzed_after_timeout"
         return analysis
     except Exception as exc:  # noqa: BLE001 - trim fallback must keep the scout moving
         return _fallback_analysis(candidate, reason=f"Gemini analysis fallback: {exc}")
@@ -664,6 +693,60 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+async def _analyze_candidate_preview(candidate: dict, excerpt: str, task_dir: Path) -> dict:
+    """Judge actual downloaded pixels when the model cannot inspect a URL.
+
+    A deterministic offset is only a preview proposal. It becomes eligible
+    footage only after the attached contact sheet receives an explicit verdict.
+    """
+    key = hashlib.sha256(candidate["source_page_url"].encode()).hexdigest()[:16]
+    folder = task_dir / "footage" / "evidence" / "previews" / key
+    folder.mkdir(parents=True, exist_ok=True)
+    interval = _fallback_analysis(candidate, reason="Unreviewed preview proposal")
+    raw, sectioned = await _download_youtube(candidate, folder, interval)
+    media = await _probe(raw)
+    if not sectioned:
+        interval = _fit_analysis_to_media(interval, media["duration_seconds"])
+    edit = {"start_seconds": 0, "end_seconds": interval["end_seconds"] - interval["start_seconds"]} if sectioned else interval
+    preview = folder / "preview.mp4"
+    await _trim(raw, preview, edit, "landscape")
+    sheet = folder / "contact-sheet.jpg"
+    await _run_command([
+        "ffmpeg", "-y", "-v", "error", "-i", str(preview),
+        "-vf", "fps=1,scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2,tile=4x4",
+        "-frames:v", "1", str(sheet),
+    ], timeout=60)
+    prompt = (
+        "Evaluate the attached contact sheet of REAL downloaded video frames, "
+        "sampled at one frame per second in row-major order. Black final cells are padding. "
+        "Judge only visible pixels, not what the source title or narration suggests. "
+        f"Narration: {excerpt}\nSource title: {candidate.get('title', '')}\n"
+        "Does this preview depict the narrated people, product or action, or provide "
+        "clearly relevant contextual B-roll without misrepresenting a different event? "
+        "Reject unrelated footage and text-only/talking-head filler. "
+        "Return JSON with image_received (boolean), suitable (boolean), confidence (0..1), "
+        "visible_content (concrete visual description), reason. If the image is absent, "
+        "unreadable or insufficient to establish relevance, suitable must be false."
+    )
+    from backend.pipeline.multimodal_review import _response_payload, _review_command
+
+    result = await run_opencli(
+        _review_command("gemini", prompt, sheet, config.WEB_FOOTAGE_GEMINI_TIMEOUT),
+        timeout=config.WEB_FOOTAGE_GEMINI_TIMEOUT + 60,
+    )
+    verdict = _response_payload(result.stdout)
+    (folder / "review.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
+    if verdict.get("image_received") is not True or verdict.get("suitable") is not True:
+        raise WebFootageError(f"Preview visual review rejected: {verdict.get('reason', 'No explicit image verdict')}")
+    rejection = analysis_rejection(verdict)
+    if rejection or not str(verdict.get("visible_content") or "").strip():
+        raise WebFootageError(f"Preview visual review rejected: {rejection or 'Missing visible-content evidence'}")
+    return {
+        **interval, **verdict, "analyzer": "gemini-web-contact-sheet",
+        "status": "analyzed", "preview_evidence": sheet.relative_to(task_dir).as_posix(),
+    }
+
+
 async def supplement_web_footage(
     *,
     task_dir: Path,
@@ -728,6 +811,13 @@ async def supplement_web_footage(
             manifest.setdefault("errors", []).append(
                 {"query": query, "stage": "web-selection", "message": "No unique web candidate found"}
             )
+            # Long entity lists can overconstrain YouTube. Broaden only the
+            # query, retaining the same narration binding and suitability gate.
+            words = query.split()
+            if len(words) > 3 and not shot.get("_short_query"):
+                shorter = " ".join(words[:3])
+                pending_shots.append({**shot, "query": shorter, "_short_query": True})
+                _emit(log, f"Web footage: no results; retrying subject query '{shorter}'")
             continue
 
         excerpt = str(shot.get("script_excerpt") or "").strip()
@@ -749,6 +839,20 @@ async def supplement_web_footage(
         raw_path: Path | None = None
         try:
             analysis = await analyze_candidate_link(candidate, excerpt)
+            rejection = analysis_rejection(analysis)
+            if rejection and (
+                analysis.get("status") == "fallback"
+                or re.search(r"unavailable|unviewable|not possible|cannot (?:view|access|verify)|unable to", rejection, re.I)
+            ):
+                _emit(log, "Web footage: URL inspection unavailable; reviewing actual preview frames")
+                analysis = await _analyze_candidate_preview(candidate, excerpt, task_dir)
+                rejection = analysis_rejection(analysis)
+            if rejection:
+                manifest.setdefault("rejected_candidates", []).append({
+                    "query": query, "source_page_url": candidate["source_page_url"],
+                    "script_excerpt": excerpt, "analysis": analysis,
+                })
+                raise WebFootageError(f"Visual suitability rejected: {rejection}")
             source_duration = float(candidate.get("duration_seconds") or 0)
             if source_duration:
                 analysis = _fit_analysis_to_media(analysis, source_duration)
@@ -767,7 +871,9 @@ async def supplement_web_footage(
                     "start_seconds": 0.0,
                     "end_seconds": min(media["duration_seconds"], requested_length),
                 }
-            clip_id = f"clip-{len(manifest.get('clips', [])) + 1:02d}"
+            from backend.pipeline.footage import _next_clip_id
+
+            clip_id = _next_clip_id(task_dir / "footage", manifest.get("clips", []))
             destination = task_dir / "footage" / f"{clip_id}.mp4"
             await _trim(raw_path, destination, edit_analysis, orientation)
             trimmed = await _probe(destination)
@@ -787,6 +893,8 @@ async def supplement_web_footage(
                 }
             )
             used_sources.add(candidate["source_page_url"])
+            manifest["updated_at"] = _now()
+            _write_manifest(manifest_file, manifest)
             if candidate_attempt < MAX_CANDIDATE_ATTEMPTS_PER_QUERY:
                 pending_shots.append(
                     {

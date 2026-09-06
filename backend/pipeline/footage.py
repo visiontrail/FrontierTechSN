@@ -38,7 +38,7 @@ OPEN_LICENSE_MARKERS = (
     "cc-by-sa",
 )
 UNSAFE_LICENSE_MARKERS = ("noncommercial", "no derivatives", "-nc", "-nd")
-WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{1,}")
 TAG_RE = re.compile(r"<[^>]+>")
 SAFE_FILENAME_RE = re.compile(r"[^a-z0-9]+")
 USER_QUERY_PURPOSE = "User-supplied search direction"
@@ -260,6 +260,14 @@ def _parse_plan(value: str, count: int | None) -> list[dict[str, str]]:
     return output
 
 
+def _is_program_bookend(text: str) -> bool:
+    value = " ".join(text.casefold().replace("’", "'").split())
+    return (
+        (value.startswith("it's ") and "bytefront espresso" in value)
+        or value.startswith("that's today's bytefront espresso")
+    )
+
+
 def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str, str]]:
     """Build story-specific queries when the model plan cannot be decoded.
 
@@ -290,7 +298,7 @@ def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str,
             if (
                 key in FALLBACK_QUERY_STOPWORDS
                 or key in seen
-                or len(key) < 3
+                or (len(key) < 3 and word not in {"AI", "Ig"})
                 or len(key) > 32
             ):
                 continue
@@ -302,7 +310,8 @@ def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str,
     for paragraph in paragraphs:
         lowered = paragraph.casefold()
         if (
-            ("good morning" in lowered and "briefing" in lowered)
+            _is_program_bookend(paragraph)
+            or ("good morning" in lowered and "briefing" in lowered)
             or "thanks for watching" in lowered
             or "subscribe for more" in lowered
         ):
@@ -349,10 +358,10 @@ def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str,
         def salience(item: tuple[int, str]) -> tuple[int, int, int, int, int]:
             index, word = item
             key = word.casefold()
-            proper_name = int(word[:1].isupper() and index > 0)
+            proper_name = int(word[:1].isupper())
             technical = int("-" in word or any(char.isdigit() for char in word))
             rarity = -document_frequency.get(key, 1)
-            return term_frequency[key], proper_name, technical, rarity, -index
+            return proper_name, technical, rarity, -index, term_frequency[key]
 
         selected = sorted(indexed, key=salience, reverse=True)[:6]
         selected.sort(key=lambda item: item[0])
@@ -388,7 +397,15 @@ def _distinct_grounded_plan(
     for raw in plan:
         query = _sanitize_query(str(raw.get("query") or ""))
         purpose = str(raw.get("purpose") or "").strip()
-        excerpt = _script_purpose_for_query(f"{query} {purpose}", script)
+        # An exact full-paragraph purpose can contain several unrelated subjects.
+        # Select its query-matching sentence, rather than rewarding the longest
+        # sentence for overlapping the entire purpose.
+        scope = purpose if purpose and purpose in script else script
+        excerpt = _script_purpose_for_query(query, scope)
+        if not excerpt:
+            excerpt = _script_purpose_for_query(purpose, script)
+        if _is_program_bookend(purpose) or _is_program_bookend(excerpt):
+            continue
         if not query:
             continue
         if not excerpt and keep_ungrounded:
@@ -399,7 +416,7 @@ def _distinct_grounded_plan(
                     "script_excerpt": "",
                 }
             )
-            if len(output) >= count:
+            if count is not None and len(output) >= count:
                 break
             continue
         if not excerpt:
@@ -490,7 +507,9 @@ async def plan_footage_queries(
             api_key,
             log,
             "Footage plan",
-            max_tokens=1200,
+            max_tokens=2400,
+            enable_skills=False,
+            disable_thinking=True,
         )
         plan = _parse_plan(result, candidate_count)
         plan = _distinct_grounded_plan(
