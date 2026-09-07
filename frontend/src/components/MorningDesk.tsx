@@ -163,7 +163,7 @@ export default function MorningDesk() {
       // recipe immediately so a queueing failure never looks like the recipe
       // was lost or remains unsaved.
       applySaved(saved)
-      return runDailyNow(true, 1)
+      return runDailyNow(true)
     },
     onSuccess: openQueuedTask,
   })
@@ -171,10 +171,9 @@ export default function MorningDesk() {
     mutationFn: async (value: DailyAutomationSettings) => {
       const saved = await updateDailyAutomation(value)
       applySaved(saved)
-      // No duration override: the backend snapshots the saved full-length
-      // recipe and follows the same render and distribution path as a
-      // scheduled edition.
-      return runDailyNow(false, null)
+      // The backend snapshots the recipe; reporting determines the length
+      // for both manual and scheduled editions.
+      return runDailyNow(false)
     },
     onSuccess: openQueuedTask,
   })
@@ -272,7 +271,6 @@ export default function MorningDesk() {
     && !draft.opening_template.replace('{date}', '').includes('}')
     && draft.closing_remarks.trim().length > 0
     && draft.closing_remarks.length <= 500
-    && inRange(draft.target_duration_minutes, 1, 30)
     && inRange(draft.max_stories, 3, 12)
     && inRange(draft.source_window_hours, 12, 96)
   const dirty = JSON.stringify(recipe) !== JSON.stringify(data.settings)
@@ -321,9 +319,8 @@ export default function MorningDesk() {
           </article>
 
           <article className="morning-config-panel">
-            <header><span>02</span><div><strong>Editorial brief</strong><small>Length, language, and evidence window</small></div></header>
-            <div className="morning-field-grid morning-field-grid--four">
-              <label><span>Target length</span><div className="morning-unit-input"><input type="number" min="1" max="30" value={draft.target_duration_minutes} onChange={(event) => patch('target_duration_minutes', Number(event.target.value))} /><i>min</i></div></label>
+            <header><span>02</span><div><strong>Editorial brief</strong><small>Automatic length · Each story gets the time its reporting needs</small></div></header>
+            <div className="morning-field-grid morning-field-grid--three">
               <label><span>Language</span><select value={draft.language} onChange={(event) => {
                 const language = event.target.value as 'en' | 'zh'
                 const previousDefaults = DEFAULT_BOOKENDS[draft.language]
@@ -337,7 +334,7 @@ export default function MorningDesk() {
               <label><span>Stories</span><input type="number" min="3" max="12" value={draft.max_stories} onChange={(event) => patch('max_stories', Number(event.target.value))} /></label>
               <label><span>Source window</span><div className="morning-unit-input"><input type="number" min="12" max="96" step="12" value={draft.source_window_hours} onChange={(event) => patch('source_window_hours', Number(event.target.value))} /><i>hr</i></div></label>
             </div>
-            <p className="morning-panel-note">The final script and narration must stay within 20% of this target. The source quorum remains a hard gate; widening the window never lowers evidence requirements.</p>
+            <p className="morning-panel-note">Reporting depth follows the available evidence, without padding or cutting stories to fit a timer. Source coverage and fact-checking requirements still apply.</p>
           </article>
 
           <article className="morning-config-panel">
@@ -549,11 +546,11 @@ export default function MorningDesk() {
         <footer className="morning-config-actions">
           <div>
             <span className={`morning-save-state ${dirty ? 'is-dirty' : ''}`}><i />{dirty ? 'Unsaved changes' : 'Saved recipe'}</span>
-            <small>Tests are one minute and never publish. Full runs use the saved duration and distribution settings.</small>
+            <small>Report length adapts to the news. Tests never publish; full runs use the saved distribution settings.</small>
           </div>
           <div className="morning-action-buttons">
             <button type="button" className="btn-ghost" disabled={actionPending || !configReady} onClick={() => save.mutate(recipe)}>{save.isPending ? 'Saving…' : 'Save recipe'}</button>
-            <button type="button" className="btn-primary" disabled={actionPending || !configReady} onClick={() => runTest.mutate(recipe)}>{runTest.isPending ? 'Saving & queuing test…' : 'Save & run 1-min test'}</button>
+            <button type="button" className="btn-primary" disabled={actionPending || !configReady} onClick={() => runTest.mutate(recipe)}>{runTest.isPending ? 'Saving & queuing test…' : 'Save & run test'}</button>
             <button
               type="button"
               className="btn-primary morning-start-now"

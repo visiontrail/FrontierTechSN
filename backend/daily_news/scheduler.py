@@ -59,7 +59,9 @@ def load_settings() -> DailyAutomationSettings:
         else next(iter(config.TTS_MODELS))
     )
     requested_model = payload.get("tts_model", default_model)
-    migrated = False
+    # Retire saved fixed lengths: each new edition follows its evidence.
+    migrated = "target_duration_minutes" in payload
+    payload.pop("target_duration_minutes", None)
     if requested_model not in config.TTS_MODELS:
         requested_model = default_model
         payload["tts_model"] = requested_model
@@ -114,10 +116,9 @@ async def create_daily_task(
     edition_date: date,
     trigger: str,
     test_mode: bool = False,
-    duration_override: int | None = None,
 ) -> TaskResponse:
     task_config = TaskConfig(
-        target_duration_minutes=duration_override or settings.target_duration_minutes,
+        target_duration_minutes=None,
         script_format=ScriptFormat.MONOLOGUE,
         voice_1=settings.voice,
         opening_remarks=morning_opening(
@@ -176,7 +177,7 @@ async def create_daily_task(
     now = datetime.now(timezone.utc).isoformat()
     state = _read_json(_state_path())
     if test_mode:
-        # A one-minute validation run is not today's published edition. Keeping
+        # A validation run is not today's published edition. Keeping
         # its receipt separate prevents the test button from suppressing the
         # real scheduled run through `_is_due`'s once-per-edition guard.
         state.update(

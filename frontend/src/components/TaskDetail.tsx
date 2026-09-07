@@ -78,8 +78,8 @@ function formatDuration(seconds: number): string {
   return `${minutes}m ${String(remainder).padStart(2, '0')}s`
 }
 
-function isDurationMismatch(actualSeconds: number | null, targetMinutes: number): boolean {
-  if (actualSeconds === null) return false
+function isDurationMismatch(actualSeconds: number | null, targetMinutes: number | null): boolean {
+  if (actualSeconds === null || targetMinutes === null || targetMinutes <= 0) return false
   const targetSeconds = targetMinutes * 60
   return actualSeconds < targetSeconds * 0.8 || actualSeconds > targetSeconds * 1.2
 }
@@ -111,7 +111,7 @@ export default function TaskDetail() {
   const dirty = draftOverride !== null && draftOverride !== scriptText
   const durationMismatch = isDurationMismatch(
     task?.duration_seconds ?? null,
-    task?.config.target_duration_minutes ?? 0,
+    task?.config.target_duration_minutes ?? null,
   )
 
   const [startOverride, setStartOverride] = useState<string | null>(null)
@@ -295,7 +295,7 @@ export default function TaskDetail() {
             </div>
             <div>
               <dt>Target duration</dt>
-              <dd>{task.config.target_duration_minutes} min</dd>
+              <dd>{task.config.target_duration_minutes === null ? 'Automatic · based on reporting' : `${task.config.target_duration_minutes} min`}</dd>
             </div>
             <div>
               <dt>Voices</dt>

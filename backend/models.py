@@ -69,7 +69,8 @@ DEFAULT_MORNING_CLOSINGS = {
 
 
 class TaskConfig(BaseModel):
-    target_duration_minutes: int = 10
+    # None means content-driven length; numeric values preserve historical tasks.
+    target_duration_minutes: int | None = 10
     # Solo talk-show is the primary product direction; dialogue is the secondary
     # option. speaker_count is derived from script_format and kept in sync for
     # back-compat (monologue -> 1 voice, dialogue -> 2 voices).
@@ -674,7 +675,6 @@ class DailyAutomationSettings(BaseModel):
     # Do not publish a stale morning edition when the app is first started
     # late in the day. Normal runs still fire once at the configured desk time.
     catch_up_after_restart: bool = False
-    target_duration_minutes: int = Field(default=3, ge=1, le=30)
     language: Literal["en", "zh"] = "en"
     opening_template: Optional[str] = Field(default=None, max_length=500)
     closing_remarks: Optional[str] = Field(default=None, max_length=500)

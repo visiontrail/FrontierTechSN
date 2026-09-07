@@ -165,7 +165,7 @@ export default function TaskList() {
                       <td>
                         <span className="task-length-cell">
                           <strong>{task.duration_seconds !== null ? `${formatDuration(task.duration_seconds)} actual` : 'Not rendered'}</strong>
-                          <small>{task.config.target_duration_minutes || '—'} min target</small>
+                          <small>{task.config.target_duration_minutes === null ? 'Automatic length' : `${task.config.target_duration_minutes} min target`}</small>
                         </span>
                       </td>
                       <td>

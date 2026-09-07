@@ -1185,7 +1185,7 @@ def test_daily_desk_defaults_to_unattended_next_run():
 
     assert settings.enabled is True
     assert settings.catch_up_after_restart is False
-    assert settings.target_duration_minutes == 3
+    assert "target_duration_minutes" not in settings.model_dump()
     assert settings.tts_model == "orpheus-en"
     assert settings.voice == "leah"
     assert settings.opening_template.count("{date}") == 1
@@ -1251,7 +1251,7 @@ def test_load_settings_migrates_a_retired_tts_recipe(tmp_path: Path):
     ):
         settings = scheduler.load_settings()
 
-    assert settings.target_duration_minutes == 12
+    assert "target_duration_minutes" not in settings.model_dump()
     assert settings.tts_model == "vibevoice-0.5b"
     assert settings.voice == "Carter"
     persisted = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -1311,7 +1311,7 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
         )
 
     task_config = create.await_args.args[2]
-    assert task_config.target_duration_minutes == 12
+    assert task_config.target_duration_minutes is None
     assert task_config.tts_model == "orpheus-en"
     assert task_config.voice_1 == "tara"
     assert task_config.opening_remarks == "It is Wednesday, August 19, 2026. Your ByteFront Espresso is ready."
@@ -1368,7 +1368,6 @@ def test_test_run_does_not_consume_the_scheduled_daily_edition(tmp_path: Path):
                 edition_date=date(2026, 8, 19),
                 trigger="manual",
                 test_mode=True,
-                duration_override=1,
             )
         )
 
@@ -1377,7 +1376,7 @@ def test_test_run_does_not_consume_the_scheduled_daily_edition(tmp_path: Path):
     assert state["last_task_id"] == "yesterday"
     assert state["last_test_task_id"] == queued.id
     test_config = create.await_args.args[2]
-    assert test_config.target_duration_minutes == 1
+    assert test_config.target_duration_minutes is None
     assert test_config.auto_publish is False
     assert test_config.publish_test_mode is True
 
@@ -2355,3 +2354,114 @@ def test_review_stops_when_the_same_claim_failure_repeats_after_correction(tmp_p
     report = json.loads((tmp_path / "review" / "fact_check_report.json").read_text())
     assert report["manual_review_required"] is True
     assert report["correction_count"] == 1
+
+
+@pytest.mark.parametrize("language,repetitions", [("en", 1), ("en", 180), ("zh", 1)])
+def test_automatic_report_length_survives_generation_and_review(tmp_path, language, repetitions):
+    edition = date(2026, 9, 7)
+    evidence = (
+        "Source 1 reports a new chip with published specifications."
+        if language == "en" else "Source 1 报道了一款新芯片，并公布了技术规格。"
+    )
+    story = " ".join([evidence] * repetitions)
+    article = research.NewsArticle(
+        id="1", source_id="source-1", source_name="Source 1", language=language,
+        title="New chip", url="https://example.com/chip",
+        published_at="2026-09-07T00:00:00+00:00", summary=evidence, evidence_text=story,
+    )
+    dossier = research.ResearchDossier("2026-09-07", "now", 36, [article], [article], [])
+    closing = "Thanks for listening." if language == "en" else "感谢收听。"
+    chat = AsyncMock(return_value=story)
+    fit = AsyncMock(side_effect=AssertionError("Automatic editions must not fit a duration"))
+    web_review = AsyncMock(return_value=(
+        {"approved": True, "confidence": 100, "summary": "Verified.", "issues": []},
+        "[RAW]", "", "gemini",
+    ))
+
+    async def run():
+        script = await scriptwriter.generate_daily_script(
+            dossier, edition, target_duration_minutes=None, language=language,
+            closing_remarks=closing, ai_endpoint=None, ai_model=None, provider_id=None,
+        )
+        result = await review.review_daily_script(
+            script, dossier, edition, tmp_path, target_duration_minutes=None,
+            language=language, closing_remarks=closing, ai_endpoint=None,
+            ai_model=None, provider_id=None,
+        )
+        assert result.script == script
+        assert result.report["attempts"][0]["duration_contract"] is None
+        assert story in result.script
+
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("https://example.com", "model", "key"))),
+        patch.object(scriptwriter, "_chat", chat),
+        patch.object(review, "fit_daily_script_duration", fit),
+        patch.object(review, "_web_story_review", web_review),
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()),
+    ):
+        asyncio.run(run())
+    fit.assert_not_awaited()
+    web_review.assert_awaited_once()
+    assert "There is no target runtime or word count" in chat.await_args.args[0]
+
+
+def test_automatic_audio_continues_to_composition_without_duration_gate():
+    task = TaskResponse(
+        id="daily-automatic", created_at="now", updated_at="now",
+        source_type=SourceType.NEWS_DAILY, status=TaskStatus.TTS,
+        config=TaskConfig(target_duration_minutes=None, auto_render=True),
+    )
+    compose = AsyncMock()
+    with (
+        patch.object(orchestrator, "narration_duration_report", side_effect=AssertionError("No fixed duration gate")),
+        patch.object(orchestrator, "run_compose", compose),
+    ):
+        asyncio.run(orchestrator._after_audio(
+            task, script_path="script.txt", audio_path="audio.wav",
+            task_log=lambda _: None, log=None,
+        ))
+    compose.assert_awaited_once_with(task, log=None)
+    assert task.audio_path == "audio.wav"
+
+
+def test_saved_duration_is_retired_without_changing_other_recipe_fields(tmp_path):
+    settings_path = tmp_path / "daily_automation.json"
+    original = DailyAutomationSettings(auto_publish=False, max_stories=4).model_dump(mode="json")
+    settings_path.write_text(json.dumps({**original, "target_duration_minutes": 3}))
+    with patch.object(scheduler, "_settings_path", return_value=settings_path):
+        assert scheduler.load_settings().model_dump(mode="json") == original
+    assert json.loads(settings_path.read_text()) == original
+
+
+@pytest.mark.parametrize("test_mode", [False, True])
+def test_run_now_api_ignores_legacy_duration_and_queues_automatic_length(tmp_path, test_mode):
+    from fastapi.testclient import TestClient
+    from backend.main import app
+
+    settings_path = tmp_path / "recipe.json"
+    settings_path.write_text(json.dumps({
+        **DailyAutomationSettings(auto_publish=False).model_dump(mode="json"),
+        "target_duration_minutes": 3,
+    }))
+
+    async def create(source_type, payload, task_config, **kwargs):
+        return TaskResponse(
+            id="automatic-api-test", created_at="now", updated_at="now",
+            source_type=source_type, source_url=payload,
+            status=TaskStatus.QUEUED, config=task_config,
+        )
+
+    with (
+        patch.object(scheduler, "_settings_path", return_value=settings_path),
+        patch.object(scheduler, "_state_path", return_value=tmp_path / "state.json"),
+        patch.object(scheduler.database, "create_task", AsyncMock(side_effect=create)),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/api/daily-news/run-now",
+            params={"test_mode": str(test_mode).lower(), "duration_minutes": 1},
+        )
+        assert response.status_code == 200
+        assert response.json()["config"]["target_duration_minutes"] is None
+        assert response.json()["config"]["publish_test_mode"] is test_mode
+        assert "target_duration_minutes" not in client.get("/api/daily-news").json()["settings"]

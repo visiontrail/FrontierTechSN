@@ -100,12 +100,13 @@ With no saved desk configuration, the next edition runs automatically at 05:30 A
 The **Morning Desk** page configures:
 
 - daily execution time and IANA timezone;
-- language, duration, story count, and research window;
+- language, story count, and research window;
+- automatic report length based on each story’s evidence and complexity, with no fixed minute or word quota (including test runs); saved legacy duration settings are retired automatically;
 - TTS voice/model, Paper-Collage clip count, and the separate public-footage clip budget;
 - Gemini or deterministic local music;
 - automatic distribution targets and YouTube visibility.
 
-Use **Save & run 1-min test** for an end-to-end test edition. The current desk recipe is saved before the task is queued, the test never auto-publishes, and it does not consume that day's scheduled edition. External test publishing is a separate explicit action on the completed task.
+Use **Save & run test** for an end-to-end test edition. The current desk recipe is saved before the task is queued, the test never auto-publishes, and it does not consume that day's scheduled edition. External test publishing is a separate explicit action on the completed task.
 
 Use **Start full run now** to save the current recipe and immediately queue a full-length edition without waiting for the schedule. It follows the same video-generation and configured automatic-distribution path as a scheduled edition, and counts as that day's production run.
 

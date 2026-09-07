@@ -728,7 +728,7 @@ async def generate_daily_script(
     dossier: ResearchDossier,
     edition_date: date,
     *,
-    target_duration_minutes: int,
+    target_duration_minutes: int | None,
     language: str,
     closing_remarks: str,
     opening_remarks: str | None = None,
@@ -743,11 +743,25 @@ async def generate_daily_script(
         if language == "zh"
         else DAILY_NEWS_ENGLISH_WORDS_PER_MINUTE
     )
-    spoken_unit_target = max(units_per_minute, target_duration_minutes * units_per_minute)
+    if target_duration_minutes is None:
+        length_guidance = (
+            "Let the reporting determine the length. Give each story the space needed "
+            "to explain its verified development, relevant context and supported significance. "
+            "Use more detail for complex or consequential stories and less for simple updates. "
+            "There is no target runtime or word count. Do not pad, repeat facts, or omit "
+            "material evidence to meet a length quota."
+        )
+        # A response capacity, never a requested or accepted script length.
+        response_tokens = DAILY_NEWS_EDIT_MAX_TOKENS
+    else:
+        spoken_unit_target = max(units_per_minute, target_duration_minutes * units_per_minute)
+        length_guidance = f"Target about {spoken_unit_target} spoken {'characters' if language == 'zh' else 'words'}."
+        response_tokens = max(4096, min(DAILY_NEWS_EDIT_MAX_TOKENS, spoken_unit_target * 3))
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
     language_label = "natural broadcast Mandarin Chinese" if language == "zh" else "natural broadcast English"
     system_prompt = f"""You are the senior anchor and evidence editor for ByteFront Espresso.
-Write a solo morning-news video podcast script in {language_label}, about {spoken_unit_target} spoken {'characters' if language == 'zh' else 'words'}.
+Write a solo morning-news video podcast script in {language_label}.
+{length_guidance}
 
 NON-NEGOTIABLE EDITORIAL CONTRACT
 1. The first spoken line will be injected by software. Do not write a greeting, date, show name, headline list, title, markdown, labels, stage directions, citations section, or speaker prefixes.
@@ -797,7 +811,7 @@ Software-controlled closing (for context only; DO NOT repeat):
             call_api_key,
             log,
             "Daily news script",
-            max_tokens=max(4096, min(DAILY_NEWS_EDIT_MAX_TOKENS, spoken_unit_target * 3)),
+            max_tokens=response_tokens,
             enable_skills=False,
             disable_thinking=response_attempt > 1,
             route_selected=remember_route,
@@ -818,7 +832,7 @@ Software-controlled closing (for context only; DO NOT repeat):
                 call_api_key,
                 log,
                 "Daily news English translation repair",
-                max_tokens=max(4096, min(DAILY_NEWS_EDIT_MAX_TOKENS, spoken_unit_target * 3)),
+                max_tokens=response_tokens,
                 enable_skills=False,
                 disable_thinking=True,
                 route_selected=remember_route,
@@ -1023,7 +1037,7 @@ def script_contract_report(
             "script paragraph contract changed: expected "
             f"{expected_paragraph_count}, found {paragraph_count}"
         )
-    if len(script.split()) < 120:
+    if target_duration_minutes is not None and len(script.split()) < 120:
         failures.append("script is implausibly short")
     duration_contract = None
     if target_duration_minutes is not None:

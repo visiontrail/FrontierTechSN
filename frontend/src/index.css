@@ -4353,7 +4353,7 @@ video {
 .morning-config-panel > header strong { font: 700 22px/1 Georgia, 'Times New Roman', serif; }
 .morning-config-panel > header small { margin-top: 6px; color: var(--text-muted); font: 600 9px/1.25 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; }
 .morning-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
-.morning-field-grid--four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.morning-field-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .morning-field-grid > label > span,.morning-visual-row > label > span,.morning-music-field > span { display: block; margin-bottom: 7px; color: var(--text-muted); font: 700 9px/1.2 var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
 .morning-field-grid input,.morning-field-grid select,.morning-visual-row input,.morning-music-field select { width: 100%; min-height: 42px; }
 .morning-unit-input { position: relative; }
@@ -4501,10 +4501,10 @@ video {
 .morning-last { display: flex; align-items: baseline; gap: 18px; padding: 24px 0 0; }
 .morning-last span { color: var(--text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: .1em; }
 .morning-last a { margin-left: auto; color: var(--accent-2); font-weight: 700; }
-@media (max-width: 1080px) { .morning-field-grid--four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 1080px) { .morning-field-grid--three { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 920px) { .morning-masthead,.morning-config-head,.morning-section-head,.morning-distribution-head { grid-template-columns: 1fr; } .morning-status { text-align: left; border-left: 0; border-top: 1px solid var(--rule); padding: 18px 0 0; } .morning-config-grid { grid-template-columns: 1fr; } .morning-distribution-controls { grid-template-columns: minmax(150px, .65fr) minmax(250px, 1fr); } }
 @media (max-width: 620px) { .morning-distribution-controls { grid-template-columns: 1fr; } .morning-distribution-master { min-width: 0; } .morning-distribution-foot { align-items: flex-start; flex-direction: column; gap: 10px; } }
-@media (max-width: 560px) { .morning-desk { padding: 24px 18px 48px; } .morning-masthead h1 { font-size: 48px; } .morning-config-head h2 { font-size: 42px; } .morning-field-grid,.morning-field-grid--four,.morning-voice-catalog { grid-template-columns: 1fr; } .morning-visual-row { grid-template-columns: minmax(0, 1fr) 105px; padding: 14px; } .morning-config-actions { grid-template-columns: 1fr; } .morning-action-buttons { justify-content: stretch; } .morning-action-buttons button { flex: 1; } .morning-destination { grid-template-columns: 24px 44px minmax(0, 1fr) auto; padding: 16px 14px; } }
+@media (max-width: 560px) { .morning-desk { padding: 24px 18px 48px; } .morning-masthead h1 { font-size: 48px; } .morning-config-head h2 { font-size: 42px; } .morning-field-grid,.morning-field-grid--three,.morning-voice-catalog { grid-template-columns: 1fr; } .morning-visual-row { grid-template-columns: minmax(0, 1fr) 105px; padding: 14px; } .morning-config-actions { grid-template-columns: 1fr; } .morning-action-buttons { justify-content: stretch; } .morning-action-buttons button { flex: 1; } .morning-destination { grid-template-columns: 24px 44px minmax(0, 1fr) auto; padding: 16px 14px; } }
 @media (max-width: 700px) { .morning-music-preview,.morning-outro-preview { grid-template-columns: 1fr; } }
 
 /* Publishing console: an identity ledger, not a generic preference form. */

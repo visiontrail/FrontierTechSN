@@ -97,7 +97,6 @@ async def get_program_music_audio(track_id: str):
 @router.post("/run-now", response_model=TaskResponse)
 async def run_daily_now(
     test_mode: bool = Query(default=False),
-    duration_minutes: int | None = Query(default=None, ge=1, le=30),
 ):
     settings = load_settings()
     try:
@@ -107,7 +106,6 @@ async def run_daily_now(
             edition_date=edition_date,
             trigger="manual",
             test_mode=test_mode,
-            duration_override=duration_minutes,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -185,7 +185,10 @@ async def _after_audio(
 ):
     """Either pause for audio review or, when the task opted out, continue
     straight into the compose stage."""
-    if task.source_type == SourceType.NEWS_DAILY:
+    if (
+        task.source_type == SourceType.NEWS_DAILY
+        and task.config.target_duration_minutes is not None
+    ):
         narration_seconds = await _probe_duration(Path(audio_path))
         duration_contract = narration_duration_report(
             narration_seconds,
@@ -334,7 +337,7 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
     else:
         script = await generate_script(
             summary,
-            task.config.target_duration_minutes,
+            task.config.target_duration_minutes or 10,
             script_format=task.config.script_format.value,
             ai_endpoint=ai_endpoint,
             ai_model=ai_model,

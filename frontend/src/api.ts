@@ -1,7 +1,7 @@
 const BASE = '';
 
 export interface TaskConfig {
-  target_duration_minutes: number;
+  target_duration_minutes: number | null;
   script_format?: 'monologue' | 'dialogue';
   speaker_count: number;
   voice_1: string;
@@ -208,7 +208,6 @@ export interface DailyAutomationSettings {
   generation_time: string;
   timezone: string;
   catch_up_after_restart: boolean;
-  target_duration_minutes: number;
   language: 'en' | 'zh';
   max_stories: number;
   source_window_hours: number;
@@ -814,11 +813,10 @@ export function outroBackgroundVideoUrl(style: OutroPreset['id']): string {
   return `${BASE}/api/daily-news/outro-library/${encodeURIComponent(style)}/video`;
 }
 
-export function runDailyNow(testMode = true, durationMinutes: number | null = 1): Promise<Task> {
+export function runDailyNow(testMode = true): Promise<Task> {
   const params = new URLSearchParams({
     test_mode: String(testMode),
   });
-  if (durationMinutes !== null) params.set('duration_minutes', String(durationMinutes));
   return dailyRequest(`/run-now?${params}`, { method: 'POST' });
 }
 
