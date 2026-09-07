@@ -2362,7 +2362,7 @@ def test_review_stops_when_the_same_claim_failure_repeats_after_correction(tmp_p
     assert report["correction_count"] == 1
 
 
-@pytest.mark.parametrize("language,repetitions", [("en", 1), ("en", 180), ("zh", 1)])
+@pytest.mark.parametrize("language,repetitions", [("en", 1), ("en", 20), ("zh", 1)])
 def test_automatic_report_length_survives_generation_and_review(tmp_path, language, repetitions):
     edition = date(2026, 9, 7)
     evidence = (
@@ -2408,7 +2408,7 @@ def test_automatic_report_length_survives_generation_and_review(tmp_path, langua
         asyncio.run(run())
     fit.assert_not_awaited()
     web_review.assert_awaited_once()
-    assert "There is no target runtime or word count" in chat.await_args.args[0]
+    assert "There is no target runtime or total word count" in chat.await_args.args[0]
 
 
 def test_automatic_audio_continues_to_composition_without_duration_gate():

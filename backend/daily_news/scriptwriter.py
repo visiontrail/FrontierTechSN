@@ -28,6 +28,7 @@ DAILY_NEWS_DURATION_UPPER_RATIO = 1.2
 # below still cap what can enter narration.
 DAILY_NEWS_EDIT_MAX_TOKENS = 32_768
 DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS = 3
+DAILY_NEWS_AUTOMATIC_STORY_MAX_WORDS = 180
 DAILY_NEWS_EDIT_MODEL_ALIASES: dict[str, str] = {}
 SOURCE_SPOKEN_ALIASES = {
     "a16z": ("Andreessen Horowitz", "A sixteen Z"),
@@ -438,7 +439,7 @@ def _has_chinese_media_label(paragraph: str, alias: str) -> bool:
         return False
     descriptor = (
         r"(?:Chinese(?:[- ]language)?|China[- ]based)\s+"
-        r"(?:(?:business|technology|tech|news|financial|digital)\s+){0,2}"
+        r"(?:(?:business|technology|tech|AI|science|scientific|research|news|financial|digital|online|and)\s+){0,4}"
         r"(?:outlet|publication|media|newspaper|magazine|news\s+(?:site|website))"
     )
     before = paragraph[:name.start()]
@@ -786,8 +787,12 @@ async def generate_daily_script(
             "Let the reporting determine the length. Give each story the space needed "
             "to explain its verified development, relevant context and supported significance. "
             "Use more detail for complex or consequential stories and less for simple updates. "
-            "There is no target runtime or word count. Do not pad, repeat facts, or omit "
-            "material evidence to meet a length quota."
+            "There is no target runtime or total word count. Do not pad or repeat facts. "
+            "For an English automatic bulletin, each news paragraph must stay within "
+            f"{DAILY_NEWS_AUTOMATIC_STORY_MAX_WORDS} words. Select the central development, "
+            "one useful example and attributed interpretation; omit secondary benchmarks "
+            "and training details. Retain material uncertainty. Short evidence warrants "
+            "a shorter item, never padding to the ceiling."
         )
         # A response capacity, never a requested or accepted script length.
         response_tokens = DAILY_NEWS_EDIT_MAX_TOKENS
@@ -894,6 +899,9 @@ Software-controlled closing (for context only; DO NOT repeat):
             analysis_failures = _analysis_length_failures(candidate, dossier, language)
             if analysis_failures:
                 raise RuntimeError("; ".join(analysis_failures))
+            bulletin_failures = _bulletin_length_failures(candidate, dossier, language, target_duration_minutes)
+            if bulletin_failures:
+                raise RuntimeError("; ".join(bulletin_failures))
             attribution = _story_attribution_report(candidate, dossier, language)
             if attribution["failures"]:
                 raise RuntimeError("; ".join(attribution["failures"]))
@@ -1053,6 +1061,26 @@ def _analysis_length_failures(script: str, dossier: ResearchDossier, language: s
     return failures
 
 
+def _bulletin_length_failures(
+    script: str, dossier: ResearchDossier, language: str,
+    target_duration_minutes: int | None,
+) -> list[str]:
+    # An explicitly configured runtime retains its existing duration contract.
+    if language != "en" or target_duration_minutes is not None:
+        return []
+    body = _spoken_lines(script)[1:-1]
+    failures = []
+    for number, (article, paragraph) in enumerate(zip(dossier.selected, body), 1):
+        words = len(ENGLISH_SPOKEN_WORD_RE.findall(paragraph))
+        if article.content_kind != "analysis" and words > DAILY_NEWS_AUTOMATIC_STORY_MAX_WORDS:
+            failures.append(
+                f"news bulletin story {number} is too long: {words} words, maximum "
+                f"{DAILY_NEWS_AUTOMATIC_STORY_MAX_WORDS}; retain the core news, one example "
+                "and attributed analysis, and remove secondary technical detail"
+            )
+    return failures
+
+
 def _story_attribution_report(script: str, dossier: ResearchDossier, language: str) -> dict:
     paragraphs = _spoken_lines(script)
     # Invalid paragraph counts are reported separately; never borrow the closing.
@@ -1075,7 +1103,10 @@ def _story_attribution_report(script: str, dossier: ResearchDossier, language: s
         if language == "en" and requires_chinese_media_label(article):
             labels[article.id] = any(_has_chinese_media_label(paragraph, alias) for alias in matched)
             if not labels[article.id]:
-                failures.append(f"story {index + 1} must explicitly identify its Chinese-language media source beside its first spoken name")
+                failures.append(
+                    f"story {index + 1} must explicitly identify its Chinese-language media "
+                    f"source beside its first spoken name; use '{_preferred_spoken_source(article)}'"
+                )
     return {
         "failures": failures,
         "story_source_mentions": mentions,
@@ -1109,6 +1140,7 @@ def script_contract_report(
     for identity, label in matched_publications.items():
         source_mentions.setdefault(label, True)
     failures = _analysis_length_failures(script, dossier, language) + attribution["failures"]
+    failures.extend(_bulletin_length_failures(script, dossier, language, target_duration_minutes))
     if not script.startswith(opening):
         failures.append("fixed dated opening is missing or modified")
     if not script.rstrip().endswith(closing_remarks):

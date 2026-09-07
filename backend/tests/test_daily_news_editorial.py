@@ -49,6 +49,9 @@ def test_chinese_provenance_must_describe_this_outlet_at_first_mention(story):
     "Chinese tech publication QbitAI",
     "QbitAI, a Chinese-language news outlet",
     "the China-based technology publication QbitAI",
+    "the Chinese-language AI outlet QbitAI",
+    "the Chinese-language science publication QbitAI",
+    "the Chinese-language science and technology outlet QbitAI",
 ])
 def test_explicit_chinese_outlet_identity_is_accepted(label):
     assert contract(
@@ -139,3 +142,30 @@ def test_final_review_receives_source_language_and_commentary_attribution_rules(
         assert "actual publication/analyst attribution" in prompt
         assert "commentary-only sources" in prompt
         assert "do not imply the original article was read" in prompt
+
+
+def test_automatic_bulletin_rejects_a_technical_lecture_but_keeps_fixed_duration_mode():
+    data = dossier(("bloomberg", "Bloomberg", "en"))
+    story = "Bloomberg reports " + " ".join(["detail"] * 180) + "."
+    assert not contract(data, story)["passed"]
+    script = "\n".join([scriptwriter.morning_opening(EDITION), story, CLOSING])
+    assert scriptwriter._bulletin_length_failures(script, data, "en", 8) == []
+
+
+def test_generation_retries_overlong_automatic_story():
+    data = dossier(("bloomberg", "Bloomberg", "en"))
+    chat = AsyncMock(side_effect=[
+        "Bloomberg reports " + " ".join(["detail"] * 180) + ".",
+        "Bloomberg reports that the company says its trial has started.",
+    ])
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", chat),
+    ):
+        result = asyncio.run(scriptwriter.generate_daily_script(
+            data, EDITION, target_duration_minutes=None, language="en",
+            closing_remarks=CLOSING, ai_endpoint=None, ai_model=None, provider_id=None,
+        ))
+    assert chat.await_count == 2
+    assert "maximum 180" in chat.await_args.args[0]
+    assert "its trial has started" in result
