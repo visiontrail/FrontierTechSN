@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -13,12 +14,14 @@ from backend.daily_news.scheduler import (
     save_settings,
 )
 from backend.daily_news.source_catalog import load_source_catalog
+from backend.daily_news.source_check import check_sources
 from backend.models import DailyAutomationResponse, DailyAutomationSettings, TaskResponse
 from backend.pipeline.music import list_program_music_tracks, resolve_program_music_track
 from backend.pipeline.outros import list_outro_presets, resolve_outro_preset
 from backend.publishing import automatic_publication_configuration_errors
 
 router = APIRouter(prefix="/api/daily-news", tags=["daily-news"])
+_source_check_lock = asyncio.Lock()
 
 
 @router.get("", response_model=DailyAutomationResponse)
@@ -51,6 +54,14 @@ async def update_daily_automation(body: DailyAutomationSettings):
 @router.get("/sources")
 async def get_daily_sources():
     return {"sources": [source.as_dict() for source in load_source_catalog()]}
+
+
+@router.post("/sources/check")
+async def check_daily_sources():
+    if _source_check_lock.locked():
+        raise HTTPException(status_code=409, detail="A source check is already running")
+    async with _source_check_lock:
+        return await check_sources()
 
 
 @router.get("/music-library")

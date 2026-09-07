@@ -65,9 +65,9 @@ def test_source_catalog_contains_global_reporting_and_institutional_analysis():
     load_source_catalog.cache_clear()
     sources = load_source_catalog()
 
-    assert len(sources) == 25
+    assert len(sources) == 23
     by_id = {source.id: source for source in sources}
-    assert {"bloomberg", "reuters", "financial_times", "wall_street_journal", "nature"} <= by_id.keys()
+    assert {"bloomberg", "financial_times", "wall_street_journal", "nature"} <= by_id.keys()
     assert by_id["a16z"].content_kind == "analysis"
     assert by_id["a16z"].lookback_hours == 168
     assert by_id["a16z"].feed_url is None

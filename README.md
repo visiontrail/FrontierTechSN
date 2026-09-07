@@ -8,7 +8,7 @@ The project is a new repository derived from the proven media pipeline in Video-
 
 Every daily run is fail-closed around these checks:
 
-1. Fetch all enabled sources in the 25-source catalog and require at least three working sources.
+1. Fetch all enabled sources in the 23-source catalog and require at least three working sources.
 2. Deduplicate and balance six stories across source, language, and technology category.
 3. Inject an exact, date-stamped morning-news opening and an exact spoken closing.
 4. Generate the script from the evidence dossier only through yhroot AI.
@@ -25,11 +25,19 @@ Each Paper-Collage clip targets the duration of its selected narration scene, ca
 
 ## Source roster
 
-The catalog lives in [`config/news_sources.json`](config/news_sources.json). Alongside the original 12 bilingual sources, it includes Bloomberg, Reuters, Financial Times, The Wall Street Journal, CNBC Technology, BBC Technology, TechCrunch, The Verge, WIRED, MIT Technology Review, Nature, a16z, and Sequoia Capital. The Signal board uses the enabled catalog count and shows reporting, aggregators, institutional viewpoints, and access notes.
+The catalog lives in [`config/news_sources.json`](config/news_sources.json). The 23-source roster combines bilingual specialist sources with Bloomberg, Financial Times, The Wall Street Journal, CNBC Technology, BBC Technology, TechCrunch, The Verge, WIRED, MIT Technology Review, Nature, a16z, and Sequoia Capital. The Signal board uses the enabled catalog count and shows reporting, aggregators, institutional viewpoints, and access notes.
 
 Institutional articles use an explicit 168-hour lookback (news retains the edition's configured window). Editions with at least three stories can include at most one institutional reading, after the news, only after its publication date and article excerpt are verified. The script uses 3–4 sentences to explain the attributed thesis and one supporting example, identifies the investor perspective and publication date, and retains supported limitations. Generation and final script checks cap each interpretation at 120 English words or 220 Chinese characters. No eligible reading means the edition uses news instead. The dossier preserves `content_kind`, `lookback_hours`, and `evidence_status`; feed summaries are never represented as complete article access.
 
-a16z uses its current article-list HTML because its former RSS endpoint returns 404. Public media feeds do not guarantee article access: subscriptions, authorization failures (including Reuters), and connection failures remain explicit in the per-run fetch audit. No credentials or paywall workarounds are configured.
+a16z uses its current article-list HTML because its former RSS endpoint returns 404. Public media feeds do not guarantee article access: subscriptions, authorization failures, and connection failures remain explicit in the per-run fetch audit. No credentials or paywall workarounds are configured.
+
+TLDR uses its dated newsletter archive and extracts all editorial blocks rather than its first recruiting card. AIBase reads dated article records from its current Chinese daily page, excluding navigation cards. ITHome publication times come from the article's publisher timestamp; GeekPark uses its official RSS. Techmeme archive notices are discarded in favor of the actual feed summary.
+
+Machine Heart uses its official article-library JSON endpoints for both discovery and article content. Its local publication timestamps are converted from Asia/Shanghai to UTC. FT uses a narrowly scoped HTTPS DNS fallback when the operating system resolver cannot connect; the original HTTP Host, TLS SNI, and certificate verification remain intact. Public addresses are resolved at runtime, cached for the DNS TTL (at most five minutes), and never pinned into configuration. This does not change system DNS.
+
+Reuters and VentureBeat were removed from the active catalog on 2026-09-07: Reuters' public sitemap was accessible but article requests returned 401 without usable article evidence; VentureBeat's RSS and pages returned a Vercel Security Checkpoint (429), requiring a browser verification challenge. Neither is counted as monitored coverage. They can be reconsidered when an authorized, unattended access route is available.
+
+Run `curl -X POST http://localhost:8101/api/daily-news/sources/check` to verify the deployed service's own production adapters. The check fetches every enabled source, reads up to three articles per source, requires at least one dated article excerpt or feed summary per source, and saves the exact evidence in `outputs/source-checks/`. `fresh_sample_count` is separate: a working periodic source need not have published within today's news window. HTTP success or navigation-only pages do not pass the check.
 
 One blocked or changed website cannot abort an edition. Its failure is preserved in `research/dossier.json`; the source quorum and selected-story gates decide whether the edition may continue.
 

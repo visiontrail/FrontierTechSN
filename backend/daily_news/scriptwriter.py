@@ -31,6 +31,7 @@ DAILY_NEWS_EDIT_MODEL_ALIASES: dict[str, str] = {}
 SOURCE_SPOKEN_ALIASES = {
     "a16z": ("Andreessen Horowitz", "A sixteen Z"),
     "机器之心 AI Daily": ("Machine Heart", "Jiqizhixin"),
+    "机器之心": ("Machine Heart", "Jiqizhixin"),
     "量子位 QbitAI": ("QbitAI",),
     "DeepTech 深科技": ("DeepTech China", "MIT Technology Review China"),
     "AIBase AI 日报": ("AIBase",),

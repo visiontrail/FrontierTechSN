@@ -85,7 +85,7 @@ def test_authorization_failure_is_isolated_and_audited():
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(401, request=req))) as client:
             with patch.object(research.asyncio, 'sleep', new=AsyncMock()):
-                rows, audit = await research.fetch_source(client, source('reuters'))
+                rows, audit = await research.fetch_source(client, replace(source('bloomberg'), id='reuters', name='Reuters', homepage='https://www.reuters.com/technology/', feed_url=None, fetch_mode='html'))
         assert rows == []
         assert not audit.ok and audit.status_code == 401
         assert audit.source_id == 'reuters'

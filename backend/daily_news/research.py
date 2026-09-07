@@ -15,12 +15,14 @@ from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
 
 from backend import config
 from backend.daily_news.source_catalog import NewsSource, enabled_sources
+from backend.daily_news.http import get_public_page
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -87,6 +89,7 @@ class NewsArticle:
     content_kind: str = "news"
     lookback_hours: int | None = None
     evidence_status: str = "not_fetched"
+    evidence_url: str = ""
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -248,6 +251,8 @@ def parse_rss(payload: str, source: NewsSource, fetched_at: datetime) -> list[Ne
 
 
 def parse_html(payload: str, source: NewsSource, fetched_at: datetime) -> list[NewsArticle]:
+    if source.id == "aibase_daily":
+        return _parse_aibase_daily(payload, source, fetched_at)
     soup = BeautifulSoup(payload, "html.parser")
     for node in soup(["script", "style", "noscript", "svg", "nav", "footer"]):
         node.decompose()
@@ -288,6 +293,13 @@ def parse_html(payload: str, source: NewsSource, fetched_at: datetime) -> list[N
         published = _parse_datetime(
             str(time_node.get("datetime") or time_node.get_text(" ", strip=True)) if time_node else None
         )
+        if source.id == "tldr_ai":
+            # The publisher's archive URL carries the edition date, not an
+            # exact publication time. Normalize date-only evidence to UTC.
+            match = re.fullmatch(r"/ai/(\d{4}-\d{2}-\d{2})", parts.path)
+            if not match:
+                continue
+            published = _parse_datetime(match.group(1))
         articles.append(
             NewsArticle(
                 id=_article_id(source.id, url, title),
@@ -307,8 +319,58 @@ def parse_html(payload: str, source: NewsSource, fetched_at: datetime) -> list[N
     return articles
 
 
+def _parse_aibase_daily(payload: str, source: NewsSource, fetched_at: datetime) -> list[NewsArticle]:
+    soup = BeautifulSoup(payload, "html.parser")
+    node = soup.select_one('script#__NUXT_DATA__[type="application/json"]')
+    if node is None:
+        raise ValueError("AIBase daily page omitted its published article data")
+    table = json.loads(node.get_text())
+    if not isinstance(table, list):
+        raise ValueError("AIBase article data is not a reference table")
+    linked_urls = {_canonical_url(a["href"], source.homepage) for a in soup.select('a[href]')}
+
+    def scalar(row: dict, key: str):
+        index = row.get(key)
+        if isinstance(index, int) and 0 <= index < len(table):
+            value = table[index]
+            return value if isinstance(value, (str, int, float)) else None
+        return None
+
+    articles = []
+    seen = set()
+    for row in table:
+        if not isinstance(row, dict) or not {"title", "oid", "createTime"} <= row.keys():
+            continue
+        oid = scalar(row, "oid")
+        if not isinstance(oid, int) or oid <= 0:
+            continue
+        url = _canonical_url(f"/zh/daily/{oid}", source.homepage)
+        title = _clean_text(str(scalar(row, "title") or ""))
+        if url not in linked_urls or url in seen or len(title) < MIN_HEADLINE_CHARS:
+            continue
+        try:
+            published = datetime.strptime(str(scalar(row, "createTime")), "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=ZoneInfo("Asia/Shanghai"),
+            ).astimezone(timezone.utc)
+        except ValueError:
+            continue
+        summary = _clean_text(str(scalar(row, "description") or ""))[:1200]
+        articles.append(NewsArticle(
+            id=_article_id(source.id, url, title), source_id=source.id,
+            source_name=source.name, language=source.language, title=title, url=url,
+            published_at=published.isoformat(), summary=summary,
+            category=_category(title, summary), fetched_at=fetched_at.isoformat(),
+        ))
+        seen.add(url)
+        if len(articles) >= MAX_ITEMS_PER_SOURCE:
+            break
+    return articles
+
+
 def parse_json_api(payload: str, source: NewsSource, fetched_at: datetime) -> list[NewsArticle]:
     value = json.loads(payload)
+    if source.id == "jiqizhixin_daily":
+        return _parse_jiqizhixin_articles(value, source, fetched_at)
     data = value.get("data") if isinstance(value, dict) else None
     rows = data.get("items") if isinstance(data, dict) else data
     if not isinstance(rows, list):
@@ -347,15 +409,51 @@ def parse_json_api(payload: str, source: NewsSource, fetched_at: datetime) -> li
     return articles
 
 
+def _parse_jiqizhixin_articles(value: dict, source: NewsSource, fetched_at: datetime) -> list[NewsArticle]:
+    if not isinstance(value, dict) or value.get("success") is not True:
+        raise ValueError("Machine Heart article API did not report success")
+    rows = value.get("articles")
+    if not isinstance(rows, list):
+        raise ValueError("Machine Heart article API omitted articles")
+    articles = []
+    for row in rows[:MAX_ITEMS_PER_SOURCE]:
+        if not isinstance(row, dict):
+            continue
+        title = _clean_text(row.get("title"))
+        slug = str(row.get("slug") or "")
+        if len(title) < MIN_HEADLINE_CHARS or not re.fullmatch(r"[a-zA-Z0-9_-]+", slug):
+            continue
+        try:
+            published = datetime.strptime(row["publishedAt"], "%Y/%m/%d %H:%M").replace(
+                tzinfo=ZoneInfo("Asia/Shanghai"),
+            ).astimezone(timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            continue  # Never assign the fetch time to an undated article.
+        url = _canonical_url(f"/articles/{slug}", source.homepage)
+        summary = _clean_text(row.get("content"))[:1200]
+        articles.append(NewsArticle(
+            id=_article_id(source.id, url, title), source_id=source.id,
+            source_name=source.name, language=source.language, title=title,
+            url=url, published_at=published.isoformat(), summary=summary,
+            category=_category(title, summary), fetched_at=fetched_at.isoformat(),
+        ))
+    return articles
+
+
 async def _request_text(client: httpx.AsyncClient, url: str, attempts: int = 3) -> tuple[str, int]:
     last_error: Exception | None = None
     for attempt in range(attempts):
         try:
-            response = await client.get(url, follow_redirects=True)
+            response = await get_public_page(client, url)
             response.raise_for_status()
             return response.text, response.status_code
         except (httpx.HTTPError, UnicodeError) as exc:
             last_error = exc
+            if isinstance(exc, httpx.HTTPStatusError) and (
+                exc.response.status_code in {401, 403, 404}
+                or exc.response.headers.get("x-vercel-mitigated") == "challenge"
+            ):
+                break
             if attempt + 1 < attempts:
                 await asyncio.sleep(min(4.0, 0.5 * 2**attempt))
     assert last_error is not None
@@ -529,6 +627,24 @@ def _extract_article_text(payload: str) -> str:
     return "\n".join(paragraphs)[:MAX_ARTICLE_TEXT_CHARS]
 
 
+def _extract_tldr_newsletter(payload: str) -> str:
+    soup = BeautifulSoup(payload, "html.parser")
+    excerpts = []
+    for section in soup.select("article"):
+        heading = section.select_one("h3")
+        body = section.select_one(".newsletter-html")
+        link = section.select_one("a[href]")
+        if heading is None or body is None or link is None:
+            continue
+        title = _clean_text(heading.get_text(" ", strip=True))
+        if "sponsor" in title.casefold() or "jobs." in str(link.get("href")):
+            continue
+        summary = _clean_text(body.get_text(" ", strip=True))
+        if len(summary) >= 35:
+            excerpts.append(f"{title}\n{summary}")
+    return "\n\n".join(excerpts)[:MAX_ARTICLE_TEXT_CHARS]
+
+
 def _extract_published_at(payload: str) -> datetime | None:
     """Extract a machine-verifiable publication timestamp from an article page."""
     soup = BeautifulSoup(payload, "html.parser")
@@ -579,11 +695,33 @@ async def hydrate_evidence(
     async def hydrate(article: NewsArticle) -> None:
         async with semaphore:
             try:
-                payload, _ = await _request_text(client, article.url, attempts=2)
+                article.evidence_url = article.url
+                if article.source_id == "jiqizhixin_daily":
+                    slug = urlsplit(article.url).path.removeprefix("/articles/")
+                    if not re.fullmatch(r"[a-zA-Z0-9_-]+", slug):
+                        raise ValueError("Invalid Machine Heart article slug")
+                    article.evidence_url = f"https://www.jiqizhixin.com/api/article_library/articles/{slug}"
+                    raw, _ = await _request_text(client, article.evidence_url, attempts=2)
+                    detail = json.loads(raw)
+                    if _clean_text(detail.get("title")) != article.title:
+                        raise ValueError("Machine Heart detail did not match the selected title")
+                    payload = f"<article>{detail.get('content') or ''}</article>"
+                else:
+                    payload, _ = await _request_text(client, article.url, attempts=2)
                 if not article.published_at:
                     published = _extract_published_at(payload)
+                    if published is None and article.source_id == "ithome_ai":
+                        node = BeautifulSoup(payload, "html.parser").select_one("#pubtime_baidu")
+                        if node is not None:
+                            published = datetime.strptime(node.get_text(strip=True), "%Y/%m/%d %H:%M:%S").replace(
+                                tzinfo=ZoneInfo("Asia/Shanghai"),
+                            ).astimezone(timezone.utc)
                     article.published_at = published.isoformat() if published else None
                 article.evidence_text = _extract_article_text(payload)
+                if article.source_id == "tldr_ai":
+                    article.evidence_text = _extract_tldr_newsletter(payload)
+                elif article.source_id == "techmeme" and "This is a Techmeme archive page" in payload:
+                    article.evidence_text = ""  # The archive notice is not article evidence.
                 article.evidence_status = "article_excerpt" if article.evidence_text else "feed_summary"
                 if not article.evidence_text:
                     article.evidence_text = article.summary
@@ -615,6 +753,7 @@ def dossier_markdown(dossier: ResearchDossier) -> str:
                 f"- Source: {article.source_name} ({article.language})",
                 f"- Content kind: {article.content_kind}",
                 f"- Evidence access: {article.evidence_status} (never assume the complete article was read)",
+                f"- Evidence URL: {article.evidence_url or article.url}",
                 f"- Freshness window: {article.lookback_hours or dossier.window_hours} hours",
                 ("- Editorial treatment: institutional viewpoint, with potential investment interests. Use 3–4 sentences, at most 120 English words or 220 Chinese characters, to explain the author's thesis, one supporting example and stated limitations; attribute opinions to the institution, never present them as independent reporting or established fact."
                  if article.content_kind == "analysis" else "- Editorial treatment: report only supported claims with source attribution."),
