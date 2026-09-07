@@ -85,7 +85,21 @@ export async function attachGeminiFile(page, filePath) {
             if (typeof page.cdp === 'function') {
                 await page.cdp('Page.bringToFront', {}).catch(() => undefined);
             }
-            await page.click('button[aria-label="Upload & tools"]');
+            // Some bridge versions acknowledge selector clicks without opening
+            // this menu. Retry with a fresh visible target and a trusted click.
+            const uploadTarget = await page.evaluate(`(() => {
+                const button = document.querySelector('button[aria-label="Upload & tools"]');
+                if (!button || button.disabled) return null;
+                const rect = button.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0
+                    ? { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+                    : null;
+            })()`);
+            if (uploadTarget && typeof page.nativeClick === 'function') {
+                await page.nativeClick(uploadTarget.x, uploadTarget.y);
+            } else {
+                await page.click('button[aria-label="Upload & tools"]');
+            }
         }
     }
     if (!fileInputSelector) {

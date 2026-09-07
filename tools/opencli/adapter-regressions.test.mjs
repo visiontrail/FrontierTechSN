@@ -1551,3 +1551,26 @@ test('ChatGPT never falls back to Instant when the preferred switch fails', asyn
   )
   assert.deepEqual(pressed, ['ArrowRight'])
 })
+
+test('Gemini attachment retries an ignored menu click using fresh native coordinates', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('fileChooserOpened not received')
+  const originalEvaluate = page.evaluate
+  let opened = false
+  page.evaluate = async (script) => {
+    if (script.includes('const inputSelector = selectors.find') && !opened) {
+      return { inputSelector: '', buttonSelector: '', expanded: false }
+    }
+    if (script.includes('const uploadTarget') || script.includes('button.getBoundingClientRect()')) {
+      return { x: 45, y: 67 }
+    }
+    return originalEvaluate(script)
+  }
+  page.nativeClick = async (x, y) => {
+    assert.deepEqual([x, y], [45, 67])
+    opened = true
+  }
+  await attachGeminiFile(page, image)
+  assert.equal(opened, true)
+  assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
+})
