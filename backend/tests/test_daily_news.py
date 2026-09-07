@@ -1140,6 +1140,26 @@ def test_contract_counts_one_aggregator_mention_only_once():
     assert "fewer than three selected publications are attributed aloud" in report["failures"]
 
 
+@pytest.mark.parametrize("paragraph,accepted", [
+    ("The Chinese-language science outlet DeepTech reports on microbial pesticides.", True),
+    ("DeepTech reports on microbial pesticides.", False),
+    ("The Chinese-language science outlet reports on microbial pesticides.", False),
+    ("The Chinese-language science outlet DeepTechnology reports on pesticides.", False),
+])
+def test_contract_recognizes_deeptech_short_name_with_explicit_media_provenance(paragraph, accepted):
+    script = _attribution_script(
+        "Axios reports growing data-center opposition.",
+        "The Chinese-language outlet QbitAI reports a robot coffee shop.",
+        paragraph,
+        "According to Bloomberg, a foldable iPhone prototype is being tested.",
+    )
+    report = script_contract_report(
+        script, _attribution_dossier(), date(2026, 8, 24),
+        language="en", closing_remarks="Thanks for listening.",
+    )
+    assert report["passed"] is accepted
+
+
 def test_d_only_trim_preserves_every_selected_publication_attribution():
     dossier = _attribution_dossier()
     script = _attribution_script(

@@ -35,7 +35,7 @@ SOURCE_SPOKEN_ALIASES = {
     "机器之心 AI Daily": ("Machine Heart", "Jiqizhixin"),
     "机器之心": ("Machine Heart", "Jiqizhixin"),
     "量子位 QbitAI": ("QbitAI",),
-    "DeepTech 深科技": ("DeepTech China", "MIT Technology Review China"),
+    "DeepTech 深科技": ("DeepTech China", "MIT Technology Review China", "DeepTech"),
     "AIBase AI 日报": ("AIBase",),
     "IT之家 AI / 智能时代": ("ITHome",),
     "极客公园": ("GeekPark",),
