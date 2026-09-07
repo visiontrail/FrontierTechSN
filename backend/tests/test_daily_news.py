@@ -1773,6 +1773,53 @@ def test_chatgpt_fact_check_uses_in_range_model_after_preferred_switch_fails():
     assert any("Policy fallback at High" in message for message in messages)
 
 
+@pytest.mark.parametrize("terminal_failure", [False, True])
+def test_model_preflight_recovers_stale_page_then_timeout_in_fresh_sessions(terminal_failure):
+    sessions = []
+    asks = []
+
+    async def command(args, **kwargs):
+        namespace = kwargs["site_session_namespace"]
+        if args[:2] == ["chatgpt", "model"]:
+            assert args[args.index("--timeout") + 1] == "45"
+            assert kwargs["timeout"] == 75
+            sessions.append(namespace)
+            if len(sessions) == 1:
+                raise OpenCLIError("Page not found: deadbeef — stale page identity")
+            if len(sessions) == 2:
+                raise OpenCLIError("OpenCLI command timed out after 75s")
+            # Same namespace would hit the daemon lease from attempt two.
+            assert namespace not in sessions[:-1]
+            if terminal_failure:
+                raise OpenCLIError("SESSION_BUSY")
+            return OpenCLIResult(tuple(args), 0, '[{"Model":"Medium"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
+            asks.append(namespace)
+            return OpenCLIResult(tuple(args), 0, '[{"response":"W1P2P"}]', "")
+        raise AssertionError(args)
+
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review.asyncio, "sleep", AsyncMock()),
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()) as close,
+    ):
+        coroutine = review._web_story_review(
+            "audit", story_numbers=[1, 2], log=None,
+            site_session_namespace="frontiertechsn-review-original",
+        )
+        if terminal_failure:
+            with pytest.raises(RuntimeError, match="after 3 attempts"):
+                asyncio.run(coroutine)
+            assert asks == []
+        else:
+            payload, _, _, _ = asyncio.run(coroutine)
+            assert payload["approved"] is True
+            assert asks == [sessions[-1]]
+    assert len(set(sessions)) == 3
+    assert [call.args[0] for call in close.await_args_list] == sessions
+    assert all(call.kwargs["sites"] == ("chatgpt",) for call in close.await_args_list)
+
+
 @pytest.mark.parametrize("outside_level", ["Instant", "Pro"])
 def test_chatgpt_fact_check_retries_out_of_range_model_without_submitting(
     outside_level: str,

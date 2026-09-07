@@ -23,6 +23,7 @@ const askPath = path.join(geminiDir, 'ask.js')
 const utilsPath = path.join(geminiDir, 'utils.js')
 const modelsPath = path.join(geminiDir, 'models.js')
 const chatgptUtilsPath = path.join(chatgptDir, 'utils.js')
+const chatgptModelPath = path.join(chatgptDir, 'model.js')
 const executionPath = path.join(
   runtimeDir,
   'node_modules',
@@ -89,6 +90,38 @@ execution = replaceOnce(
   'persistent site-session namespace',
 )
 fs.writeFileSync(executionPath, execution)
+
+// Model selection previously had no transport deadline, so Python's 60s kill
+// could leave a 120s browser operation and its lease running behind the retry.
+let chatgptModel = fs.readFileSync(chatgptModelPath, 'utf8')
+chatgptModel = replaceOnce(
+  chatgptModel,
+  '    args: [',
+  `    args: [
+        { name: 'timeout', type: 'int', default: 45, help: 'Model-selection timeout in seconds' },`,
+  'ChatGPT model transport deadline',
+)
+chatgptModel = replaceOnce(
+  chatgptModel,
+  '    CHATGPT_DOMAIN,',
+  '    CHATGPT_DOMAIN,\n    CHATGPT_URL,',
+  'ChatGPT model initial URL import',
+)
+chatgptModel = replaceOnce(
+  chatgptModel,
+  `        if (kwargs.project) {
+            await navigateToProject(page, kwargs.project);
+        }`,
+  `        if (kwargs.project) {
+            await navigateToProject(page, kwargs.project);
+        } else {
+            // Resolve a real page before evaluating the URL/composer. A fresh
+            // adapter lease otherwise starts by executing against about:blank.
+            await page.goto(CHATGPT_URL, { settleMs: 2000 });
+        }`,
+  'ChatGPT model navigate before page evaluation',
+)
+fs.writeFileSync(chatgptModelPath, chatgptModel)
 
 let utils = fs.readFileSync(utilsPath, 'utf8')
 const helperIndex = utils.indexOf(helperMarker)
@@ -1136,6 +1169,16 @@ fs.copyFileSync(
 )
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+const chatgptModelEntry = manifest.find(
+  (entry) => entry?.site === 'chatgpt' && entry?.name === 'model',
+)
+if (!chatgptModelEntry?.args) throw new Error('ChatGPT model manifest entry not found')
+if (!chatgptModelEntry.args.some((arg) => arg.name === 'timeout')) {
+  chatgptModelEntry.args.push({
+    name: 'timeout', type: 'int', default: 45,
+    help: 'Model-selection timeout in seconds',
+  })
+}
 const askEntry = manifest.find(
   (entry) => entry?.site === 'gemini' && entry?.name === 'ask',
 )

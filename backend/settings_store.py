@@ -653,8 +653,10 @@ SPECS: tuple[SettingSpec, ...] = (
         allow_blank=False,
     ),
     SettingSpec(
-        "OPENCLI_PROFILE", "footage", "OpenCLI Chrome profile", "string",
-        description="Optional Browser Bridge profile alias. Blank auto-selects the only connected profile.",
+        "OPENCLI_PROFILE", "footage", "OpenCLI browser profile", "string",
+        description="Browser Bridge profile ID or alias. Pin the Ego Lite profile when multiple browsers are connected. "
+                    "After a browser-profile import, ensure each OpenCLI extension has a distinct profile ID; "
+                    "duplicated IDs cause stale pages and command timeouts. Blank auto-selects the only connected profile.",
     ),
     SettingSpec(
         "OPENCLI_BROWSER_RUNTIME", "footage", "OpenCLI browser runtime", "choice",

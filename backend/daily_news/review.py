@@ -745,6 +745,37 @@ async def _web_story_review(
     site_session_namespace: str | None = None,
     log: LogCallback | None,
 ) -> tuple[dict[str, Any], str, str, str]:
+    retry_sessions: list[str] = []
+    try:
+        return await _web_story_review_in_session(
+            prompt,
+            story_number=story_number,
+            story_numbers=story_numbers,
+            claim_catalog=claim_catalog,
+            site_session_namespace=site_session_namespace,
+            log=log,
+            retry_sessions=retry_sessions,
+        )
+    finally:
+        for namespace in retry_sessions:
+            try:
+                await close_opencli_site_sessions(namespace, sites=("chatgpt",))
+            except Exception as exc:  # cleanup must preserve the review outcome
+                logging.getLogger(__name__).warning(
+                    "OpenCLI model-recovery session cleanup failed: %s", exc
+                )
+
+
+async def _web_story_review_in_session(
+    prompt: str,
+    *,
+    story_number: int | None = None,
+    story_numbers: list[int] | None = None,
+    claim_catalog: dict[int, dict[str, str]] | None = None,
+    site_session_namespace: str | None = None,
+    log: LogCallback | None,
+    retry_sessions: list[str],
+) -> tuple[dict[str, Any], str, str, str]:
     if (story_number is None) == (story_numbers is None):
         raise ValueError("exactly one of story_number or story_numbers is required")
     review_label = f"story {story_number}" if story_number is not None else f"stories {story_numbers}"
@@ -889,6 +920,8 @@ async def _web_story_review(
                     "chatgpt",
                     "model",
                     config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL,
+                    "--timeout",
+                    "45",
                     "--window",
                     "foreground",
                     "--site-session",
@@ -898,7 +931,7 @@ async def _web_story_review(
                     "-f",
                     "json",
                 ],
-                timeout=60,
+                timeout=75,
                 site_session_namespace=review_session_namespace,
             )
             policy_rows = _rows(first_json(policy_result.stdout))
@@ -973,6 +1006,20 @@ async def _web_story_review(
                     f"retrying: {exc}"
                 )
             if policy_attempt < chatgpt_model_policy_attempts:
+                if any(marker in str(exc).lower() for marker in (
+                    "stale page identity", "page not found:", "timed out",
+                    "session_busy", "timeout",
+                )):
+                    # A killed CLI can leave both a daemon lease and a browser
+                    # operation alive. Do not force-unlock or drive that tab on
+                    # retry. No audit prompt has been sent during model preflight,
+                    # so a fresh owned session is safe here (never replay ask).
+                    if review_session_namespace not in retry_sessions:
+                        retry_sessions.append(review_session_namespace)
+                    review_session_namespace = f"frontiertechsn-model-{uuid4().hex}"
+                    retry_sessions.append(review_session_namespace)
+                    if log:
+                        log("ChatGPT model preflight will retry in a fresh owned browser session")
                 await asyncio.sleep(_MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
     if chatgpt_model_policy_error is not None:

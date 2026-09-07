@@ -6,6 +6,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 import { selectChatGPTModel } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
 import {
   attachGeminiFile,
@@ -1151,6 +1152,27 @@ test('Gemini clears partial fill text before native typing the exact prompt once
   assert.deepEqual(actions, ['fillText', 'nativeType'])
   assert.equal(prepareCalls, 2)
   assert.equal(submittedText, 'hello world')
+})
+
+test('ChatGPT model navigates a fresh lease before evaluating the page', async () => {
+  const actions = []
+  const page = {
+    async goto(url) { actions.push(['goto', url]) },
+    async nativeClick() {},
+    async evaluate(script) {
+      actions.push(['evaluate', script])
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('hasComposer') && script.includes('hasLoginGate')) {
+        return { hasComposer: true, isLoggedIn: true, hasLoginGate: false }
+      }
+      if (script.includes('findEntryForText')) return { model: 'balanced', label: 'Medium' }
+      throw new Error(`Unexpected script: ${script.slice(0, 80)}`)
+    },
+  }
+  const result = await chatgptModelCommand.func(page, { model: 'medium' })
+  assert.deepEqual(actions[0], ['goto', 'https://chatgpt.com'])
+  assert.deepEqual(result, [{ Status: 'Already selected', Model: 'Medium' }])
+  assert.equal(chatgptModelCommand.args.find(arg => arg.name === 'timeout').default, 45)
 })
 
 test('ChatGPT waits for a delayed slider after one model-trigger click', async () => {

@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -134,18 +135,21 @@ async def run_opencli(
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             process.communicate(), timeout=timeout or config.OPENCLI_TIMEOUT
         )
     except TimeoutError as exc:
-        process.kill()
-        await process.communicate()
+        await _stop_command(process)
         raise OpenCLIError(
             f"OpenCLI command timed out after {timeout or config.OPENCLI_TIMEOUT}s: "
             f"{' '.join(args[:3])}"
         ) from exc
+    except asyncio.CancelledError:
+        await _stop_command(process)
+        raise
 
     result = OpenCLIResult(
         args=tuple(args),
@@ -159,6 +163,15 @@ async def run_opencli(
             f"OpenCLI {' '.join(args[:2])} failed with exit {result.returncode}: {detail}"
         )
     return result
+
+
+async def _stop_command(process: asyncio.subprocess.Process) -> None:
+    """Reap this command and its children before a caller can retry."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    await process.communicate()
 
 
 async def run_opencli_with_retries(

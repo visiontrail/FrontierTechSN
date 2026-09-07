@@ -15,3 +15,26 @@
   to 1.8.6 and fails installation if its upstream anchors change.
 
 No global OpenCLI npm package or global Claude Code skill is required.
+
+## Browser imports and model-check recovery
+
+Chrome profile imports into Ego Lite can copy OpenCLI's non-secret
+`opencli_context_id_v1` routing identifier. Two extensions with that identifier
+replace each other's daemon connection, causing stale page identities,
+navigation timeouts, and `SESSION_BUSY` after retries. A daemon status showing
+one profile does not prove that only one browser is connected. Compare the
+profile IDs in both extensions' popups.
+
+Assign the imported Ego Lite extension a distinct routing ID in its own
+`chrome.storage.local`, reload only that extension, and verify that the daemon
+lists two distinct profiles. Save the Ego Lite ID in Admin's `OPENCLI_PROFILE`;
+do not change the global default or clear login/cookie data. The setting is
+machine-specific and belongs in ignored `data/settings.json`.
+
+The project patch navigates to ChatGPT before model inspection and gives
+`chatgpt model` a 45-second browser deadline, inside a 75-second subprocess
+ceiling. Failed preflight attempts caused by stale pages, timeouts, or busy
+leases use fresh owned sessions, all cleaned up afterward. This recovery is
+limited to model preflight, before any review prompt has been submitted;
+the successful session is reused for the prompt and its response recovery.
+The observed model must still pass the configured `medium..xhigh` gate.

@@ -1,3 +1,5 @@
+import asyncio
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +25,51 @@ class OpenCLIOutputTests(unittest.TestCase):
     def test_first_json_rejects_non_json_output(self):
         with self.assertRaises(OpenCLIError):
             first_json("browser returned no structured payload")
+
+
+class OpenCLIProcessLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timeout_and_cancellation_stop_child_and_release_its_lock(self):
+        # A real wrapper/child pair catches the original kill-parent-only bug.
+        # The lock also proves cleanup has finished before the caller retries.
+        import fcntl
+
+        for cancel in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                lock = Path(directory) / "lease"
+                ready = Path(directory) / "ready"
+                child = Path(directory) / "child.py"
+                child.write_text(
+                    "import fcntl, time\n"
+                    f"handle = open({str(lock)!r}, 'w')\n"
+                    "fcntl.flock(handle, fcntl.LOCK_EX)\n"
+                    f"open({str(ready)!r}, 'w').close()\n"
+                    "time.sleep(30)\n"
+                )
+                wrapper = Path(directory) / "wrapper"
+                wrapper.write_text(
+                    f"#!{sys.executable}\n"
+                    "import subprocess, sys\n"
+                    f"subprocess.run([sys.executable, {str(child)!r}])\n"
+                )
+                wrapper.chmod(0o755)
+                with patch.object(config, "OPENCLI_BIN", str(wrapper)):
+                    task = asyncio.create_task(opencli_module.run_opencli(
+                        ["test"], timeout=30 if cancel else 1,
+                    ))
+                    for _ in range(100):
+                        if ready.exists():
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertTrue(ready.exists())
+                    if cancel:
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                    else:
+                        with self.assertRaisesRegex(OpenCLIError, "timed out"):
+                            await task
+                with lock.open() as handle:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 class OpenCLISessionIsolationTests(unittest.TestCase):
