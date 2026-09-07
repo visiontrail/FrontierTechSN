@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend import config
+from backend.daily_news.editorial import ATTRIBUTION_REVIEW_RULES, source_language_guidance
 from backend.daily_news.research import ResearchDossier
 from backend.daily_news.scriptwriter import (
     fit_daily_script_duration,
@@ -221,6 +222,7 @@ def _compact_article_evidence(script: str, article, index: int) -> str:
             f"STORY {index}",
             f"Title: {article.title}",
             f"Source: {article.source_name}",
+            f"Spoken provenance: {source_language_guidance(article)}",
             f"Original URL: {article.url}",
             f"Published: {article.published_at}",
             f"Feed summary lead: {(article.summary[:350] if article.summary else 'none')}",
@@ -239,6 +241,7 @@ def _full_article_evidence(article, index: int) -> str:
             f"STORY {index}",
             f"Title: {article.title}",
             f"Source: {article.source_name}",
+            f"Spoken provenance: {source_language_guidance(article)}",
             f"Original URL: {article.url}",
             f"Published: {article.published_at}",
             f"Content kind: {article.content_kind}; evidence access: {article.evidence_status}",
@@ -356,6 +359,8 @@ def _review_prompt(
     return f"""You are the independent final fact-checker for STORY {story_index} in a technology broadcast dated {edition_date.isoformat()}.
 Check whether the full script accurately covers this selected story and whether every script claim about it is supported by the story evidence. Missing coverage, wrong names, wrong numbers, stale framing, unsupported extrapolation, or company claims stated as independent fact must fail.
 
+{ATTRIBUTION_REVIEW_RULES}
+
 {_mandatory_web_review_rules()}
 
 Reply with exactly ONE ASCII token beginning with W:
@@ -390,6 +395,8 @@ def _batch_review_prompt(
     claims = _claim_catalog(script, dossier)
     return f"""You are the independent final fact-checker for stories {numbers} in a technology broadcast dated {edition_date.isoformat()}.
 For EACH numbered story, check whether the full script covers it accurately and whether every related claim is supported by that story's evidence. Missing coverage, wrong names, wrong numbers, stale framing, unsupported extrapolation, or company claims stated as independent fact must fail.
+
+{ATTRIBUTION_REVIEW_RULES}
 
 {_mandatory_web_review_rules()}
 

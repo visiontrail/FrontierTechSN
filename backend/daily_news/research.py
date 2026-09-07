@@ -736,6 +736,8 @@ async def hydrate_evidence(
 
 
 def dossier_markdown(dossier: ResearchDossier) -> str:
+    from backend.daily_news.editorial import source_language_guidance
+
     lines = [
         f"# ByteFront Espresso evidence dossier — {dossier.edition_date}",
         "",
@@ -751,6 +753,7 @@ def dossier_markdown(dossier: ResearchDossier) -> str:
             [
                 f"### {index}. {article.title}",
                 f"- Source: {article.source_name} ({article.language})",
+                f"- Spoken provenance: {source_language_guidance(article)}",
                 f"- Content kind: {article.content_kind}",
                 f"- Evidence access: {article.evidence_status} (never assume the complete article was read)",
                 f"- Evidence URL: {article.evidence_url or article.url}",

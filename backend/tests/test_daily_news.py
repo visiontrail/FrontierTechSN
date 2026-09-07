@@ -461,7 +461,7 @@ def test_d_only_audit_rewrites_from_evidence_before_trimming():
         )
 
     assert revised.splitlines()[1] == (
-        "DeepTech China reports that a robot was tested on folding clothes in late 2024."
+        "The Chinese-language outlet DeepTech China reports that a robot was tested on folding clothes in late 2024."
     )
     assert "Do not rely on the title alone" in chat.await_args.args[0]
     assert "MUST NOT copy a cited blocked sentence back unchanged" in chat.await_args.args[0]
@@ -1095,8 +1095,8 @@ def test_contract_accepts_original_publications_carried_by_techmeme_credit():
     dossier = _attribution_dossier()
     script = _attribution_script(
         "Axios reports growing data-center opposition.",
-        "QbitAI reports a robot coffee shop.",
-        "DeepTech China reports progress in coding agents.",
+        "The Chinese-language outlet QbitAI reports a robot coffee shop.",
+        "The Chinese-language outlet DeepTech China reports progress in coding agents.",
         "According to Bloomberg, a foldable iPhone prototype is being tested.",
     )
 
@@ -1169,8 +1169,8 @@ def test_d_only_trim_preserves_every_selected_publication_attribution():
     )
 
     assert "According to Axios, Communities are resisting data-center expansion." in revised
-    assert "According to QbitAI, A robot coffee shop operated in an open crowd." in revised
-    assert "According to DeepTech China, Coding agents can run experiments." in revised
+    assert "According to the Chinese-language outlet QbitAI, A robot coffee shop operated in an open crowd." in revised
+    assert "According to the Chinese-language outlet DeepTech China, Coding agents can run experiments." in revised
     assert "According to Bloomberg, A foldable phone prototype is being tested." in revised
     assert report["passed"] is True
     assert report["matched_publication_count"] == 4
