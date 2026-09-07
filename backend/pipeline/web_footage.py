@@ -693,12 +693,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-async def _analyze_candidate_preview(candidate: dict, excerpt: str, task_dir: Path) -> dict:
+async def _analyze_candidate_preview(
+    candidate: dict, excerpt: str, task_dir: Path, *, source_path: Path | None = None,
+) -> dict:
     """Judge actual downloaded pixels when the model cannot inspect a URL.
 
     A deterministic offset is only a preview proposal. It becomes eligible
     footage only after the attached contact sheet receives an explicit verdict.
     """
+    if source_path is not None:
+        source_path = source_path.resolve()
+        source_path.relative_to(task_dir.resolve())
+        if not source_path.is_file():
+            raise WebFootageError("Publisher source is not a local task artifact")
     key = hashlib.sha256(candidate["source_page_url"].encode()).hexdigest()[:16]
     folder = task_dir / "footage" / "evidence" / "previews" / key
     folder.mkdir(parents=True, exist_ok=True)
@@ -716,7 +723,10 @@ async def _analyze_candidate_preview(candidate: dict, excerpt: str, task_dir: Pa
         window = folder / f"window-{index}"
         window.mkdir(exist_ok=True)
         interval = {**proposal, "start_seconds": start, "end_seconds": start + length}
-        raw, sectioned = await _download_youtube(candidate, window, interval)
+        raw, sectioned = (
+            (source_path, False) if source_path is not None
+            else await _download_youtube(candidate, window, interval)
+        )
         media = await _probe(raw)
         if not sectioned:
             interval = _fit_analysis_to_media(interval, media["duration_seconds"])

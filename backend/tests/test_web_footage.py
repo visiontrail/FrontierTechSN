@@ -735,3 +735,38 @@ class WebFootagePreviewTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         with self.assertRaises(web_footage.WebFootageError):
                             await web_footage._analyze_candidate_preview(candidate, 'Robotaxi narration', root)
+
+    async def test_publisher_file_uses_original_timestamps_without_redownloading(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'publisher.mp4'
+            source.touch()
+            verdict = {'image_received': True, 'suitable': True, 'confidence': 0.95,
+                       'visible_content': 'Actual product demonstration',
+                       'reason': 'The demonstrated product matches the narration',
+                       'selected_window': 2}
+            with (
+                patch.object(web_footage, '_download_youtube', AsyncMock()) as download,
+                patch.object(web_footage, '_probe', AsyncMock(return_value={'duration_seconds': 100})),
+                patch.object(web_footage, '_trim', AsyncMock()) as trim,
+                patch.object(web_footage, '_run_command', AsyncMock()),
+                patch.object(web_footage, 'run_opencli', AsyncMock(return_value=OpenCLIResult(
+                    args=[], returncode=0, stdout=json.dumps(verdict), stderr='',
+                ))),
+            ):
+                result = await web_footage._analyze_candidate_preview(
+                    {'source_page_url': 'https://publisher.example/demo', 'duration_seconds': 100},
+                    'Product demonstration', root, source_path=source,
+                )
+            download.assert_not_awaited()
+            self.assertEqual(result['start_seconds'], 67)
+            self.assertEqual(trim.await_args_list[2].args[0], source.resolve())
+            self.assertEqual(trim.await_args_list[2].args[2]['start_seconds'], 67)
+
+    async def test_publisher_file_must_belong_to_task(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(ValueError):
+                await web_footage._analyze_candidate_preview({}, '', root / 'task', source_path=root / 'outside.mp4')
+            with self.assertRaises(web_footage.WebFootageError):
+                await web_footage._analyze_candidate_preview({}, '', root, source_path=root / 'missing.mp4')
