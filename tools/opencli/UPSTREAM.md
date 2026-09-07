@@ -12,7 +12,7 @@
   download. It detects Gemini's `generated-video` completion component (rather
   than assuming a native `<video>` element) and can resume an existing Gemini
   conversation when a late result only needs downloading. The patch is pinned
-  to 1.8.6 and fails installation if its upstream anchors change.
+  to 1.8.7 and fails installation if its upstream anchors change.
 
 No global OpenCLI npm package or global Claude Code skill is required.
 
@@ -38,3 +38,22 @@ leases use fresh owned sessions, all cleaned up afterward. This recovery is
 limited to model preflight, before any review prompt has been submitted;
 the successful session is reused for the prompt and its response recovery.
 The observed model must still pass the configured `medium..xhigh` gate.
+
+## Partial ChatGPT answers and recovery
+
+ChatGPT now also renders conversation turns as `section` elements. Generation
+checks must locate turns by `data-testid`, including status text outside the
+inner message, instead of requiring an `article` tag. Otherwise a paused stream
+can look like a stable final answer, such as `W` or `W1P;2BF@2.3,2`.
+
+`chatgpt detail` checks the current conversation ID before navigating. Reading
+the already-owned target preserves its live stream; a fresh tab or a different
+conversation still navigates to the requested ID. The Python review parser
+continues to reject partial verdicts and unknown claim IDs. Both changes live
+in the idempotent postinstall patch and have adapter regression coverage.
+
+Live verification should call `backend.daily_news.review.review_daily_script`
+with the saved task dossier, draft, and task configuration. This exercises the
+configured model gate, project OpenCLI wrapper, pacing, owned-turn recovery,
+claim validation, correction loop, and session cleanup together. Do not replace
+that check with direct OpenCLI commands or a different model.

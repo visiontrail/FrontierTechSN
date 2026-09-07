@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
@@ -169,3 +170,51 @@ def test_generation_retries_overlong_automatic_story():
     assert chat.await_count == 2
     assert "maximum 180" in chat.await_args.args[0]
     assert "its trial has started" in result
+
+
+@pytest.mark.parametrize("duration, expected_calls", [(None, 2), (8, 1)])
+def test_audit_correction_obeys_automatic_length_limit_and_preserves_passing_story(duration, expected_calls):
+    data = dossier(("bloomberg", "Bloomberg", "en"), ("bbc", "BBC", "en"))
+    passing = "BBC reports that the company says its trial has started."
+    original = "\n".join([scriptwriter.morning_opening(EDITION), "Bloomberg reports a trial.", passing, CLOSING])
+    long = "Bloomberg reports " + " ".join(["detail"] * 182) + "."
+    short = "Bloomberg reports that the company says its trial has started."
+    chat = AsyncMock(side_effect=[json.dumps({"1": long}), json.dumps({"1": short})])
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", chat),
+    ):
+        result = asyncio.run(scriptwriter.revise_daily_script(
+            original, data, [{"evidence_story_numbers": [1]}], EDITION,
+            language="en", closing_remarks=CLOSING, ai_endpoint=None, ai_model=None,
+            provider_id=None, target_duration_minutes=duration,
+        ))
+    assert chat.await_count == expected_calls
+    assert result.splitlines()[2] == passing
+    assert result.splitlines()[1] == (short if duration is None else long)
+    if duration is None:
+        assert "maximum 180" in chat.await_args.args[0]
+        assert "184 words" in chat.await_args.args[0]
+
+
+def test_audit_correction_exhausts_length_retries_without_truncating_or_switching_provider():
+    data = dossier(("bloomberg", "Bloomberg", "en"))
+    original = "\n".join([scriptwriter.morning_opening(EDITION), "Bloomberg reports a trial.", CLOSING])
+    calls = []
+
+    async def oversized(*args, **kwargs):
+        calls.append(args)
+        kwargs["route_selected"]("selected-endpoint", "selected-model", "selected-key")
+        return json.dumps({"1": "Bloomberg reports " + " ".join(["detail"] * 182) + "."})
+
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", side_effect=oversized),
+        pytest.raises(RuntimeError, match="exhausted 3 length-constrained responses"),
+    ):
+        asyncio.run(scriptwriter.revise_daily_script(
+            original, data, [{"evidence_story_numbers": [1]}], EDITION,
+            language="en", closing_remarks=CLOSING, ai_endpoint=None, ai_model=None, provider_id=None,
+        ))
+    assert len(calls) == scriptwriter.DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS
+    assert all(call[2:5] == ("selected-endpoint", "selected-model", "selected-key") for call in calls[1:])

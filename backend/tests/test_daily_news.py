@@ -1466,6 +1466,18 @@ def test_review_token_normalization_accepts_only_known_ui_wrappers():
         review._batch_payload("1P2P because both stories pass", [1, 2])
 
 
+@pytest.mark.parametrize("partial", ["W", "W1P;2BF@2.3,2"])
+def test_partial_live_chatgpt_verdicts_never_become_fact_check_approval(partial):
+    claims = {1: {"1.1": "First story"}, 2: {"2.3": "Name", "2.6": "Result"}}
+    with pytest.raises(ValueError, match="invalid characters"):
+        review._batch_payload(partial, [1, 2], claim_catalog=claims, require_web=True)
+    complete = review._batch_payload(
+        "W1P;2BDF@2.3,2.6", [1, 2], claim_catalog=claims, require_web=True,
+    )
+    assert complete["approved"] is False
+    assert complete["issues"][0]["claim_ids"] == ["2.3", "2.6"]
+
+
 def test_review_recovery_requires_the_current_request_anchor():
     current = "a" * 32
     other = "b" * 32

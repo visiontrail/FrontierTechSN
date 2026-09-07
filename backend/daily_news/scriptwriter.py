@@ -941,6 +941,7 @@ async def revise_daily_script(
     ai_endpoint: str | None,
     ai_model: str | None,
     provider_id: int | None,
+    target_duration_minutes: int | None = None,
     log: LogCallback | None = None,
 ) -> str:
     """Apply independent-review directives using the evidence-bound writing model."""
@@ -974,10 +975,22 @@ async def revise_daily_script(
     correction_shape = json.dumps(
         {str(number): "corrected spoken paragraph" for number in failed_story_numbers}
     )
+    length_limits = []
+    for number in failed_story_numbers:
+        if dossier.selected[number - 1].content_kind == "analysis":
+            limit = 220 if language == "zh" else 120
+            unit = "Chinese characters" if language == "zh" else "English words"
+            length_limits.append(f"Story {number}: maximum {limit} {unit}.")
+        elif language == "en" and target_duration_minutes is None:
+            length_limits.append(
+                f"Story {number}: maximum {DAILY_NEWS_AUTOMATIC_STORY_MAX_WORDS} English words."
+            )
     system_prompt = f"""You are the correction editor for ByteFront Espresso.
 Rewrite only the failed story paragraphs to fix every blocking audit directive below.
 Use only the supplied evidence dossier. Remove unsupported precision instead of guessing.
 Preserve the natural broadcast tone.
+Keep corrections concise, including any added attribution. Shorten or remove only cited failed claims to meet these paragraph limits; preserve uncited claims word-for-word:
+{chr(10).join(length_limits) or 'Preserve the existing paragraph length as closely as possible.'}
 {DAILY_NEWS_EDITORIAL_RULES}
 Edit ONLY failed story numbers {failed_story_numbers}. The software will preserve and merge every passing story, the opening, and the closing; do not output any of them.
 Every blocking issue carries claim_ids and claim_texts from the reviewed script. Modify only those cited claims inside a failed story paragraph. Preserve every uncited claim in that paragraph word-for-word unless changing punctuation is necessary to remove a cited sentence. Never discard an entire paragraph merely because one claim failed.
@@ -997,52 +1010,88 @@ For an English edition, output no Chinese, Japanese, or Korean characters.
             "EVIDENCE DOSSIER\n" + dossier_markdown(dossier),
         ]
     )
-    raw = await _chat(
-        system_prompt,
-        user_content,
-        endpoint,
-        edit_model,
-        api_key,
-        log,
-        "Daily news audit correction",
-        max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
-        enable_skills=False,
-        disable_thinking=True,
-    )
-    corrections = _parse_story_corrections(raw, failed_story_numbers)
-    corrections = _remove_persisting_cited_numeric_claims(corrections, issues)
-    corrections = _ensure_persisting_company_claim_attribution(corrections, issues)
-    if language == "en" and any(
-        NON_ENGLISH_RE.search(paragraph) for paragraph in corrections.values()
-    ):
-        raise RuntimeError(
-            "Daily-news audit correction contains CJK text in an English edition"
+    selected_route: tuple[str, str, str] | None = None
+
+    def remember_route(route_endpoint: str, route_model: str, route_api_key: str) -> None:
+        nonlocal selected_route
+        selected_route = (route_endpoint, route_model, route_api_key)
+
+    length_failures: list[str] = []
+    for response_attempt in range(1, DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS + 1):
+        response_prompt = system_prompt
+        if length_failures:
+            response_prompt += (
+                "\nThe previous correction exceeded the software paragraph limits: "
+                + "; ".join(length_failures)
+                + ". Return the complete correction JSON again. Make only the cited "
+                "failed claims shorter or remove them; do not shorten uncited claims."
+            )
+        call_endpoint, call_model, call_api_key = selected_route or (endpoint, edit_model, api_key)
+        raw = await _chat(
+            response_prompt,
+            user_content,
+            call_endpoint,
+            call_model,
+            call_api_key,
+            log,
+            "Daily news audit correction",
+            max_tokens=DAILY_NEWS_EDIT_MAX_TOKENS,
+            enable_skills=False,
+            disable_thinking=True,
+            route_selected=remember_route,
         )
-    revised_paragraphs = list(current_paragraphs)
-    for story_number, paragraph in corrections.items():
-        revised_paragraphs[story_number] = paragraph
-    revised = "\n".join(revised_paragraphs)
-    # Old saved review reports predate claim identifiers. Preserve their
-    # conservative first-sentence fallback, but never apply that paragraph-wide
-    # trim to the new claim-targeted protocol.
-    legacy_d_issues = [
-        issue
-        for issue in issues
-        if re.search(r"audit codes [A-F]*D", str(issue.get("claim", "")), re.I)
-        and not issue.get("claim_ids")
-    ]
-    if legacy_d_issues:
-        revised = _minimalize_unsupported_paragraphs(
+        corrections = _parse_story_corrections(raw, failed_story_numbers)
+        corrections = _remove_persisting_cited_numeric_claims(corrections, issues)
+        corrections = _ensure_persisting_company_claim_attribution(corrections, issues)
+        if language == "en" and any(
+            NON_ENGLISH_RE.search(paragraph) for paragraph in corrections.values()
+        ):
+            raise RuntimeError(
+                "Daily-news audit correction contains CJK text in an English edition"
+            )
+        revised_paragraphs = list(current_paragraphs)
+        for story_number, paragraph in corrections.items():
+            revised_paragraphs[story_number] = paragraph
+        revised = "\n".join(revised_paragraphs)
+        # Old saved review reports predate claim identifiers. Preserve their
+        # conservative first-sentence fallback, but never apply that paragraph-wide
+        # trim to the new claim-targeted protocol.
+        legacy_d_issues = [
+            issue
+            for issue in issues
+            if re.search(r"audit codes [A-F]*D", str(issue.get("claim", "")), re.I)
+            and not issue.get("claim_ids")
+        ]
+        if legacy_d_issues:
+            revised = _minimalize_unsupported_paragraphs(
+                revised,
+                legacy_d_issues,
+                dossier,
+                language=language,
+            )
+        candidate = enforce_script_contract(
             revised,
-            legacy_d_issues,
-            dossier,
+            opening=opening,
+            closing=closing_remarks,
             language=language,
         )
-    return enforce_script_contract(
-        revised,
-        opening=opening,
-        closing=closing_remarks,
-        language=language,
+
+        length_failures = _analysis_length_failures(candidate, dossier, language)
+        length_failures.extend(
+            _bulletin_length_failures(candidate, dossier, language, target_duration_minutes)
+        )
+        if not length_failures:
+            return candidate
+        if log:
+            log(
+                f"Daily news audit correction: rejected overlong response "
+                f"{response_attempt}/{DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS}: "
+                + "; ".join(length_failures)
+            )
+    raise RuntimeError(
+        "Daily-news audit correction exhausted "
+        f"{DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS} length-constrained responses: "
+        + "; ".join(length_failures)
     )
 
 

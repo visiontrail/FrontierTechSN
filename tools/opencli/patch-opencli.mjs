@@ -24,6 +24,7 @@ const utilsPath = path.join(geminiDir, 'utils.js')
 const modelsPath = path.join(geminiDir, 'models.js')
 const chatgptUtilsPath = path.join(chatgptDir, 'utils.js')
 const chatgptModelPath = path.join(chatgptDir, 'model.js')
+const chatgptDetailPath = path.join(chatgptDir, 'detail.js')
 const executionPath = path.join(
   runtimeDir,
   'node_modules',
@@ -122,6 +123,28 @@ chatgptModel = replaceOnce(
   'ChatGPT model navigate before page evaluation',
 )
 fs.writeFileSync(chatgptModelPath, chatgptModel)
+
+// Recovery must not reload an owned conversation that is still streaming.
+let chatgptDetail = fs.readFileSync(chatgptDetailPath, 'utf8')
+chatgptDetail = replaceOnce(
+  chatgptDetail,
+  '    CHATGPT_URL,',
+  '    CHATGPT_URL,\n    currentChatGPTUrl,',
+  'ChatGPT detail current URL import',
+)
+chatgptDetail = replaceOnce(
+  chatgptDetail,
+  '        await page.goto(`${CHATGPT_URL}/c/${id}`, { settleMs: 2000 });',
+  `        let currentId = '';
+        try {
+            currentId = parseChatGPTConversationId(await currentChatGPTUrl(page));
+        } catch { /* A fresh tab still needs navigation. */ }
+        if (currentId !== id) {
+            await page.goto(\`\${CHATGPT_URL}/c/\${id}\`, { settleMs: 2000 });
+        }`,
+  'ChatGPT detail preserve active response stream',
+)
+fs.writeFileSync(chatgptDetailPath, chatgptDetail)
 
 let utils = fs.readFileSync(utilsPath, 'utf8')
 const helperIndex = utils.indexOf(helperMarker)
@@ -545,6 +568,12 @@ models = replaceOnce(
 fs.writeFileSync(modelsPath, models)
 
 let chatgptUtils = fs.readFileSync(chatgptUtilsPath, 'utf8')
+chatgptUtils = replaceOnce(
+  chatgptUtils,
+  `            const turns = document.querySelectorAll('article[data-testid*="conversation-turn"]');`,
+  `            const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');`,
+  'ChatGPT section generation status scope',
+)
 chatgptUtils = replaceOnce(
   chatgptUtils,
   "        label: 'Balanced',",

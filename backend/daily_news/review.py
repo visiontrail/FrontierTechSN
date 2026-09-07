@@ -1363,6 +1363,7 @@ async def _review_daily_script(
             ai_endpoint=ai_endpoint,
             ai_model=ai_model,
             provider_id=provider_id,
+            target_duration_minutes=target_duration_minutes,
             log=log,
         )
         correction_count += 1

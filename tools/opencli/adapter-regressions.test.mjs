@@ -5,7 +5,8 @@ import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
 
-import { selectChatGPTModel } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { isGenerating, selectChatGPTModel } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
 import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
 import {
@@ -18,6 +19,59 @@ import {
   uploadFrames,
   submittedVideoPrompt,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+test('ChatGPT generation includes status outside the message in a section turn', async () => {
+  const thinking = {
+    children: [], textContent: 'Thinking',
+    closest() { return null },
+  }
+  const answer = {
+    children: [], textContent: 'W',
+    closest() { return {} },
+  }
+  const section = {
+    children: [thinking, answer],
+    querySelectorAll() { return [thinking, answer] },
+  }
+  const page = {
+    async evaluate(script) {
+      return vm.runInNewContext(script, {
+        document: {
+          querySelector() { return null },
+          querySelectorAll(selector) {
+            if (selector === '[data-testid^="conversation-turn-"]') return [section]
+            if (selector === '[data-message-author-role]') return [answer]
+            return []
+          },
+        },
+      })
+    },
+  }
+  assert.equal(await isGenerating(page), true)
+  thinking.textContent = ''
+  answer.textContent = 'An answer mentioning Thinking'
+  assert.equal(await isGenerating(page), false)
+})
+
+for (const current of ['https://chatgpt.com/c/abcdefgh1234', 'https://chatgpt.com/c/otherchat1234', 'about:blank']) {
+  test(`ChatGPT detail navigates only when the target differs from ${current}`, async () => {
+    const navigations = []
+    const page = {
+      async goto(url) { navigations.push(url) },
+      async wait() {},
+      async evaluate(script) {
+        if (script === 'window.location.href') return current
+        if (script.includes('isLoggedIn')) return { isLoggedIn: true, hasLoginGate: false }
+        if (script.includes('const roleOf')) return [{ role: 'assistant', text: 'W1P;2P', html: '' }]
+        if (script.includes('stop-button')) return false
+        throw new Error(`Unexpected detail evaluation: ${script.slice(0, 100)}`)
+      },
+    }
+    const rows = await chatgptDetailCommand.func(page, { id: 'abcdefgh1234', wait: false })
+    assert.equal(rows[0].Text, 'W1P;2P')
+    assert.deepEqual(navigations, current.endsWith('/abcdefgh1234') ? [] : ['https://chatgpt.com/c/abcdefgh1234'])
+  })
+}
 
 function videoFrameFixture(t, names = ['first-frame.png']) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'opencli-video-upload-'))
