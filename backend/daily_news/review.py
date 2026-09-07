@@ -224,6 +224,7 @@ def _compact_article_evidence(script: str, article, index: int) -> str:
             f"Original URL: {article.url}",
             f"Published: {article.published_at}",
             f"Feed summary lead: {(article.summary[:350] if article.summary else 'none')}",
+            f"Content kind: {article.content_kind}; evidence access: {article.evidence_status}",
             "Claim-relevant article evidence:",
             excerpt,
         ]
@@ -240,8 +241,11 @@ def _full_article_evidence(article, index: int) -> str:
             f"Source: {article.source_name}",
             f"Original URL: {article.url}",
             f"Published: {article.published_at}",
+            f"Content kind: {article.content_kind}; evidence access: {article.evidence_status}",
+            ("Institutional analysis: verify the attributed author's thesis, investor perspective and publication date. A recent essay must not be presented as today's breaking news or independent fact."
+             if article.content_kind == "analysis" else "Reporting: verify source attribution and factual support."),
             f"Feed summary lead: {(article.summary or 'none')}",
-            "Full locally captured article evidence:",
+            "Locally captured evidence excerpt (may be feed-only, not the complete article):",
             evidence or article.summary or article.title,
         ]
     )

@@ -4493,6 +4493,7 @@ video {
 .source-table { width: 100%; border-collapse: collapse; min-width: 940px; }
 .source-table th { padding: 11px 12px; text-align: left; font: 700 10px ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; color: var(--text-muted); border-bottom: 1px solid var(--rule); }
 .source-table td { padding: 15px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; color: var(--text-secondary); }
+.source-table td small { display: block; margin-top: 6px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 .source-table tr:last-child td { border-bottom: 0; }
 .source-table tr.is-priority td:first-child { color: var(--accent-2); font-weight: 800; }
 .source-table td:nth-child(2) a { color: var(--ink); font-weight: 750; text-decoration: none; }

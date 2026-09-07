@@ -196,8 +196,8 @@ export default function MorningDesk() {
     return <div className="empty-state">Opening the morning desk…</div>
   }
 
-  const priority = sources.filter((source) => source.priority <= 6)
-  const secondary = sources.filter((source) => source.priority > 6)
+  const monitoredSources = sources.filter((source) => source.enabled)
+  const analysisSourceCount = monitoredSources.filter((source) => source.content_kind === 'analysis').length
   const publicationFields = Object.fromEntries(
     (settingsSchema?.groups.find((group) => group.id === 'publication')?.fields ?? [])
       .map((field) => [field.key, field.value]),
@@ -633,18 +633,18 @@ export default function MorningDesk() {
       </section>
 
       <section className="morning-sources">
-        <div className="morning-section-head"><div><span className="morning-section-label">Signal board</span><h2>{sources.length || 12} monitored sources</h2></div><p>Six primary desks set the agenda; six secondary desks widen or verify the frame. Per-source failure is isolated, while source quorum remains a hard gate.</p></div>
+        <div className="morning-section-head"><div><span className="morning-section-label">Signal board</span><h2>{monitoredSources.length} monitored sources</h2></div><p>Global reporting, specialist media and {analysisSourceCount} institutional perspectives. Editions of three or more stories can include one recent article interpretation, with the author’s thesis clearly attributed. Source availability is recorded in each run.</p></div>
         <div className="source-table-wrap">
           <table className="source-table">
-            <thead><tr><th>Rank</th><th>Desk</th><th>Language</th><th>Coverage</th><th>Cadence</th><th>Signal</th></tr></thead>
+            <thead><tr><th>Rank</th><th>Desk / Type</th><th>Language</th><th>Coverage / Access</th><th>Cadence</th><th>Signal</th></tr></thead>
             <tbody>
-              {[...priority, ...secondary].map((source) => (
+              {monitoredSources.map((source) => (
                 <tr key={source.id} className={source.priority <= 6 ? 'is-priority' : ''}>
                   <td>{String(source.priority).padStart(2, '0')}</td>
-                  <td><a href={source.homepage} target="_blank" rel="noreferrer">{source.name}</a>{source.priority <= 6 && <small>PRIMARY</small>}</td>
+                  <td><a href={source.homepage} target="_blank" rel="noreferrer">{source.name}</a><small>{source.content_kind === 'analysis' ? 'INSTITUTIONAL VIEW' : source.content_kind === 'aggregator' ? 'AGGREGATOR' : 'REPORTING'}</small></td>
                   <td>{SOURCE_LABELS[source.language] || source.language}</td>
-                  <td>{source.coverage}</td>
-                  <td>{source.frequency}</td>
+                  <td>{source.coverage}<small>{source.access_note}</small></td>
+                  <td>{source.frequency}{source.lookback_hours && <small>Latest {source.lookback_hours / 24} days</small>}</td>
                   <td><span className="source-stars">{'★'.repeat(source.rating)}</span></td>
                 </tr>
               ))}

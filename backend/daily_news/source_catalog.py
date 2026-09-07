@@ -22,6 +22,10 @@ class NewsSource:
     feed_url: str | None
     fetch_mode: str
     enabled: bool = True
+    content_kind: str = "news"
+    access_note: str = "Public headlines and available article excerpts."
+    lookback_hours: int | None = None
+    article_selector: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)

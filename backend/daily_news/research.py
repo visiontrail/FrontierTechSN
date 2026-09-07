@@ -84,6 +84,9 @@ class NewsArticle:
     corroborating_sources: list[str] = field(default_factory=list)
     evidence_text: str = ""
     fetched_at: str = ""
+    content_kind: str = "news"
+    lookback_hours: int | None = None
+    evidence_status: str = "not_fetched"
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -251,7 +254,7 @@ def parse_html(payload: str, source: NewsSource, fetched_at: datetime) -> list[N
     home_parts = urlsplit(source.homepage)
     seen: set[tuple[str, str]] = set()
     articles: list[NewsArticle] = []
-    for anchor in soup.select("article a[href], main a[href], h1 a[href], h2 a[href], h3 a[href], a[href]"):
+    for anchor in soup.select(source.article_selector or "article a[href], main a[href], h1 a[href], h2 a[href], h3 a[href], a[href]"):
         title = _clean_text(anchor.get_text(" ", strip=True) or anchor.get("title"))
         if source.id == "the_rundown_ai":
             title = re.split(r"\s+PLUS:\s+", title, maxsplit=1, flags=re.I)[0].strip()
@@ -378,6 +381,9 @@ async def fetch_source(client: httpx.AsyncClient, source: NewsSource) -> tuple[l
             articles = parse_html(payload, source, fetched_at)
         if not articles:
             raise RuntimeError("No candidate headlines survived source parsing")
+        for article in articles:
+            article.content_kind = source.content_kind
+            article.lookback_hours = source.lookback_hours
         return articles, SourceFetch(source.id, source.name, url, True, status, len(articles))
     except Exception as exc:  # noqa: BLE001 - one source cannot abort the edition
         status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
@@ -393,6 +399,7 @@ async def fetch_source(client: httpx.AsyncClient, source: NewsSource) -> tuple[l
 
 
 def _within_window(article: NewsArticle, now: datetime, window_hours: int) -> bool:
+    window_hours = article.lookback_hours or window_hours
     if not article.published_at:
         return True
     try:
@@ -411,7 +418,10 @@ def _cluster_articles(articles: list[NewsArticle]) -> list[list[NewsArticle]]:
                 for cluster in clusters
                 if any(
                     existing.url == article.url
-                    or _title_similarity(existing.title, article.title) >= 0.68
+                    or (
+                        (existing.content_kind == "analysis") == (article.content_kind == "analysis")
+                        and _title_similarity(existing.title, article.title) >= 0.68
+                    )
                     for existing in cluster
                 )
             ),
@@ -431,7 +441,10 @@ def score_and_deduplicate(
     clusters = _cluster_articles(list(articles))
     ranked: list[NewsArticle] = []
     for cluster in clusters:
-        representative = min(cluster, key=lambda article: source_map[article.source_id].priority)
+        representative = min(cluster, key=lambda article: (
+            source_map[article.source_id].content_kind == "aggregator",
+            source_map[article.source_id].priority,
+        ))
         lowered = representative.title.casefold().strip(" .!—-")
         if lowered in {"one daily email", "subscribe to our newsletter", "sign up for free"}:
             continue
@@ -454,6 +467,14 @@ def score_and_deduplicate(
 
 
 def select_balanced(articles: list[NewsArticle], max_stories: int) -> list[NewsArticle]:
+    # One recent institutional reading can close an edition, after the news.
+    # It needs article evidence, not just a headline or a subscription screen.
+    analyses = [
+        article for article in articles
+        if article.content_kind == "analysis" and article.evidence_status == "article_excerpt"
+    ]
+    analysis = max(analyses, key=lambda article: article.score) if analyses and max_stories >= 3 else None
+    news_slots = max_stories - int(analysis is not None)
     selected: list[NewsArticle] = []
     source_counts: Counter[str] = Counter()
     category_counts: Counter[str] = Counter()
@@ -468,8 +489,8 @@ def select_balanced(articles: list[NewsArticle], max_stories: int) -> list[NewsA
         source_penalty = 32.0 * source_counts[article.source_id]
         return article.score + diversity + language - source_penalty
 
-    remaining = list(articles)
-    while remaining and len(selected) < max_stories:
+    remaining = [article for article in articles if article.content_kind != "analysis"]
+    while remaining and len(selected) < news_slots:
         unused_sources = [article for article in remaining if source_counts[article.source_id] == 0]
         pool = unused_sources or remaining
         pool.sort(key=lambda article: (-adjusted(article), article.title))
@@ -481,11 +502,18 @@ def select_balanced(articles: list[NewsArticle], max_stories: int) -> list[NewsA
         source_counts[candidate.source_id] += 1
         category_counts[candidate.category] += 1
         language_counts[candidate.language] += 1
+    if analysis is not None:
+        selected.append(analysis)
     return selected
 
 
 def _extract_article_text(payload: str) -> str:
     soup = BeautifulSoup(payload, "html.parser")
+    # A successful HTTP response can still be a subscription shell. Treat a
+    # declared paywall conservatively and keep the public feed evidence.
+    for node in soup.select('script[type="application/ld+json"]'):
+        if re.search(r'"isAccessibleForFree"\s*:\s*(?:false|"false")', node.get_text(), re.I):
+            return ""
     for node in soup(["script", "style", "nav", "footer", "aside", "form", "noscript", "svg"]):
         node.decompose()
     container = soup.find("article") or soup.find("main") or soup.body
@@ -556,10 +584,14 @@ async def hydrate_evidence(
                     published = _extract_published_at(payload)
                     article.published_at = published.isoformat() if published else None
                 article.evidence_text = _extract_article_text(payload)
+                article.evidence_status = "article_excerpt" if article.evidence_text else "feed_summary"
                 if not article.evidence_text:
                     article.evidence_text = article.summary
+                    if not article.summary:
+                        article.evidence_status = "headline_only"
             except Exception as exc:  # noqa: BLE001 - keep feed evidence if detail is blocked
                 article.evidence_text = article.summary
+                article.evidence_status = "feed_summary" if article.summary else "headline_only"
                 _log(log, f"Evidence detail unavailable for {article.source_name}: {exc}")
 
     await asyncio.gather(*(hydrate(article) for article in articles))
@@ -581,6 +613,11 @@ def dossier_markdown(dossier: ResearchDossier) -> str:
             [
                 f"### {index}. {article.title}",
                 f"- Source: {article.source_name} ({article.language})",
+                f"- Content kind: {article.content_kind}",
+                f"- Evidence access: {article.evidence_status} (never assume the complete article was read)",
+                f"- Freshness window: {article.lookback_hours or dossier.window_hours} hours",
+                ("- Editorial treatment: institutional viewpoint, with potential investment interests. Use 3–4 sentences, at most 120 English words or 220 Chinese characters, to explain the author's thesis, one supporting example and stated limitations; attribute opinions to the institution, never present them as independent reporting or established fact."
+                 if article.content_kind == "analysis" else "- Editorial treatment: report only supported claims with source attribution."),
                 f"- URL: {article.url}",
                 f"- Published: {article.published_at or 'not exposed by source'}",
                 f"- Category: {article.category}",
@@ -625,6 +662,31 @@ async def run_research(
             failures = "; ".join(f"{fetch.source_name}: {fetch.error}" for fetch in fetches if not fetch.ok)
             raise RuntimeError(f"Research source quorum failed; fewer than 3 sources returned stories. {failures}")
         ranked = score_and_deduplicate(all_articles, sources, now)
+        # Undated institutional cards need a fair chance at date verification
+        # before the news batch fills the edition. Bound this extra work.
+        ranked_ids = {article.id for article in ranked}
+        analysis_candidates: list[NewsArticle] = []
+        analysis_counts: Counter[str] = Counter()
+        # Preserve publishers' latest-first listing order for undated cards;
+        # sorting their tied scores alphabetically would favor old essays.
+        for article in all_articles:
+            if (article.content_kind == "analysis" and article.id in ranked_ids
+                    and analysis_counts[article.source_id] < 4):
+                analysis_candidates.append(article)
+                analysis_counts[article.source_id] += 1
+            if len(analysis_candidates) >= 8:
+                break
+        # Verify one candidate per desk before spending the batch on repeated
+        # high-scoring aggregator stories. Otherwise an expanded roster can
+        # still yield an edition dominated by the first few sources.
+        hydration_order = list(analysis_candidates)
+        seen_sources = {article.source_id for article in hydration_order}
+        for article in ranked:
+            if article.source_id not in seen_sources:
+                hydration_order.append(article)
+                seen_sources.add(article.source_id)
+        queued_ids = {article.id for article in hydration_order}
+        hydration_order.extend(article for article in ranked if article.id not in queued_ids)
         # Headlines without feed dates are provisionally ranked, then hydrated
         # in bounded batches. Final selection is freshness-closed: every story
         # must have an article/feed timestamp inside this edition's window.
@@ -632,8 +694,8 @@ async def run_research(
         batch_size = max(24, max_stories * 4)
         selected: list[NewsArticle] = []
         hydrated_count = 0
-        for offset in range(0, len(ranked), batch_size):
-            batch = ranked[offset : offset + batch_size]
+        for offset in range(0, len(hydration_order), batch_size):
+            batch = hydration_order[offset : offset + batch_size]
             await hydrate_evidence(client, batch, log=log)
             hydrated_count += len(batch)
             freshness_verified.extend(

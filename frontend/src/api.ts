@@ -266,6 +266,9 @@ export interface DailyNewsSource {
   feed_url: string | null;
   fetch_mode: string;
   enabled: boolean;
+  content_kind: 'news' | 'aggregator' | 'analysis';
+  access_note: string;
+  lookback_hours: number | null;
 }
 
 export interface PublicationEntry {

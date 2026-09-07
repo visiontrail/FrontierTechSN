@@ -8,7 +8,7 @@ The project is a new repository derived from the proven media pipeline in Video-
 
 Every daily run is fail-closed around these checks:
 
-1. Fetch all 12 configured sources and require at least three working sources.
+1. Fetch all enabled sources in the 25-source catalog and require at least three working sources.
 2. Deduplicate and balance six stories across source, language, and technology category.
 3. Inject an exact, date-stamped morning-news opening and an exact spoken closing.
 4. Generate the script from the evidence dossier only through yhroot AI.
@@ -25,7 +25,11 @@ Each Paper-Collage clip targets the duration of its selected narration scene, ca
 
 ## Source roster
 
-The catalog lives in [`config/news_sources.json`](config/news_sources.json). Primary desks are Techmeme, TLDR AI, 机器之心 AI Daily, 量子位 QbitAI, IEEE Spectrum, and DeepTech 深科技. Secondary desks are AIBase AI 日报, IT之家 AI / 智能时代, 极客公园, The Rundown AI, Ars Technica, and VentureBeat AI.
+The catalog lives in [`config/news_sources.json`](config/news_sources.json). Alongside the original 12 bilingual sources, it includes Bloomberg, Reuters, Financial Times, The Wall Street Journal, CNBC Technology, BBC Technology, TechCrunch, The Verge, WIRED, MIT Technology Review, Nature, a16z, and Sequoia Capital. The Signal board uses the enabled catalog count and shows reporting, aggregators, institutional viewpoints, and access notes.
+
+Institutional articles use an explicit 168-hour lookback (news retains the edition's configured window). Editions with at least three stories can include at most one institutional reading, after the news, only after its publication date and article excerpt are verified. The script uses 3–4 sentences to explain the attributed thesis and one supporting example, identifies the investor perspective and publication date, and retains supported limitations. Generation and final script checks cap each interpretation at 120 English words or 220 Chinese characters. No eligible reading means the edition uses news instead. The dossier preserves `content_kind`, `lookback_hours`, and `evidence_status`; feed summaries are never represented as complete article access.
+
+a16z uses its current article-list HTML because its former RSS endpoint returns 404. Public media feeds do not guarantee article access: subscriptions, authorization failures (including Reuters), and connection failures remain explicit in the per-run fetch audit. No credentials or paywall workarounds are configured.
 
 One blocked or changed website cannot abort an edition. Its failure is preserved in `research/dossier.json`; the source quorum and selected-story gates decide whether the edition may continue.
 

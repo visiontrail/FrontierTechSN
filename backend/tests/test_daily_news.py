@@ -61,11 +61,17 @@ def _task(root: Path, audio: Path) -> TaskResponse:
     )
 
 
-def test_source_catalog_contains_bilingual_priority_six_and_twelve_total():
+def test_source_catalog_contains_global_reporting_and_institutional_analysis():
     load_source_catalog.cache_clear()
     sources = load_source_catalog()
 
-    assert len(sources) == 12
+    assert len(sources) == 25
+    by_id = {source.id: source for source in sources}
+    assert {"bloomberg", "reuters", "financial_times", "wall_street_journal", "nature"} <= by_id.keys()
+    assert by_id["a16z"].content_kind == "analysis"
+    assert by_id["a16z"].lookback_hours == 168
+    assert by_id["a16z"].feed_url is None
+    assert by_id["sequoia"].content_kind == "analysis"
     assert [source.priority for source in sources[:6]] == [1, 2, 3, 4, 5, 6]
     assert {source.language for source in sources} == {"en", "zh"}
 
