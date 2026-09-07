@@ -83,6 +83,21 @@ class QualityGateRetry(RuntimeError):
     """A rendered candidate needs another compose/review cycle, not FAILED."""
 
 
+def _eligible_news_image_scene_ids(plans: list[dict], board: dict) -> set[str]:
+    bookends = {
+        str(scene.get("id") or "")
+        for scene in board.get("scenes", [])
+        if scene.get("program_segment_kind") in {"opening", "closing"}
+    }
+    return {
+        str(plan.get("id") or "")
+        for plan in plans
+        if not plan.get("collage_broll")
+        and plan.get("archetype") != "footage"
+        and str(plan.get("id") or "") not in bookends
+    }
+
+
 def _record_quality_retry(
     output_dir: Path,
     quality_report: dict,
@@ -1420,11 +1435,7 @@ async def compose_video(
         "missing_scene_ids": [],
         "warning": "",
     }
-    eligible_image_scene_ids = {
-        str(plan.get("id") or "")
-        for plan in plans
-        if not plan.get("collage_broll") and plan.get("archetype") != "footage"
-    }
+    eligible_image_scene_ids = _eligible_news_image_scene_ids(plans, board)
     if not eligible_image_scene_ids:
         news_image_quality["complete"] = True
     if news_images_enabled and eligible_image_scene_ids:

@@ -799,3 +799,21 @@ def test_visual_planner_falls_back_for_known_nonfinite_fields_and_checkpoints(
         plans,
     )
     assert composer._load_cached_scene_plans(tmp_path, data) == plans
+
+
+def test_footage_promotion_preserves_structured_story_details(tmp_path):
+    data = board(1)
+    data['scenes'][0]['text'] = 'Atlas builds 3D worlds. Zhengrong simulates urban floods.'
+    data['scenes'][0]['keywords'] = ['Atlas', 'Zhengrong']
+    items = ['Atlas builds 3D worlds', 'Zhengrong simulates urban floods']
+    plans = [{'id': data['scenes'][0]['id'], 'archetype': 'bullets', 'body': '', 'items': items}]
+    (tmp_path / 'atlas.mp4').touch()
+    manifest = {'clips': [{'local_path': 'atlas.mp4', 'query': 'Atlas', 'script_excerpt': data['scenes'][0]['text']}]}
+    assert visual_plan.attach_footage(plans, data, manifest, tmp_path) == 1
+    assert all(item in plans[0]['body'] for item in items)
+    assert plans[0]['archetype'] == 'footage'
+
+
+def test_footage_body_keeps_existing_copy_and_comparison_labels():
+    assert visual_plan._footage_body({'body': 'Original', 'items': ['Other']}) == 'Original'
+    assert visual_plan._footage_body({'left': {'label': 'BEFORE', 'text': 'Manual'}, 'right': {'label': 'AFTER', 'text': 'Automatic'}}) == 'BEFORE: Manual · AFTER: Automatic'

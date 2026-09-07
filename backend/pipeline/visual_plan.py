@@ -514,6 +514,23 @@ async def plan_scene_visuals(
     return plans
 
 
+def _footage_body(plan: dict) -> str:
+    """Keep structured editorial copy visible after changing the scene type."""
+    if str(plan.get("body") or "").strip():
+        return str(plan["body"])
+    items = [str(item).strip() for item in plan.get("items") or [] if str(item).strip()]
+    if items:
+        return " · ".join(items)
+    sides = []
+    for side in ("left", "right"):
+        value = plan.get(side) or {}
+        label = str(value.get("label") or plan.get(f"{side}_label") or "").strip()
+        text = str(value.get("text") or plan.get(f"{side}_text") or "").strip()
+        if text:
+            sides.append(f"{label}: {text}" if label else text)
+    return " · ".join(sides)
+
+
 def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, task_dir: Path) -> int:
     """Promote scenes to full-bleed footage plates where a clip actually fits.
 
@@ -657,6 +674,7 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
                 "query": str(clip.get("query") or "")[:160],
             }
         )
+        plan["body"] = _footage_body(plan)
         plan["archetype"] = "footage"
         plan["footage_src"] = rel
         plan["footage_kind"] = "video" if path.suffix.lower() in {".webm", ".mp4", ".ogv"} else "image"

@@ -725,3 +725,20 @@ def test_portrait_render_command_uses_task_resolution(tmp_path):
     assert command[command.index("--protocol-timeout") + 1] == str(
         composer.config.RENDER_PROTOCOL_TIMEOUT_MS
     )
+
+
+def test_news_images_exclude_program_bookends_and_existing_footage():
+    plans = [
+        {'id': 'intro', 'archetype': 'statement'},
+        {'id': 'news-video', 'archetype': 'footage'},
+        {'id': 'news-image', 'archetype': 'statement'},
+        {'id': 'outro', 'archetype': 'statement'},
+    ]
+    board = {'scenes': [
+        {'id': 'intro', 'program_segment_kind': 'opening'},
+        {'id': 'news-video', 'program_segment_kind': 'news'},
+        {'id': 'news-image', 'program_segment_kind': 'news'},
+        {'id': 'outro', 'program_segment_kind': 'closing'},
+    ]}
+    assert composer._eligible_news_image_scene_ids(plans, board) == {'news-image'}
+    assert composer._eligible_news_image_scene_ids(plans, {}) == {'intro', 'news-image', 'outro'}
