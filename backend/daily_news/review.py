@@ -961,9 +961,13 @@ async def _web_story_review_in_session(
 
     chatgpt_model_policy_error: Exception | None = None
     chatgpt_model_policy_attempts = 3
+    chatgpt_model_rate_limit_attempts = 3
+    policy_attempt = 0
+    rate_limit_attempt = 0
+    rate_limit_exhausted = False
     observed_chatgpt_model = ""
     chatgpt_model_policy_status = ""
-    for policy_attempt in range(1, chatgpt_model_policy_attempts + 1):
+    while policy_attempt < chatgpt_model_policy_attempts:
         try:
             policy_result = await run_opencli(
                 [
@@ -1043,8 +1047,32 @@ async def _web_story_review_in_session(
                     "continuing after the preferred-model switch attempt"
                 )
             break
+        except OpenCLIRateLimitError as exc:
+            # The transport has already opened the shared provider breaker.
+            # Do not spend a model-picker hydration attempt on a site-wide
+            # access limit: the next run_opencli call waits outside its command
+            # timeout and retries only after the persisted cooldown.
+            chatgpt_model_policy_error = exc
+            rate_limit_attempt += 1
+            raw_attempts.append(
+                f"[CHATGPT MODEL POLICY RATE LIMIT {rate_limit_attempt}/"
+                f"{chatgpt_model_rate_limit_attempts}]\n{exc}"
+            )
+            if rate_limit_attempt >= chatgpt_model_rate_limit_attempts:
+                rate_limit_exhausted = True
+                break
+            if log:
+                log(
+                    "ChatGPT fact-check model policy hit the provider access "
+                    f"limit ({rate_limit_attempt}/"
+                    f"{chatgpt_model_rate_limit_attempts}); preserving all "
+                    "model-policy retries and waiting for the shared cooldown "
+                    f"before retrying: {exc}"
+                )
+            continue
         except Exception as exc:  # noqa: BLE001 - fail closed after bounded retry
             chatgpt_model_policy_error = exc
+            policy_attempt += 1
             raw_attempts.append(
                 f"[CHATGPT MODEL POLICY ERROR {policy_attempt}/"
                 f"{chatgpt_model_policy_attempts}]\n{exc}"
@@ -1073,11 +1101,15 @@ async def _web_story_review_in_session(
                 await asyncio.sleep(_MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
     if chatgpt_model_policy_error is not None:
+        failed_after = (
+            f"{chatgpt_model_rate_limit_attempts} access-limit cooldowns"
+            if rate_limit_exhausted
+            else f"{chatgpt_model_policy_attempts} attempts"
+        )
         raise RuntimeError(
             "ChatGPT fact-check current model could not be verified within the "
             f"allowed {config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
-            f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} range after "
-            f"{chatgpt_model_policy_attempts} attempts "
+            f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} range after {failed_after} "
             f"({chatgpt_model_policy_error})"
         ) from chatgpt_model_policy_error
 

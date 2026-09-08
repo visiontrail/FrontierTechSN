@@ -11,13 +11,15 @@ from pathlib import Path
 from typing import Callable
 
 
-MIN_INTERVAL_SECONDS = 3 * 60.0
-MAX_INTERVAL_SECONDS = 10 * 60.0
+MIN_INTERVAL_SECONDS = 10 * 60.0
+MAX_INTERVAL_SECONDS = 30 * 60.0
 DEFAULT_INTERVAL_SECONDS = MIN_INTERVAL_SECONDS
 RATE_LIMITED_SITES = frozenset({"chatgpt", "gemini"})
 RATE_LIMITED_ACTIONS = frozenset({"ask", "image"})
-PROVIDER_COOLDOWN_SECONDS = 5 * 60.0
-MAX_PROVIDER_COOLDOWN_SECONDS = 30 * 60.0
+GENERATION_QUIET_PERIOD_ACTIONS = frozenset({("chatgpt", "model")})
+PROVIDER_COOLDOWN_SECONDS = 30 * 60.0
+MAX_PROVIDER_COOLDOWN_SECONDS = 2 * 60 * 60.0
+PROVIDER_COOLDOWN_ESCALATION_WINDOW_SECONDS = 6 * 60 * 60.0
 
 
 def _cooldown_path(site: str, state_path: Path | None = None) -> Path:
@@ -41,7 +43,10 @@ def record_opencli_rate_limit(
             except (ValueError, TypeError):
                 prior = {}
             now = clock()
-            recent = now - float(prior.get("recorded_at", 0)) < 3600
+            recent = (
+                now - float(prior.get("recorded_at", 0))
+                < PROVIDER_COOLDOWN_ESCALATION_WINDOW_SECONDS
+            )
             previous_delay = float(prior.get("delay", 0)) if recent else 0
             delay = min(MAX_PROVIDER_COOLDOWN_SECONDS,
                         max(PROVIDER_COOLDOWN_SECONDS, previous_delay * 2))
@@ -93,8 +98,26 @@ def is_rate_limited_command(args: list[str] | tuple[str, ...]) -> bool:
     )
 
 
+def needs_generation_quiet_period(args: list[str] | tuple[str, ...]) -> bool:
+    """Return whether a browser read must wait behind the last generation.
+
+    ChatGPT's model picker is a conversation-level browser operation and has
+    triggered the same access-limit dialog when run immediately after an audit
+    response. Recovery reads remain outside this proactive gate so an owned
+    partial response can still be captured without waiting for another full
+    generation interval.
+    """
+    return (
+        len(args) >= 2
+        and (
+            str(args[0]).strip().lower(),
+            str(args[1]).strip().lower(),
+        ) in GENERATION_QUIET_PERIOD_ACTIONS
+    )
+
+
 def normalize_interval(value: object | None) -> float:
-    """Coerce an interval and fail safe inside the supported 3–10 minute range."""
+    """Coerce an interval and fail safe inside the supported 10–30 minute range."""
     if value is None:
         value = os.getenv(
             "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS",
@@ -170,13 +193,64 @@ def wait_for_opencli_web_slot(
             fcntl.flock(state.fileno(), fcntl.LOCK_UN)
 
 
+def wait_for_opencli_generation_quiet_period(
+    site: str,
+    *,
+    interval: object | None = None,
+    state_path: Path | None = None,
+    clock: Callable[[], float] = time.time,
+    sleeper: Callable[[float], None] = time.sleep,
+    reporter: Callable[[str], None] | None = None,
+) -> float:
+    """Wait until the last generation slot is old enough without reserving one.
+
+    The same lock used by generation reservations prevents a concurrent prompt
+    from starting while a model-policy check is waiting. The check does not
+    update the timestamp, so the following prompt may start immediately after
+    the quiet period instead of paying the interval twice.
+    """
+    selected_interval = normalize_interval(interval)
+    path = state_path or default_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    report = reporter or (lambda message: print(message, file=sys.stderr, flush=True))
+
+    with path.open("a+", encoding="utf-8") as state:
+        fcntl.flock(state.fileno(), fcntl.LOCK_EX)
+        try:
+            state.seek(0)
+            try:
+                last_started_at = float(state.read().strip() or "0")
+            except ValueError:
+                last_started_at = 0.0
+            delay = min(
+                selected_interval,
+                max(0.0, last_started_at + selected_interval - clock()),
+            )
+            if delay > 0:
+                report(
+                    f"OpenCLI pacing: waiting {delay:.1f}s before the next "
+                    f"{site} model check (generation quiet period "
+                    f"{selected_interval:.1f}s)."
+                )
+                sleeper(delay)
+            return delay
+        finally:
+            fcntl.flock(state.fileno(), fcntl.LOCK_UN)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0].lower() in RATE_LIMITED_SITES:
-        wait_for_opencli_cooldown(args[0].lower())
-    if not is_rate_limited_command(args):
-        return 0
-    wait_for_opencli_web_slot(args[0].strip().lower())
+    site = args[0].lower() if args else ""
+    if site in RATE_LIMITED_SITES:
+        wait_for_opencli_cooldown(site)
+    if is_rate_limited_command(args):
+        wait_for_opencli_web_slot(site)
+        # A concurrent process may have opened the provider breaker while this
+        # direct invocation waited for its global generation slot.
+        wait_for_opencli_cooldown(site)
+    elif needs_generation_quiet_period(args):
+        wait_for_opencli_generation_quiet_period(site)
+        wait_for_opencli_cooldown(site)
     return 0
 
 

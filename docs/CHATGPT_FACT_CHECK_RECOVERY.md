@@ -15,8 +15,8 @@ Recovery proceeds in this order:
 0. Check visible ChatGPT dialogs/alerts for access limiting (including "Too many
    requests" and "temporarily limited access"). Never read the answer behind that
    modal. Surface `CHATGPT_RATE_LIMITED` with the target URL and persist a shared
-   provider cooldown: 5 minutes initially, doubling on recurring limits within
-   an hour, capped at 30 minutes. During cooldown, generation, model selection,
+   provider cooldown: 30 minutes initially, doubling on recurring limits within
+   six hours, capped at 2 hours. During cooldown, generation, model selection,
    reads, and refreshes all wait before starting their command timeout. The wait
    is cancellable and the breaker survives service restarts. Direct wrapper
    invocations also honor this saved cooldown. Recovery keeps the original URL
@@ -25,7 +25,9 @@ Recovery proceeds in this order:
    blocking dialog is still visible. Without this step, a stale dialog could
    trigger endless cooldowns even after server access has recovered. A fresh
    limit after reloading opens the longer cooldown; an active stream without a
-   limit dialog is preserved.
+   limit dialog is preserved. A provider access-limit cycle does not consume one
+   of the three model-picker hydration retries; it has its own bounded three-cycle
+   budget so a transient provider window cannot immediately fail the task.
 1. Read the exact conversation returned by `ask`, without navigating away from
    an active stream. Match the current `REVIEW_REQUEST_ID` to its assistant turn.
 2. Reject responses still marked as generating. Parse only complete verdicts.
@@ -56,8 +58,9 @@ A passed parser test alone does not establish that browser recovery works.
 
 The screenshot supplied during verification showed a real access-limit modal
 over the exact `[5, 6]` conversation. An otherwise complete token is insufficient
-while that modal is present. Generation spacing alone (normally three minutes)
-does not handle this provider-wide conversation-access limit; the access circuit
+while that modal is present. Generation spacing alone (normally ten minutes,
+with model preflight held behind the same post-generation quiet period) does not
+handle this provider-wide conversation-access limit; the access circuit
 breaker is separate and applies to recovery commands too. Avoid repeated manual
 or automated probes during its cooldown; resume the same saved conversation once
 the wait ends.

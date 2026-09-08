@@ -146,9 +146,9 @@ OPENCLI_TIMEOUT = int(os.getenv("OPENCLI_TIMEOUT", "180"))
 OPENCLI_MAX_ATTEMPTS = int(os.getenv("OPENCLI_MAX_ATTEMPTS", "10"))
 OPENCLI_RETRY_BASE_SECONDS = float(os.getenv("OPENCLI_RETRY_BASE_SECONDS", "3"))
 # Cross-process start-to-start spacing for Gemini and ChatGPT web commands.
-# The runtime limiter clamps direct environment overrides to 3–10 minutes too.
+# The runtime limiter clamps direct environment overrides to 10–30 minutes too.
 OPENCLI_WEB_REQUEST_INTERVAL_SECONDS = int(
-    os.getenv("OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "180")
+    os.getenv("OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "600")
 )
 # Daily-news claim review first prefers the minimum reasoning level, then accepts
 # the page's existing level only when switching fails inside the non-Pro range.

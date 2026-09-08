@@ -21,8 +21,10 @@ from typing import Any
 from backend import config
 from backend.pipeline.opencli_rate_limit import (
     is_rate_limited_command,
+    needs_generation_quiet_period,
     opencli_cooldown_remaining,
     record_opencli_rate_limit,
+    wait_for_opencli_generation_quiet_period,
     wait_for_opencli_web_slot,
 )
 from backend.pipeline.opencli_browser_runtime import (
@@ -146,6 +148,17 @@ async def run_opencli(
         await asyncio.to_thread(
             wait_for_opencli_web_slot,
             str(args[0]).lower(),
+            interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
+        )
+        env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
+    elif needs_generation_quiet_period(args):
+        # A model-policy check is not a generation request and therefore does
+        # not reserve the next slot. It still waits behind the prior prompt so
+        # ChatGPT does not receive a model-page access immediately after an
+        # audit response. Recovery reads deliberately remain unpaced here.
+        await asyncio.to_thread(
+            wait_for_opencli_generation_quiet_period,
+            site,
             interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
         )
         env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"

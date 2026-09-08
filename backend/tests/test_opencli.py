@@ -12,7 +12,9 @@ from backend.pipeline import opencli_rate_limit as rate_limit_module
 from backend.pipeline.opencli import OpenCLIError, first_json
 from backend.pipeline.opencli_rate_limit import (
     is_rate_limited_command,
+    needs_generation_quiet_period,
     normalize_interval,
+    wait_for_opencli_generation_quiet_period,
     wait_for_opencli_web_slot,
 )
 
@@ -204,33 +206,48 @@ class OpenCLIRateLimitTests(unittest.TestCase):
         self.assertFalse(is_rate_limited_command(["doctor"]))
         self.assertFalse(is_rate_limited_command(["youtube", "search", "query"]))
 
-    def test_interval_is_clamped_to_three_through_ten_minutes(self):
-        self.assertEqual(normalize_interval(1), 180)
-        self.assertEqual(normalize_interval(240), 240)
-        self.assertEqual(normalize_interval(900), 600)
-        self.assertEqual(normalize_interval("invalid"), 180)
+    def test_model_checks_wait_without_becoming_generation_requests(self):
+        self.assertTrue(needs_generation_quiet_period(["chatgpt", "model", "medium"]))
+        self.assertFalse(needs_generation_quiet_period(["gemini", "model", "pro"]))
+        self.assertFalse(needs_generation_quiet_period(["chatgpt", "detail", "owned"]))
+
+    def test_interval_is_clamped_to_ten_through_thirty_minutes(self):
+        self.assertEqual(normalize_interval(1), 600)
+        self.assertEqual(normalize_interval(900), 900)
+        self.assertEqual(normalize_interval(3600), 1800)
+        self.assertEqual(normalize_interval("invalid"), 600)
 
     def test_wrapper_helper_only_reserves_generation_actions(self):
-        with patch.object(rate_limit_module, "wait_for_opencli_web_slot") as reserve:
+        with (
+            patch.object(rate_limit_module, "wait_for_opencli_web_slot") as reserve,
+            patch.object(
+                rate_limit_module,
+                "wait_for_opencli_generation_quiet_period",
+            ) as quiet,
+        ):
             self.assertEqual(rate_limit_module.main(["gemini", "read", "-f", "json"]), 0)
             reserve.assert_not_called()
+            quiet.assert_not_called()
+
+            self.assertEqual(rate_limit_module.main(["chatgpt", "model", "medium"]), 0)
+            quiet.assert_called_once_with("chatgpt")
 
             self.assertEqual(rate_limit_module.main(["chatgpt", "ask", "prompt"]), 0)
             reserve.assert_called_once_with("chatgpt")
 
-    def test_admin_setting_accepts_only_three_through_ten_minutes(self):
+    def test_admin_setting_accepts_only_ten_through_thirty_minutes(self):
         spec = next(
             item
             for item in settings_store.SPECS
             if item.key == "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS"
         )
 
-        self.assertEqual(settings_store.coerce(spec, 180), 180)
         self.assertEqual(settings_store.coerce(spec, 600), 600)
+        self.assertEqual(settings_store.coerce(spec, 1800), 1800)
         with self.assertRaises(settings_store.SettingsError):
-            settings_store.coerce(spec, 179)
+            settings_store.coerce(spec, 599)
         with self.assertRaises(settings_store.SettingsError):
-            settings_store.coerce(spec, 601)
+            settings_store.coerce(spec, 1801)
 
     def test_persistent_slot_waits_between_immediate_requests(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -247,7 +264,7 @@ class OpenCLIRateLimitTests(unittest.TestCase):
 
             first_delay = wait_for_opencli_web_slot(
                 "chatgpt",
-                interval=180,
+                interval=600,
                 state_path=state_path,
                 clock=clock,
                 sleeper=sleeper,
@@ -255,7 +272,7 @@ class OpenCLIRateLimitTests(unittest.TestCase):
             )
             second_delay = wait_for_opencli_web_slot(
                 "gemini",
-                interval=180,
+                interval=600,
                 state_path=state_path,
                 clock=clock,
                 sleeper=sleeper,
@@ -263,9 +280,45 @@ class OpenCLIRateLimitTests(unittest.TestCase):
             )
 
             self.assertEqual(first_delay, 0)
-            self.assertEqual(second_delay, 180)
-            self.assertEqual(sleeps, [180])
-            self.assertEqual(float(state_path.read_text().strip()), 1180)
+            self.assertEqual(second_delay, 600)
+            self.assertEqual(sleeps, [600])
+            self.assertEqual(float(state_path.read_text().strip()), 1600)
+
+    def test_model_quiet_period_waits_without_reserving_the_next_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "limiter-state"
+            state_path.write_text("1000\n")
+            now = [1_100.0]
+            sleeps: list[float] = []
+
+            def clock() -> float:
+                return now[0]
+
+            def sleeper(seconds: float) -> None:
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            delay = wait_for_opencli_generation_quiet_period(
+                "chatgpt",
+                interval=600,
+                state_path=state_path,
+                clock=clock,
+                sleeper=sleeper,
+                reporter=lambda _message: None,
+            )
+            generation_delay = wait_for_opencli_web_slot(
+                "chatgpt",
+                interval=600,
+                state_path=state_path,
+                clock=clock,
+                sleeper=sleeper,
+                reporter=lambda _message: None,
+            )
+
+            self.assertEqual(delay, 500)
+            self.assertEqual(generation_delay, 0)
+            self.assertEqual(sleeps, [500])
+            self.assertEqual(float(state_path.read_text().strip()), 1600)
 
 
 class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -283,7 +336,7 @@ class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "create_subprocess_exec",
                 AsyncMock(return_value=SuccessfulProcess()),
             ) as create_process,
-            patch.object(config, "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", 240),
+            patch.object(config, "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", 900),
         ):
             result = await opencli_module.run_opencli(
                 ["chatgpt", "ask", "prompt"], timeout=5
@@ -293,7 +346,7 @@ class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
         to_thread.assert_awaited_once_with(
             wait_for_opencli_web_slot,
             "chatgpt",
-            interval=240,
+            interval=900,
         )
         self.assertEqual(
             create_process.await_args.kwargs["env"][
@@ -302,7 +355,7 @@ class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "1",
         )
 
-    async def test_backend_does_not_reserve_slot_for_provider_read_or_configuration(self):
+    async def test_backend_does_not_reserve_slot_for_provider_recovery_reads(self):
         class SuccessfulProcess:
             returncode = 0
 
@@ -320,7 +373,6 @@ class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
             for args in (
                 ["gemini", "read"],
                 ["chatgpt", "detail", "https://chatgpt.com/c/example"],
-                ["chatgpt", "model", "medium"],
             ):
                 result = await opencli_module.run_opencli(args, timeout=5)
                 self.assertEqual(result.stdout, "ok")
@@ -331,6 +383,37 @@ class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "OPENCLI_WEB_REQUEST_SLOT_RESERVED",
                 call.kwargs["env"],
             )
+
+    async def test_backend_waits_for_model_quiet_period_before_browser_launch(self):
+        class SuccessfulProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return b"ok", b""
+
+        with (
+            patch.object(opencli_module.asyncio, "to_thread", AsyncMock()) as to_thread,
+            patch.object(
+                opencli_module.asyncio,
+                "create_subprocess_exec",
+                AsyncMock(return_value=SuccessfulProcess()),
+            ) as create_process,
+            patch.object(config, "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", 900),
+        ):
+            result = await opencli_module.run_opencli(
+                ["chatgpt", "model", "medium"], timeout=5
+            )
+
+        self.assertEqual(result.stdout, "ok")
+        to_thread.assert_awaited_once_with(
+            wait_for_opencli_generation_quiet_period,
+            "chatgpt",
+            interval=900,
+        )
+        self.assertEqual(
+            create_process.await_args.kwargs["env"]["OPENCLI_WEB_REQUEST_SLOT_RESERVED"],
+            "1",
+        )
 
 
 if __name__ == "__main__":

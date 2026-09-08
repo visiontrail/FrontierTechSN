@@ -43,9 +43,10 @@ back to the existing silence/word estimate and delivery continues with an explic
 
 Every `chatgpt` or `gemini` prompt/image submission through the project wrapper
 participates in a cross-process start limiter. Read-only recovery, conversation
-detail, status checks, and model selection do not reserve a generation slot. The
-default interval is 3 minutes and the supported range is 3–10 minutes
-(`OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`, expressed as 180–600 seconds and also
+detail, and status checks do not reserve a generation slot. ChatGPT model checks
+also do not reserve one, but they wait until the prior generation's quiet period
+has elapsed. The default interval is 10 minutes and the supported range is 10–30 minutes
+(`OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`, expressed as 600–1800 seconds and also
 available under **Admin → System → Footage Sources**). The limiter covers generation
 retries, concurrent backend tasks, and direct `scripts/opencli.sh` calls; unrelated
 OpenCLI sites are not delayed.

@@ -12,15 +12,28 @@ def test_cooldown_persists_and_escalates_across_calls(tmp_path):
     clock = [1000.0]
     now = lambda: clock[0]
     until = pacing.record_opencli_rate_limit('chatgpt', state_path=state, clock=now)
-    assert until == 1300
-    assert pacing.opencli_cooldown_remaining('chatgpt', state_path=state, clock=now) == 300
+    assert until == 2800
+    assert pacing.opencli_cooldown_remaining('chatgpt', state_path=state, clock=now) == 1800
     assert pacing.opencli_cooldown_remaining('gemini', state_path=state, clock=now) == 0
-    clock[0] = 1301
+    clock[0] = 2801
     assert pacing.opencli_cooldown_remaining('chatgpt', state_path=state, clock=now) == 0
-    assert pacing.record_opencli_rate_limit('chatgpt', state_path=state, clock=now) == 1901
+    assert pacing.record_opencli_rate_limit('chatgpt', state_path=state, clock=now) == 6401
     for _ in range(5):
         until = pacing.record_opencli_rate_limit('chatgpt', state_path=state, clock=now)
-    assert until == 3101  # bounded at 30 minutes
+    assert until == 10001  # bounded at two hours
+
+
+def test_cooldown_still_escalates_after_a_one_hour_provider_window(tmp_path):
+    state = tmp_path / 'pacing'
+    clock = [1000.0]
+    now = lambda: clock[0]
+    assert pacing.record_opencli_rate_limit(
+        'chatgpt', state_path=state, clock=now,
+    ) == 2800
+    clock[0] = 5000
+    assert pacing.record_opencli_rate_limit(
+        'chatgpt', state_path=state, clock=now,
+    ) == 8600
 
 
 def test_cooldown_wait_is_cancellable_before_browser_launch():
@@ -54,6 +67,7 @@ def test_all_chatgpt_actions_wait_outside_command_timeout(action):
     with (
         patch.object(opencli, 'opencli_cooldown_remaining', side_effect=lambda _: next(remaining)),
         patch.object(opencli, 'wait_for_opencli_web_slot'),
+        patch.object(opencli, 'wait_for_opencli_generation_quiet_period'),
         patch.object(opencli.asyncio, 'sleep', AsyncMock()) as sleep,
         patch.object(opencli.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as launch,
     ):

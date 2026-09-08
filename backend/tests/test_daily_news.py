@@ -1756,6 +1756,57 @@ def test_chatgpt_fact_check_retries_transient_model_picker_failure():
     sleep.assert_any_await(review._MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
 
+def test_chatgpt_model_rate_limits_do_not_consume_picker_retries():
+    model_attempts = 0
+    chatgpt_asks = 0
+    messages: list[str] = []
+
+    async def command(args, **kwargs):
+        nonlocal model_attempts, chatgpt_asks
+        if args[:2] == ["chatgpt", "model"]:
+            model_attempts += 1
+            if model_attempts <= 2:
+                raise review.OpenCLIRateLimitError(
+                    "CHATGPT_RATE_LIMITED Target: https://chatgpt.com/"
+                )
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"Status":"Success","Model":"Medium"}]',
+                "",
+            )
+        if args[:2] == ["chatgpt", "ask"]:
+            chatgpt_asks += 1
+            return OpenCLIResult(
+                tuple(args),
+                0,
+                '[{"response":"W1P2P","conversationUrl":"https://chatgpt.com/c/current"}]',
+                "",
+            )
+        raise AssertionError(args)
+
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        payload, raw, _, _ = asyncio.run(
+            review._web_story_review(
+                "audit",
+                story_numbers=[1, 2],
+                log=messages.append,
+            )
+        )
+
+    assert payload["approved"] is True
+    assert model_attempts == 3
+    assert chatgpt_asks == 1
+    assert "[CHATGPT MODEL POLICY RATE LIMIT 1/3]" in raw
+    assert "[CHATGPT MODEL POLICY RATE LIMIT 2/3]" in raw
+    assert not any("model policy check attempt" in message for message in messages)
+    assert any("preserving all model-policy retries" in message for message in messages)
+    sleep.assert_not_awaited()
+
+
 def test_chatgpt_fact_check_uses_in_range_model_after_preferred_switch_fails():
     model_attempts = 0
     chatgpt_asks = 0

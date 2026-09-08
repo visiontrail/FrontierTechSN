@@ -726,10 +726,11 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         "OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "footage",
         "Gemini / ChatGPT request interval", "int", unit="seconds",
-        minimum=180, maximum=600,
+        minimum=600, maximum=1800,
         description="Minimum start-to-start spacing shared by all OpenCLI Gemini "
-                    "and ChatGPT web commands, including concurrent tasks. "
-                    "Choose 180–600 seconds (3–10 minutes).",
+                    "and ChatGPT generation commands, including concurrent tasks; "
+                    "ChatGPT model checks also wait out this post-generation quiet "
+                    "period. Choose 600–1800 seconds (10–30 minutes).",
     ),
     SettingSpec(
         "DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL", "footage",

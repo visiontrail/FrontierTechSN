@@ -43,10 +43,12 @@ fi
 
 # Gemini and ChatGPT generation requests are browser-backed and enforce burst
 # limits. Gate prompt/image submissions made outside the backend too, but let
-# page reads, recovery, model selection, and status checks skip generation slots.
+# page reads, recovery, and status checks skip generation slots. ChatGPT model
+# checks do not reserve a slot, but wait out the last generation's quiet period.
 # All provider actions still honor a persisted access-limit cooldown.
-# Backend calls reserve their slot before their command timeout starts and mark
-# the child so this wrapper does not reserve the same request twice.
+# Backend calls reserve their slot or wait out the model-check quiet period
+# before their command timeout starts, then mark the child so this wrapper does
+# not apply the same pacing twice.
 case "${1:-}" in
   chatgpt|gemini)
     if [ "${OPENCLI_WEB_REQUEST_SLOT_RESERVED:-0}" != "1" ]; then
