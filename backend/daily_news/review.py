@@ -546,7 +546,10 @@ def _batch_payload(
         raw_segments = clean.split(";")
         matches = [segment_pattern.fullmatch(segment) for segment in raw_segments]
         if any(match is None for match in matches):
-            raise ValueError("batch review response contained invalid characters")
+            raise ValueError(
+                "batch review response is incomplete or malformed "
+                "(expected every story verdict and complete claim IDs)"
+            )
         parsed_segments = [
             (
                 int(match.group(1)),
@@ -567,7 +570,10 @@ def _batch_payload(
                     for match in legacy_matches
                 ]
         if not parsed_segments:
-            raise ValueError("batch review response contained invalid characters")
+            raise ValueError(
+                "batch review response is incomplete or malformed "
+                "(expected every story verdict and complete claim IDs)"
+            )
     indices = [story_number for story_number, _codes, _ids in parsed_segments]
     if indices != expected:
         raise ValueError("batch review response omitted or reordered a story")
@@ -869,11 +875,28 @@ async def _web_story_review_in_session(
         )
         recovery_attempts = len(poll_delays) + 1
         last_error: Exception | None = None
+        previous_settled_invalid = ""
+        refresh_pending = False
+        refresh_used = False
         for recovery_attempt in range(1, recovery_attempts + 1):
             assistant_text = ""
+            messages: list[dict[str, Any]] = []
             try:
+                read_command = list(command)
+                if refresh_pending:
+                    read_command.extend(["--refresh", "true"])
+                    refresh_pending = False
+                    refresh_used = True
+                    raw_attempts.append(
+                        f"[CHATGPT SETTLED TARGET REFRESH]\n{conversation_url}"
+                    )
+                    if log:
+                        log(
+                            f"ChatGPT {review_label}: reloading the settled owned "
+                            "conversation to recover stale partial text"
+                        )
                 read_result = await run_opencli(
-                    command,
+                    read_command,
                     timeout=timeout + 15 if conversation_url else 30,
                     site_session_namespace=review_session_namespace,
                 )
@@ -884,6 +907,8 @@ async def _web_story_review_in_session(
                         f"{provider} recovery page did not contain a response "
                         "owned by this request"
                     )
+                if any(_field(row, "Generating").casefold() == "true" for row in messages):
+                    raise ValueError("owned review response is still generating")
                 payload = parse_response(assistant_text)
                 raw_attempts.append(
                     f"[{provider.upper()} RECOVERY]\n{assistant_text}"
@@ -896,6 +921,22 @@ async def _web_story_review_in_session(
                         f"[{provider.upper()} RECOVERY INVALID "
                         f"{recovery_attempt}/{recovery_attempts}]\n{assistant_text}"
                     )
+                # Re-reading a frozen DOM cannot recover its server-saved final
+                # answer. Require two identical, explicitly settled owned reads
+                # before one refresh; missing metadata never authorizes a reload.
+                settled = bool(messages) and all(
+                    any(
+                        str(key).casefold() == "generating"
+                        and (value is False or str(value).casefold() == "false")
+                        for key, value in row.items()
+                    )
+                    for row in messages
+                )
+                if conversation_url and assistant_text and settled and not refresh_used:
+                    refresh_pending = assistant_text == previous_settled_invalid
+                    previous_settled_invalid = assistant_text
+                else:
+                    previous_settled_invalid = ""
                 if recovery_attempt < recovery_attempts:
                     delay = poll_delays[recovery_attempt - 1]
                     if log and conversation_url:
@@ -1076,6 +1117,8 @@ async def _web_story_review_in_session(
             raw_attempts.append(
                 f"[CHATGPT {chatgpt_attempt}]\n{response or '[EMPTY]'}"
             )
+            if conversation_url:
+                raw_attempts.append(f"[CHATGPT CONVERSATION]\n{conversation_url}")
             if not response or "[NO RESPONSE]" in response.upper():
                 raise ValueError("ChatGPT ask returned no completed assistant response")
             payload = parse_response(response)

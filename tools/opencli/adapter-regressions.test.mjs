@@ -1650,3 +1650,26 @@ test('Gemini attachment retries an ignored menu click using fresh native coordin
   assert.equal(opened, true)
   assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
 })
+
+for (const generating of [false, true]) {
+  test(`ChatGPT explicit refresh never reloads a generating target: ${generating}`, async () => {
+    const navigations = []
+    let reloads = 0
+    const page = {
+      async goto(url) { navigations.push(url) },
+      async wait() {},
+      async evaluate(script) {
+        if (script.includes('window.location.reload()')) { reloads += 1; return true }
+        if (script === 'window.location.href') return 'https://chatgpt.com/c/abcdefgh1234'
+        if (script.includes('isLoggedIn')) return { isLoggedIn: true, hasLoginGate: false }
+        if (script.includes('const roleOf')) return [{ role: 'assistant', text: 'W5B@5.1;6P', html: '' }]
+        if (script.includes('stop-button')) return generating
+        throw new Error(`Unexpected evaluate: ${script.slice(0, 100)}`)
+      },
+    }
+    const rows = await chatgptDetailCommand.func(page, { id: 'abcdefgh1234', refresh: true, wait: false })
+    assert.equal(rows[0].Text, 'W5B@5.1;6P')
+    assert.equal(navigations.length, 0)
+    assert.equal(reloads, generating ? 0 : 1)
+  })
+}

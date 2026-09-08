@@ -1460,16 +1460,16 @@ def test_review_token_normalization_accepts_only_known_ui_wrappers():
 
     assert payload["approved"] is False
     assert payload["issues"][0]["evidence_story_numbers"] == [2]
-    with pytest.raises(ValueError, match="invalid characters"):
+    with pytest.raises(ValueError, match="incomplete or malformed"):
         review._batch_payload("Result: 1P2P", [1, 2])
-    with pytest.raises(ValueError, match="invalid characters"):
+    with pytest.raises(ValueError, match="incomplete or malformed"):
         review._batch_payload("1P2P because both stories pass", [1, 2])
 
 
-@pytest.mark.parametrize("partial", ["W", "W1P;2BF@2.3,2"])
+@pytest.mark.parametrize("partial", ["W", "W1P;2BF@2.3,2", "W1P;2", "W5B@5.1;6", "W5B@5."])
 def test_partial_live_chatgpt_verdicts_never_become_fact_check_approval(partial):
     claims = {1: {"1.1": "First story"}, 2: {"2.3": "Name", "2.6": "Result"}}
-    with pytest.raises(ValueError, match="invalid characters"):
+    with pytest.raises(ValueError, match="incomplete or malformed"):
         review._batch_payload(partial, [1, 2], claim_catalog=claims, require_web=True)
     complete = review._batch_payload(
         "W1P;2BDF@2.3,2.6", [1, 2], claim_catalog=claims, require_web=True,
@@ -2550,3 +2550,79 @@ def test_run_now_api_ignores_legacy_duration_and_queues_automatic_length(tmp_pat
         assert response.json()["config"]["target_duration_minutes"] is None
         assert response.json()["config"]["publish_test_mode"] is test_mode
         assert "target_duration_minutes" not in client.get("/api/daily-news").json()["settings"]
+
+
+@pytest.mark.parametrize('generation', [False, True, None])
+def test_chatgpt_recovers_frozen_partial_only_after_settled_owned_reads(generation):
+    prompt = ''
+    commands = []
+    reads = 0
+    target = 'https://chatgpt.com/c/frozen-owned-turn'
+
+    async def command(args, **kwargs):
+        nonlocal prompt, reads
+        commands.append(args)
+        if args[:2] == ['chatgpt', 'model']:
+            rows = [{'Model': 'Medium', 'Status': 'Success'}]
+        elif args[:2] == ['chatgpt', 'ask']:
+            prompt = args[2]
+            rows = [{'response': 'W5B@5.', 'conversationUrl': target}]
+        else:
+            assert args[:3] == ['chatgpt', 'detail', target]
+            reads += 1
+            refreshing = '--refresh' in args
+            if generation is False and reads == 3:
+                assert refreshing
+            else:
+                assert not refreshing
+            rows = [
+                {'Role': 'User', 'Text': prompt},
+                {'Role': 'Assistant', 'Text': 'W5B@5.1;6P' if reads >= 3 or generation is True else 'W5B@5.'},
+            ]
+            for row in rows:
+                if generation is not None:
+                    row['Generating'] = generation if reads < 3 else False
+        return OpenCLIResult(tuple(args), 0, json.dumps(rows), '')
+
+    with patch.object(review, 'run_opencli', AsyncMock(side_effect=command)), patch.object(review.asyncio, 'sleep', AsyncMock()):
+        payload, raw, _, _ = asyncio.run(review._web_story_review(
+            'audit', story_numbers=[5, 6], claim_catalog={5: {'5.1': 'Claim'}, 6: {'6.1': 'Claim'}}, log=None,
+        ))
+    assert payload['approved'] is False
+    assert payload['issues'][0]['claim_ids'] == ['5.1']
+    assert reads == 3
+    assert len([args for args in commands if args[:2] == ['chatgpt', 'ask']]) == 1
+    assert ('[CHATGPT SETTLED TARGET REFRESH]' in raw) == (generation is False)
+
+
+@pytest.mark.parametrize('owned', [True, False])
+def test_chatgpt_refresh_is_bounded_and_cannot_approve_invalid_or_unowned_verdicts(owned):
+    prompt = ''
+    refreshes = 0
+
+    async def command(args, **kwargs):
+        nonlocal prompt, refreshes
+        if args[:2] == ['chatgpt', 'model']:
+            rows = [{'Model': 'Medium'}]
+        elif args[:2] == ['chatgpt', 'ask']:
+            prompt = args[2]
+            rows = [{'response': 'W5B@5.', 'conversationUrl': 'https://chatgpt.com/c/owned'}]
+        else:
+            refreshes += '--refresh' in args
+            rows = [
+                {'Role': 'User', 'Text': prompt if owned else 'REVIEW_REQUEST_ID:' + '0' * 32, 'Generating': False},
+                {'Role': 'Assistant', 'Text': 'W5B@5.99;6P' if owned else 'W5P;6P', 'Generating': False},
+            ]
+        return OpenCLIResult(tuple(args), 0, json.dumps(rows), '')
+
+    with (
+        patch.object(review, 'run_opencli', AsyncMock(side_effect=command)),
+        patch.object(review, '_target_recovery_poll_delays', return_value=(0, 0, 0, 0)),
+        patch.object(review.asyncio, 'sleep', AsyncMock()),
+        pytest.raises(review._WebStoryReviewError),
+    ):
+        asyncio.run(review._web_story_review(
+            'audit', story_numbers=[5, 6],
+            claim_catalog={5: {'5.1': 'Claim'}, 6: {'6.1': 'Claim'}}, log=None,
+        ))
+    assert refreshes == (2 if owned else 0)  # At most once per submission.

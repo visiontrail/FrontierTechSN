@@ -144,6 +144,32 @@ chatgptDetail = replaceOnce(
         }`,
   'ChatGPT detail preserve active response stream',
 )
+chatgptDetail = replaceOnce(
+  chatgptDetail,
+  '    currentChatGPTUrl,',
+  '    currentChatGPTUrl,\n    isGenerating,',
+  'ChatGPT refresh generation guard import',
+)
+chatgptDetail = replaceOnce(
+  chatgptDetail,
+  '    args: [',
+  `    args: [
+        { name: 'refresh', type: 'boolean', default: false, help: 'Reload a settled target conversation to recover stale rendered text' },`,
+  'ChatGPT settled refresh argument',
+)
+chatgptDetail = replaceOnce(
+  chatgptDetail,
+  `        if (currentId !== id) {`,
+  `        // A stalled client can retain a partial token after generation ends.
+        // Explicit recovery may reload only an idle, already selected target.
+        if (currentId === id && normalizeBooleanFlag(kwargs.refresh, false)
+            && !await isGenerating(page)) {
+            await page.evaluate('(() => { window.location.reload(); return true; })()');
+            await page.wait(2);
+        }
+        if (currentId !== id) {`,
+  'ChatGPT settled target refresh',
+)
 fs.writeFileSync(chatgptDetailPath, chatgptDetail)
 
 let utils = fs.readFileSync(utilsPath, 'utf8')
@@ -1198,6 +1224,16 @@ fs.copyFileSync(
 )
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+const chatgptDetailEntry = manifest.find(
+  (entry) => entry?.site === 'chatgpt' && entry?.name === 'detail',
+)
+if (!chatgptDetailEntry?.args) throw new Error('ChatGPT detail manifest entry not found')
+if (!chatgptDetailEntry.args.some((arg) => arg.name === 'refresh')) {
+  chatgptDetailEntry.args.push({
+    name: 'refresh', type: 'boolean', default: false,
+    help: 'Reload a settled target conversation to recover stale rendered text',
+  })
+}
 const chatgptModelEntry = manifest.find(
   (entry) => entry?.site === 'chatgpt' && entry?.name === 'model',
 )
