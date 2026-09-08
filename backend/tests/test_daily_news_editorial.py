@@ -112,7 +112,7 @@ def test_generation_retries_missing_provenance_and_supplies_shared_style():
     data = dossier(("qbitai", "量子位 QbitAI", "zh"))
     chat = AsyncMock(side_effect=[
         "QbitAI reports that the company says its trial has started.",
-        "The Chinese-language outlet QbitAI reports that the company says its trial has started.",
+        json.dumps({"1": "The Chinese-language outlet QbitAI reports that the company says its trial has started."}),
     ])
     with (
         patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
@@ -157,7 +157,7 @@ def test_generation_retries_overlong_automatic_story():
     data = dossier(("bloomberg", "Bloomberg", "en"))
     chat = AsyncMock(side_effect=[
         "Bloomberg reports " + " ".join(["detail"] * 180) + ".",
-        "Bloomberg reports that the company says its trial has started.",
+        json.dumps({"1": "Bloomberg reports that the company says its trial has started."}),
     ])
     with (
         patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
@@ -170,6 +170,69 @@ def test_generation_retries_overlong_automatic_story():
     assert chat.await_count == 2
     assert "maximum 180" in chat.await_args.args[0]
     assert "its trial has started" in result
+
+
+def test_cnbc_section_name_accepts_broadcast_publication_but_not_unrelated_names():
+    data = dossier(("cnbc_technology", "CNBC Technology", "en"))
+    assert contract(data, "CNBC reports that investigators issued a preliminary report.")["passed"]
+    assert not contract(data, "NBC reports that investigators issued a preliminary report.")["passed"]
+    assert not contract(data, "CNBCOther reports a trial.")["passed"]
+
+
+@pytest.mark.parametrize("bad_repair", ["not JSON", json.dumps({"1": "Changed passing story", "2": "BBC reports a trial."})])
+def test_generation_repairs_all_failures_without_rewriting_passing_stories(bad_repair):
+    data = dossier(("cnbc_technology", "CNBC Technology", "en"), ("bbc", "BBC", "en"))
+    passing = "CNBC reports that the company says its trial has started."
+    # The observed 181-word boundary and missing attribution must be diagnosed together.
+    overlong = " ".join(["detail"] * 181) + "."
+    repaired = "BBC reports that the company says its trial has started."
+    responses = iter([passing + "\n" + overlong, bad_repair, json.dumps({"2": repaired})])
+    calls = []
+
+    async def chat(*args, **kwargs):
+        calls.append((args, kwargs))
+        kwargs["route_selected"]("selected-endpoint", "selected-model", "selected-key")
+        return next(responses)
+
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", side_effect=chat),
+    ):
+        result = asyncio.run(scriptwriter.generate_daily_script(
+            data, EDITION, target_duration_minutes=None, language="en",
+            closing_remarks=CLOSING, ai_endpoint=None, ai_model=None, provider_id=None,
+        ))
+    assert result.splitlines() == [scriptwriter.morning_opening(EDITION), passing, repaired, CLOSING]
+    for args, kwargs in calls[1:]:
+        assert "181 words, maximum 180" in args[0]
+        assert "story 2 is missing its reporting publication attribution" in args[0]
+        assert "spoken source: BBC" in args[1]
+        assert passing not in args[1]
+        assert overlong in args[1]
+        assert args[2:5] == ("selected-endpoint", "selected-model", "selected-key")
+        assert kwargs["disable_thinking"] is True
+
+
+def test_generation_keeps_newly_repaired_stories_and_still_enforces_word_limit():
+    data = dossier(("bloomberg", "Bloomberg", "en"), ("bbc", "BBC", "en"))
+    overlong = "BBC reports " + " ".join(["detail"] * 179) + "."
+    fixed = "Bloomberg reports that the company says its trial has started."
+    chat = AsyncMock(side_effect=[
+        "A company says its trial has started.\n" + overlong,
+        json.dumps({"1": fixed, "2": overlong}),
+        json.dumps({"2": overlong}),
+    ])
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", chat),
+        pytest.raises(RuntimeError, match="exhausted 3 semantic response attempts: news bulletin story 2 is too long: 181 words"),
+    ):
+        asyncio.run(scriptwriter.generate_daily_script(
+            data, EDITION, target_duration_minutes=None, language="en",
+            closing_remarks=CLOSING, ai_endpoint=None, ai_model=None, provider_id=None,
+        ))
+    assert "Repair ONLY story numbers [2]" in chat.await_args.args[0]
+    assert fixed not in chat.await_args.args[1]
 
 
 @pytest.mark.parametrize("duration, expected_calls", [(None, 2), (8, 1)])
