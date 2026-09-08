@@ -74,3 +74,29 @@ def test_real_middle_omission_does_not_report_a_missing_ending():
     assert not tts._orpheus_transcript_report(
         SOURCE, words(TRANSCRIPT.replace("in the city.", ""))
     )["trailing_anchor"]
+
+
+def test_pocket_request_spells_short_integers_without_changing_source_tokens():
+    source = (
+        "QbitAI reports that roughly 44 billion yuan went into China's "
+        "embodied-intelligence sector in the first half of 2026. "
+        "The D1 shipped 8.5 million units with 61.1 percent share, "
+        "50 markets, 1 robot and 99 modules."
+    )
+    spoken = tts._pocket_synthesis_text(source)
+    assert "forty-four billion yuan" in spoken
+    assert "fifty markets, one robot and ninety-nine modules" in spoken
+    assert "D1" in spoken and "2026" in spoken and "61.1" in spoken and "8.5" in spoken
+    assert tts._lexical_tokens(spoken) == tts._lexical_tokens(source)
+
+
+@pytest.mark.parametrize("source", [
+    "D1 Qwen3 R2-D2 2026 44.5 8.5 61.1 7.08 1,000 $44 01",
+    "It costs 1 dollar, 44 yuan, or 99 cents.",
+    "From 20 to 50 percent in September 8, 2026.",
+])
+def test_pocket_number_pronunciation_preserves_numeric_identity(source):
+    spoken = tts._pocket_synthesis_text(source)
+    assert tts._lexical_tokens(spoken) == tts._lexical_tokens(source)
+    if source.startswith("D1"):
+        assert spoken == source

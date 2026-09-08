@@ -3943,6 +3943,35 @@ def _pocket_http_headers() -> dict[str, str]:
     )
 
 
+def _pocket_synthesis_text(text: str) -> str:
+    """Expose short integer pronunciation without changing canonical narration.
+
+    Pocket repeatedly read the literal 44 as four in a real paragraph. Spell
+    standalone integers below 100 in the provider request, preserving decimals,
+    grouped amounts, years, and alphanumeric/hyphenated model identifiers.
+    Acoustic verification and cache identity still use the original script.
+    """
+    small = (
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+        "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+        "sixteen", "seventeen", "eighteen", "nineteen",
+    )
+    tens = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+
+    def spoken(match: re.Match) -> str:
+        literal = match.group(0)
+        if len(literal) > 1 and literal.startswith("0"):
+            return literal
+        value = int(literal)
+        if value < 20:
+            return small[value]
+        return tens[value // 10] + (f"-{small[value % 10]}" if value % 10 else "")
+
+    return re.sub(
+        r"(?<![\w.,$-])\d{1,2}(?![\w]|\.\d|,\d|-\w)", spoken, text
+    )
+
+
 async def _generate_pocket_tts(
     script_path: str,
     output_dir: str,
@@ -4011,13 +4040,21 @@ async def _generate_pocket_tts(
 
             staged_part = expected_part.with_suffix(".tmp.wav")
             staged_part.unlink(missing_ok=True)
+            synthesis_text = _pocket_synthesis_text(chunk)
+            if _lexical_tokens(synthesis_text) != _lexical_tokens(chunk):
+                raise TtsIntegrityError("Pocket TTS pronunciation changed source tokens")
+            synthesis_dir = output_dir_path / "synthesis"
+            synthesis_dir.mkdir(parents=True, exist_ok=True)
+            (synthesis_dir / input_path.name).write_text(
+                synthesis_text, encoding="utf-8"
+            )
             request_started = time.monotonic()
             last_error: Exception | None = None
             for request_attempt in range(1, 4):
                 try:
                     response = await client.post(
                         f"{base_url}/tts",
-                        data={"text": chunk, "voice_url": voice},
+                        data={"text": synthesis_text, "voice_url": voice},
                     )
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "").casefold()

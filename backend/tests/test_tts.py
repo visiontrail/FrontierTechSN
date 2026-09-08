@@ -3723,7 +3723,7 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             script = root / "script.txt"
             script.write_text(
                 "Speaker 1: Opening words stay together for natural delivery.\n"
-                "Speaker 1: This complete story remains a second physical paragraph."
+                "Speaker 1: This story reports 44 billion yuan in funding."
             )
             verifier = AsyncMock(side_effect=self.verified_report)
             with (
@@ -3739,10 +3739,17 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             output = Path(result)
             manifest = json.loads((output.parent / "tts_manifest.json").read_text())
             output_info = tts._read_pcm_wav(output)
+            self.assertIn("44 billion", script.read_text())
+            self.assertIn(
+                "forty-four billion",
+                (output.parent / "synthesis" / "tts_input_part_002.txt").read_text(),
+            )
 
         self.assertEqual(len(requests), 2)
         self.assertTrue(all(request.url.path == "/tts" for request in requests))
         self.assertTrue(all(b"voice_url=alba" in request.content for request in requests))
+        self.assertIn(b"forty-four+billion", requests[1].content)
+        self.assertIn("44 billion", verifier.await_args_list[1].args[1])
         self.assertEqual(output_info.frame_count, 96_000)
         self.assertEqual(manifest["model"], "pocket-tts-en")
         self.assertEqual(manifest["chunk_count"], 2)
