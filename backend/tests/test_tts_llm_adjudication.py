@@ -434,3 +434,67 @@ async def test_orpheus_verifier_keeps_mismatch_strict_without_adjudication(tmp_p
                 tmp_path,
                 emit=lambda _message: None,
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_response", ["approve", "reject", "malformed", "incomplete"])
+@pytest.mark.parametrize("first_failure", ["malformed", "max_output_tokens"])
+async def test_adjudication_retries_only_invalid_json_on_unchanged_evidence(
+    tmp_path, second_response, first_failure,
+):
+    source = "Bloomberg reports that Shenzhen Longsys Electronics is trading today."
+    transcript = _words(source.replace("Longsys", "Longsis"))
+    indexes = list(range(len(tts._lexical_tokens(source))))
+    verdict = {
+        "decision": "approve_asr_error" if second_response != "reject" else "reject_audio_mismatch",
+        "all_source_tokens_accounted_for": True,
+        "accounted_source_token_indexes": indexes[:-1] if second_response == "incomplete" else indexes,
+        "confidence": "high",
+        "reason": "Both acoustic transcripts agree on the proper-name spelling.",
+    }
+    malformed = '```json\n{"decision": "approve_asr_error", "indexes": [0,1,```json\n' + json.dumps(verdict)
+    responses = iter([
+        malformed if first_failure == "malformed" else RuntimeError("assistant error: max_output_tokens"),
+        malformed if second_response == "malformed" else json.dumps(verdict),
+    ])
+    requests = []
+
+    async def chat(system_prompt, payload, *, route_selected, max_tokens, **_kwargs):
+        route_selected("https://judge.example", "judge", "secret")
+        requests.append((system_prompt, payload, max_tokens))
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    route = model_router.ModelRoute(
+        slot="standalone", provider_id=None, provider_type="test",
+        provider_name="Judge", endpoint="https://judge.example", model="judge",
+        api_key="secret",
+    )
+    with (
+        patch("backend.pipeline.digester._resolve_provider", AsyncMock(
+            return_value=(route.endpoint, route.model, route.api_key),
+        )),
+        patch("backend.pipeline.model_router.resolve_model_routes", AsyncMock(return_value=(route,))),
+        patch("backend.pipeline.digester._chat", AsyncMock(side_effect=chat)) as mock_chat,
+    ):
+        result = await tts._adjudicate_orpheus_asr_mismatch(
+            source, transcript, transcript,
+            tts._orpheus_transcript_report(source, transcript), tmp_path,
+            emit=lambda _message: None,
+        )
+    assert mock_chat.await_count == 2
+    assert requests[0][1] == requests[1][1]
+    assert requests[0][2] >= 2048
+    assert requests[1][2] == requests[0][2] * 2
+    assert "previous response was not valid JSON" in requests[1][0]
+    assert (result is not None) == (second_response == "approve")
+    evidence = json.loads((tmp_path / "llm_asr_adjudication.json").read_text())
+    assert len(evidence["attempts"]) == 2
+    if first_failure == "malformed":
+        assert evidence["attempts"][0]["raw_response"] == malformed
+        assert evidence["attempts"][0]["verdict"] is None
+    else:
+        assert "max_output_tokens" in evidence["attempts"][0]["error"]
+    assert "secret" not in json.dumps(evidence)

@@ -87,11 +87,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 23
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 24
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 5
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 6
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -782,18 +782,41 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
             word_indexes.extend([index, index, index + consumed_range_words - 1])
             index += consumed_range_words
             continue
-        currency_match = CURRENCY_TRANSCRIPT_AMOUNT_RE.fullmatch(word_text)
+        # Whisper puts the currency qualifier before the amount (HK $7 .08
+        # billion / US $903 million), while the spoken qualifier follows it.
+        # Expand only an explicit qualifier attached to a dollar amount; a
+        # bare HK/US or an unqualified $ must not invent a currency identity.
+        currency_qualifier: list[str] = []
+        currency_prefix_words = 0
+        currency_text = word_text
+        qualifier_match = re.fullmatch(r"\s*(HK|US)\s*(\$.*)?\s*", word_text)
+        if qualifier_match is not None:
+            qualified_amount = qualifier_match.group(2)
+            if qualified_amount is None and index + 1 < len(words):
+                qualified_amount = str(words[index + 1].get("text") or "")
+                currency_prefix_words = 1
+            if qualified_amount and CURRENCY_TRANSCRIPT_AMOUNT_RE.fullmatch(
+                qualified_amount
+            ):
+                currency_text = qualified_amount
+                currency_qualifier = (
+                    ["hong", "kong"] if qualifier_match.group(1) == "HK"
+                    else ["u", "s"]
+                )
+            else:
+                currency_prefix_words = 0
+        currency_match = CURRENCY_TRANSCRIPT_AMOUNT_RE.fullmatch(currency_text)
         if currency_match is not None:
             integer = currency_match.group(1)
             fraction = currency_match.group(2)
-            consumed_words = 1
-            if fraction is None and index + 1 < len(words):
+            consumed_words = 1 + currency_prefix_words
+            if fraction is None and index + consumed_words < len(words):
                 split_fraction = DECIMAL_FRACTION_WORD_RE.fullmatch(
-                    str(words[index + 1].get("text") or "")
+                    str(words[index + consumed_words].get("text") or "")
                 )
                 if split_fraction is not None:
                     fraction = split_fraction.group(1)
-                    consumed_words = 2
+                    consumed_words += 1
             amount_token = (
                 f"decimalnumber{integer}point{fraction}"
                 if fraction is not None
@@ -826,6 +849,8 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
                 and (fraction is None or set(fraction) <= {"0"})
                 and not has_scale
             )
+            tokens.extend(currency_qualifier)
+            word_indexes.extend([index] * len(currency_qualifier))
             tokens.append("dollar" if amount_is_one else "dollars")
             word_indexes.append(index)
             index += consumed_words
@@ -2245,9 +2270,14 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         )
 
     leading_anchor = all(position_is_anchored(index) for index in range(edge))
-    trailing_anchor = all(
-        position_is_anchored(index)
-        for index in range(max(0, len(expected) - edge), len(expected))
+    # A middle omission shifts absolute indexes without removing the ending.
+    # Report the acoustic edge truthfully; coverage still rejects the omission.
+    trailing_anchor = exact_trailing_anchor or (
+        len(expected) == len(observed)
+        and all(
+            position_is_anchored(index)
+            for index in range(max(0, len(expected) - edge), len(expected))
+        )
     )
     matched_acoustic_words = len(matched_expected)
     if phonetic_substitutions:
@@ -2364,6 +2394,11 @@ def _aligned_phonetic_substitutions(
     for index, (expected_token, observed_token) in enumerate(zip(expected, observed)):
         if expected_token == observed_token:
             continue
+        # Canonical decimals/ranges and model identifiers contain digits.
+        # The phonetic key strips nonletters, so comparing those keys would
+        # otherwise equate different amounts such as 7.08 and 7.09.
+        if any(character.isdigit() for character in expected_token + observed_token):
+            return None
         spelling_similarity = SequenceMatcher(
             a=expected_token,
             b=observed_token,
@@ -2876,21 +2911,63 @@ only with exactly these fields:
             f"{provider_label} ASR adjudication: using isolated judge route "
             f"{adjudication_route.audit_label}"
         )
-        raw = await _chat(
-            system_prompt,
-            json.dumps(request, ensure_ascii=False),
-            endpoint=endpoint,
-            model=model,
-            api_key=api_key,
-            log=emit,
-            label=f"{provider_label} ASR adjudication",
-            max_tokens=700,
-            enable_skills=False,
-            disable_thinking=True,
-            route_selected=remember_route,
-        )
-        evidence["raw_response"] = raw
-        verdict = _first_json_object(raw)
+        evidence["attempts"] = []
+        # The response enumerates every normalized source-token index. Leave
+        # room for that accounting plus the explanation even on full paragraphs;
+        # 700 tokens caused SDK continuation fragments and max_output_tokens.
+        output_budget = min(4096, max(2048, 512 + 4 * len(expected_tokens)))
+        for attempt in range(2):
+            retry_instruction = (
+                "\nYour previous response was not valid JSON or was truncated. Re-evaluate the "
+                "same evidence and return exactly one complete JSON object. "
+                "Do not include analysis, prose, or Markdown fences."
+                if attempt else ""
+            )
+            try:
+                raw = await _chat(
+                    system_prompt + retry_instruction,
+                    json.dumps(request, ensure_ascii=False),
+                    endpoint=endpoint,
+                    model=model,
+                    api_key=api_key,
+                    log=emit,
+                    label=f"{provider_label} ASR adjudication",
+                    max_tokens=min(8192, output_budget * (attempt + 1)),
+                    enable_skills=False,
+                    disable_thinking=True,
+                    route_selected=remember_route,
+                )
+            except Exception as exc:
+                # This isolated, skills-disabled judge has no side effects.
+                # Retry only explicit output exhaustion, using the same route
+                # and evidence; unrelated transport/model errors still fail.
+                evidence["attempts"].append({
+                    "error": f"{type(exc).__name__}: {exc}"[:700],
+                    "route": dict(evidence["route"]),
+                })
+                write_evidence()
+                if attempt == 0 and "max_output_tokens" in str(exc):
+                    emit(
+                        f"{provider_label} ASR adjudication: output truncated; "
+                        "retrying once with more output room on the same evidence"
+                    )
+                    continue
+                raise
+            evidence["raw_response"] = raw
+            verdict = _first_json_object(raw)
+            evidence["attempts"].append({
+                "raw_response": raw,
+                "verdict": verdict,
+                "route": dict(evidence["route"]),
+            })
+            write_evidence()
+            if verdict is not None:
+                break
+            if attempt == 0:
+                emit(
+                    f"{provider_label} ASR adjudication: invalid JSON; retrying "
+                    "once against the same transcripts without regenerating audio"
+                )
         evidence["verdict"] = verdict
         expected_indexes = list(range(len(expected_tokens)))
         confidence = str((verdict or {}).get("confidence") or "").strip()
