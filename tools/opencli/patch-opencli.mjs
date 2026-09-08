@@ -170,6 +170,39 @@ chatgptDetail = replaceOnce(
         if (currentId !== id) {`,
   'ChatGPT settled target refresh',
 )
+chatgptDetail = replaceOnce(
+  chatgptDetail, '    isGenerating,',
+  '    isGenerating,\n    chatgptRateLimitGuardScript,\n    requireBooleanEvaluateResult,\n    unwrapEvaluateResult,',
+  'ChatGPT cooldown dialog guard import',
+)
+chatgptDetail = replaceOnce(
+  chatgptDetail, '    args: [',
+  `    args: [
+        { name: 'cooldown', type: 'boolean', default: false, help: 'Recover a stale limit dialog after the shared access cooldown' },`,
+  'ChatGPT post-cooldown argument',
+)
+chatgptDetail = replaceOnce(
+  chatgptDetail,
+  '        // A stalled client can retain a partial token after generation ends.',
+  `        // The project transport has waited out the persisted access cooldown.
+        // Reload only if the old blocking dialog remains; otherwise preserve
+        // any active response stream and continue normal detail waiting.
+        if (currentId === id && normalizeBooleanFlag(kwargs.cooldown, false)) {
+            const staleLimit = requireBooleanEvaluateResult(unwrapEvaluateResult(await page.evaluate(\`(() => {
+                try { \${chatgptRateLimitGuardScript()} return false; }
+                catch (error) {
+                    if (String(error).includes('CHATGPT_RATE_LIMITED')) return true;
+                    throw error;
+                }
+            })()\`)), 'ChatGPT stale rate-limit dialog');
+            if (staleLimit === true) {
+                await page.evaluate('(() => { window.location.reload(); return true; })()');
+                await page.wait(2);
+            }
+        }
+        // A stalled client can retain a partial token after generation ends.`,
+  'ChatGPT stale limit dialog recovery',
+)
 fs.writeFileSync(chatgptDetailPath, chatgptDetail)
 
 let utils = fs.readFileSync(utilsPath, 'utf8')
@@ -594,6 +627,25 @@ models = replaceOnce(
 fs.writeFileSync(modelsPath, models)
 
 let chatgptUtils = fs.readFileSync(chatgptUtilsPath, 'utf8')
+const rateLimitHelper = fs.readFileSync(
+  path.join(runtimeDir, 'patches', 'chatgpt-rate-limit-helper.js'), 'utf8',
+)
+const rateLimitHelperMarker = '// Project patch: inspect visible provider UI, never quoted answer/prompt text.'
+if (chatgptUtils.includes(rateLimitHelperMarker)) {
+  chatgptUtils = chatgptUtils.slice(0, chatgptUtils.indexOf(rateLimitHelperMarker)).trimEnd()
+}
+chatgptUtils += `\n\n${rateLimitHelper}\n`
+for (const [anchor, label] of [
+  ["        const text = (document.body?.innerText || '').replace(/\\\\s+/g, ' ').trim();", 'page state'],
+  ['        const includeHtml = ${includeHtml};', 'message extraction'],
+  ['            if (document.querySelector(\'[data-testid="stop-button"]\')) return true;', 'generation polling'],
+]) {
+  chatgptUtils = replaceOnce(
+    chatgptUtils, anchor,
+    '${chatgptRateLimitGuardScript()}\n' + anchor,
+    `ChatGPT rate-limit guard in ${label}`,
+  )
+}
 chatgptUtils = replaceOnce(
   chatgptUtils,
   `            const turns = document.querySelectorAll('article[data-testid*="conversation-turn"]');`,
@@ -1232,6 +1284,12 @@ if (!chatgptDetailEntry.args.some((arg) => arg.name === 'refresh')) {
   chatgptDetailEntry.args.push({
     name: 'refresh', type: 'boolean', default: false,
     help: 'Reload a settled target conversation to recover stale rendered text',
+  })
+}
+if (!chatgptDetailEntry.args.some((arg) => arg.name === 'cooldown')) {
+  chatgptDetailEntry.args.push({
+    name: 'cooldown', type: 'boolean', default: false,
+    help: 'Recover a stale limit dialog after the shared access cooldown',
   })
 }
 const chatgptModelEntry = manifest.find(

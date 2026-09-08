@@ -1673,3 +1673,49 @@ for (const generating of [false, true]) {
     assert.equal(reloads, generating ? 0 : 1)
   })
 }
+
+for (const quoted of [false, true]) {
+  test(`ChatGPT detects the screenshot limit modal but ignores quoted content: ${quoted}`, async () => {
+    class Element {
+      textContent = 'Too many requests. You’re making requests too quickly. We’ve temporarily limited access to your conversations to protect your data.'
+      closest() { return quoted ? {} : null }
+      getBoundingClientRect() { return { width: 500, height: 200 } }
+    }
+    const dialog = new Element()
+    const page = {
+      async evaluate(script) {
+        return vm.runInNewContext(script, {
+          HTMLElement: Element,
+          window: { location: { href: 'https://chatgpt.com/c/owned' }, getComputedStyle() { return {} } },
+          document: {
+            querySelector() { return null },
+            querySelectorAll(selector) { return selector.startsWith('dialog,') ? [dialog] : [] },
+          },
+        })
+      },
+    }
+    if (quoted) assert.equal(await isGenerating(page), false)
+    else await assert.rejects(isGenerating(page), /CHATGPT_RATE_LIMITED.*https:\/\/chatgpt.com\/c\/owned/)
+  })
+}
+
+for (const staleLimit of [false, true]) {
+  test(`Post-cooldown recovery reloads only a still-visible blocking dialog: ${staleLimit}`, async () => {
+    let reloads = 0
+    const page = {
+      async goto() { throw new Error('Must keep the original conversation') },
+      async wait() {},
+      async evaluate(script) {
+        if (script === 'window.location.href') return 'https://chatgpt.com/c/abcdefgh1234'
+        if (script.includes('catch (error)')) return staleLimit
+        if (script.includes('window.location.reload()')) { reloads += 1; return true }
+        if (script.includes('isLoggedIn')) return { isLoggedIn: true, hasLoginGate: false }
+        if (script.includes('const roleOf')) return [{ role: 'assistant', text: 'W5P;6P', html: '' }]
+        if (script.includes('stop-button')) return !staleLimit
+        throw new Error(`Unexpected evaluate: ${script.slice(0, 100)}`)
+      },
+    }
+    await chatgptDetailCommand.func(page, { id: 'abcdefgh1234', cooldown: true, wait: false })
+    assert.equal(reloads, staleLimit ? 1 : 0)
+  })
+}

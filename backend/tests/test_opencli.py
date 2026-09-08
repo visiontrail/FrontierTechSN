@@ -2,6 +2,7 @@ import asyncio
 import sys
 import tempfile
 import unittest
+import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -14,6 +15,11 @@ from backend.pipeline.opencli_rate_limit import (
     normalize_interval,
     wait_for_opencli_web_slot,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_pacing_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCLI_WEB_RATE_LIMIT_STATE_PATH", str(tmp_path / "pacing"))
 
 
 class OpenCLIOutputTests(unittest.TestCase):
@@ -54,20 +60,27 @@ class OpenCLIProcessLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 wrapper.chmod(0o755)
                 with patch.object(config, "OPENCLI_BIN", str(wrapper)):
                     task = asyncio.create_task(opencli_module.run_opencli(
-                        ["test"], timeout=30 if cancel else 1,
+                        # Two Python interpreters may take over a second to
+                        # launch under macOS load; test cleanup, not startup speed.
+                        ["test"], timeout=30 if cancel else 5,
                     ))
-                    for _ in range(100):
-                        if ready.exists():
-                            break
-                        await asyncio.sleep(0.01)
-                    self.assertTrue(ready.exists())
-                    if cancel:
-                        task.cancel()
-                        with self.assertRaises(asyncio.CancelledError):
-                            await task
-                    else:
-                        with self.assertRaisesRegex(OpenCLIError, "timed out"):
-                            await task
+                    try:
+                        for _ in range(1000):
+                            if ready.exists() or task.done():
+                                break
+                            await asyncio.sleep(0.01)
+                        self.assertTrue(ready.exists())
+                        if cancel:
+                            task.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await task
+                        else:
+                            with self.assertRaisesRegex(OpenCLIError, "timed out"):
+                                await task
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
                 with lock.open() as handle:
                     fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
 

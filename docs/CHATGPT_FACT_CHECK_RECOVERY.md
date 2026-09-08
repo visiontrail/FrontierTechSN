@@ -12,6 +12,20 @@ saved group-3 prompt. Waiting longer on that frozen DOM did not help.
 
 Recovery proceeds in this order:
 
+0. Check visible ChatGPT dialogs/alerts for access limiting (including "Too many
+   requests" and "temporarily limited access"). Never read the answer behind that
+   modal. Surface `CHATGPT_RATE_LIMITED` with the target URL and persist a shared
+   provider cooldown: 5 minutes initially, doubling on recurring limits within
+   an hour, capped at 30 minutes. During cooldown, generation, model selection,
+   reads, and refreshes all wait before starting their command timeout. The wait
+   is cancellable and the breaker survives service restarts. Direct wrapper
+   invocations also honor this saved cooldown. Recovery keeps the original URL
+   and request marker; it does not immediately submit another audit. After the
+   cooldown, `detail --cooldown true` reloads the same target only if the old
+   blocking dialog is still visible. Without this step, a stale dialog could
+   trigger endless cooldowns even after server access has recovered. A fresh
+   limit after reloading opens the longer cooldown; an active stream without a
+   limit dialog is preserved.
 1. Read the exact conversation returned by `ask`, without navigating away from
    an active stream. Match the current `REVIEW_REQUEST_ID` to its assistant turn.
 2. Reject responses still marked as generating. Parse only complete verdicts.
@@ -32,9 +46,18 @@ OpenCLI 1.8.7 patch in `tools/opencli/patch-opencli.mjs`. Test with:
 ```sh
 source .venv/bin/activate
 PYTHONPATH=. pytest backend/tests/test_daily_news.py backend/tests/test_opencli.py
+PYTHONPATH=. pytest backend/tests/test_opencli_access_cooldown.py
 npm run test:adapter --prefix tools/opencli
 ```
 
 Live verification must use `review_daily_script` with the saved task dossier,
 script, and configured providers/model range, or the task's `resume-review` route.
 A passed parser test alone does not establish that browser recovery works.
+
+The screenshot supplied during verification showed a real access-limit modal
+over the exact `[5, 6]` conversation. An otherwise complete token is insufficient
+while that modal is present. Generation spacing alone (normally three minutes)
+does not handle this provider-wide conversation-access limit; the access circuit
+breaker is separate and applies to recovery commands too. Avoid repeated manual
+or automated probes during its cooldown; resume the same saved conversation once
+the wait ends.

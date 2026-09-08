@@ -1,8 +1,9 @@
-"""Cross-process pacing for Gemini and ChatGPT generation requests."""
+"""Cross-process generation pacing and provider-wide access cooldowns."""
 
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import sys
 import time
@@ -15,14 +16,75 @@ MAX_INTERVAL_SECONDS = 10 * 60.0
 DEFAULT_INTERVAL_SECONDS = MIN_INTERVAL_SECONDS
 RATE_LIMITED_SITES = frozenset({"chatgpt", "gemini"})
 RATE_LIMITED_ACTIONS = frozenset({"ask", "image"})
+PROVIDER_COOLDOWN_SECONDS = 5 * 60.0
+MAX_PROVIDER_COOLDOWN_SECONDS = 30 * 60.0
+
+
+def _cooldown_path(site: str, state_path: Path | None = None) -> Path:
+    if site not in RATE_LIMITED_SITES:
+        raise ValueError(f"Unsupported rate-limited site: {site}")
+    return Path(f"{state_path or default_state_path()}.{site}.cooldown")
+
+
+def record_opencli_rate_limit(
+    site: str, *, state_path: Path | None = None, clock=time.time,
+) -> float:
+    """Persist a provider-wide circuit breaker, including reads and refreshes."""
+    path = _cooldown_path(site, state_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as state:
+        fcntl.flock(state.fileno(), fcntl.LOCK_EX)
+        try:
+            state.seek(0)
+            try:
+                prior = json.load(state)
+            except (ValueError, TypeError):
+                prior = {}
+            now = clock()
+            recent = now - float(prior.get("recorded_at", 0)) < 3600
+            previous_delay = float(prior.get("delay", 0)) if recent else 0
+            delay = min(MAX_PROVIDER_COOLDOWN_SECONDS,
+                        max(PROVIDER_COOLDOWN_SECONDS, previous_delay * 2))
+            until = max(now + delay, float(prior.get("until", 0)))
+            state.seek(0)
+            state.truncate()
+            json.dump({"recorded_at": now, "until": until, "delay": delay}, state)
+            state.flush()
+            os.fsync(state.fileno())
+            return until
+        finally:
+            fcntl.flock(state.fileno(), fcntl.LOCK_UN)
+
+
+def opencli_cooldown_remaining(
+    site: str, *, state_path: Path | None = None, clock=time.time,
+) -> float:
+    if site not in RATE_LIMITED_SITES:
+        return 0.0
+    path = _cooldown_path(site, state_path)
+    try:
+        with path.open(encoding="utf-8") as state:
+            fcntl.flock(state.fileno(), fcntl.LOCK_SH)
+            data = json.load(state)
+            return min(MAX_PROVIDER_COOLDOWN_SECONDS,
+                       max(0.0, float(data["until"]) - clock()))
+    except FileNotFoundError:
+        return 0.0
+
+
+def wait_for_opencli_cooldown(site: str) -> None:
+    """Direct-wrapper gate; no lock is held while sleeping."""
+    while remaining := opencli_cooldown_remaining(site):
+        print(f"OpenCLI {site} access cooldown: {remaining:.0f}s remaining",
+              file=sys.stderr, flush=True)
+        time.sleep(min(30.0, remaining))
 
 
 def is_rate_limited_command(args: list[str] | tuple[str, ...]) -> bool:
     """Return whether an OpenCLI command starts a rate-sensitive generation.
 
-    Page reads, conversation-detail recovery, status checks, and model selection
-    do not submit a prompt. Charging those commands a generation slot turns a
-    bounded recovery poll into several minutes of artificial delay.
+    Reads and model selection skip generation slots, but still honor the
+    separate provider access cooldown when the site explicitly limits access.
     """
     return (
         len(args) >= 2
@@ -110,6 +172,8 @@ def wait_for_opencli_web_slot(
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0].lower() in RATE_LIMITED_SITES:
+        wait_for_opencli_cooldown(args[0].lower())
     if not is_rate_limited_command(args):
         return 0
     wait_for_opencli_web_slot(args[0].strip().lower())

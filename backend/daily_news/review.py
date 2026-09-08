@@ -21,6 +21,7 @@ from backend.daily_news.scriptwriter import (
     script_contract_report,
 )
 from backend.pipeline.opencli import (
+    OpenCLIRateLimitError,
     close_opencli_site_sessions,
     first_json,
     run_opencli,
@@ -834,6 +835,7 @@ async def _web_story_review_in_session(
         provider: str,
         *,
         conversation_url: str = "",
+        after_rate_limit: bool = False,
     ) -> tuple[dict[str, Any], str]:
         if provider == "chatgpt" and conversation_url:
             command = [
@@ -883,6 +885,11 @@ async def _web_story_review_in_session(
             messages: list[dict[str, Any]] = []
             try:
                 read_command = list(command)
+                if after_rate_limit and conversation_url:
+                    # The transport waits out the shared breaker first. Then
+                    # discard a still-visible old limit dialog on this target.
+                    read_command.extend(["--cooldown", "true"])
+                    after_rate_limit = False
                 if refresh_pending:
                     read_command.extend(["--refresh", "true"])
                     refresh_pending = False
@@ -916,6 +923,8 @@ async def _web_story_review_in_session(
                 return payload, assistant_text
             except Exception as exc:  # noqa: BLE001 - bounded late-response poll
                 last_error = exc
+                if isinstance(exc, OpenCLIRateLimitError):
+                    after_rate_limit = True
                 if assistant_text:
                     raw_attempts.append(
                         f"[{provider.upper()} RECOVERY INVALID "
@@ -1132,12 +1141,19 @@ async def _web_story_review_in_session(
             )
         except Exception as exc:  # noqa: BLE001 - target-specific recovery below
             chatgpt_error = exc
+            if isinstance(exc, OpenCLIRateLimitError) and log:
+                log(
+                    "ChatGPT has limited conversation access. All project browser "
+                    "operations will wait for the shared cooldown before recovering "
+                    "this same owned turn; no prompt will be resubmitted now."
+                )
             target_match = _CHATGPT_CONVERSATION_URL_RE.search(str(exc))
             target_url = conversation_url or (target_match.group(0) if target_match else "")
             try:
                 recovered = await recover_current(
                     "chatgpt",
                     conversation_url=target_url,
+                    after_rate_limit=isinstance(exc, OpenCLIRateLimitError),
                 )
                 payload, _ = recovered
                 if log:

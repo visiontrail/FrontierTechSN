@@ -21,6 +21,8 @@ from typing import Any
 from backend import config
 from backend.pipeline.opencli_rate_limit import (
     is_rate_limited_command,
+    opencli_cooldown_remaining,
+    record_opencli_rate_limit,
     wait_for_opencli_web_slot,
 )
 from backend.pipeline.opencli_browser_runtime import (
@@ -41,6 +43,22 @@ CLOSE_ADAPTER_SESSIONS_SCRIPT = (
 
 class OpenCLIError(RuntimeError):
     """An OpenCLI command could not produce a usable result."""
+
+
+class OpenCLIRateLimitError(OpenCLIError):
+    """Provider UI explicitly blocked access; all project calls must cool down."""
+
+
+async def _wait_for_provider_cooldown(site: str) -> None:
+    reported = False
+    while remaining := opencli_cooldown_remaining(site):
+        if not reported:
+            logger.warning(
+                "OpenCLI %s access limited: waiting %.0fs before any browser operation",
+                site, remaining,
+            )
+            reported = True
+        await asyncio.sleep(min(30.0, remaining))
 
 
 @dataclass(frozen=True)
@@ -120,6 +138,8 @@ async def run_opencli(
     env = _environment(site_session_namespace=site_session_namespace)
     if mode == ISOLATED_HEADLESS_RUNTIME:
         env["OPENCLI_ISOLATED_RUNTIME_READY"] = "1"
+    site = str(args[0]).lower() if args else ""
+    await _wait_for_provider_cooldown(site)
     if is_rate_limited_command(args):
         # Pace before starting the subprocess so the provider-command timeout
         # measures the web operation, not time intentionally spent in queue.
@@ -129,6 +149,9 @@ async def run_opencli(
             interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
         )
         env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
+    # Another process may have opened the breaker while this generation waited
+    # for its normal start slot. Recheck immediately before launching the CLI.
+    await _wait_for_provider_cooldown(site)
     process = await asyncio.create_subprocess_exec(
         *command,
         cwd=str(config.PROJECT_ROOT),
@@ -157,6 +180,16 @@ async def run_opencli(
         stdout=stdout_bytes.decode("utf-8", errors="replace").strip(),
         stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
     )
+    if result.returncode != 0 and "CHATGPT_RATE_LIMITED" in result.stderr + result.stdout:
+        until = record_opencli_rate_limit("chatgpt")
+        detail = next(
+            value for value in (result.stderr, result.stdout)
+            if "CHATGPT_RATE_LIMITED" in value
+        )[-1600:]
+        raise OpenCLIRateLimitError(
+            f"ChatGPT conversation access is rate limited; all browser operations "
+            f"are paused until Unix time {until:.0f}. {detail}"
+        )
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout or "unknown OpenCLI failure")[-1200:]
         raise OpenCLIError(

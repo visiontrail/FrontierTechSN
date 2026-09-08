@@ -2626,3 +2626,33 @@ def test_chatgpt_refresh_is_bounded_and_cannot_approve_invalid_or_unowned_verdic
             claim_catalog={5: {'5.1': 'Claim'}, 6: {'6.1': 'Claim'}}, log=None,
         ))
     assert refreshes == (2 if owned else 0)  # At most once per submission.
+
+
+def test_rate_limit_recovers_the_owned_turn_without_resubmitting():
+    prompt = ''
+    calls = []
+    target = 'https://chatgpt.com/c/rate-limited-owned'
+
+    async def command(args, **kwargs):
+        nonlocal prompt
+        calls.append(args)
+        if args[:2] == ['chatgpt', 'model']:
+            rows = [{'Model': 'Medium'}]
+        elif args[:2] == ['chatgpt', 'ask']:
+            prompt = args[2]
+            raise review.OpenCLIRateLimitError('CHATGPT_RATE_LIMITED Target: ' + target)
+        else:
+            assert args[:3] == ['chatgpt', 'detail', target]
+            assert '--refresh' not in args
+            rows = [{'Role': 'User', 'Text': prompt}, {'Role': 'Assistant', 'Text': 'W5P;6P', 'Generating': False}]
+        return OpenCLIResult(tuple(args), 0, json.dumps(rows), '')
+
+    logs = []
+    with patch.object(review, 'run_opencli', AsyncMock(side_effect=command)):
+        payload, _, url, _ = asyncio.run(review._web_story_review(
+            'audit', story_numbers=[5, 6], log=logs.append,
+        ))
+    assert payload['approved'] is True
+    assert url == target
+    assert len([args for args in calls if args[:2] == ['chatgpt', 'ask']]) == 1
+    assert any('shared cooldown' in line for line in logs)
