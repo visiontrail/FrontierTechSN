@@ -15,14 +15,15 @@ Recovery proceeds in this order:
 0. Check visible ChatGPT dialogs/alerts for access limiting (including "Too many
    requests" and "temporarily limited access"). Never read the answer behind that
    modal. Surface `CHATGPT_RATE_LIMITED` with the target URL and persist a shared
-   provider cooldown: 30 minutes initially, doubling on recurring limits within
-   six hours, capped at 2 hours. During cooldown, generation, model selection,
-   reads, and refreshes all wait before starting their command timeout. The wait
-   is cancellable and the breaker survives service restarts. Direct wrapper
-   invocations also honor this saved cooldown. Recovery keeps the original URL
-   and request marker; it does not immediately submit another audit. After the
-   cooldown, `detail --cooldown true` reloads the same target only if the old
-   blocking dialog is still visible. Without this step, a stale dialog could
+   provider cooldown: 10 minutes initially, adding 10 minutes for each recurring
+   limit within six hours, capped at 60 minutes. If no new limit is recorded for
+   six hours, the next cooldown resets to 10 minutes. During cooldown, generation,
+   model selection, reads, and refreshes all wait before starting their command
+   timeout. The wait is cancellable and the breaker survives service restarts.
+   Direct wrapper invocations also honor this saved cooldown. Recovery keeps the
+   original URL and request marker; it does not immediately submit another audit.
+   After the cooldown, `detail --cooldown true` reloads the same target only if
+   the old blocking dialog is still visible. Without this step, a stale dialog could
    trigger endless cooldowns even after server access has recovered. A fresh
    limit after reloading opens the longer cooldown; an active stream without a
    limit dialog is preserved. A provider access-limit cycle does not consume one

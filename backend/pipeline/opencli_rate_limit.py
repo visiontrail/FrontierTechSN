@@ -17,8 +17,9 @@ DEFAULT_INTERVAL_SECONDS = MIN_INTERVAL_SECONDS
 RATE_LIMITED_SITES = frozenset({"chatgpt", "gemini"})
 RATE_LIMITED_ACTIONS = frozenset({"ask", "image"})
 GENERATION_QUIET_PERIOD_ACTIONS = frozenset({("chatgpt", "model")})
-PROVIDER_COOLDOWN_SECONDS = 30 * 60.0
-MAX_PROVIDER_COOLDOWN_SECONDS = 2 * 60 * 60.0
+PROVIDER_COOLDOWN_SECONDS = 10 * 60.0
+PROVIDER_COOLDOWN_INCREMENT_SECONDS = 10 * 60.0
+MAX_PROVIDER_COOLDOWN_SECONDS = 60 * 60.0
 PROVIDER_COOLDOWN_ESCALATION_WINDOW_SECONDS = 6 * 60 * 60.0
 
 
@@ -48,9 +49,17 @@ def record_opencli_rate_limit(
                 < PROVIDER_COOLDOWN_ESCALATION_WINDOW_SECONDS
             )
             previous_delay = float(prior.get("delay", 0)) if recent else 0
-            delay = min(MAX_PROVIDER_COOLDOWN_SECONDS,
-                        max(PROVIDER_COOLDOWN_SECONDS, previous_delay * 2))
-            until = max(now + delay, float(prior.get("until", 0)))
+            delay = min(
+                MAX_PROVIDER_COOLDOWN_SECONDS,
+                max(
+                    PROVIDER_COOLDOWN_SECONDS,
+                    previous_delay + PROVIDER_COOLDOWN_INCREMENT_SECONDS,
+                ),
+            )
+            until = min(
+                now + MAX_PROVIDER_COOLDOWN_SECONDS,
+                max(now + delay, float(prior.get("until", 0))),
+            )
             state.seek(0)
             state.truncate()
             json.dump({"recorded_at": now, "until": until, "delay": delay}, state)
@@ -71,8 +80,16 @@ def opencli_cooldown_remaining(
         with path.open(encoding="utf-8") as state:
             fcntl.flock(state.fileno(), fcntl.LOCK_SH)
             data = json.load(state)
-            return min(MAX_PROVIDER_COOLDOWN_SECONDS,
-                       max(0.0, float(data["until"]) - clock()))
+            now = clock()
+            recorded_at = float(data.get("recorded_at", now))
+            effective_until = min(
+                float(data["until"]),
+                recorded_at + MAX_PROVIDER_COOLDOWN_SECONDS,
+            )
+            return min(
+                MAX_PROVIDER_COOLDOWN_SECONDS,
+                max(0.0, effective_until - now),
+            )
     except FileNotFoundError:
         return 0.0
 
