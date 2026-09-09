@@ -1262,6 +1262,22 @@ def _previous_rejection_used_fallback(output_dir: Path) -> bool:
         return False
 
 
+def _director_scene_plans(plans: list[dict], *, quality_retry: bool) -> list[dict]:
+    # A quality retry applies concrete frame feedback. Reauthoring configured
+    # bookends here can erase that repair and repeat an unrelated provider call.
+    # Keep their deterministic overlays; the rendered-pixel gate still applies.
+    return [
+        plan for plan in plans
+        if (
+            plan.get("archetype") in {"intro", "outro"} and not quality_retry
+        ) or (
+            not plan.get("footage_src")
+            and not plan.get("news_image")
+            and not plan.get("news_webpage")
+        )
+    ]
+
+
 async def compose_video(
     script_path: str,
     audio_path: str,
@@ -1296,6 +1312,7 @@ async def compose_video(
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
     prefer_previous_reviewer = _previous_rejection_used_fallback(output_dir_path)
+    quality_retry_source, _ = _pending_visual_repairs(output_dir_path, [])
     frame = resolve_frame_spec(video_orientation)
 
     # Mirror to the task log (pipeline.log + LogPanel) when available, else the
@@ -1763,16 +1780,11 @@ async def compose_video(
     # Licensed editorial media stays on the deterministic renderer. The branded
     # intro/outro are deliberate exceptions: their Gemini videos remain locked
     # while the video-editing agent authors only the editable HyperFrames overlay.
-    director_plans = [
-        plan
-        for plan in scene_plans
-        if plan.get("archetype") in {"intro", "outro"}
-        or (
-            not plan.get("footage_src")
-            and not plan.get("news_image")
-            and not plan.get("news_webpage")
-        )
-    ]
+    director_plans = _director_scene_plans(
+        scene_plans, quality_retry=bool(quality_retry_source)
+    )
+    if quality_retry_source:
+        emit("Quality retry: preserving configured bookend overlays after frame-feedback repair")
     if config.DIRECTOR_ENABLED and director_plans and model:
         if config.DIRECTOR_MAX_SCENES:
             budget = director_plans[: config.DIRECTOR_MAX_SCENES]

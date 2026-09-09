@@ -10,6 +10,19 @@ from backend.pipeline import composer, visual_plan
 from backend.pipeline.video_format import PORTRAIT
 
 
+def test_quality_retry_preserves_configured_bookends_but_still_directs_unlocked_scenes():
+    plans = [
+        {"id": "intro", "archetype": "intro", "footage_src": "intro.mp4"},
+        {"id": "news", "archetype": "footage", "footage_src": "news.mp4"},
+        {"id": "graphic", "archetype": "topic"},
+        {"id": "outro", "archetype": "outro", "footage_src": "outro.mp4"},
+    ]
+    assert [p["id"] for p in composer._director_scene_plans(plans, quality_retry=False)] == [
+        "intro", "graphic", "outro",
+    ]
+    assert [p["id"] for p in composer._director_scene_plans(plans, quality_retry=True)] == ["graphic"]
+
+
 @pytest.mark.parametrize("enabled,passed,providers,valid,expected", [
     (True, False, ["chatgpt", "chatgpt"], True, True),
     (True, False, ["gemini", "chatgpt"], True, False),
