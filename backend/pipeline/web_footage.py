@@ -1097,8 +1097,15 @@ async def supplement_web_footage(
             and (not error.get("script_excerpt") or error["script_excerpt"] == shot.get("script_excerpt"))
             and (error.get("stage") != "web-metadata" or error.get("query") == shot["query"])
         }
-        return next((item for item in eligible if item["source_page_url"] not in
-                     used_sources | failed | (reserved or set())), None)
+        available = [item for item in eligible if item["source_page_url"] not in
+                     used_sources | failed | (reserved or set())]
+        def needs_preview(item: dict) -> bool:
+            key = hashlib.sha256(item["source_page_url"].encode()).hexdigest()[:16]
+            folder = task_dir / "footage" / "evidence" / "previews" / key
+            return _load_prepared_preview(item, folder, task_dir) is None
+        # Search ranking can change between retries. Prefer intact evidence
+        # anywhere in the eligible results before starting another download.
+        return min(available, key=needs_preview, default=None)
 
     for shot_index, shot in enumerate(pending_shots):
         if len(manifest.get("clips", [])) >= target_total:

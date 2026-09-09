@@ -472,7 +472,7 @@ def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_
     candidates = [{'source_page_url': f'https://youtu.be/port-{i}', 'title': 'Los Angeles port containers', 'duration_seconds': 90} for i in range(3)]
     review = AsyncMock(return_value=[web_footage.WebFootageReviewUnavailable('Review offline')])
     with (patch.object(web_footage, 'search_youtube', AsyncMock(return_value=candidates)) as search,
-          patch.object(web_footage, '_load_prepared_preview', return_value={'sheet': 'cached.jpg'}),
+          patch.object(web_footage, '_load_prepared_preview', side_effect=lambda candidate, *args: {'sheet': 'cached.jpg'} if candidate['source_page_url'] == candidates[2]['source_page_url'] else None),
           patch.object(web_footage, '_analyze_preview_batch', review),
           pytest.raises(web_footage.WebFootageReviewUnavailable, match='Review offline')):
         asyncio.run(web_footage.supplement_web_footage(
@@ -482,7 +482,7 @@ def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_
         ))
     search.assert_awaited_once()
     assert len(review.await_args.args[0]) == 1
-    assert review.await_args.args[0][0][0]['source_page_url'] == candidates[0]['source_page_url']
+    assert review.await_args.args[0][0][0]['source_page_url'] == candidates[2]['source_page_url']
     result = json.loads((tmp_path / 'footage/manifest.json').read_text())
     assert result['status'] == 'review_unavailable'
     assert not any(error.get('source_page_url') for error in result['errors'])
