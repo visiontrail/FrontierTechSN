@@ -119,6 +119,19 @@ def test_outro_scene_is_a_valid_editable_hyperframes_composition():
     assert 'data-bookend-layer="overlay" style="z-index:2"' in html
 
 
+def test_outro_preserves_spoken_subscription_and_next_morning(tmp_path, monkeypatch):
+    _install_fake_library(tmp_path, monkeypatch)
+    board = _storyboard()
+    board["scenes"][-1]["text"] = "Subscribe, and we'll see you tomorrow morning."
+    staged = outros.stage_outro(tmp_path / "task", board, "morning-brief")
+    html = scene_kit.render_scene(scene_kit.ScenePlan.from_dict(
+        staged, duration=staged["duration"], scene_id=staged["id"],
+    ))
+    assert 'data-outro-action="subscribe"' in html
+    assert "See you tomorrow morning." in html
+    assert html.count("data-outro-action=") == 4
+
+
 def test_outro_agent_contract_rejects_removed_phrase_and_missing_actions():
     broken = '<div data-outro-role="brand" data-outro-role="thanks">感谢观看</div>'
 

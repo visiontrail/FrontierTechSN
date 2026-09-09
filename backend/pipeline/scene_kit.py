@@ -921,6 +921,27 @@ def _footage_intervals(sequence, scene_duration: float):
             break
 
 
+def _editorial_details(plan: ScenePlan) -> str:
+    """Keep body and parallel facts readable when media changes the layout."""
+    items = tuple(item for item in plan.items if item.strip())
+    body = plan.body.strip()
+    # Footage attachment historically flattened a list into the body. Render
+    # that list once, while retaining independent body/stat/attribution copy.
+    if body == " · ".join(items):
+        body = ""
+    markup = (
+        f'<div class="body" id="{plan.id}-body">{_esc(body)}</div>\n'
+        if body else ""
+    )
+    if items:
+        markup += (
+            f'<ul class="editorial-facts" id="{plan.id}-facts">'
+            + "".join(f"<li>{_esc(item)}</li>" for item in items)
+            + "</ul>\n"
+        )
+    return markup
+
+
 def _render_footage(plan: ScenePlan) -> str:
     """Render a full-bleed media plate that remains populated for the full scene."""
     accent = accent_hex(plan.accent, plan.theme)
@@ -993,10 +1014,19 @@ def _render_footage(plan: ScenePlan) -> str:
   #{plan.id} .headline {{ font-size:{headline_size(plan.headline, base=92)}px; max-width:1340px;
       color:#F5F2EA; text-shadow:0 8px 40px rgba(0,0,0,.6); }}
   #{plan.id} .body {{ font-size:{body_size(plan.body, base=38)}px; max-width:1100px; color:rgba(245,242,234,.9); }}
+  #{plan.id} .editorial-facts {{ margin:0; padding-left:30px; display:grid; gap:12px;
+      font:500 34px/1.28 {SANS}; color:#F5F2EA; max-width:1450px; }}
+  #{plan.id} .editorial-facts li::marker {{ color:{accent}; }}
   #{plan.id} .credit {{ position:absolute; right:44px; top:40px; font:500 20px {SANS};
       color:#F5F2EA; letter-spacing:.06em;
       background:rgba(17,19,24,.8); padding:9px 16px; border-radius:999px;
       border:1px solid {_rgba(accent, 0.3)}; }}
+"""
+    if plan.items:
+        css += f"""
+  #{plan.id} .stage {{ justify-content:center; padding:140px 150px 210px; gap:20px; }}
+  #{plan.id} .headline {{ font-size:60px; max-width:1500px; }}
+  #{plan.id} .body {{ font-size:34px; max-width:1480px; line-height:1.28; }}
 """
     if plan.collage_broll:
         caption_headline = plan.headline.strip() or plan.body.strip()
@@ -1069,7 +1099,7 @@ def _render_footage(plan: ScenePlan) -> str:
         + '    <div class="stage">\n'
         + (f'      <div class="kicker" id="{plan.id}-kicker">{_esc(plan.kicker)}</div>\n' if plan.kicker else "")
         + (f'      <div class="headline" id="{plan.id}-head">{_esc(plan.headline)}</div>\n' if plan.headline else "")
-        + (f'      <div class="body" id="{plan.id}-body">{_esc(plan.body)}</div>\n' if plan.body else "")
+        + _editorial_details(plan)
         + '    </div>\n'
     )
     primary_media_id = f"{plan.id}-media-1" if plan.footage_kind == "video" else f"{plan.id}-media"
@@ -1078,6 +1108,7 @@ def _render_footage(plan: ScenePlan) -> str:
         inAt("#{plan.id}-kicker", {{ x: -36, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .55, ease: "power3.out" }}, 0.25);
         inAt("#{plan.id}-head", {{ y: 56, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .85, ease: "expo.out" }}, 0.4);
         inAt("#{plan.id}-body", {{ y: 26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .65, ease: "power2.out" }}, 0.62);
+        inAt("#{plan.id}-facts", {{ y: 26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .65, ease: "power2.out" }}, 0.72);
         inAt("#{plan.id}-credit", {{ opacity: 0 }}, {{ opacity: 1, duration: .6, ease: "power1.out" }}, 0.8);
 """
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
@@ -1111,6 +1142,7 @@ def _render_news_webpage_overlay(plan: ScenePlan) -> str:
             f'src="{_esc(background_src)}" alt="" crossorigin="anonymous">\n'
         )
     source_label = plan.news_webpage_source or "English news source"
+    has_editorial_copy = bool(plan.headline or plan.body or plan.items)
     css = f"""
   #{plan.id} .news-web-bg-frame {{ position:absolute; inset:0; overflow:hidden; background:{plan.theme.bg}; }}
   #{plan.id} .news-web-background {{ position:absolute; inset:0; display:block; width:100%; height:100%;
@@ -1130,11 +1162,34 @@ def _render_news_webpage_overlay(plan: ScenePlan) -> str:
   #{plan.id} .news-web-corner {{ position:absolute; right:-22px; bottom:-22px; width:126px; height:126px;
       z-index:5; border-right:7px solid {accent}; border-bottom:7px solid {accent}; }}
 """
+    if has_editorial_copy:
+        css += f"""
+  #{plan.id} .news-web-card-wrap {{ left:120px; top:280px; width:470px; height:340px; margin:0; }}
+  #{plan.id} .news-web-shot {{ object-fit:contain; object-position:50% 100%; }}
+  #{plan.id} .news-web-source {{ left:14px; right:14px; top:16px; font-size:17px;
+      white-space:normal; padding:12px; letter-spacing:.06em; }}
+  #{plan.id} .news-web-editorial {{ position:relative; box-sizing:border-box; width:100%; height:100%;
+      padding:130px 120px 190px 660px; display:flex; flex-direction:column; justify-content:center;
+      gap:20px; z-index:3; background:linear-gradient(90deg, transparent 28%, rgba(8,10,18,.93) 36%); }}
+  #{plan.id} .news-web-editorial .headline {{ font-size:50px; line-height:1.08; color:#F5F2EA; }}
+  #{plan.id} .news-web-editorial .body {{ font:500 32px/1.28 {SANS}; color:#F5F2EA; }}
+  #{plan.id} .editorial-facts {{ margin:0; padding-left:27px; display:grid; gap:13px;
+      font:500 32px/1.28 {SANS}; color:#F5F2EA; }}
+  #{plan.id} .editorial-facts li::marker {{ color:{accent}; }}
+"""
     markup = (
         f'    <div class="news-web-bg-frame" id="{plan.id}-background-frame">\n'
         + background
         + "    </div>\n"
         + f'    <div class="news-web-scrim" id="{plan.id}-web-scrim"></div>\n'
+        + (
+            f'<div class="news-web-editorial" id="{plan.id}-editorial">'
+            + (f'<div class="kicker">{_esc(plan.kicker)}</div>' if plan.kicker else "")
+            + (f'<div class="headline">{_esc(plan.headline)}</div>' if plan.headline else "")
+            + _editorial_details(plan)
+            + "</div>\n"
+            if has_editorial_copy else ""
+        )
         + f'    <div class="news-web-card-wrap" id="{plan.id}-web-wrap" data-layout-allow-overflow>\n'
         + f'      <div class="news-web-card" id="{plan.id}-web-card">\n'
         + '        <div class="news-web-shot-crop">\n'
@@ -1151,6 +1206,7 @@ def _render_news_webpage_overlay(plan: ScenePlan) -> str:
     drift = max(2.4, plan.duration - 0.25)
     timeline = f"""        inAt("#{plan.id}-background", {{ scale: 1.08, x: {direction * -18} }}, {{ scale: 1.16, x: {direction * 18}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.05);
         inAt("#{plan.id}-web-scrim", {{ opacity: 0 }}, {{ opacity: 1, duration: .48, ease: "sine.out" }}, 0.12);
+        inAt("#{plan.id}-editorial", {{ x: 36, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .65, ease: "power2.out" }}, 0.4);
         inAt("#{plan.id}-web-card", {{ x: {direction * 210}, y: 70, opacity: 0, rotationY: {direction * -10}, rotationZ: {direction * 1.2}, scale: .9 }}, {{ x: 0, y: 0, opacity: 1, rotationY: 0, rotationZ: 0, scale: 1, duration: 1.02, ease: "power4.out", transformPerspective: 1800, transformOrigin: "50% 50%" }}, 0.22);
         inAt("#{plan.id}-web-shot", {{ scale: 1.035, y: -8 }}, {{ scale: 1, y: 8, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 0%" }}, 0.28);
         inAt("#{plan.id}-web-source", {{ x: -34, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .58, ease: "expo.out" }}, 0.64);
@@ -1285,6 +1341,10 @@ def _render_outro(plan: ScenePlan) -> str:
     panel_padding = "52px 44px" if portrait else "46px 54px 42px"
     logo_width = "560px"
     headline_size_px = 72 if portrait else 91
+    subscribe_action = (
+        '<div class="outro-action" data-outro-action="subscribe"><span>Subscribe</span></div>'
+        if any(item.casefold() == "subscribe" for item in plan.items) else ""
+    )
     css = f"""
   #{plan.id} .outro-background {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
   #{plan.id} .outro-veil {{ position:absolute; inset:0; background:{veil}; pointer-events:none; }}
@@ -1335,6 +1395,7 @@ def _render_outro(plan: ScenePlan) -> str:
           <p class="outro-subline">{_esc(plan.body)}</p>
         </div>
         <div class="outro-actions" data-outro-role="actions" aria-label="Engagement actions">
+          {subscribe_action}
           <div class="outro-action" data-outro-action="like"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v11H3V10h4Z"/><path d="M7 19h10.2a2 2 0 0 0 1.96-1.61l1.2-6A2 2 0 0 0 18.4 9H14l.72-3.08A2.45 2.45 0 0 0 12.34 3L7 10"/></svg><span>Like</span></div>
           <div class="outro-action" data-outro-action="comment"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H6l-4 3V12a9 9 0 1 1 19 0Z"/><path d="M8 12h.01M12 12h.01M16 12h.01"/></svg><span>Comment</span></div>
           <div class="outro-action" data-outro-action="share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 5l5-3v16l-5-3"/><path d="M19 10H9a6 6 0 0 0-6 6v3"/></svg><span>Share</span></div>

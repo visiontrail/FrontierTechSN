@@ -66,6 +66,10 @@ scene's exact `id`. No prose, no markdown fences, no explanation.
   Repeat the same kicker across consecutive scenes that share a subject — it
   reads as a chapter label.
 - `items`: at most 5 items, max 80 characters each.
+- For a long news scene with several distinct claims, keep the named subject
+  in the headline/body and use `items` for the remaining dates, figures,
+  mechanism, and qualifications. Items may accompany a topic or media scene.
+  A source-page screenshot does not replace readable editorial copy.
 - Preserve every factual number at the narration's exact precision. Never round
   or shorten a source value such as `2.751 billion` to `2.75B`.
 - Every string must be in the same language as the narration.

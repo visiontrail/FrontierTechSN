@@ -354,6 +354,32 @@ def test_news_webpage_overlay_preserves_ai_public_footage_sequence():
     assert all(" loop" not in video for video in videos)
 
 
+@pytest.mark.parametrize("webpage", [False, True])
+def test_media_scenes_preserve_independent_body_and_structured_facts(webpage):
+    html = sk.render_scene(plan(
+        archetype="footage", footage_src="clip.mp4", footage_kind="video",
+        headline="NASA food safety", body="Paul Lachance developed HACCP.",
+        items=("1993: 700+ illnesses & four deaths", "1996: FSIS mandate"),
+        news_webpage_src="page.png" if webpage else "",
+    ))
+    assert validate_scene_html(html, "scene-01") == []
+    assert "Paul Lachance developed HACCP." in html
+    assert "<li>1993: 700+ illnesses &amp; four deaths</li>" in html
+    assert "<li>1996: FSIS mandate</li>" in html
+    if webpage:
+        assert 'src="page.png"' in html
+        assert 'class="news-web-editorial"' in html
+
+
+def test_media_scene_does_not_repeat_a_body_flattened_from_its_items():
+    html = sk.render_scene(plan(
+        archetype="footage", footage_src="clip.mp4", footage_kind="video",
+        body="First finding · Second finding", items=("First finding", "Second finding"),
+    ))
+    assert html.count("First finding") == 1
+    assert html.count("Second finding") == 1
+
+
 def test_fullscreen_news_image_uses_escaped_quote_when_body_is_empty():
     html = sk.render_scene(
         plan(

@@ -1201,7 +1201,9 @@ def _review_retry_fingerprint(directory: Path, request: dict) -> str:
     for name in ("compositions", "assets", "news_images"):
         paths.update(path for path in (directory / name).rglob("*") if path.is_file())
     paths.update((directory / "footage").glob("*-render.mp4"))
-    paths.update(Path(__file__).parent / name for name in ("scene_kit.py", "assembler.py", "storyboard.py"))
+    paths.update(Path(__file__).parent / name for name in (
+        "scene_kit.py", "assembler.py", "storyboard.py", "intros.py", "outros.py",
+    ))
     evidence = {
         "request": request,
         "render": [config.RENDER_FPS, config.RENDER_QUALITY, config.RENDER_WORKERS],
@@ -1242,6 +1244,24 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
     return str(_promote_quality_gated_candidate(candidate, report_path, directory, digest, report))
 
 
+def _previous_rejection_used_fallback(output_dir: Path) -> bool:
+    """Let the same available reviewer assess repairs it explicitly requested."""
+    fallback = str(getattr(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "") or "")
+    if fallback != "chatgpt":
+        return False
+    try:
+        report = json.loads((output_dir / "av_sync_report.next.json").read_text())
+        review = report["multimodal"]
+        batches = (review.get("calibration") or {}).get("batches") or review.get("batches")
+        return review.get("passed") is False and bool(batches) and all(
+            batch.get("contract_valid") is True
+            and batch.get("review_provider") == fallback
+            for batch in batches
+        )
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
 async def compose_video(
     script_path: str,
     audio_path: str,
@@ -1275,6 +1295,7 @@ async def compose_video(
     review_request = {key: value for key, value in locals().items() if key != "log"}
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
+    prefer_previous_reviewer = _previous_rejection_used_fallback(output_dir_path)
     frame = resolve_frame_spec(video_orientation)
 
     # Mirror to the task log (pipeline.log + LogPanel) when available, else the
@@ -1948,6 +1969,7 @@ async def compose_video(
             board,
             output_dir_path,
             log=emit,
+            prefer_fallback=prefer_previous_reviewer,
         )
     else:
         gemini_review = {

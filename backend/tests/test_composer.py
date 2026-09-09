@@ -10,6 +10,26 @@ from backend.pipeline import composer, visual_plan
 from backend.pipeline.video_format import PORTRAIT
 
 
+@pytest.mark.parametrize("enabled,passed,providers,valid,expected", [
+    (True, False, ["chatgpt", "chatgpt"], True, True),
+    (True, False, ["gemini", "chatgpt"], True, False),
+    (True, False, ["chatgpt"], False, False),
+    (True, True, ["chatgpt"], True, False),
+    (False, False, ["chatgpt"], True, False),
+    (True, False, [], True, False),
+])
+def test_repaired_pixels_return_to_the_configured_available_reviewer(
+    tmp_path, monkeypatch, enabled, passed, providers, valid, expected,
+):
+    monkeypatch.setattr(composer.config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "chatgpt" if enabled else "")
+    (tmp_path / "av_sync_report.next.json").write_text(json.dumps({
+        "multimodal": {"passed": passed, "calibration": {"batches": [
+            {"review_provider": provider, "contract_valid": valid} for provider in providers
+        ]}},
+    }))
+    assert composer._previous_rejection_used_fallback(tmp_path) is expected
+
+
 def test_collage_planning_respects_existing_media_and_explicit_quantity():
     board = {'scenes': [
         {'id': 'opening', 'program_segment_kind': 'opening'},

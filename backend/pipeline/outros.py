@@ -145,6 +145,15 @@ def stage_outro(
     storyboard["outro_start"] = start
     storyboard["outro_duration"] = duration
     storyboard["outro_style"] = style
+    closing_text = str(closing.get("text") or "").casefold()
+    actions = ["LIKE", "COMMENT", "SHARE"]
+    if "subscribe" in closing_text:
+        actions.insert(0, "SUBSCRIBE")
+    body = (
+        "Stay curious. See you tomorrow morning."
+        if "tomorrow morning" in closing_text
+        else "Stay curious. Tomorrow's frontier arrives in one sharp shot."
+    )
 
     return {
         "id": str(closing["id"]),
@@ -152,8 +161,8 @@ def stage_outro(
         "archetype": "outro",
         "kicker": "SEE YOU IN THE NEXT SHOT",
         "headline": "THANKS FOR WATCHING",
-        "body": "Stay curious. Tomorrow's frontier arrives in one sharp shot.",
-        "items": ["LIKE", "COMMENT", "SHARE"],
+        "body": body,
+        "items": actions,
         "accent": "coral",
         "motif": "none",
         "footage_src": "assets/outro/background.mp4",
