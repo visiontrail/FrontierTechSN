@@ -1494,6 +1494,7 @@ chatgptUtils = replaceWithinFunction(
         }`,
   'ChatGPT range fallback after a failed switch',
 )
+chatgptUtils = chatgptUtils.replace('const target = `${CHATGPT_URL}/new`;', 'const target = CHATGPT_URL;')
 chatgptUtils = replaceOnce(chatgptUtils,
   `export async function startNewChat(page) {
     await page.goto(\`\${CHATGPT_URL}/new\`, { settleMs: 2000 });
@@ -1504,7 +1505,7 @@ chatgptUtils = replaceOnce(chatgptUtils,
     }
 }`,
   `export async function startNewChat(page) {
-    const target = \`\${CHATGPT_URL}/new\`;
+    const target = CHATGPT_URL;
     await page.goto(target, { settleMs: 2000 });
     for (let attempt = 0; attempt < 2; attempt++) {
         try {

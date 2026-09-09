@@ -39,7 +39,7 @@ for (const outcome of ['loaded', 'blank', 'login', 'conversation']) {
 test(`ChatGPT new chat distinguishes stalled navigation from login: ${outcome}`, async () => {
   let navigations = 0
   const page = {
-    async goto(url) { assert.equal(url, 'https://chatgpt.com/new'); navigations++ },
+    async goto(url) { assert.equal(url, 'https://chatgpt.com'); navigations++ },
     async wait() { throw new Error('Composer has not mounted yet') },
     async evaluate(script) {
       const loaded = outcome === 'loaded' && navigations === 2
