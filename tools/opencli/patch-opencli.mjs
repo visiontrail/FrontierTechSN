@@ -816,6 +816,22 @@ utils = replaceOnce(
             }`,
   'Gemini appended response ignores trailing empty speaker elements',
 )
+utils = replaceOnce(
+  utils,
+  'export async function waitForGeminiResponse(page, baseline, promptText, timeoutSeconds) {',
+  `export function requireGeminiGeneratedReply(response) {
+    const text = String(response || '').trim();
+    const normalized = text.replace(/\\s+/g, ' ').toLowerCase();
+    if (!text) throw new CommandExecutionError('Gemini generation returned no response');
+    if (normalized === 'i seem to be encountering an error. can i try something else for you?'
+        || normalized === 'i encountered an error doing what you asked. could you try again?') {
+        throw new CommandExecutionError('Gemini generation failed: ' + text);
+    }
+    return text;
+}
+export async function waitForGeminiResponse(page, baseline, promptText, timeoutSeconds) {`,
+  'Gemini explicit generation failures retain diagnostic traces',
+)
 fs.writeFileSync(utilsPath, utils)
 
 let models = fs.readFileSync(modelsPath, 'utf8')
@@ -1538,6 +1554,17 @@ ask = replaceOnce(
   '        const before = await readGeminiSnapshot(page);\n        await sendGeminiMessage(page, prompt);',
   '        if (kwargs.file) await attachGeminiFile(page, kwargs.file);\n        const before = await readGeminiSnapshot(page);\n        await sendGeminiMessage(page, prompt);',
   'Gemini ask attachment call',
+)
+ask = replaceOnce(ask, '  waitForGeminiResponse,',
+  '  waitForGeminiResponse,\n  requireGeminiGeneratedReply,', 'Gemini reply validation import')
+ask = replaceOnce(ask,
+  '        return [{ response: `💬 ${response}` }];',
+  '        return [{ response: `💬 ${requireGeminiGeneratedReply(response)}` }];',
+  'Gemini generation failures are command failures',
+)
+ask = ask.replaceAll(
+  '            return [{ response: `💬 ${NO_RESPONSE_PREFIX} No Gemini response within ${timeout}s.` }];',
+  "            throw new CommandExecutionError('Gemini generation returned no response within ' + timeout + 's');",
 )
 fs.writeFileSync(askPath, ask)
 

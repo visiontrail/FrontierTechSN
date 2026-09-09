@@ -17,12 +17,23 @@ import {
   sendGeminiMessage,
   startNewGeminiChat,
   waitForGeminiResponse,
+  requireGeminiGeneratedReply,
 } from './node_modules/@jackwener/opencli/clis/gemini/utils.js'
 import {
   uploadFrame,
   uploadFrames,
   submittedVideoPrompt,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+test('Gemini generation errors fail explicitly while ordinary review content is preserved', () => {
+  for (const text of ['', 'I seem to be encountering an error. Can I try something else for you?',
+    'I encountered an error doing what you asked. Could you try again?']) {
+    assert.throws(() => requireGeminiGeneratedReply(text), /Gemini generation/)
+  }
+  const review = '{"image_received":true,"reviews":[{"issues":["An error message is visible on screen."]}]}'
+  assert.equal(requireGeminiGeneratedReply(review), review)
+  assert.equal(requireGeminiGeneratedReply('I can explain an error in your code.'), 'I can explain an error in your code.')
+})
 
 test('reapplying browser patches keeps every adapter byte-identical and recovery arguments unique', (t) => {
   const source = path.dirname(fileURLToPath(import.meta.url))
