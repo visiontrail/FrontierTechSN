@@ -146,6 +146,21 @@ test('Gemini ask does not hide unrelated native upload failures', async (t) => {
   assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
 })
 
+test('Gemini verifies a native upload acknowledgement before skipping the file transfer', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage(null)
+  page.setFileInput = async () => undefined
+  const originalEvaluate = page.evaluate
+  page.evaluate = async script => {
+    if (script.includes('const file = input.files?.[0]')) {
+      return vm.runInNewContext(script, { document: { querySelector: () => ({ files: [] }) } })
+    }
+    return originalEvaluate(script)
+  }
+  await attachGeminiFile(page, image)
+  assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
+})
+
 for (const interrupted of [false, true]) {
   test(`Gemini large-file fallback stays below the daemon limit and cleans transfer state: ${interrupted}`, async (t) => {
     const [image] = videoFrameFixture(t, ['large-contact-sheet.jpg'])
@@ -238,8 +253,8 @@ test('Gemini attachment never reports success while its preview remains unavaila
   assert.equal(previewReads, 60)
 })
 
-for (const visible of [false, true]) {
-  test(`Gemini attachment waits only for visible composer upload progress: ${visible}`, async (t) => {
+for (const scenario of ['ready', 'busy', 'unrelated-preview', 'disabled-send']) {
+  test(`Gemini attachment requires a ready preview in its own composer: ${scenario}`, async (t) => {
     const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
     const page = geminiAttachmentPage('fileChooserOpened not received')
     const originalEvaluate = page.evaluate
@@ -247,11 +262,14 @@ for (const visible of [false, true]) {
       if (!script.includes('const candidates = Array.from')) return originalEvaluate(script)
       return vm.runInNewContext(script, {
         document: {
-          querySelector() { return { innerText: '' } },
+          querySelector(selector) {
+            if (selector.includes('button')) return { disabled: scenario === 'disabled-send', getAttribute: () => null }
+            return { innerText: '', querySelectorAll: () => scenario === 'unrelated-preview' ? [] : [{ getAttribute: name => name === 'src' ? 'blob:attachment' : '' }] }
+          },
           querySelectorAll(selector) {
             if (selector.includes('progressbar')) {
               assert.match(selector, /input-container/)
-              return [{ getBoundingClientRect: () => ({ width: visible ? 24 : 0, height: visible ? 24 : 0 }) }]
+              return [{ getBoundingClientRect: () => ({ width: scenario === 'busy' ? 24 : 0, height: scenario === 'busy' ? 24 : 0 }) }]
             }
             return [{ getAttribute: name => name === 'src' ? 'blob:attachment' : '' }]
           },
@@ -259,7 +277,7 @@ for (const visible of [false, true]) {
         getComputedStyle: () => ({ visibility: 'visible' }),
       })
     }
-    if (visible) await assert.rejects(attachGeminiFile(page, image), /did not become ready/)
+    if (scenario !== 'ready') await assert.rejects(attachGeminiFile(page, image), /did not become ready/)
     else await assert.doesNotReject(attachGeminiFile(page, image))
   })
 }

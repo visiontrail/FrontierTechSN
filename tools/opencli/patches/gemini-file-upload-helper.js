@@ -134,13 +134,17 @@ export async function attachGeminiFile(page, filePath) {
     if (page.setFileInput) {
         try {
             await page.setFileInput([absPath], fileInputSelector);
-            await page.evaluate(`(() => {
+            uploaded = await page.evaluate(`(() => {
                 const input = document.querySelector(${JSON.stringify(fileInputSelector)});
-                if (!input) return false;
+                // Some bridges acknowledge setFileInput without populating the
+                // picker. Verify its actual FileList before trusting the ack.
+                if (!input) return !!document.querySelector('input-container button[aria-label="close attachment"]');
+                const file = input.files?.[0];
+                if (!file || file.name !== ${JSON.stringify(path.default.basename(absPath))} || file.size !== ${stats.size}) return false;
                 input.dispatchEvent(new Event('change', { bubbles: true }));
                 return true;
-            })()`);
-            uploaded = true;
+            })()`) === true;
+            if (!uploaded) console.error('[gemini/upload] Native upload acknowledgement had no matching file; transferring the attachment');
         } catch (error) {
             const message = String(error?.message || error);
             if (!/Not allowed|Unknown action|not supported|fileChooserOpened|file chooser/i.test(message)) {
@@ -189,14 +193,15 @@ export async function attachGeminiFile(page, filePath) {
     }
 
     const fileName = path.default.basename(absPath).toLowerCase();
+    let lastState;
     for (let attempt = 0; attempt < 60; attempt += 1) {
         await page.wait(1);
         const state = await page.evaluate(`(() => {
             const name = ${JSON.stringify(fileName)};
             const text = (document.querySelector('input-container')?.innerText || '').toLowerCase();
-            const candidates = Array.from(document.querySelectorAll(
+            const candidates = Array.from(document.querySelector('input-container')?.querySelectorAll(
                 '[data-test-id*="attachment"], [data-test-id*="file"], [class*="attachment"], [class*="file-chip"], [class*="upload-preview"], img'
-            ));
+            ) || []);
             const named = candidates.some((node) =>
                 String(node.getAttribute('aria-label') || node.getAttribute('alt') || node.textContent || '')
                     .toLowerCase().includes(name)
@@ -215,9 +220,12 @@ export async function attachGeminiFile(page, filePath) {
                 return rect.width > 0 && rect.height > 0
                     && getComputedStyle(node).visibility !== 'hidden';
             });
-            return { ready: (text.includes(name) || named || preview) && !busy };
+            const send = document.querySelector('input-container button[aria-label="Send message"], input-container button[aria-label="发送消息"]');
+            const sendReady = !!send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
+            return { ready: (text.includes(name) || named || preview) && !busy && sendReady, named, preview, busy, sendReady };
         })()`);
+        lastState = state;
         if (state?.ready) return true;
     }
-    throw new CommandExecutionError('Gemini attachment did not become ready; the review prompt was not submitted');
+    throw new CommandExecutionError('Gemini attachment did not become ready; the review prompt was not submitted: ' + JSON.stringify(lastState));
 }
