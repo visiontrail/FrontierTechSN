@@ -115,10 +115,15 @@ async def _acquire_task_footage(
     requested = int(manifest.get("requested_clip_count") or 0)
     acquired = len(manifest.get("clips") or [])
     if acquired < requested:
+        missing = ", ".join(
+            str(item.get("query") or "") for item in manifest.get("missing_queries", [])
+        )
+        detail = f"unfilled searches: {missing}. " if missing else ""
         raise RuntimeError(
             f"Public-footage acquisition incomplete: {acquired}/{requested} eligible clips; "
+            f"{detail}"
             "review footage/manifest.json for rejected candidates and search failures. "
-            "Retry footage acquisition before rendering."
+            "Retry footage acquisition to resume verified clips before rendering."
         )
     return manifest
 

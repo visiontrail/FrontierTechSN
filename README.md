@@ -23,6 +23,8 @@ All yhroot stages get ten total attempts (one initial call plus nine retries). M
 
 Each Paper-Collage clip targets the duration of its selected narration scene, capped by Gemini's configured single-generation limit (eight seconds by default). The generated assembly plays once and then holds its completed final frame for the remainder of a longer scene; neither FFmpeg nor HyperFrames replays it. Operators can change the provider ceiling under **Admin → System → Paper-collage B-roll** with `COLLAGE_GEMINI_MAX_SECONDS`.
 
+Public-footage retries resume the saved shot plan when the script, orientation, provider and requested count still match. Hybrid and YouTube clips are reused only after checksum and narration-binding checks; changed bindings require a fresh review. Exhausted searches use rejection evidence to select new directions. When URL inspection is unavailable, up to four labelled contact sheets share one Gemini request, with a separate suitability verdict for each candidate. Missing shots still block rendering. The task's `footage/manifest.json` records missing searches, rejections and invalidated clips, and `footage/history/` retains earlier ledgers.
+
 ## Source roster
 
 The catalog lives in [`config/news_sources.json`](config/news_sources.json). The 23-source roster combines bilingual specialist sources with Bloomberg, Financial Times, The Wall Street Journal, CNBC Technology, BBC Technology, TechCrunch, The Verge, WIRED, MIT Technology Review, Nature, a16z, and Sequoia Capital. The Signal board uses the enabled catalog count and shows reporting, aggregators, institutional viewpoints, and access notes.

@@ -1,5 +1,6 @@
 import json
 import unittest
+import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
@@ -7,6 +8,12 @@ from unittest.mock import AsyncMock, patch
 from backend import config
 from backend.pipeline import web_footage
 from backend.pipeline.opencli import OpenCLIResult
+
+
+@pytest.fixture(autouse=True)
+def isolate_search_repair_provider(monkeypatch):
+    monkeypatch.setattr('backend.pipeline.footage._resolve_provider', AsyncMock(return_value=('endpoint', 'model', 'key')))
+    monkeypatch.setattr('backend.pipeline.footage._chat', AsyncMock(return_value='{"queries":[]}'))
 
 
 class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
@@ -583,7 +590,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["errors"][0]["candidate_attempt"], 1)
 
-    async def test_supplement_uses_short_stock_variant_after_primary_candidates_fail(self):
+    async def test_supplement_repairs_search_using_failure_evidence(self):
         with TemporaryDirectory() as directory:
             task_dir = Path(directory)
             (task_dir / "footage").mkdir()
@@ -611,7 +618,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
             }]
 
             async def fake_search(query):
-                return stock if query.endswith("stock footage") else primary
+                return stock if query == "semiconductor manufacturing cleanroom" else primary
 
             async def fake_download(candidate, raw_dir, _analysis):
                 if "blocked" in candidate["source_page_url"]:
@@ -624,6 +631,8 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
                 destination.write_bytes(b"trimmed-video")
 
             with (
+                patch('backend.pipeline.footage._resolve_provider', AsyncMock(return_value=('endpoint', 'model', 'key'))),
+                patch('backend.pipeline.footage._chat', AsyncMock(return_value='{"queries":["semiconductor manufacturing cleanroom"]}')) as repair,
                 patch.object(
                     web_footage,
                     "search_youtube",
@@ -661,7 +670,9 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(result["status"], "ready")
-        self.assertEqual(result["clips"][0]["query"], "chip factory stock footage")
+        self.assertEqual(result["clips"][0]["query"], "semiconductor manufacturing cleanroom")
+        self.assertEqual(result["clips"][0]["plan_query"], "chip factory")
+        self.assertIn('403 Forbidden', repair.await_args.args[1])
         self.assertEqual(download.await_count, 4)
         self.assertEqual(search.await_count, 4)
 

@@ -132,11 +132,14 @@ def _script_purpose_for_query(query: str, script: str) -> str:
         }
 
     query_terms = terms(query)
+    ordered = [match_term(word) for word in WORD_RE.findall(query)
+               if word.casefold() not in PURPOSE_MATCH_STOPWORDS]
+    weights = {word: len(ordered) - index for index, word in reversed(list(enumerate(ordered)))}
     if not query_terms:
         return ""
     sentences = [
         sentence.strip()
-        for sentence in re.split(r"(?<=[.!?。！？])\s+", script)
+        for sentence in re.split(r"(?<!\b[A-Z]\.)(?<=[.!?。！？])\s+", script)
         if sentence.strip()
     ]
     scored = []
@@ -144,8 +147,8 @@ def _script_purpose_for_query(query: str, script: str) -> str:
         sentence_terms = terms(sentence)
         overlap = query_terms & sentence_terms
         if overlap:
-            scored.append((len(overlap), -index, sentence))
-    return max(scored, default=(0, 0, ""))[2]
+            scored.append((len(overlap), sum(weights.get(word, 1) for word in overlap), -index, sentence))
+    return max(scored, default=(0, 0, 0, ""))[3]
 
 
 def _storyboard_scene_purposes(task_dir: Path) -> dict[str, str]:
@@ -255,6 +258,8 @@ def _parse_plan(value: str, count: int | None) -> list[dict[str, str]]:
             continue
         seen.add(key)
         output.append({"query": query, "purpose": purpose})
+        if isinstance(item, dict) and item.get("script_excerpt"):
+            output[-1]["script_excerpt"] = str(item["script_excerpt"]).strip()
         if count is not None and len(output) >= count:
             break
     if not output and count is not None:
@@ -407,9 +412,20 @@ def _distinct_grounded_plan(
         # Select its query-matching sentence, rather than rewarding the longest
         # sentence for overlapping the entire purpose.
         scope = purpose if purpose and purpose in script else script
-        excerpt = _script_purpose_for_query(query, scope)
+        if purpose and purpose not in script:
+            # The visual query may deliberately use generic objects. First
+            # locate the story using the planner's entity-rich purpose, then
+            # match the visual within that story rather than the whole edition.
+            anchor = _script_purpose_for_query(purpose, script)
+            paragraphs = re.split(r"\n\s*\n|\n+", script)
+            scope = next((part for part in paragraphs if anchor and anchor in part), script)
+        supplied_excerpt = str(raw.get("script_excerpt") or "").strip()
+        excerpt = (
+            supplied_excerpt if supplied_excerpt and supplied_excerpt in scope
+            else _script_purpose_for_query(query, scope)
+        )
         if not excerpt:
-            excerpt = _script_purpose_for_query(purpose, script)
+            excerpt = _script_purpose_for_query(purpose, scope)
         if (
             _is_program_bookend(purpose) or _is_program_bookend(excerpt)
             or (excerpt and any(excerpt in paragraph for paragraph in bookends))
@@ -1135,6 +1151,100 @@ async def acquire_public_footage(
     return manifest
 
 
+def _resume_web_manifest(
+    task_dir: Path, *, provider: str, script: str, orientation: str,
+    clip_count: int | None,
+) -> dict | None:
+    """Resume the same plan only with intact, still-bound reviewed artifacts."""
+    previous = read_manifest(task_dir)
+    expected_provider = {"hybrid": "hybrid-youtube", "opencli_web": "youtube-web"}.get(provider)
+    if not previous or previous.get("provider_id") != expected_provider:
+        return None
+    if previous.get("orientation") != orientation or not previous.get("queries"):
+        return None
+    digest = hashlib.sha256(script.encode()).hexdigest()
+    old_digest = previous.get("script_sha256")
+    if old_digest and old_digest != digest:
+        return None
+    if clip_count is not None and previous.get("requested_clip_count") != clip_count:
+        return None
+    if (clip_count is None) != (previous.get("selection_mode") == "ai"):
+        return None
+    if not old_digest and any(
+        not shot.get("script_excerpt") or shot["script_excerpt"] not in script
+        for shot in previous["queries"]
+    ):
+        return None
+    # Keep the original ledger before migrating legacy narration bindings.
+    snapshot = json.dumps(previous, sort_keys=True, ensure_ascii=False)
+    history = task_dir / "footage" / "history"
+    history.mkdir(exist_ok=True)
+    (history / f"manifest-{hashlib.sha256(snapshot.encode()).hexdigest()[:16]}.json").write_text(
+        snapshot, encoding="utf-8",
+    )
+    plan = previous["queries"]
+    if previous.get("binding_version") != 2:
+        old_bindings = {shot["query"].casefold(): shot.get("script_excerpt", "") for shot in plan}
+        for error in previous.get("errors", []):
+            query = str(error.get("plan_query") or error.get("query") or "").removesuffix(" stock footage").casefold()
+            if error.get("source_page_url") and query in old_bindings:
+                error.setdefault("script_excerpt", old_bindings[query])
+        plan = _distinct_grounded_plan(
+            [{k: v for k, v in shot.items() if k != "script_excerpt"} for shot in plan],
+            script, None, allow_same_scene=clip_count is None,
+        )
+        if len(plan) != len(previous["queries"]):
+            return None
+    by_query = {shot["query"].casefold(): shot for shot in plan}
+    root = task_dir.resolve()
+    reusable = []
+    invalidated = []
+    used_sources: set[str] = set()
+    used_queries: set[str] = set()
+    from backend.pipeline.web_footage import analysis_rejection
+
+    for clip in previous.get("clips") or []:
+        if not isinstance(clip, dict):
+            continue
+        query = str(clip.get("plan_query") or clip.get("query") or "")
+        shot = by_query.get(query.casefold()) or by_query.get(query.removesuffix(" stock footage").casefold())
+        path = (task_dir / str(clip.get("local_path") or "")).resolve()
+        reason = ""
+        source = str(clip.get("source_page_url") or "")
+        if not shot or clip.get("script_excerpt") != shot.get("script_excerpt"):
+            reason = "Narration binding changed; a fresh visual review is required"
+        elif not source or source in used_sources or shot["query"] in used_queries:
+            reason = "Missing or duplicate source/shot identity"
+        elif root not in path.parents or not path.is_file():
+            reason = "Local artifact missing or outside task directory"
+        elif not clip.get("sha256") or _file_sha256(path) != clip["sha256"]:
+            reason = "Artifact checksum mismatch"
+        elif clip.get("platform") == "youtube" or clip.get("provider_id") == "youtube-ytdlp":
+            analysis = clip.get("analysis") or {}
+            reason = analysis_rejection(analysis)
+            if analysis.get("analyzer") == "gemini-web-contact-sheet" and (
+                analysis.get("image_received") is not True
+                or analysis.get("suitable") is not True
+                or not analysis.get("visible_content")
+            ):
+                reason = "Missing explicit preview review evidence"
+        elif not _is_open_license(str(clip.get("license") or "")):
+            reason = "Missing open-license evidence"
+        if reason:
+            invalidated.append({**clip, "invalidation_reason": reason})
+        else:
+            reusable.append({**clip, "plan_query": shot["query"]})
+            used_sources.add(source)
+            used_queries.add(shot["query"])
+    previous.setdefault("invalidated_clips", []).extend(invalidated)
+    previous.update(
+        clips=reusable, queries=plan, script_sha256=digest, binding_version=2,
+        status="searching", updated_at=_now(),
+    )
+    _write_manifest(task_dir, previous)
+    return previous
+
+
 async def acquire_footage(
     *,
     media_provider: str,
@@ -1159,6 +1269,23 @@ async def acquire_footage(
     provider = (media_provider or "wikimedia").strip().lower()
     script = script_path.read_text(encoding="utf-8")
     automatic = clip_count is None
+    if provider in {"hybrid", "opencli_web"} and config.WEB_FOOTAGE_ENABLED and not supplied_queries:
+        resumed = _resume_web_manifest(
+            task_dir, provider=provider, script=script, orientation=orientation,
+            clip_count=clip_count,
+        )
+        if resumed is not None:
+            fulfilled = {clip["plan_query"].casefold() for clip in resumed["clips"]}
+            pending = [shot for shot in resumed["queries"] if shot["query"].casefold() not in fulfilled]
+            _emit(log, f"Public footage resume: reused {len(resumed['clips'])} verified clips; {len(pending)} planned shots remain")
+            from backend.pipeline.web_footage import supplement_web_footage
+
+            return await supplement_web_footage(
+                task_dir=task_dir, manifest=resumed, query_plan=pending,
+                target_total=resumed["requested_clip_count"], orientation=orientation,
+                script=script, log=log, provider_id=provider_id,
+                ai_endpoint=ai_endpoint, ai_model=ai_model,
+            )
     automatic_plan: list[dict[str, str]] | None = None
     automatic_planner = ""
     if automatic:
@@ -1267,6 +1394,8 @@ async def acquire_footage(
     manifest["queries"] = query_plan
     manifest["selection_mode"] = "ai" if automatic else "explicit"
     manifest["planned_clip_count"] = clip_count
+    manifest["script_sha256"] = hashlib.sha256(script.encode()).hexdigest()
+    manifest["binding_version"] = 2
     _write_manifest(task_dir, manifest)
 
     # Lazy import avoids a module cycle: web_footage reuses the query/search
@@ -1299,4 +1428,7 @@ async def acquire_footage(
         orientation=orientation,
         script=script,
         log=log,
+        provider_id=provider_id,
+        ai_endpoint=ai_endpoint,
+        ai_model=ai_model,
     )
