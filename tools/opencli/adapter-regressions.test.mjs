@@ -1191,6 +1191,50 @@ test('Gemini does not click twice when the first click submits but reports an er
   assert.equal(clickCount, 1)
 })
 
+for (const scenario of ['ready', 'disabled', 'generating', 'changed-text']) {
+test(`Gemini DOM submit recovery respects ${scenario} composer state`, async () => {
+  let composerText = ''
+  let domClicks = 0
+  class Element {}
+  const button = Object.assign(new Element(), {
+    disabled: scenario === 'disabled',
+    textContent: scenario === 'generating' ? 'Stop response' : 'Send message',
+    getAttribute() { return null },
+    getBoundingClientRect() { return { width: 48, height: 48 } },
+    click() { domClicks += 1; composerText = '' },
+  })
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app/test'
+      if (script.includes('bestButton instanceof HTMLElement')) {
+        return { action: 'button', label: 'Send message', x: 123, y: 456 }
+      }
+      if (script.includes('hasText: actual.length > 0')) return { hasText: !!composerText, actual: composerText }
+      if (script.includes('Could not find Gemini composer')) return { ok: true }
+      if (script.includes('const expectedComposerText')) {
+        return vm.runInNewContext(script, {
+          HTMLElement: Element,
+          document: { querySelector: (selector) => selector.includes('composer') ? { innerText: composerText } : button },
+          getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+        })
+      }
+      throw new Error(`Unexpected Gemini evaluate script: ${String(script).slice(0, 100)}`)
+    },
+    async fillText(_selector, text) { composerText = text; return { verified: true, actual: text } },
+    async click() { if (scenario === 'changed-text') composerText = 'A different prompt' },
+    async nativeClick() {},
+    async wait() {},
+  }
+  if (scenario === 'ready') {
+    assert.equal(await sendGeminiMessage(page, 'hello'), 'button')
+    assert.equal(domClicks, 1)
+  } else {
+    await assert.rejects(sendGeminiMessage(page, 'hello'), /did not accept the composer submission/)
+    assert.equal(domClicks, 0)
+  }
+})
+}
+
 test('Gemini waits for a delayed composer-clear acknowledgement after submit', async () => {
   let composerText = ''
   let submitted = false

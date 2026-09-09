@@ -598,6 +598,56 @@ utils = replaceWithinFunction(
   exactGeminiVerifiedFill,
   'Gemini write-once exact composer fill',
 )
+if (!utils.includes('const dispatchPreparedGeminiSubmit = async () =>')) {
+  const start = utils.indexOf('export async function sendGeminiMessage(page, text) {')
+  const end = utils.indexOf('function normalizeGeminiExportUrls(value) {', start)
+  if (start < 0 || end < 0) throw new Error('Gemini submit recovery boundary was not found')
+  let section = utils.slice(start, end)
+  const recovery = `    const dispatchPreparedGeminiSubmit = async () => {
+        const fresh = await page.evaluate(submitComposerScript());
+        if (fresh?.action !== 'button' || !/send|submit|发送|提交/i.test(String(fresh.label || '')))
+            return false;
+        const clicked = await page.evaluate(\`(() => {
+            const expectedComposerText = \${JSON.stringify(expectedText)};
+            const composer = document.querySelector('[data-opencli-gemini-composer="1"]');
+            const button = document.querySelector('[data-opencli-gemini-submit="1"]');
+            const actual = String(composer?.innerText || composer?.textContent || '').replace(/\\\\s+/g, ' ').trim();
+            if (actual !== expectedComposerText || !(button instanceof HTMLElement)) return false;
+            const label = ((button.getAttribute('aria-label') || '') + ' ' + (button.textContent || '')).trim();
+            if (!/send|submit|发送|提交/i.test(label) || /stop|停止/i.test(label)) return false;
+            if (button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+            const rect = button.getBoundingClientRect();
+            const style = getComputedStyle(button);
+            if (!rect.width || !rect.height || style.display === 'none' || style.visibility === 'hidden') return false;
+            button.click();
+            return true;
+        })()\`);
+        const accepted = clicked === true && await waitForComposerClear();
+        if (accepted) console.error('[gemini/submit] Prepared DOM button accepted the pending composer');
+        return accepted;
+    };
+`
+  section = replaceOnce(section,
+    "    if (submitAction?.action === 'button') {",
+    recovery + "    if (submitAction?.action === 'button') {",
+    'Gemini state-checked DOM submit recovery',
+  )
+  section = section.replaceAll(
+    "throw new CommandExecutionError('Gemini did not accept the composer submission');",
+    "if (await dispatchPreparedGeminiSubmit()) return 'button';\n                throw new CommandExecutionError('Gemini did not accept the composer submission');",
+  )
+  utils = utils.slice(0, start) + section + utils.slice(end)
+}
+utils = replaceWithinFunction(
+  utils,
+  'export async function sendGeminiMessage(page, text) {',
+  'function normalizeGeminiExportUrls(value) {',
+  '        return clicked === true && await waitForComposerClear();',
+  `        const accepted = clicked === true && await waitForComposerClear();
+        if (accepted) console.error('[gemini/submit] Prepared DOM button accepted the pending composer');
+        return accepted;`,
+  'Gemini confirmed DOM submit diagnostic',
+)
 utils = replaceOnce(
   utils,
   `        const expectedVariant = String(modelId).replace(/^\\d+(?:\\.\\d+)?-/, '').toLowerCase();
