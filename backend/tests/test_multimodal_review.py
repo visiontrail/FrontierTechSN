@@ -4,11 +4,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from PIL import Image
 
 from backend import config
 from backend.pipeline import multimodal_review
-from backend.pipeline.opencli import OpenCLIResult
+from backend.pipeline.opencli import OpenCLIError, OpenCLIResult
 
 
 def _scene(scene_id: str, start: float, text: str) -> dict:
@@ -171,6 +172,33 @@ def test_response_payload_can_recover_json_wrapper_from_stderr():
     wrapped = json.dumps([{"response": json.dumps(payload)}])
 
     assert multimodal_review._response_payload(f"plain stdout\n{wrapped}") == payload
+
+
+def test_response_payload_recovers_complete_envelope_after_abandoned_scene_prefix():
+    scenes = [_scene("scene-01", 0, "Gold rises."), _scene("scene-02", 8, "Rates fall.")]
+    payload = _matching_payload(scenes, 90)
+    prefix = '{"image_received":true,"reviews":[' + json.dumps(payload["reviews"][0]) + ",\n"
+    wrapped = json.dumps([{"response": prefix + "```json\n" + json.dumps(payload)}])
+    assert multimodal_review._response_payload(wrapped) == payload
+
+
+def test_response_payload_does_not_choose_between_conflicting_complete_reviews():
+    scenes = [_scene("scene-01", 0, "Gold rises.")]
+    first = _matching_payload(scenes, 30)
+    second = _matching_payload(scenes, 90)
+    wrapped = json.dumps([{"response": json.dumps(first) + "\n" + json.dumps(second)}])
+    with pytest.raises(OpenCLIError, match="exactly one complete review"):
+        multimodal_review._response_payload(wrapped)
+
+
+def test_recovered_review_still_rejects_missing_image_and_scenes(tmp_path):
+    scenes = [_scene("scene-01", 0, "Gold rises."), _scene("scene-02", 8, "Rates fall.")]
+    payload = _matching_payload(scenes[:1], 90)
+    payload["image_received"] = False
+    wrapped = json.dumps([{"response": '{"abandoned":' + json.dumps(payload)}])
+    recovered = multimodal_review._response_payload(wrapped)
+    normalized = multimodal_review.normalise_batch(recovered, _frames(tmp_path, scenes), 70)
+    assert not multimodal_review._batch_is_valid(normalized)
 
 
 class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
