@@ -665,6 +665,29 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(opencli.await_args_list[1].args[0][0], "chatgpt")
             self.assertEqual(report["batches"][0]["review_provider"], "chatgpt")
 
+    async def test_resumed_unavailable_review_tries_fallback_first_without_overriding_rejection(self):
+        for outcome in ("match", "partial", "unavailable"):
+            with self.subTest(outcome=outcome), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
+                payload = _matching_payload(scenes, 90 if outcome == "match" else 65)
+                if outcome == "partial":
+                    payload["reviews"][0].update(verdict="partial", issues=["Missing price."], suggested_visual="Show the price.")
+                first = OpenCLIError("ChatGPT unavailable") if outcome == "unavailable" else _opencli_result(payload)
+                call = AsyncMock(side_effect=[first, _opencli_result(_matching_payload(scenes, 90))])
+                with patch.object(multimodal_review, "run_opencli", call), patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "chatgpt"):
+                    normalized, attempts, error = await multimodal_review._review_batch(
+                        title="Gold", batch_frames=_frames(root, scenes), sheet=root / "sheet.jpg",
+                        match_floor=70, minimum_average_score=82, timeout=120,
+                        maximum_retries=2, batch_index=1, phase="initial", log=None,
+                        prefer_fallback=True,
+                    )
+                self.assertEqual(call.await_args_list[0].args[0][0], "chatgpt")
+                self.assertEqual(attempts, 2 if outcome == "unavailable" else 1)
+                self.assertEqual(error, "")
+                self.assertEqual(normalized["reviews"][0]["passed"], outcome != "partial")
+                self.assertEqual(normalized["review_provider"], "gemini" if outcome == "unavailable" else "chatgpt")
+
     async def test_unavailable_review_overwrites_stale_response_and_keeps_last_error(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

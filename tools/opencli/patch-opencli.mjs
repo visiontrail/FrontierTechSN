@@ -1494,6 +1494,34 @@ chatgptUtils = replaceWithinFunction(
         }`,
   'ChatGPT range fallback after a failed switch',
 )
+chatgptUtils = replaceOnce(chatgptUtils,
+  `export async function startNewChat(page) {
+    await page.goto(\`\${CHATGPT_URL}/new\`, { settleMs: 2000 });
+    try {
+        await page.wait({ selector: COMPOSER_WAIT_SELECTOR, timeout: 8 });
+    } catch {
+        // Composer didn't mount; downstream ensureChatGPTComposer surfaces a typed error.
+    }
+}`,
+  `export async function startNewChat(page) {
+    const target = \`\${CHATGPT_URL}/new\`;
+    await page.goto(target, { settleMs: 2000 });
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            await page.wait({ selector: COMPOSER_WAIT_SELECTOR, timeout: 30 });
+        } catch { /* Inspect navigation and login state before choosing recovery. */ }
+        const state = await getPageState(page);
+        if (state.hasComposer || state.hasLoginGate) return;
+        const url = await currentChatGPTUrl(page);
+        if (attempt === 0 && (!url || url === 'about:blank')) {
+            await page.goto(target, { settleMs: 2000 });
+            continue;
+        }
+        throw new CommandExecutionError('ChatGPT new conversation did not finish loading: ' + (url || 'unknown URL'));
+    }
+}`,
+  'ChatGPT fresh navigation readiness and blank-page recovery',
+)
 fs.writeFileSync(chatgptUtilsPath, chatgptUtils)
 
 let ask = fs.readFileSync(askPath, 'utf8')

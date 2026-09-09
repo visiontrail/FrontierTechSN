@@ -324,6 +324,7 @@ def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, 
         assert Path(result).read_bytes() == b"rendered video"
         assert json.loads((tmp_path / "av_sync_report.json").read_text())["passed"] is True
         review.assert_awaited_once()
+        assert review.await_args.kwargs["prefer_fallback"] is True
     else:
         assert result is None
         review.assert_not_awaited()

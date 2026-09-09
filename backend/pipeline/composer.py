@@ -1232,7 +1232,11 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
     except (OSError, ValueError, KeyError, TypeError):
         return None
     emit("Visual review: resuming the unchanged rendered candidate after provider unavailability")
-    review = await multimodal_review.review_video(candidate, board, directory, log=emit)
+    # A resumed unavailable review has already exhausted the primary path.
+    # Give the configured fallback one chance before repeating that cycle.
+    review = await multimodal_review.review_video(
+        candidate, board, directory, log=emit, prefer_fallback=True
+    )
     _finalize_quality_report(report, board["alignment"], report["visual_grounding"], review, multimodal_enabled=True)
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
     return str(_promote_quality_gated_candidate(candidate, report_path, directory, digest, report))

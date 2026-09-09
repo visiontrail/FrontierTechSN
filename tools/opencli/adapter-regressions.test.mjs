@@ -7,7 +7,7 @@ import vm from 'node:vm'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { isGenerating, selectChatGPTModel, uploadChatGPTImages } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { isGenerating, selectChatGPTModel, uploadChatGPTImages, startNewChat } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
 import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
@@ -34,6 +34,25 @@ test('Gemini generation errors fail explicitly while ordinary review content is 
   assert.equal(requireGeminiGeneratedReply(review), review)
   assert.equal(requireGeminiGeneratedReply('I can explain an error in your code.'), 'I can explain an error in your code.')
 })
+
+for (const outcome of ['loaded', 'blank', 'login', 'conversation']) {
+test(`ChatGPT new chat distinguishes stalled navigation from login: ${outcome}`, async () => {
+  let navigations = 0
+  const page = {
+    async goto(url) { assert.equal(url, 'https://chatgpt.com/new'); navigations++ },
+    async wait() { throw new Error('Composer has not mounted yet') },
+    async evaluate(script) {
+      const loaded = outcome === 'loaded' && navigations === 2
+      if (script === 'window.location.href') return outcome === 'conversation' ? 'https://chatgpt.com/c/existing' : 'about:blank'
+      if (script.includes('hasLoginGate')) return { hasComposer: loaded, hasLoginGate: outcome === 'login', isLoggedIn: outcome !== 'login' }
+      throw new Error('Unexpected navigation script')
+    },
+  }
+  if (['loaded', 'login'].includes(outcome)) await startNewChat(page)
+  else await assert.rejects(startNewChat(page), /did not finish loading/)
+  assert.equal(navigations, ['loaded', 'blank'].includes(outcome) ? 2 : 1)
+})
+}
 
 test('reapplying browser patches keeps every adapter byte-identical and recovery arguments unique', (t) => {
   const source = path.dirname(fileURLToPath(import.meta.url))

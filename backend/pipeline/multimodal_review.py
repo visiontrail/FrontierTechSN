@@ -500,12 +500,14 @@ async def _review_batch(
     batch_index: int,
     phase: str,
     log: LogCallback | None,
+    prefer_fallback: bool = False,
 ) -> tuple[dict, int, str]:
     """Run one bounded OpenCLI batch and retain the last invalid proof for audit."""
     normalized: dict | None = None
     last_normalized: dict | None = None
     last_error = ""
     attempts = 0
+    last_provider = "gemini"
     prompt = _review_prompt(
         title, batch_frames, match_floor, minimum_average_score,
         aggregate_calibration=phase == "aggregate_calibration",
@@ -534,66 +536,14 @@ async def _review_batch(
             except OSError:
                 pass
 
-    for attempt in range(maximum_retries + 1):
-        attempts = attempt + 1
-        result = None
-        try:
-            prompt = _review_prompt(
-                title,
-                batch_frames,
-                match_floor,
-                minimum_average_score,
-                aggregate_calibration=phase == "aggregate_calibration",
-            )
-            result = await run_opencli(
-                _review_command("gemini", prompt, sheet, timeout),
-                timeout=timeout + 90,
-            )
-            _persist_provider_response(
-                sheet,
-                phase=phase,
-                batch_index=batch_index,
-                attempt=attempts,
-                provider="gemini",
-                stdout=result.stdout,
-                stderr=result.stderr,
-            )
-            payload = _response_payload(f"{result.stdout}\n{result.stderr}")
-            normalized = normalise_batch(payload, batch_frames, match_floor)
-            if _batch_is_valid(normalized):
-                normalized["review_provider"] = "gemini"
-                cache_review("gemini", payload)
-                return normalized, attempts, ""
-            last_normalized = normalized
-            raise OpenCLIError(
-                "Gemini omitted the image, required scene ids, or a score/verdict "
-                "row violated the requested review rubric"
-            )
-        except Exception as exc:  # noqa: BLE001 - bounded web retry
-            last_error = str(exc)
-            normalized = None
-            if result is None:
-                _persist_provider_response(
-                    sheet, phase=phase, batch_index=batch_index,
-                    attempt=attempts, provider="gemini", stdout="", stderr=last_error,
-                )
-            if attempt < maximum_retries:
-                _emit(
-                    log,
-                    f"Gemini A/V review: retrying {phase} batch {batch_index} "
-                    f"after unusable response ({last_error})",
-                )
-            else:
-                _emit(
-                    log,
-                    f"Gemini A/V review: exhausted {phase} batch {batch_index} "
-                    f"after unusable response ({last_error})",
-                )
-
     fallback_provider = str(
         getattr(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "") or ""
     ).strip().casefold()
-    if fallback_provider in {"chatgpt"}:
+    async def try_fallback() -> tuple[dict, int, str] | None:
+        nonlocal attempts, last_error, last_normalized, last_provider
+        if fallback_provider != "chatgpt":
+            return None
+        last_provider = fallback_provider
         attempts += 1
         result = None
         try:
@@ -628,6 +578,7 @@ async def _review_batch(
                 normalized["review_provider"] = fallback_provider
                 cache_review(fallback_provider, payload)
                 return normalized, attempts, ""
+            normalized["review_provider"] = fallback_provider
             last_normalized = normalized
             raise OpenCLIError(
                 f"{fallback_provider} omitted the image, required scene ids, or "
@@ -641,15 +592,83 @@ async def _review_batch(
                     attempt=attempts, provider=fallback_provider,
                     stdout="", stderr=last_error,
                 )
+        return None
+
+    if prefer_fallback:
+        recovered = await try_fallback()
+        if recovered is not None:
+            return recovered
+
+    for attempt in range(maximum_retries + 1):
+        attempts += 1
+        last_provider = "gemini"
+        result = None
+        try:
+            prompt = _review_prompt(
+                title,
+                batch_frames,
+                match_floor,
+                minimum_average_score,
+                aggregate_calibration=phase == "aggregate_calibration",
+            )
+            result = await run_opencli(
+                _review_command("gemini", prompt, sheet, timeout),
+                timeout=timeout + 90,
+            )
+            _persist_provider_response(
+                sheet,
+                phase=phase,
+                batch_index=batch_index,
+                attempt=attempts,
+                provider="gemini",
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+            payload = _response_payload(f"{result.stdout}\n{result.stderr}")
+            normalized = normalise_batch(payload, batch_frames, match_floor)
+            if _batch_is_valid(normalized):
+                normalized["review_provider"] = "gemini"
+                cache_review("gemini", payload)
+                return normalized, attempts, ""
+            normalized["review_provider"] = "gemini"
+            last_normalized = normalized
+            raise OpenCLIError(
+                "Gemini omitted the image, required scene ids, or a score/verdict "
+                "row violated the requested review rubric"
+            )
+        except Exception as exc:  # noqa: BLE001 - bounded web retry
+            last_error = str(exc)
+            normalized = None
+            if result is None:
+                _persist_provider_response(
+                    sheet, phase=phase, batch_index=batch_index,
+                    attempt=attempts, provider="gemini", stdout="", stderr=last_error,
+                )
+            if attempt < maximum_retries:
+                _emit(
+                    log,
+                    f"Gemini A/V review: retrying {phase} batch {batch_index} "
+                    f"after unusable response ({last_error})",
+                )
+            else:
+                _emit(
+                    log,
+                    f"Gemini A/V review: exhausted {phase} batch {batch_index} "
+                    f"after unusable response ({last_error})",
+                )
+
+    if not prefer_fallback:
+        recovered = await try_fallback()
+        if recovered is not None:
+            return recovered
     if last_normalized is not None:
-        last_normalized["review_provider"] = fallback_provider or "gemini"
         return last_normalized, attempts, last_error
     unavailable = normalise_batch(
             {"image_received": False, "reviews": []},
             batch_frames,
             match_floor,
         )
-    unavailable["review_provider"] = fallback_provider or "gemini"
+    unavailable["review_provider"] = last_provider
     return (
         unavailable,
         attempts,
@@ -690,6 +709,7 @@ async def review_video(
     task_dir: str | Path,
     *,
     log: LogCallback | None = None,
+    prefer_fallback: bool = False,
 ) -> dict:
     """Review the rendered pixels against narration and return a release gate."""
     directory = Path(task_dir).resolve()
@@ -754,6 +774,7 @@ async def review_video(
             batch_index=batch_index,
             phase="initial",
             log=log,
+            prefer_fallback=prefer_fallback,
         )
         if last_error:
             errors.append(f"batch {batch_index}: {last_error}")
@@ -834,6 +855,7 @@ async def review_video(
                 batch_index=batch_index,
                 phase="aggregate_calibration",
                 log=log,
+                prefer_fallback=prefer_fallback,
             )
             if last_error:
                 calibration_errors.append(
