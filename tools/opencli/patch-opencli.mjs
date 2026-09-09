@@ -54,7 +54,7 @@ function replaceOnce(source, before, after, label) {
   if (!source.includes(before)) {
     throw new Error(`OpenCLI ${label} patch anchor was not found; pinned upstream changed`)
   }
-  return source.replace(before, after)
+  return source.replace(before, () => after)
 }
 
 function replaceWithinFunction(source, signature, nextSignature, before, after, label) {
@@ -775,6 +775,68 @@ models = replaceOnce(
 fs.writeFileSync(modelsPath, models)
 
 let chatgptUtils = fs.readFileSync(chatgptUtilsPath, 'utf8')
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  'export async function uploadChatGPTImages(page, imagePaths) {',
+  'export async function isGenerating(page) {',
+  '    const fileNames = absPaths.map(filePath => path.default.basename(filePath));',
+  `    const fileNames = absPaths.map(filePath => path.default.basename(filePath));
+    const imageInputSelector = 'input[data-opencli-chatgpt-image-input="1"]';
+    let imageInputReady = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+        imageInputReady = unwrapEvaluateResult(await page.evaluate(\`(() => {
+            const composer = document.querySelector('#prompt-textarea');
+            const scope = composer?.closest('form')?.parentElement || composer?.parentElement;
+            if (!scope) return false;
+            const reactiveInputs = Array.from(scope.querySelectorAll('input[type="file"]')).filter(input => {
+                const propsKey = Object.keys(input).find(key => key.startsWith('__reactProps$'));
+                return !input.disabled && input.accept.includes('image/') && typeof input[propsKey]?.onChange === 'function';
+            });
+            if (!reactiveInputs.length) return false;
+            document.querySelectorAll('[data-opencli-chatgpt-image-input]').forEach(input => input.removeAttribute('data-opencli-chatgpt-image-input'));
+            reactiveInputs[0].setAttribute('data-opencli-chatgpt-image-input', '1');
+            return true;
+        })()\`)) === true;
+        if (imageInputReady) break;
+        await page.sleep(0.25);
+    }
+    if (!imageInputReady) return { ok: false, reason: 'ChatGPT composer image input did not hydrate' };`,
+  'ChatGPT image upload selects the hydrated composer input',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function uploadChatGPTImages(page, imagePaths) {', 'export async function isGenerating(page) {',
+  "await page.setFileInput(absPaths, 'input[type=\"file\"]');", 'await page.setFileInput(absPaths, imageInputSelector);',
+  'ChatGPT native image upload input scope',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function uploadChatGPTImages(page, imagePaths) {', 'export async function isGenerating(page) {',
+  "const input = document.querySelector('input[type=\"file\"]');", "const input = document.querySelector('input[data-opencli-chatgpt-image-input=\"1\"]');",
+  'ChatGPT compatible image upload input scope',
+)
+{
+  const start = chatgptUtils.indexOf('async function waitForChatGPTUploadPreview(page, fileNames) {')
+  const end = chatgptUtils.indexOf('export async function uploadChatGPTImages(page, imagePaths) {', start)
+  if (start < 0 || end < 0) throw new Error('ChatGPT image preview confirmation boundary was not found')
+  chatgptUtils = chatgptUtils.slice(0, start) + `async function waitForChatGPTUploadPreview(page, fileNames) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+        await page.sleep(1);
+        const ready = unwrapEvaluateResult(await page.evaluate(\`(() => {
+            const names = \${JSON.stringify(fileNames)};
+            const composer = document.querySelector('#prompt-textarea');
+            const scope = composer?.closest('form')?.parentElement || composer?.parentElement;
+            if (!scope) return false;
+            const labels = Array.from(scope.querySelectorAll('button[aria-label]')).map(button => button.getAttribute('aria-label') || '');
+            const matchedNames = names.filter(name => labels.some(label => label.includes(name))).length;
+            const send = scope.querySelector('[data-testid="send-button"]');
+            return matchedNames === names.length && !!send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
+        })()\`));
+        if (ready === true) return true;
+    }
+    return false;
+}
+
+` + chatgptUtils.slice(end)
+}
 chatgptUtils = replaceWithinFunction(
   chatgptUtils,
   'export async function uploadChatGPTImages(page, imagePaths) {',

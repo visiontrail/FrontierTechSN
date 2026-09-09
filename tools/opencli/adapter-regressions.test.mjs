@@ -76,6 +76,7 @@ test(`ChatGPT image upload recovers only supported native-picker failures: ${nat
     async setFileInput() { throw new Error(nativeError) },
     async sleep() {},
     async evaluate(script) {
+      if (script.includes('const reactiveInputs')) return true
       if (script.includes('const dt = new DataTransfer()')) { transfers++; return { ok: true } }
       if (script.includes('matchedNames')) return true
       throw new Error('Unexpected upload operation')
@@ -88,6 +89,32 @@ test(`ChatGPT image upload recovers only supported native-picker failures: ${nat
     await assert.rejects(uploadChatGPTImages(page, [image]), /Browser target crashed/)
     assert.equal(transfers, 0)
   }
+})
+}
+
+for (const hydrated of [false, true]) {
+test(`ChatGPT selects the active image callback instead of the first generic file input: ${hydrated}`, async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  let selected = -1, nativeCalls = 0
+  const inputs = [
+    { accept: '', __reactProps$x: { onChange: null } },
+    { accept: 'image/*', __reactProps$x: { onChange: hydrated ? () => {} : null } },
+  ].map((input, index) => ({ ...input, disabled: false, setAttribute() { selected = index } }))
+  const scope = { querySelectorAll: () => inputs }
+  const composer = { closest: () => ({ parentElement: scope }) }
+  const page = {
+    async sleep() {},
+    async setFileInput(_files, selector) { nativeCalls++; assert.equal(selected, 1); assert.match(selector, /data-opencli-chatgpt-image-input/); throw new Error('fileChooserOpened not received') },
+    async evaluate(script) {
+      if (script.includes('const reactiveInputs')) return vm.runInNewContext(script, { document: { querySelector: () => composer, querySelectorAll: () => [] } })
+      if (script.includes('const dt = new DataTransfer()')) return { ok: true }
+      if (script.includes('matchedNames')) return true
+      throw new Error('Unexpected upload operation')
+    },
+  }
+  const result = await uploadChatGPTImages(page, [image])
+  assert.equal(result.ok, hydrated)
+  assert.equal(nativeCalls, hydrated ? 1 : 0)
 })
 }
 
