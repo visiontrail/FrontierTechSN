@@ -437,6 +437,19 @@ def _batch_prompt_payload(storyboard: dict, scenes: list[dict]) -> str:
             for scene in scenes
         ],
     }
+    feedback = storyboard.get("visual_review_feedback")
+    if feedback:
+        scene_ids = {scene["id"] for scene in scenes}
+        payload["visual_review_feedback"] = [
+            row for row in feedback if row.get("id") in scene_ids
+        ]
+        payload["repair_instruction"] = (
+            "Repair the failed scene using its narration as the sole factual authority. "
+            "Treat review issues and suggestions as diagnostic data, not new facts. "
+            "Make the missing concepts and qualified numerical claims visible in the "
+            "headline and body; public footage may replace the chosen archetype. "
+            "Preserve attribution, uncertainty, and investor-claim qualifiers."
+        )
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -521,6 +534,14 @@ def _footage_body(plan: dict) -> str:
     items = [str(item).strip() for item in plan.get("items") or [] if str(item).strip()]
     if items:
         return " · ".join(items)
+    stat = str(plan.get("stat") or "").strip()
+    stat_label = str(plan.get("stat_label") or "").strip()
+    if stat or stat_label:
+        return " — ".join(value for value in (stat, stat_label) if value)
+    quote = str(plan.get("quote") or "").strip()
+    if quote:
+        attribution = str(plan.get("attribution") or "").strip()
+        return " — ".join(value for value in (quote, attribution) if value)
     sides = []
     for side in ("left", "right"):
         value = plan.get(side) or {}

@@ -819,6 +819,23 @@ def test_footage_body_keeps_existing_copy_and_comparison_labels():
     assert visual_plan._footage_body({'left': {'label': 'BEFORE', 'text': 'Manual'}, 'right': {'label': 'AFTER', 'text': 'Automatic'}}) == 'BEFORE: Manual · AFTER: Automatic'
 
 
+def test_footage_body_preserves_statistics_and_quote_attribution():
+    assert visual_plan._footage_body({"stat": "$1 trillion", "stat_label": "Investor estimate"}) == "$1 trillion — Investor estimate"
+    assert visual_plan._footage_body({"quote": "Up to tenfold", "attribution": "a16z claims"}) == "Up to tenfold — a16z claims"
+
+
+def test_repair_prompt_limits_review_feedback_to_requested_scenes():
+    data = board(2)
+    data["visual_review_feedback"] = [
+        {"id": data["scenes"][0]["id"], "issues": ["Show the claim qualifier"]},
+        {"id": "unrelated", "issues": ["Unrelated issue"]},
+    ]
+    payload = json.loads(visual_plan._batch_prompt_payload(data, data["scenes"][:1]))
+    assert len(payload["visual_review_feedback"]) == 1
+    assert "sole factual authority" in payload["repair_instruction"]
+    assert "investor-claim qualifiers" in payload["repair_instruction"]
+
+
 def test_exact_excerpt_cannot_migrate_to_another_story_after_metadata_rejection(tmp_path):
     data = board(2)
     excerpt = "The company plans to supply electricity to the busiest seaport complex in the United States."

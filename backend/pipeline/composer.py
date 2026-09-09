@@ -352,6 +352,46 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
     return recovered
 
 
+def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, list[dict]]:
+    """Use feedback only for the retained candidate, once per scene checkpoint."""
+    try:
+        state = _strict_json_loads((output_dir / "quality_retry_state.json").read_bytes())
+        latest = state.get("latest") or {}
+        source_hash = latest.get("rendered_video_sha256")
+        candidate = output_dir / "video.next.mp4"
+        if (
+            state.get("status") != "retrying"
+            or not isinstance(source_hash, str)
+            or not candidate.is_file()
+            or _sha256_path(candidate) != source_hash
+        ):
+            return "", []
+        by_id = {plan["id"]: plan for plan in plans}
+        failed = set(latest.get("failed_scene_ids") or [])
+        feedback = []
+        for review in latest.get("scene_reviews") or []:
+            scene_id = review.get("id")
+            previous = by_id.get(scene_id)
+            if (
+                scene_id not in failed
+                or previous is None
+                or previous.get("review_repair_source_sha256") == source_hash
+            ):
+                continue
+            feedback.append({
+                "id": scene_id,
+                "issues": review.get("issues") or [],
+                "suggested_visual": review.get("suggested_visual") or "",
+                "previous_copy": {
+                    key: previous.get(key)
+                    for key in ("headline", "body", "stat", "stat_label", "items", "quote", "attribution")
+                },
+            })
+        return source_hash, feedback
+    except (OSError, ValueError, TypeError, AttributeError):
+        return "", []
+
+
 async def _load_or_plan_scene_visuals(
     output_dir: Path,
     board: dict,
@@ -364,6 +404,36 @@ async def _load_or_plan_scene_visuals(
     plans = _load_cached_scene_plans(output_dir, board)
     if plans is not None:
         log(f"Visual plan: reusing {len(plans)}/{board['scene_count']} cached scene plan(s)")
+        source_hash, feedback = _pending_visual_repairs(output_dir, plans)
+        if feedback:
+            failed_ids = {row["id"] for row in feedback}
+            repair_scenes = [scene for scene in board["scenes"] if scene["id"] in failed_ids]
+            log(f"Visual plan: repairing {len(repair_scenes)} failed scene(s) from rendered-frame feedback")
+            repaired = await visual_plan.plan_scene_visuals(
+                {**board, "scenes": repair_scenes, "scene_count": len(repair_scenes),
+                 "visual_review_feedback": feedback},
+                ai_endpoint=ai_endpoint,
+                ai_model=ai_model,
+                provider_id=provider_id,
+                log=log,
+            )
+            by_id = {plan["id"]: plan for plan in repaired}
+            if set(by_id) != failed_ids:
+                raise RuntimeError("Visual review repair did not return every failed scene")
+            unchanged = [
+                row["id"] for row in feedback
+                if all(by_id[row["id"]].get(key) == value
+                       for key, value in row["previous_copy"].items())
+            ]
+            if unchanged:
+                raise RuntimeError(
+                    "Visual review repair returned unchanged visible content for "
+                    + ", ".join(unchanged)
+                )
+            for repaired_plan in repaired:
+                repaired_plan["review_repair_source_sha256"] = source_hash
+            plans = [by_id.get(plan["id"], plan) for plan in plans]
+            _write_visual_plan_checkpoint(output_dir, board, plans)
         return plans
 
     plans = await visual_plan.plan_scene_visuals(

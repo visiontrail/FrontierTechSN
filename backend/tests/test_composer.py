@@ -243,6 +243,64 @@ def test_cached_scene_plans_require_exact_current_checkpoint_and_strip_placement
     assert isinstance(json.loads((tmp_path / "visual_plan.json").read_text()), list)
 
 
+def _failed_visual_candidate(root):
+    (root / "video.next.mp4").write_bytes(b"reviewed candidate")
+    digest = hashlib.sha256(b"reviewed candidate").hexdigest()
+    (root / "quality_retry_state.json").write_text(json.dumps({
+        "status": "retrying", "latest": {
+            "rendered_video_sha256": digest, "failed_scene_ids": ["scene-02"],
+            "scene_reviews": [{"id": "scene-02", "issues": ["Missing quantified context"],
+                               "suggested_visual": "Show the narrated figures"}],
+        },
+    }))
+    return digest
+
+
+def test_quality_retry_replans_only_failed_scenes_and_checkpoints_feedback(tmp_path, monkeypatch):
+    board = {**_cache_board(), "scene_count": 2}
+    _write_cache(tmp_path, board)
+    digest = _failed_visual_candidate(tmp_path)
+    before = composer._load_cached_scene_plans(tmp_path, board)
+    calls = []
+
+    async def repair(repair_board, **kwargs):
+        calls.append(repair_board)
+        return [{"id": "scene-02", "archetype": "stat", "headline": "Quantified living circuits",
+                 "body": "The measured result and its attribution"}]
+
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", repair)
+    kwargs = dict(ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None)
+    repaired = asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs))
+    assert repaired[0] == before[0]
+    assert repaired[1]["review_repair_source_sha256"] == digest
+    assert [s["id"] for s in calls[0]["scenes"]] == ["scene-02"]
+    assert calls[0]["visual_review_feedback"][0]["issues"] == ["Missing quantified context"]
+    assert asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs)) == repaired
+    assert len(calls) == 1
+
+
+def test_quality_feedback_from_another_candidate_is_not_reused(tmp_path):
+    _failed_visual_candidate(tmp_path)
+    (tmp_path / "video.next.mp4").write_bytes(b"different video")
+    assert composer._pending_visual_repairs(tmp_path, _cache_plans()) == ("", [])
+
+
+def test_quality_retry_stops_before_rendering_unchanged_scene_again(tmp_path, monkeypatch):
+    board = {**_cache_board(), "scene_count": 2}
+    _write_cache(tmp_path, board)
+    _failed_visual_candidate(tmp_path)
+    cached = composer._load_cached_scene_plans(tmp_path, board)
+
+    async def unchanged(*args, **kwargs):
+        return [cached[1]]
+
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", unchanged)
+    with pytest.raises(RuntimeError, match="unchanged visible content"):
+        asyncio.run(composer._load_or_plan_scene_visuals(
+            tmp_path, board, ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None,
+        ))
+
+
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
