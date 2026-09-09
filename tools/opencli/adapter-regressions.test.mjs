@@ -1275,6 +1275,35 @@ test('Gemini does not click twice when the first click submits but reports an er
   assert.equal(clickCount, 1)
 })
 
+test('Gemini uses a fully specified Enter key after ready send-button clicks have no effect', async () => {
+  let composerText = ''
+  const keys = []
+  class Element {}
+  const document = { activeElement: null, querySelector(selector) {
+    if (selector.includes('Stop response')) return null
+    return selector.includes('composer') ? composer : button
+  } }
+  const composer = Object.assign(new Element(), { get innerText() { return composerText }, focus() { document.activeElement = composer } })
+  Object.defineProperty(composer, 'innerText', { get: () => composerText })
+  const button = Object.assign(new Element(), { textContent: 'Send message', disabled: false, getAttribute: () => null, getBoundingClientRect: () => ({ width: 32, height: 32 }), click() {} })
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app'
+      if (script.includes('bestButton instanceof HTMLElement')) return { action: 'button', label: 'Send message', x: 40, y: 50 }
+      if (script.includes('hasText: actual.length > 0')) return { hasText: !!composerText, actual: composerText }
+      if (script.includes('Could not find Gemini composer')) return { ok: true }
+      return vm.runInNewContext(script, { document, HTMLElement: Element, getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) })
+    },
+    async fillText(_selector, text) { composerText = text },
+    async click() {}, async nativeClick() {}, async wait() {},
+    async cdp(method, params) { keys.push({ method, ...params }); if (params.type === 'keyDown') composerText = '' },
+  }
+  assert.equal(await sendGeminiMessage(page, 'hello'), 'enter')
+  assert.deepEqual(keys.map(key => [key.method, key.type, key.code, key.windowsVirtualKeyCode]), [
+    ['Input.dispatchKeyEvent', 'keyDown', 'Enter', 13], ['Input.dispatchKeyEvent', 'keyUp', 'Enter', 13],
+  ])
+})
+
 for (const scenario of ['ready', 'disabled', 'generating', 'changed-text']) {
 test(`Gemini DOM submit recovery respects ${scenario} composer state`, async () => {
   let composerText = ''

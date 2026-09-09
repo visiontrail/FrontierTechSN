@@ -679,9 +679,42 @@ if (!utils.includes('const failedComposerSubmission = async () =>')) {
   section = section.replaceAll("throw new CommandExecutionError('Gemini did not accept the composer submission');", 'throw await failedComposerSubmission();')
   utils = utils.slice(0, start) + section + utils.slice(end)
 }
+if (!utils.includes('const dispatchPreparedGeminiEnter = async () =>')) {
+  const marker = '    const dispatchPreparedGeminiSubmit = async () => {'
+  const helper = `    const dispatchPreparedGeminiEnter = async () => {
+        if (typeof page.cdp !== 'function') return false;
+        const state = await exactComposerState();
+        if (!state.exact || !state.hasText) return false;
+        const ready = await page.evaluate(\`(() => {
+            const composer = document.querySelector('[data-opencli-gemini-composer="1"]');
+            const send = document.querySelector('button[aria-label="Send message"], button[aria-label="发送消息"]');
+            if (!(composer instanceof HTMLElement) || !send || send.disabled || send.getAttribute('aria-disabled') === 'true') return false;
+            if (document.querySelector('button[aria-label="Stop response"], button[aria-label="停止回答"]')) return false;
+            composer.focus();
+            return document.activeElement === composer;
+        })()\`);
+        if (ready !== true) return false;
+        await page.cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, modifiers: 0 });
+        await page.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, modifiers: 0 });
+        const accepted = await waitForComposerClear();
+        if (accepted) console.error('[gemini/submit] Trusted Enter accepted the pending composer after ignored clicks');
+        return accepted;
+    };
+`
+  utils = replaceOnce(utils, marker, helper + marker, 'Gemini trusted Enter submit recovery')
+}
 // Older installations reapplied the legacy native-click upgrade after the DOM
 // fallback was added. Normalize that duplicate so fresh installs and upgrades
 // execute the same bounded recovery sequence.
+{
+  const start = utils.indexOf('export async function sendGeminiMessage(page, text) {')
+  const end = utils.indexOf('function normalizeGeminiExportUrls(value) {', start)
+  let section = utils.slice(start, end)
+  if (!section.includes("if (await dispatchPreparedGeminiEnter()) return 'enter';")) {
+    section = section.replaceAll('throw await failedComposerSubmission();', "if (await dispatchPreparedGeminiEnter()) return 'enter';\n                throw await failedComposerSubmission();")
+  }
+  utils = utils.slice(0, start) + section + utils.slice(end)
+}
 utils = utils.replace(
   `                if (await dispatchPreparedGeminiSubmit()) return 'button';
                 if (typeof page.nativeClick === 'function') {
