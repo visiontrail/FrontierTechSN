@@ -1140,6 +1140,13 @@ async def supplement_web_footage(
             # missing shot. A single remaining slot must not cost three paced
             # requests simply because its first search result is unsuitable.
             for seed in list(batch):
+                preview_key = hashlib.sha256(seed["_candidate"]["source_page_url"].encode()).hexdigest()[:16]
+                preview_folder = task_dir / "footage" / "evidence" / "previews" / preview_key
+                if _load_prepared_preview(seed["_candidate"], preview_folder, task_dir) is not None:
+                    # Resume the ready evidence before downloading speculative
+                    # alternatives. Filling a batch must not make one cached
+                    # final shot wait for several new source downloads.
+                    continue
                 previous = seed
                 for attempt in range(int(seed.get("_candidate_attempt") or 1) + 1,
                                      MAX_CANDIDATE_ATTEMPTS_PER_QUERY + 1):
