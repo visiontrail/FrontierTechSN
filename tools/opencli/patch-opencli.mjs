@@ -43,7 +43,7 @@ const manifestPath = path.join(
 )
 const videoPath = path.join(geminiDir, 'video.js')
 
-const helperMarker = 'export async function attachGeminiFile(page, filePath)'
+const helperMarker = 'export async function attachGeminiFile('
 const helperSource = fs.readFileSync(
   path.join(runtimeDir, 'patches', 'gemini-file-upload-helper.js'),
   'utf8',

@@ -268,6 +268,33 @@ test('Gemini attachment never reports success while its preview remains unavaila
   assert.equal(previewReads, 60)
 })
 
+for (const scenario of ['empty', 'draft', 'attachment', 'generating', 'changed-model', 'still-empty']) {
+test(`Gemini reloads a stuck menu only for a safe empty page: ${scenario}`, async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('fileChooserOpened not received')
+  const originalEvaluate = page.evaluate
+  let reloads = 0
+  page.goto = async () => { reloads++ }
+  page.evaluate = async script => {
+    if (script.includes('const inputSelector = selectors.find') && (!reloads || scenario === 'still-empty')) return { inputSelector: '', buttonSelector: '', expanded: true }
+    if (script.includes('button.getBoundingClientRect()')) return null
+    if (script.includes('emptyComposer:')) return { emptyComposer: scenario !== 'draft', attachmentCount: scenario === 'attachment' ? 1 : 0, generating: scenario === 'generating', modelLabel: 'Open mode picker, currently Flash', url: 'https://gemini.google.com/app' }
+    if (script.startsWith("document.querySelector('button[aria-label*=")) return scenario === 'changed-model' ? 'Open mode picker, currently Pro' : 'Open mode picker, currently Flash'
+    if (script.includes('uploadButtons:')) return { expanded: 'true', fileInputs: [] }
+    return originalEvaluate(script)
+  }
+  if (scenario === 'empty') {
+    await attachGeminiFile(page, image)
+    assert.equal(reloads, 1)
+    assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
+  } else {
+    await assert.rejects(attachGeminiFile(page, image), /did not open|model changed/)
+    assert.equal(reloads, ['changed-model', 'still-empty'].includes(scenario) ? 1 : 0)
+    assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 0)
+  }
+})
+}
+
 for (const scenario of ['ready', 'busy', 'unrelated-preview', 'disabled-send']) {
   test(`Gemini attachment requires a ready preview in its own composer: ${scenario}`, async (t) => {
     const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])

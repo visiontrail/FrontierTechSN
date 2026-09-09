@@ -2,7 +2,7 @@
 // Project patch: Gemini Web's XAP picker rejects CDP setFileInput on some
 // Chrome versions. Fall back to a browser-native File/DataTransfer change
 // event, matching the compatibility path used by OpenCLI's Claude adapter.
-export async function attachGeminiFile(page, filePath) {
+export async function attachGeminiFile(page, filePath, allowEmptyPageReload = true) {
     const fs = await import('node:fs');
     const path = await import('node:path');
     const absPath = path.default.resolve(filePath);
@@ -122,6 +122,33 @@ export async function attachGeminiFile(page, filePath) {
         }
     }
     if (!fileInputSelector) {
+        const recovery = await page.evaluate(`(() => {
+            const composer = document.querySelector('[contenteditable="true"][aria-label*="Gemini"]');
+            const model = document.querySelector('button[aria-label*="mode picker"]');
+            return {
+                emptyComposer: !!composer && !String(composer.innerText || composer.textContent || '').trim(),
+                attachmentCount: document.querySelectorAll('input-container button[aria-label="close attachment"]').length,
+                generating: Array.from(document.querySelectorAll('button')).some(button => /stop response|stop generating|停止回答/i.test(button.getAttribute('aria-label') || '')),
+                modelLabel: model?.getAttribute('aria-label') || '',
+                url: location.href,
+            };
+        })()`);
+        if (allowEmptyPageReload && recovery?.emptyComposer && recovery.attachmentCount === 0
+            && !recovery.generating && recovery.modelLabel && /^https:\/\/gemini\.google\.com\/app(?:[/?#]|$)/.test(recovery.url)
+            && typeof page.goto === 'function') {
+            console.error('[gemini/upload] Reloading an empty page once after its upload menu failed to hydrate');
+            await page.goto(recovery.url, { settleMs: 2000 });
+            let restoredModel = '';
+            for (let attempt = 0; attempt < 20; attempt++) {
+                await page.wait(0.5);
+                restoredModel = await page.evaluate(`document.querySelector('button[aria-label*="mode picker"]')?.getAttribute('aria-label') || ''`);
+                if (restoredModel) break;
+            }
+            if (restoredModel !== recovery.modelLabel) {
+                throw new CommandExecutionError('Gemini model changed or was unavailable after empty-page recovery; prompt was not submitted');
+            }
+            return attachGeminiFile(page, filePath, false);
+        }
         const diagnostic = await page.evaluate(`(() => ({
             url: location.href,
             uploadButtons: Array.from(document.querySelectorAll('button'))
