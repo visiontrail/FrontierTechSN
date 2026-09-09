@@ -1292,6 +1292,56 @@ test('Gemini accepts an owned short reply already present at submission confirma
   assert.equal(result, '1P2P')
 })
 
+for (const anchored of [true, false]) {
+test(`Gemini waits through speaker placeholders and ignores a trailing label (anchored=${anchored})`, async () => {
+  const prompt = 'Review the supplied image.'
+  const user = { Role: 'User', Text: prompt }
+  const label = { Role: 'Assistant', Text: 'Gemini said' }
+  const answer = { Role: 'Assistant', Text: 'Gemini said\n{"image_received":true,"reviews":[]}' }
+  let reads = 0
+  const baseline = { url: 'https://gemini.google.com/app/current', turns: [user],
+    transcriptLines: [prompt], composerHasText: false, isGenerating: false,
+    structuredTurnsTrusted: true }
+  const page = {
+    async wait() {},
+    async evaluate(script) {
+      if (script === 'window.location.href') return baseline.url
+      if (script.includes('structuredTurnsTrusted')) {
+        reads++
+        return { ...baseline, turns: [user, ...(reads >= 4 ? [answer] : []), label],
+          transcriptLines: [prompt, 'Gemini said'] }
+      }
+      throw new Error('Unexpected Gemini snapshot script')
+    },
+  }
+  const result = await waitForGeminiResponse(page, {
+    snapshot: baseline, userAnchorTurn: anchored ? user : null,
+  }, prompt, 20)
+  assert.equal(reads, 5)
+  assert.equal(result, '{"image_received":true,"reviews":[]}')
+})
+}
+
+test('Gemini never returns a speaker placeholder as a completed response', async () => {
+  const user = { Role: 'User', Text: 'Review the image.' }
+  const baseline = { url: 'https://gemini.google.com/app/current', turns: [user],
+    transcriptLines: [user.Text], composerHasText: false, isGenerating: false,
+    structuredTurnsTrusted: true }
+  const page = {
+    async wait() {},
+    async evaluate(script) {
+      if (script === 'window.location.href') return baseline.url
+      if (script.includes('structuredTurnsTrusted')) return { ...baseline,
+        turns: [user, { Role: 'Assistant', Text: 'Gemini said' }],
+        transcriptLines: [user.Text, 'Gemini said'] }
+      throw new Error('Unexpected Gemini snapshot script')
+    },
+  }
+  assert.equal(await waitForGeminiResponse(page, {
+    snapshot: baseline, userAnchorTurn: user,
+  }, user.Text, 10), '')
+})
+
 test('Gemini does not click twice when the first click submits but reports an error', async () => {
   let composerText = ''
   let clickCount = 0

@@ -763,6 +763,41 @@ utils = replaceOnce(
   '        if (selectedVariantValue && !shortLabelMatches) {',
   'Gemini canonical read-back availability',
 )
+utils = replaceOnce(
+  utils,
+  'const GEMINI_RESPONSE_NOISE_PATTERNS = [',
+  `const GEMINI_RESPONSE_NOISE_PATTERNS = [
+    /^(?:you|gemini) said:?\\s*$/gim,`,
+  'Gemini speaker labels are not assistant responses',
+)
+utils = replaceOnce(
+  utils,
+  `                .filter((turn) => turn.Role === 'Assistant')
+                .at(-1);
+            return candidate ? sanitizeGeminiResponseText(candidate.Text, promptText) : '';`,
+  `                .filter((turn) => turn.Role === 'Assistant')
+                .map((turn) => sanitizeGeminiResponseText(turn.Text, promptText))
+                .filter(Boolean)
+                .at(-1);
+            return candidate || '';`,
+  'Gemini owned response ignores trailing empty speaker elements',
+)
+utils = replaceOnce(
+  utils,
+  `                .filter((turn) => turn.Role === 'Assistant')
+                .at(-1);
+            if (appendedAssistant) {
+                return sanitizeGeminiResponseText(appendedAssistant.Text, promptText);
+            }`,
+  `                .filter((turn) => turn.Role === 'Assistant')
+                .map((turn) => sanitizeGeminiResponseText(turn.Text, promptText))
+                .filter(Boolean)
+                .at(-1);
+            if (appendedAssistant) {
+                return appendedAssistant;
+            }`,
+  'Gemini appended response ignores trailing empty speaker elements',
+)
 fs.writeFileSync(utilsPath, utils)
 
 let models = fs.readFileSync(modelsPath, 'utf8')
