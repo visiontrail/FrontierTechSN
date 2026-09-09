@@ -38,6 +38,9 @@ RUN_ID="$(date '+%Y%m%d-%H%M%S')"
 LOG_FILE="$LOG_DIR/start-$RUN_ID.log"
 LATEST_LOG="$LOG_DIR/start-latest.log"
 mkdir -p "$LOG_DIR"
+export LOG_DIR
+export PYTHONFAULTHANDLER=1
+export PYTHONUNBUFFERED=1
 ln -sf "$LOG_FILE" "$LATEST_LOG"
 
 # Prefix every line with a timestamp WITHOUT forking a process per line.
@@ -144,8 +147,15 @@ fi
 echo "Starting server on http://localhost:$PORT (API + frontend) ..."
 (
     source .venv/bin/activate
-    exec uvicorn backend.main:app --host "$HOST" --port "$PORT"
+    # Early interpreter/import failures also go straight to disk. Once main
+    # loads, faulthandler uses its own lifetime descriptor for this same file.
+    exec python -m uvicorn backend.main:app --host "$HOST" --port "$PORT" >> "$LOG_FILE" 2>> "$LOG_DIR/backend-crash.log"
 ) &
 pids+=("$!")
 
-wait "${pids[@]}"
+server_exit=0
+wait "${pids[@]}" || server_exit=$?
+# Record the supervisor's observation even when SIGKILL prevents a traceback.
+printf '%s backend pid=%s exited status=%s (128+signal for signal termination)\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${pids[0]}" "$server_exit" >> "$LOG_DIR/backend-crash.log"
+exit "$server_exit"

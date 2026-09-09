@@ -1,3 +1,9 @@
+from backend.crash_logging import configure_crash_logging
+
+# Install before importing pipeline/native dependencies, including direct
+# uvicorn launches that bypass scripts/start.sh.
+configure_crash_logging()
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager
