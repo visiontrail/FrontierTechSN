@@ -924,6 +924,7 @@ def _footage_intervals(sequence, scene_duration: float):
 def _render_footage(plan: ScenePlan) -> str:
     """Render a full-bleed media plate that remains populated for the full scene."""
     accent = accent_hex(plan.accent, plan.theme)
+    credits = ""
     if plan.footage_kind == "video":
         # Every public clip is one-pass.  AI-selected clips may be sequenced;
         # when their combined duration is shorter than the narration, the
@@ -962,6 +963,7 @@ def _render_footage(plan: ScenePlan) -> str:
                 },
             )
             sequence_markup: list[str] = []
+            sequence_credits: list[str] = []
             for index, item, cursor, duration in _footage_intervals(sequence, plan.duration):
                 sequence_markup.append(
                     f'      <video id="{plan.id}-media-{index + 1}" class="clip media public-footage-once" '
@@ -969,22 +971,31 @@ def _render_footage(plan: ScenePlan) -> str:
                     f'data-duration="{duration:.2f}" data-track-index="0" muted playsinline '
                     'crossorigin="anonymous"></video>\n'
                 )
+                if item.get("credit"):
+                    sequence_credits.append(
+                        f'    <div id="{plan.id}-credit-{index + 1}" class="clip credit" '
+                        f'data-start="{cursor:.2f}" data-duration="{duration:.2f}" '
+                        f'data-track-index="1">{_esc(str(item["credit"]))}</div>\n'
+                    )
             media = "".join(sequence_markup)
+            credits = "".join(sequence_credits)
     else:
         media = f'      <img id="{plan.id}-media" class="media" src="{_esc(plan.footage_src)}" alt="">\n'
+        if plan.footage_credit:
+            credits = f'    <div class="credit" id="{plan.id}-credit">{_esc(plan.footage_credit)}</div>\n'
     css = f"""
   #{plan.id} .frame {{ position:absolute; inset:0; overflow:hidden; }}
   #{plan.id} .media {{ display:block; width:100%; height:100%; object-fit:cover; }}
   #{plan.id} .frame > .clip {{ position:absolute; inset:0; }}
   #{plan.id} .scrim {{ position:absolute; inset:0;
-      background:linear-gradient(180deg, {_rgba(plan.theme.bg, .55)} 0%, {_rgba(plan.theme.bg, .15)} 38%, {_rgba(plan.theme.bg, .92)} 100%); }}
+      background:linear-gradient(180deg, rgba(17,19,24,.4) 0%, rgba(17,19,24,.6) 38%, rgba(17,19,24,.94) 100%); }}
   #{plan.id} .stage {{ justify-content:flex-end; padding:130px 150px 230px; }}
   #{plan.id} .headline {{ font-size:{headline_size(plan.headline, base=92)}px; max-width:1340px;
       color:#F5F2EA; text-shadow:0 8px 40px rgba(0,0,0,.6); }}
-  #{plan.id} .body {{ font-size:{body_size(plan.body, base=38)}px; max-width:1100px; color:{plan.theme.muted}; }}
+  #{plan.id} .body {{ font-size:{body_size(plan.body, base=38)}px; max-width:1100px; color:rgba(245,242,234,.9); }}
   #{plan.id} .credit {{ position:absolute; right:44px; top:40px; font:500 20px {SANS};
-      color:{_rgba(plan.theme.ink, .62)}; letter-spacing:.06em;
-      background:{_rgba(plan.theme.bg, .5)}; padding:9px 16px; border-radius:999px;
+      color:#F5F2EA; letter-spacing:.06em;
+      background:rgba(17,19,24,.8); padding:9px 16px; border-radius:999px;
       border:1px solid {_rgba(accent, 0.3)}; }}
 """
     if plan.collage_broll:
@@ -1054,15 +1065,14 @@ def _render_footage(plan: ScenePlan) -> str:
         + media
         + '    </div>\n'
         + '    <div class="scrim"></div>\n'
-        + (f'    <div class="credit" id="{plan.id}-credit">{_esc(plan.footage_credit)}</div>\n'
-           if plan.footage_credit else "")
+        + credits
         + '    <div class="stage">\n'
         + (f'      <div class="kicker" id="{plan.id}-kicker">{_esc(plan.kicker)}</div>\n' if plan.kicker else "")
         + (f'      <div class="headline" id="{plan.id}-head">{_esc(plan.headline)}</div>\n' if plan.headline else "")
         + (f'      <div class="body" id="{plan.id}-body">{_esc(plan.body)}</div>\n' if plan.body else "")
         + '    </div>\n'
     )
-    primary_media_id = f"{plan.id}-media" if plan.collage_broll else f"{plan.id}-media-1"
+    primary_media_id = f"{plan.id}-media-1" if plan.footage_kind == "video" else f"{plan.id}-media"
     timeline = f"""        inAt("#{primary_media_id}", {{ scale: 1.04, opacity: 0 }}, {{ scale: 1.12, opacity: 1, duration: 0.35, ease: "power1.out" }}, 0.05);
         inAt("#{plan.id}-motif", {{ scale: .84, opacity: 0, rotate: -10 }}, {{ scale: 1, opacity: .2, rotate: 0, duration: {max(2.0, plan.duration):.2f}, ease: "sine.out", transformOrigin: "50% 50%" }}, 0.05);
         inAt("#{plan.id}-kicker", {{ x: -36, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .55, ease: "power3.out" }}, 0.25);

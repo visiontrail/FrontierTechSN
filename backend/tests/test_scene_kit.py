@@ -420,6 +420,43 @@ def test_public_footage_sequence_plays_each_clip_once_then_reveals_hyperframe():
     assert "public-footage-fallback" in html
 
 
+def test_public_footage_credits_follow_each_clip_and_end_before_fallback():
+    html = sk.render_scene(
+        plan(
+            archetype="footage",
+            duration=12.0,
+            footage_src="footage/second.mp4",
+            footage_kind="video",
+            footage_credit="Last clip credit must not label the whole scene",
+            footage_sequence=(
+                {"src": "footage/first.mp4", "duration_seconds": 4.015, "credit": "Archive & Museum"},
+                {"src": "footage/second.mp4", "duration_seconds": 3.5, "credit": "Port authority"},
+            ),
+        )
+    )
+    assert validate_scene_html(html, "scene-01") == []
+    videos = re.findall(r"<video[^>]*>", html)
+    credits = re.findall(r'<div[^>]*class="clip credit"[^>]*>[^<]*</div>', html)
+    assert len(credits) == len(videos) == 2
+    for video, credit in zip(videos, credits):
+        for field in ("data-start", "data-duration"):
+            assert re.search(fr'{field}="([^"]*)"', credit).group(1) == re.search(fr'{field}="([^"]*)"', video).group(1)
+        assert 'data-track-index="1"' in credit
+    assert "Archive &amp; Museum" in credits[0]
+    assert "Port authority" in credits[1]
+    assert "Last clip credit" not in html
+
+
+@pytest.mark.parametrize("theme", [sk.THEMES["swiss"], sk.THEMES["podcast"]])
+def test_footage_text_uses_a_dark_backing_even_in_light_themes(theme):
+    html = sk.render_scene(plan(archetype="footage", footage_src="image.jpg", theme=theme, body="Supporting facts"))
+    scrim = re.search(r"\.scrim \{(.*?)\}", html, re.S).group(1)
+    body_rules = re.findall(r"\.body \{(.*?)\}", html, re.S)
+    assert "rgba(17,19,24,.94)" in scrim
+    assert "color:rgba(245,242,234,.9)" in body_rules[-1]
+    assert 'inAt("#scene-01-media"' in html
+
+
 def test_collage_footage_keeps_media_contract_and_adds_seekable_lower_third():
     html = sk.render_scene(
         plan(
