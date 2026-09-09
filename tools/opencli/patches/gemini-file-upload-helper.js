@@ -142,10 +142,23 @@ export async function attachGeminiFile(page, filePath) {
         const base64 = fs.default.readFileSync(absPath).toString('base64');
         const fileName = path.default.basename(absPath);
         const mimeType = fileName.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
-        const fallback = await page.evaluate(`(() => {
+        // OpenCLI's daemon caps a command body at 1 MiB. Base64 expands an
+        // 800 KiB contact sheet beyond that limit and the daemon closes the
+        // connection before dispatch. Keep every transfer command small.
+        const uploadKey = '__opencliGeminiUpload_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+        let fallback;
+        try {
+            await page.evaluate(`globalThis[${JSON.stringify(uploadKey)}] = []; true`);
+            for (let offset = 0; offset < base64.length; offset += 64 * 1024) {
+                await page.evaluate(`globalThis[${JSON.stringify(uploadKey)}].push(${JSON.stringify(base64.slice(offset, offset + 64 * 1024))}); true`);
+            }
+            fallback = await page.evaluate(`(() => {
             const input = document.querySelector(${JSON.stringify(fileInputSelector)});
             if (!input) return { ok: false, reason: 'Gemini file input disappeared' };
-            const binary = atob(${JSON.stringify(base64)});
+            const chunks = globalThis[${JSON.stringify(uploadKey)}];
+            if (!Array.isArray(chunks) || !chunks.length) return { ok: false, reason: 'Gemini upload transfer is incomplete' };
+            const binary = atob(chunks.join(''));
+            if (binary.length !== ${stats.size}) return { ok: false, reason: 'Gemini upload transfer size mismatch' };
             const bytes = new Uint8Array(binary.length);
             for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
             const file = new File([bytes], ${JSON.stringify(fileName)}, { type: ${JSON.stringify(mimeType)} });
@@ -156,6 +169,9 @@ export async function attachGeminiFile(page, filePath) {
             input.dispatchEvent(new Event('change', { bubbles: true }));
             return { ok: true };
         })()`);
+        } finally {
+            await page.evaluate(`delete globalThis[${JSON.stringify(uploadKey)}]; true`).catch(() => undefined);
+        }
         if (!fallback?.ok) {
             throw new CommandExecutionError(fallback?.reason || 'Gemini DataTransfer upload failed');
         }

@@ -119,6 +119,7 @@ function geminiAttachmentPage(nativeError, inputSelector = 'input[name="Filedata
         actions.push(['DataTransfer'])
         return { ok: true }
       }
+      if (script.includes('__opencliGeminiUpload_')) return true
       if (script.includes('const candidates = Array.from')) return { ready: true }
       throw new Error(`Unexpected Gemini attachment script: ${String(script).slice(0, 120)}`)
     },
@@ -144,6 +145,44 @@ test('Gemini ask does not hide unrelated native upload failures', async (t) => {
   await assert.rejects(attachGeminiFile(page, image), /Browser target crashed/)
   assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
 })
+
+for (const interrupted of [false, true]) {
+  test(`Gemini large-file fallback stays below the daemon limit and cleans transfer state: ${interrupted}`, async (t) => {
+    const [image] = videoFrameFixture(t, ['large-contact-sheet.jpg'])
+    const bytes = Buffer.alloc(900_000)
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = index % 251
+    fs.writeFileSync(image, bytes)
+    const input = { files: [], dispatchEvent() {} }
+    const context = vm.createContext({
+      document: { querySelector: () => input }, atob, Uint8Array, File, Event,
+      DataTransfer: class {
+        files = []
+        items = { add: file => this.files.push(file) }
+      },
+    })
+    const page = geminiAttachmentPage('fileChooserOpened not received')
+    const originalEvaluate = page.evaluate
+    let chunks = 0
+    page.evaluate = async (script) => {
+      if (script.includes('__opencliGeminiUpload_') || script.includes('const transfer = new DataTransfer()')) {
+        assert.ok(Buffer.byteLength(JSON.stringify({ action: 'exec', code: script })) < 1024 * 1024)
+        if (script.includes('.push(') && ++chunks === 2 && interrupted) throw new Error('Transfer interrupted')
+        return vm.runInContext(script, context)
+      }
+      return originalEvaluate(script)
+    }
+    if (interrupted) {
+      await assert.rejects(attachGeminiFile(page, image), /Transfer interrupted/)
+      assert.equal(input.files.length, 0)
+    } else {
+      await attachGeminiFile(page, image)
+      assert.ok(chunks > 1)
+      assert.equal(input.files.length, 1)
+      assert.deepEqual(Buffer.from(await input.files[0].arrayBuffer()), bytes)
+    }
+    assert.equal(Object.keys(context).some(key => key.startsWith('__opencliGeminiUpload_')), false)
+  })
+}
 
 test('Gemini ask supports the current unnamed images-files-uploader input', async (t) => {
   const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
