@@ -15,6 +15,11 @@ Rules:
 - Use the narrated company, product, event or location when it helps find real
   relevant footage. Avoid logo-only results and abstract phrases such as
   "the future of ideas".
+- Keep the visual subject and purpose at the same level of specificity. A
+  generic conference-hall query cannot establish a particular named event.
+  For a recent event, a concrete narrated venue or object can supply contextual
+  B-roll: state that illustrative purpose and bind it to the sentence naming
+  the place or object. Never use another named event as the narrated event.
 - Make every query meaningfully different.
 - Normally target a different narration story or scene with every query. For a
   long beat, you may return multiple clearly different shots for the same
