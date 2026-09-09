@@ -5,7 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
 
-import { isGenerating, selectChatGPTModel } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { isGenerating, selectChatGPTModel, uploadChatGPTImages } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
 import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
@@ -67,6 +67,29 @@ test('ChatGPT ask exposes image attachments and refuses to send a missing image'
   }
   await assert.rejects(chatgptAskCommand.func(page, { prompt: 'Review this image', file: '/missing-review-image.jpg' }), /not found|does not exist/i)
 })
+
+for (const nativeError of ['Page.fileChooserOpened not received within 5s', 'Browser target crashed']) {
+test(`ChatGPT image upload recovers only supported native-picker failures: ${nativeError}`, async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  let transfers = 0
+  const page = {
+    async setFileInput() { throw new Error(nativeError) },
+    async sleep() {},
+    async evaluate(script) {
+      if (script.includes('const dt = new DataTransfer()')) { transfers++; return { ok: true } }
+      if (script.includes('matchedNames')) return true
+      throw new Error('Unexpected upload operation')
+    },
+  }
+  if (nativeError.includes('fileChooserOpened')) {
+    assert.equal((await uploadChatGPTImages(page, [image])).ok, true)
+    assert.equal(transfers, 1)
+  } else {
+    await assert.rejects(uploadChatGPTImages(page, [image]), /Browser target crashed/)
+    assert.equal(transfers, 0)
+  }
+})
+}
 
 for (const current of ['https://chatgpt.com/c/abcdefgh1234', 'https://chatgpt.com/c/otherchat1234', 'about:blank']) {
   test(`ChatGPT detail navigates only when the target differs from ${current}`, async () => {

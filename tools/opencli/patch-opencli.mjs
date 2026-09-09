@@ -775,6 +775,14 @@ models = replaceOnce(
 fs.writeFileSync(modelsPath, models)
 
 let chatgptUtils = fs.readFileSync(chatgptUtilsPath, 'utf8')
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  'export async function uploadChatGPTImages(page, imagePaths) {',
+  'export async function isGenerating(page) {',
+  "!msg.includes('Not allowed') && !msg.includes('No element found')",
+  "!msg.includes('Not allowed') && !msg.includes('No element found') && !/fileChooserOpened|file chooser/i.test(msg)",
+  'ChatGPT image upload missing native file chooser fallback',
+)
 const rateLimitHelper = fs.readFileSync(
   path.join(runtimeDir, 'patches', 'chatgpt-rate-limit-helper.js'), 'utf8',
 )
