@@ -13,6 +13,7 @@ import { askCommand as chatgptAskCommand } from './node_modules/@jackwener/openc
 import {
   attachGeminiFile,
   sendGeminiMessage,
+  startNewGeminiChat,
   waitForGeminiResponse,
 } from './node_modules/@jackwener/opencli/clis/gemini/utils.js'
 import {
@@ -152,6 +153,28 @@ test('Gemini ask falls back when Browser Bridge misses fileChooserOpened', async
   assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
   assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
 })
+
+for (const scenario of ['fresh', 'draft', 'attachment', 'conversation']) {
+test(`Gemini new chat preserves only an already empty fresh page: ${scenario}`, async () => {
+  let navigations = 0
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://gemini.google.com/app'
+      return vm.runInNewContext(script, {
+        location: { pathname: scenario === 'conversation' ? '/app/current' : '/app' },
+        document: { querySelector(selector) {
+          if (selector.includes('contenteditable')) return { innerText: scenario === 'draft' ? 'unsent draft' : '' }
+          return scenario === 'attachment' ? {} : null
+        } },
+      })
+    },
+    async goto() { navigations++ },
+    async wait() {},
+  }
+  await startNewGeminiChat(page)
+  assert.equal(navigations, scenario === 'fresh' ? 0 : 1)
+})
+}
 
 test('Gemini ask does not hide unrelated native upload failures', async (t) => {
   const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
@@ -1141,6 +1164,7 @@ test('Gemini ask waits through delayed model-picker hydration', async () => {
       }
   const page = {
     async evaluate(script) {
+      if (script.includes("return ['/app', '/app/']")) return true
       if (script === 'window.location.href') return 'https://gemini.google.com/app'
       if (script.includes('Gemini model picker button was not found')) {
         pickerReads += 1

@@ -695,6 +695,24 @@ utils = utils.replace(
   `                if (await dispatchPreparedGeminiSubmit()) return 'button';
                 throw await failedComposerSubmission();`,
 )
+utils = utils.replace(String.raw`return location.pathname.replace(/\/+$/, '') === '/app'`, "return ['/app', '/app/'].includes(location.pathname)")
+utils = replaceOnce(
+  utils,
+  `export async function startNewGeminiChat(page) {
+    await ensureGeminiPage(page);
+    await page.goto(GEMINI_APP_URL, { waitUntil: 'load', settleMs: 2500 });`,
+  `export async function startNewGeminiChat(page) {
+    await ensureGeminiPage(page);
+    const alreadyFresh = await page.evaluate(\`(() => {
+        const composer = document.querySelector('[contenteditable="true"][aria-label*="Gemini"]');
+        return ['/app', '/app/'].includes(location.pathname)
+            && !!composer && !String(composer.innerText || composer.textContent || '').trim()
+            && !document.querySelector('user-query, model-response, input-container button[aria-label="close attachment"]');
+    })()\`);
+    if (alreadyFresh === true) return 'already-new';
+    await page.goto(GEMINI_APP_URL, { waitUntil: 'load', settleMs: 2500 });`,
+  'Gemini new-chat avoids reloading an already empty new page',
+)
 utils = replaceOnce(
   utils,
   `        const expectedVariant = String(modelId).replace(/^\\d+(?:\\.\\d+)?-/, '').toLowerCase();
