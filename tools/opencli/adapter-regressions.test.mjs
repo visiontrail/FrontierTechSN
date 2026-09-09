@@ -4,6 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 import { isGenerating, selectChatGPTModel, uploadChatGPTImages } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
@@ -21,6 +23,31 @@ import {
   uploadFrames,
   submittedVideoPrompt,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+test('reapplying browser patches keeps every adapter byte-identical and recovery arguments unique', (t) => {
+  const source = path.dirname(fileURLToPath(import.meta.url))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencli-patch-idempotence-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const packagePath = 'node_modules/@jackwener/opencli'
+  fs.cpSync(path.join(source, packagePath), path.join(root, packagePath), { recursive: true })
+  fs.cpSync(path.join(source, 'patches'), path.join(root, 'patches'), { recursive: true })
+  fs.copyFileSync(path.join(source, 'patch-opencli.mjs'), path.join(root, 'patch-opencli.mjs'))
+  const apply = () => execFileSync(process.execPath, [path.join(root, 'patch-opencli.mjs')])
+  const adapters = ['clis/gemini/ask.js', 'clis/gemini/utils.js', 'clis/gemini/models.js',
+    'clis/gemini/video.js', 'clis/chatgpt/ask.js', 'clis/chatgpt/utils.js',
+    'clis/chatgpt/model.js', 'clis/chatgpt/detail.js', 'dist/src/execution.js', 'cli-manifest.json']
+  apply()
+  const contents = adapters.map(name => fs.readFileSync(path.join(root, packagePath, name), 'utf8'))
+  apply()
+  adapters.forEach((name, index) => assert.equal(
+    fs.readFileSync(path.join(root, packagePath, name), 'utf8'), contents[index], name,
+  ))
+  const detail = contents[adapters.indexOf('clis/chatgpt/detail.js')]
+  for (const name of ['refresh', 'cooldown']) assert.equal(
+    [...detail.matchAll(new RegExp(`name: '${name}'`, 'g'))].length, 1,
+  )
+  assert.equal([...detail.matchAll(/let currentId = '';/g)].length, 1)
+})
 
 test('ChatGPT generation includes status outside the message in a section turn', async () => {
   const thinking = {

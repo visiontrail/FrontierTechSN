@@ -126,6 +126,24 @@ fs.writeFileSync(chatgptModelPath, chatgptModel)
 
 // Recovery must not reload an owned conversation that is still streaming.
 let chatgptDetail = fs.readFileSync(chatgptDetailPath, 'utf8')
+// Rebuild this project's navigation block from its pinned upstream anchor.
+// Later recovery patches alter earlier replacement strings, so checking each
+// intermediate string alone used to nest navigation and duplicate arguments.
+chatgptDetail = chatgptDetail.replace(
+  /^        \{ name: '(?:refresh|cooldown)', type: 'boolean'.*\},\n/gm,
+  '',
+)
+const detailNavigationStart = chatgptDetail.indexOf("        let currentId = '';")
+if (detailNavigationStart >= 0) {
+  const detailNavigationEnd = chatgptDetail.indexOf(
+    '        try {\n            await page.wait({ selector: CONVERSATION_MESSAGE_SELECTOR',
+    detailNavigationStart,
+  )
+  if (detailNavigationEnd < 0) throw new Error('ChatGPT detail navigation end anchor not found')
+  chatgptDetail = chatgptDetail.slice(0, detailNavigationStart)
+    + '        await page.goto(`${CHATGPT_URL}/c/${id}`, { settleMs: 2000 });\n'
+    + chatgptDetail.slice(detailNavigationEnd)
+}
 chatgptDetail = replaceOnce(
   chatgptDetail,
   '    CHATGPT_URL,',
