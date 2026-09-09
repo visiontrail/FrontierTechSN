@@ -580,6 +580,55 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("retained the initial review", calibration["fallback_reason"])
             self.assertEqual(opencli.await_count, 3)
 
+    async def test_unavailable_batch_never_erases_another_calibration_rejection(self):
+        for available_index in (0, 1):
+            for verdict, score in (("match", 88), ("partial", 68), ("mismatch", 40)):
+                with self.subTest(available_index=available_index, verdict=verdict):
+                    with TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        scenes = [
+                            _scene("scene-01", 0, "Gold reaches a record price."),
+                            _scene("scene-02", 8, "Central banks increase reserves."),
+                        ]
+                        payload = _matching_payload([scenes[available_index]], score)
+                        row = payload["reviews"][0]
+                        row["verdict"] = verdict
+                        if verdict != "match":
+                            row["issues"] = ["The narrated reserve figure is missing."]
+                            row["suggested_visual"] = "Show the reserve figure."
+                        calibration_responses = [
+                            OpenCLIResult(args=(), returncode=0, stdout="unavailable", stderr="")
+                            for _ in scenes
+                        ]
+                        calibration_responses[available_index] = _opencli_result(payload)
+                        opencli = AsyncMock(side_effect=[
+                            *[_opencli_result(_matching_payload([scene], 76)) for scene in scenes],
+                            *calibration_responses,
+                        ])
+                        with (
+                            patch.object(multimodal_review, "extract_scene_frames", AsyncMock(
+                                return_value=_frames(root, scenes)
+                            )),
+                            patch.object(multimodal_review, "run_opencli", opencli),
+                            patch.object(config, "AV_SYNC_GEMINI_BATCH_SIZE", 1),
+                            patch.object(config, "AV_SYNC_GEMINI_MIN_SCENE_SCORE", 70),
+                            patch.object(config, "AV_SYNC_GEMINI_MIN_AVERAGE_SCORE", 82),
+                            patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+                            patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""),
+                        ):
+                            report = await multimodal_review.review_video(
+                                root / "video.mp4", {"title": "Gold", "scenes": scenes}, root
+                            )
+                        self.assertEqual(opencli.await_count, 4)
+                        calibration = report["calibration"]
+                        self.assertEqual(calibration["scenes"][available_index]["score"], score)
+                        self.assertEqual(report["passed"], verdict == "match")
+                        self.assertEqual(calibration["fallback_to_initial"], verdict == "match")
+                        if verdict != "match":
+                            self.assertIn(scenes[available_index]["id"], report["failed_scene_ids"])
+                            self.assertEqual(report["scenes"][available_index]["issues"], row["issues"])
+                            self.assertTrue(report["errors"])
+
     async def test_chatgpt_fallback_can_pass_after_unusable_gemini_response(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

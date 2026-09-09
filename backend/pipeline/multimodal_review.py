@@ -855,6 +855,7 @@ async def review_video(
             )
         calibration["batches"] = calibrated_batches
         calibration["errors"] = calibration_errors
+        calibration["scenes"] = calibrated_reviews
         # A calibration pass is a secondary score-normalization aid, not a
         # second source of truth that may erase a complete, contract-valid
         # first review.  If Gemini/OpenCLI never returns even a structurally
@@ -867,11 +868,19 @@ async def review_video(
             for batch in calibrated_batches
             if not batch.get("contract_valid")
         ]
-        calibration_unavailable = bool(calibration_errors) and bool(
-            unusable_calibration_batches
-        ) and all(
-            not batch.get("image_received") or not batch.get("structure_valid")
-            for batch in unusable_calibration_batches
+        calibration_rejected = any(
+            review.get("rubric_consistent") is True
+            and review.get("passed") is False
+            for review in calibrated_reviews
+        )
+        calibration_unavailable = (
+            not calibration_rejected
+            and bool(calibration_errors)
+            and bool(unusable_calibration_batches)
+            and all(
+                not batch.get("image_received") or not batch.get("structure_valid")
+                for batch in unusable_calibration_batches
+            )
         )
         if calibration_unavailable:
             calibration["fallback_to_initial"] = True

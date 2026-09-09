@@ -1087,72 +1087,9 @@ def _finalize_quality_report(
     multimodal_enabled: bool,
 ) -> dict:
     """Finalize the strict quality gate before candidate promotion."""
-    # The aggregate calibration deliberately raises the per-scene score band to
-    # the configured *average* target.  A conservative reviewer can therefore
-    # turn an otherwise complete first pass (every scene is a contract-valid
-    # ``match`` with no issues) into all-partial rows merely because each score
-    # is below that raised band.  Re-rendering the same media cannot resolve
-    # that rubric disagreement and used to create an unbounded compose loop.
-    #
-    # Keep failing closed for any real initial issue, malformed batch, missing
-    # frame, or deterministic grounding failure.  Only the combination of a
-    # clean pixel review *and* independently verified exact-scene grounding may
-    # treat the stricter aggregate pass as advisory.  Preserve the second-pass
-    # rows in the report so the decision remains auditable.
-    calibration = multimodal.get("calibration") or {}
-    initial_reviews = calibration.get("initial_scenes") or []
-    initial_batches = multimodal.get("batches") or []
-    scene_count = int(multimodal.get("scene_count") or 0)
-    clean_initial_semantics = (
-        multimodal.get("passed") is not True
-        and visual_grounding.get("passed") is True
-        and not multimodal.get("errors")
-        and calibration.get("attempted") is True
-        and not calibration.get("fallback_to_initial")
-        and scene_count > 0
-        and len(initial_reviews) == scene_count
-        and bool(initial_batches)
-        and all(
-            batch.get("image_received")
-            and batch.get("structure_valid")
-            and batch.get("contract_valid")
-            for batch in initial_batches
-        )
-        and all(
-            review.get("passed") is True
-            and review.get("rubric_consistent") is True
-            and review.get("gemini_verdict") == "match"
-            and review.get("issues") == []
-            for review in initial_reviews
-        )
-    )
-    if clean_initial_semantics:
-        calibrated_reviews = list(multimodal.get("scenes") or [])
-        calibration["advisory_scenes"] = calibrated_reviews
-        calibration["advisory_average_score"] = multimodal.get("average_score")
-        calibration["advisory_failed_scene_ids"] = list(
-            multimodal.get("failed_scene_ids") or []
-        )
-        calibration["override_reason"] = (
-            "The complete initial rendered-frame review marked every scene as a "
-            "contract-valid semantic match with no issues, and deterministic "
-            "grounding independently verified every exact scene binding. The "
-            "raised-floor aggregate calibration is retained as advisory polish "
-            "feedback instead of requesting an identical compose loop."
-        )
-        multimodal.update(
-            {
-                "status": "passed",
-                "passed": True,
-                "average_score": calibration.get("initial_average_score"),
-                "failed_scene_ids": [],
-                "release_basis": (
-                    "clean_initial_matches_plus_deterministic_grounding"
-                ),
-                "scenes": initial_reviews,
-                "calibration": calibration,
-            }
-        )
+    # The reviewer owns score calibration and provider-unavailable fallback.
+    # Exact scene bindings cannot overrule a later rendered-frame rejection:
+    # a correctly bound scene can still omit a narrated claim from its pixels.
     multimodal_passed = multimodal.get("passed") is True if multimodal_enabled else True
     quality_passed = (
         alignment.get("passed") is True

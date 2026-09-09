@@ -637,7 +637,7 @@ def test_failed_review_defers_delivery_for_retry():
     assert "81.42" in report["warnings"][0]
 
 
-def test_clean_initial_pixel_matches_and_exact_grounding_end_calibration_loop():
+def test_clean_initial_matches_and_grounding_cannot_override_calibration_issues():
     initial_reviews = [
         {
             "id": "scene-01",
@@ -697,15 +697,13 @@ def test_clean_initial_pixel_matches_and_exact_grounding_end_calibration_loop():
         multimodal_enabled=True,
     )
 
-    assert report["passed"] is True
-    assert report["quality_status"] == "passed"
-    assert report["multimodal"]["release_basis"] == (
-        "clean_initial_matches_plus_deterministic_grounding"
-    )
-    assert report["multimodal"]["average_score"] == 75.0
-    assert report["multimodal"]["failed_scene_ids"] == []
-    assert report["multimodal"]["scenes"] == initial_reviews
-    assert report["multimodal"]["calibration"]["advisory_scenes"] == calibrated_reviews
+    assert report["passed"] is False
+    assert report["quality_status"] == "retrying"
+    assert report["delivery_status"] == "deferred"
+    assert report["multimodal"]["average_score"] == 77.5
+    assert report["multimodal"]["failed_scene_ids"] == ["scene-01", "scene-02"]
+    assert report["multimodal"]["scenes"] == calibrated_reviews
+    assert "override_reason" not in report["multimodal"]["calibration"]
 
 
 def test_calibration_disagreement_still_fails_without_clean_initial_evidence():
