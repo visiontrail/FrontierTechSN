@@ -77,11 +77,19 @@ export async function attachGeminiFile(page, filePath) {
                 fileInputSelector = discovered;
                 break;
             }
-        } else if ([8, 32].includes(attempt) && !picker?.expanded) {
+        } else if ([8, 32].includes(attempt)) {
             // A bridge can acknowledge trusted pointer events while an Ego
             // task-space tab remains out of focus. Opening this DOM menu does
-            // not require a native file chooser. Use its own click handler
-            // only after observed native attempts left it collapsed.
+            // not require a native file chooser. Recreate either a collapsed
+            // menu or an expanded but empty loading shell after native
+            // attempts failed to expose its controls.
+            const closed = await page.evaluate(`(() => {
+                const button = document.querySelector('button[aria-label="Upload & tools"]');
+                if (!button || button.disabled || button.getAttribute('aria-expanded') !== 'true') return false;
+                button.click();
+                return true;
+            })()`);
+            if (closed) await page.wait(0.5);
             await page.evaluate(`(() => {
                 const button = document.querySelector('button[aria-label="Upload & tools"]');
                 if (!button || button.disabled || button.getAttribute('aria-expanded') === 'true') return false;

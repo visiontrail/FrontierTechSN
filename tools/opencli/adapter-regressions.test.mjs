@@ -119,6 +119,7 @@ function geminiAttachmentPage(nativeError, inputSelector = 'input[name="Filedata
     },
     async evaluate(script) {
       if (script === 'window.location.href') return 'https://gemini.google.com/app'
+      if (script.includes('button.click();')) return false
       if (script.includes('const inputSelector = selectors.find')) {
         return { inputSelector, buttonSelector: '', expanded: true }
       }
@@ -1905,26 +1906,32 @@ for (const staleLimit of [false, true]) {
   })
 }
 
-test('Gemini attachment opens a collapsed DOM menu after acknowledged native clicks do nothing', async (t) => {
+for (const initiallyExpanded of [false, true]) {
+test(`Gemini attachment recovers an empty menu after ignored native clicks: expanded=${initiallyExpanded}`, async (t) => {
   const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
   const page = geminiAttachmentPage('fileChooserOpened not received')
   const originalEvaluate = page.evaluate
   let opened = false
+  let expanded = initiallyExpanded
   let domClicks = 0
+  const button = {
+    disabled: false,
+    getAttribute: () => String(expanded),
+    click() { expanded = !expanded; if (expanded) opened = true; domClicks++ },
+  }
   page.evaluate = async script => {
     if (script.includes('button.click();')) {
-      opened = true
-      domClicks++
-      return true
+      return vm.runInNewContext(script, { document: { querySelector: () => button } })
     }
     if (script.includes('const inputSelector = selectors.find') && !opened) {
-      return { inputSelector: '', buttonSelector: '', expanded: false }
+      return { inputSelector: '', buttonSelector: '', expanded }
     }
     if (script.includes('button.getBoundingClientRect()')) return { x: 45, y: 67 }
     return originalEvaluate(script)
   }
   page.nativeClick = async () => {}
   await attachGeminiFile(page, image)
-  assert.equal(domClicks, 1)
+  assert.equal(domClicks, initiallyExpanded ? 2 : 1)
   assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
 })
+}
