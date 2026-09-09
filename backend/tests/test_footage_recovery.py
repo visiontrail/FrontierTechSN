@@ -470,8 +470,12 @@ def test_legacy_normalized_clip_metadata_uses_the_saved_render_file(tmp_path):
 
 def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_path):
     candidates = [{'source_page_url': f'https://youtu.be/port-{i}', 'title': 'Los Angeles port containers', 'duration_seconds': 90} for i in range(3)]
+    retained = {**candidates[2], 'visual_query': 'Los Angeles port containers', 'visual_purpose': ''}
+    cache_path = tmp_path / 'footage/evidence/previews/retained/preview-cache.json'
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(json.dumps({'candidate': retained}))
     review = AsyncMock(return_value=[web_footage.WebFootageReviewUnavailable('Review offline')])
-    with (patch.object(web_footage, 'search_youtube', AsyncMock(return_value=candidates)) as search,
+    with (patch.object(web_footage, 'search_youtube', AsyncMock(return_value=candidates[:2])) as search,
           patch.object(web_footage, '_load_prepared_preview', side_effect=lambda candidate, *args: {'sheet': 'cached.jpg'} if candidate['source_page_url'] == candidates[2]['source_page_url'] else None),
           patch.object(web_footage, '_analyze_preview_batch', review),
           pytest.raises(web_footage.WebFootageReviewUnavailable, match='Review offline')):

@@ -724,7 +724,7 @@ def _save_prepared_preview(candidate: dict, prepared: dict, task_dir: Path) -> N
         for index in range(len(prepared["intervals"]))
         for filename in ("preview.mp4", "frames.jpg")
     ]]
-    contract = {"identity": _preview_cache_identity(candidate),
+    contract = {"identity": _preview_cache_identity(candidate), "candidate": candidate,
                 "intervals": prepared["intervals"],
                 "files": {path.relative_to(task_dir).as_posix(): _sha256(path) for path in files}}
     _write_manifest(folder / "preview-cache.json", contract)
@@ -1078,7 +1078,21 @@ async def supplement_web_footage(
             pending_shots.append({**shot, "_candidate_attempt": len(prior) + 1})
     fulfilled = {str(clip.get("plan_query") or clip.get("query") or "") for clip in manifest.get("clips", [])}
     async def choose_candidate(shot: dict, reserved: set[str] | None = None) -> dict | None:
-        results = await search_youtube(shot["query"])
+        cached_candidates = []
+        for cache_path in (task_dir / "footage" / "evidence" / "previews").glob("*/preview-cache.json"):
+            try:
+                cached = json.loads(cache_path.read_text()).get("candidate")
+                if (isinstance(cached, dict)
+                        and cached.get("visual_query") == shot["plan_query"]
+                        and str(cached.get("visual_purpose") or "") == str(shot.get("purpose") or "")
+                        and _load_prepared_preview(cached, cache_path.parent, task_dir) is not None):
+                    cached_candidates.append(cached)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+        # A completed preview is a retained discovery result even if its
+        # source falls out of the next search page. It still needs a fresh
+        # context-bound visual verdict before it can become a clip.
+        results = [*cached_candidates, *await search_youtube(shot["query"])]
         eligible = []
         for candidate in results:
             if not _metadata_matches_query(candidate, shot["query"]):
