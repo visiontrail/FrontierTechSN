@@ -505,6 +505,7 @@ async def _review_batch(
     attempts = 0
     for attempt in range(maximum_retries + 1):
         attempts = attempt + 1
+        result = None
         try:
             prompt = _review_prompt(
                 title,
@@ -539,10 +540,21 @@ async def _review_batch(
         except Exception as exc:  # noqa: BLE001 - bounded web retry
             last_error = str(exc)
             normalized = None
+            if result is None:
+                _persist_provider_response(
+                    sheet, phase=phase, batch_index=batch_index,
+                    attempt=attempts, provider="gemini", stdout="", stderr=last_error,
+                )
             if attempt < maximum_retries:
                 _emit(
                     log,
                     f"Gemini A/V review: retrying {phase} batch {batch_index} "
+                    f"after unusable response ({last_error})",
+                )
+            else:
+                _emit(
+                    log,
+                    f"Gemini A/V review: exhausted {phase} batch {batch_index} "
                     f"after unusable response ({last_error})",
                 )
 
@@ -551,6 +563,7 @@ async def _review_batch(
     ).strip().casefold()
     if fallback_provider in {"chatgpt"}:
         attempts += 1
+        result = None
         try:
             prompt = _review_prompt(
                 title,
@@ -589,6 +602,12 @@ async def _review_batch(
             )
         except Exception as exc:  # noqa: BLE001 - retain fail-closed proof
             last_error = f"{fallback_provider} fallback: {exc}"
+            if result is None:
+                _persist_provider_response(
+                    sheet, phase=phase, batch_index=batch_index,
+                    attempt=attempts, provider=fallback_provider,
+                    stdout="", stderr=last_error,
+                )
     if last_normalized is not None:
         last_normalized["review_provider"] = fallback_provider or "gemini"
         return last_normalized, attempts, last_error

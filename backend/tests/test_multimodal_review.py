@@ -616,6 +616,35 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(opencli.await_args_list[1].args[0][0], "chatgpt")
             self.assertEqual(report["batches"][0]["review_provider"], "chatgpt")
 
+    async def test_unavailable_review_overwrites_stale_response_and_keeps_last_error(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
+            frames = _frames(root, scenes)
+            stale = root / "response-initial-01-attempt-01-gemini.json"
+            stale.write_text('{"stdout":"previous candidate review"}')
+            messages = []
+            with (
+                patch.object(multimodal_review, "run_opencli", AsyncMock(side_effect=[
+                    OpenCLIError("Gemini send rejected: disabled button"),
+                    OpenCLIError("ChatGPT upload unavailable"),
+                ])),
+                patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "chatgpt"),
+            ):
+                normalized, attempts, error = await multimodal_review._review_batch(
+                    title="Gold", batch_frames=frames, sheet=root / "sheet.jpg",
+                    match_floor=70, minimum_average_score=82, timeout=120,
+                    maximum_retries=0, batch_index=1, phase="initial", log=messages.append,
+                )
+            self.assertEqual(attempts, 2)
+            self.assertFalse(normalized["image_received"])
+            self.assertIn("ChatGPT upload unavailable", error)
+            self.assertEqual(json.loads(stale.read_text())["stdout"], "")
+            self.assertIn("disabled button", json.loads(stale.read_text())["stderr"])
+            fallback = root / "response-initial-01-attempt-02-chatgpt.json"
+            self.assertIn("ChatGPT upload unavailable", json.loads(fallback.read_text())["stderr"])
+            self.assertTrue(any("exhausted" in message and "disabled button" in message for message in messages))
+
     async def test_low_scene_score_rejects_video_even_when_average_is_high(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
