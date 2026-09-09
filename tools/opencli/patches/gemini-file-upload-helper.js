@@ -29,13 +29,29 @@ export async function attachGeminiFile(page, filePath, allowEmptyPageReload = tr
         await page.cdp('Page.bringToFront', {}).catch(() => undefined);
         await page.wait(0.25);
     }
-    try {
-        await page.click('button[aria-label="Upload & tools"]');
-    } catch (error) {
-        throw new CommandExecutionError(
-            'Could not open Gemini upload menu with a native click: ' + String(error?.message || error)
-        );
+    const uploadMenuSelector = 'button[aria-label="Upload & tools"]';
+    let menuOpened = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        // The skeleton composer can precede the real upload control by many
+        // seconds. Wait for the actual control, not a fixed post-navigation
+        // delay; Angular can also replace it between readiness and the click.
+        await page.wait({ selector: uploadMenuSelector, timeout: 30 });
+        try {
+            await page.click(uploadMenuSelector);
+            menuOpened = true;
+            break;
+        } catch (error) {
+            const message = String(error?.message || error);
+            if (!/matched 0 elements|no element found|element not found/i.test(message)) {
+                throw new CommandExecutionError('Could not open Gemini upload menu: ' + message);
+            }
+            if (attempt === 2) {
+                throw new CommandExecutionError('Gemini upload control kept disappearing during hydration: ' + message);
+            }
+            await page.wait(0.5);
+        }
     }
+    if (!menuOpened) throw new CommandExecutionError('Gemini upload control was not ready');
 
     const fileInputSelectors = [
         'input[name="Filedata"]',

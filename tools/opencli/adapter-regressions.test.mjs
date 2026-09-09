@@ -242,6 +242,38 @@ test('Gemini ask falls back when Browser Bridge misses fileChooserOpened', async
   assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
 })
 
+test('Gemini attachment waits for the hydrated upload control and recovers its replacement', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('fileChooserOpened not received')
+  let readyWaits = 0
+  let clicks = 0
+  const wait = page.wait
+  page.wait = async value => {
+    if (value?.selector === 'button[aria-label="Upload & tools"]') readyWaits++
+    return wait(value)
+  }
+  page.click = async () => {
+    clicks++
+    assert.equal(readyWaits, clicks)
+    if (clicks < 3) throw new Error('CSS selector matched 0 elements')
+  }
+  await attachGeminiFile(page, image)
+  assert.equal(clicks, 3)
+  assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
+})
+
+test('Gemini attachment never uploads when its skeleton page does not hydrate', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('fileChooserOpened not received')
+  const wait = page.wait
+  page.wait = async value => {
+    if (value?.selector) throw new Error('Upload control readiness timed out')
+    return wait(value)
+  }
+  await assert.rejects(attachGeminiFile(page, image), /readiness timed out/)
+  assert.equal(page.actions.some(([action]) => ['click', 'setFileInput', 'DataTransfer'].includes(action)), false)
+})
+
 for (const scenario of ['fresh', 'draft', 'attachment', 'conversation']) {
 test(`Gemini new chat preserves only an already empty fresh page: ${scenario}`, async () => {
   let navigations = 0
