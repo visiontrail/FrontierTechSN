@@ -1819,3 +1819,27 @@ for (const staleLimit of [false, true]) {
     assert.equal(reloads, staleLimit ? 1 : 0)
   })
 }
+
+test('Gemini attachment opens a collapsed DOM menu after acknowledged native clicks do nothing', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('fileChooserOpened not received')
+  const originalEvaluate = page.evaluate
+  let opened = false
+  let domClicks = 0
+  page.evaluate = async script => {
+    if (script.includes('button.click();')) {
+      opened = true
+      domClicks++
+      return true
+    }
+    if (script.includes('const inputSelector = selectors.find') && !opened) {
+      return { inputSelector: '', buttonSelector: '', expanded: false }
+    }
+    if (script.includes('button.getBoundingClientRect()')) return { x: 45, y: 67 }
+    return originalEvaluate(script)
+  }
+  page.nativeClick = async () => {}
+  await attachGeminiFile(page, image)
+  assert.equal(domClicks, 1)
+  assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
+})
