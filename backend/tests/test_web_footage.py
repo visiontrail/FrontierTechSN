@@ -734,6 +734,7 @@ class WebFootagePreviewTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(web_footage, '_probe', AsyncMock(return_value={'duration_seconds': 15})),
                     patch.object(web_footage, '_trim', AsyncMock()),
                     patch.object(web_footage, '_run_command', AsyncMock()),
+                    patch.object(web_footage, '_save_prepared_preview'),
                     patch.object(web_footage, 'run_opencli', AsyncMock(return_value=OpenCLIResult(
                         args=[], returncode=0, stdout=json.dumps(verdict), stderr='',
                     ))) as ask,

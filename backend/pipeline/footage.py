@@ -1182,6 +1182,16 @@ def _resume_web_manifest(
     (history / f"manifest-{hashlib.sha256(snapshot.encode()).hexdigest()[:16]}.json").write_text(
         snapshot, encoding="utf-8",
     )
+    for error in previous.get("errors", []):
+        message = str(error.get("message") or "")
+        if error.get("stage") == "web-download-edit" and message.startswith("OpenCLI "):
+            # Older scouts charged an unavailable browser review against the
+            # candidate budget. Preserve that audit record without blacklisting
+            # a source whose pixels were never adjudicated.
+            error["original_stage"] = error["stage"]
+            error["stage"] = "web-review"
+            if error.get("source_page_url"):
+                error["pending_source_page_url"] = error.pop("source_page_url")
     plan = previous["queries"]
     if previous.get("binding_version") != 2:
         old_bindings = {shot["query"].casefold(): shot.get("script_excerpt", "") for shot in plan}

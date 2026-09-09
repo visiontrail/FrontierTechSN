@@ -8,7 +8,7 @@ import pytest
 from PIL import Image
 
 from backend.pipeline import footage, web_footage
-from backend.pipeline.opencli import OpenCLIResult
+from backend.pipeline.opencli import OpenCLIError, OpenCLIResult
 
 
 @pytest.fixture(autouse=True)
@@ -279,6 +279,78 @@ def test_one_remaining_shot_reviews_three_candidates_once(tmp_path, approved_ind
         else:
             assert result['status'] != 'ready'
     asyncio.run(run())
+
+
+def test_review_connection_failure_does_not_reject_or_replan_the_candidate(tmp_path):
+    plan = [{'query': 'venue building', 'purpose': 'Narrated venue', 'script_excerpt': 'The venue opened.'}]
+    manifest = {'provider_id': 'youtube-web', 'clips': [], 'errors': [], 'url_inspection_unavailable': True}
+    candidate = {'source_page_url': 'https://youtu.be/venue', 'title': 'Venue building', 'duration_seconds': 30}
+    async def run():
+        with (patch.object(web_footage, 'search_youtube', AsyncMock(return_value=[candidate])),
+              patch.object(web_footage, '_analyze_preview_batch', AsyncMock(return_value=[
+                  web_footage.WebFootageReviewUnavailable('OpenCLI connection failed')]))):
+            with pytest.raises(web_footage.WebFootageReviewUnavailable, match='previews and verified clips were retained'):
+                await web_footage.supplement_web_footage(
+                    task_dir=tmp_path, manifest=manifest, query_plan=plan, target_total=1,
+                    orientation='landscape', script='The venue opened.',
+                )
+        assert manifest['status'] == 'review_unavailable'
+        assert not manifest.get('rejected_candidates')
+        assert not manifest.get('query_replans')
+        assert manifest['errors'][0]['stage'] == 'web-review'
+        assert 'source_page_url' not in manifest['errors'][0]
+    asyncio.run(run())
+
+
+def test_batch_transport_exception_remains_an_unavailable_review(tmp_path):
+    folder = tmp_path / 'prepared'
+    folder.mkdir()
+    sheet = folder / 'sheet.jpg'
+    Image.new('RGB', (160, 90), 'blue').save(sheet)
+    prepared = {'folder': folder, 'sheet': sheet,
+                'intervals': [{'start_seconds': 3, 'end_seconds': 18}]}
+    async def run():
+        with (patch.object(web_footage, '_prepare_candidate_preview', AsyncMock(return_value=prepared)),
+              patch.object(web_footage, 'run_opencli', AsyncMock(side_effect=OpenCLIError('connection failed')))):
+            results = await web_footage._analyze_preview_batch([
+                ({'source_page_url': 'https://youtu.be/venue', 'title': 'Venue'}, 'The venue opened.')
+            ], tmp_path)
+        assert isinstance(results[0], web_footage.WebFootageReviewUnavailable)
+    asyncio.run(run())
+
+
+def test_prepared_preview_reuse_checks_identity_and_every_artifact(tmp_path):
+    candidate = {'source_page_url': 'https://youtu.be/venue', 'duration_seconds': 30}
+    folder = tmp_path / 'footage/evidence/previews' / hashlib.sha256(candidate['source_page_url'].encode()).hexdigest()[:16]
+    window = folder / 'window-0'
+    window.mkdir(parents=True)
+    for path in (folder / 'contact-sheet.jpg', window / 'frames.jpg'):
+        Image.new('RGB', (160, 90), 'blue').save(path)
+    (window / 'preview.mp4').write_bytes(b'verified download bytes')
+    prepared = {'folder': folder, 'sheet': folder / 'contact-sheet.jpg',
+                'intervals': [{'start_seconds': 3, 'end_seconds': 18}]}
+    web_footage._save_prepared_preview(candidate, prepared, tmp_path)
+    async def run():
+        with patch.object(web_footage, '_download_youtube', AsyncMock()) as download:
+            result = await web_footage._prepare_candidate_preview(candidate, 'A new narration binding.', tmp_path)
+        assert result == prepared
+        download.assert_not_awaited()
+    asyncio.run(run())
+    assert web_footage._load_prepared_preview({**candidate, 'duration_seconds': 31}, folder, tmp_path) is None
+    (window / 'preview.mp4').write_bytes(b'tampered')
+    assert web_footage._load_prepared_preview(candidate, folder, tmp_path) is None
+
+
+def test_resume_does_not_blacklist_legacy_browser_transport_failures(tmp_path):
+    script, manifest = saved_hybrid(tmp_path)
+    manifest['errors'] = [{'stage': 'web-download-edit', 'query': 'query',
+                           'source_page_url': 'https://youtu.be/undecided',
+                           'message': 'OpenCLI gemini ask failed: sendCommand: max attempts exhausted'}]
+    (tmp_path / 'footage/manifest.json').write_text(json.dumps(manifest))
+    result = resume(tmp_path, script)
+    assert result['errors'][0]['stage'] == 'web-review'
+    assert result['errors'][0]['pending_source_page_url'].endswith('/undecided')
+    assert 'source_page_url' not in result['errors'][0]
 
 
 def test_redownload_refreshes_an_existing_raw_interval(tmp_path):

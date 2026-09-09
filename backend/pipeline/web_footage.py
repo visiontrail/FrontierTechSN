@@ -46,6 +46,10 @@ class WebFootageError(RuntimeError):
     """One candidate failed without invalidating the rest of the scout."""
 
 
+class WebFootageReviewUnavailable(WebFootageError):
+    """The review did not execute; candidate suitability remains undecided."""
+
+
 def _emit(log: LogCallback | None, message: str) -> None:
     if log:
         log(message)
@@ -708,6 +712,45 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _preview_cache_identity(candidate: dict) -> dict:
+    return {"version": 1, "source_page_url": candidate["source_page_url"],
+            "duration_seconds": float(candidate.get("duration_seconds") or 0)}
+
+
+def _save_prepared_preview(candidate: dict, prepared: dict, task_dir: Path) -> None:
+    folder = prepared["folder"]
+    files = [prepared["sheet"], *[
+        folder / f"window-{index}" / filename
+        for index in range(len(prepared["intervals"]))
+        for filename in ("preview.mp4", "frames.jpg")
+    ]]
+    contract = {"identity": _preview_cache_identity(candidate),
+                "intervals": prepared["intervals"],
+                "files": {path.relative_to(task_dir).as_posix(): _sha256(path) for path in files}}
+    _write_manifest(folder / "preview-cache.json", contract)
+
+
+def _load_prepared_preview(candidate: dict, folder: Path, task_dir: Path) -> dict | None:
+    try:
+        contract = json.loads((folder / "preview-cache.json").read_text())
+        if contract.get("identity") != _preview_cache_identity(candidate):
+            return None
+        intervals = contract["intervals"]
+        if not intervals or not isinstance(intervals, list):
+            return None
+        expected = [folder / "contact-sheet.jpg", *[
+            folder / f"window-{index}" / filename for index in range(len(intervals))
+            for filename in ("preview.mp4", "frames.jpg")
+        ]]
+        for path in expected:
+            if (task_dir.resolve() not in path.resolve().parents or not path.is_file()
+                    or _sha256(path) != contract["files"].get(path.relative_to(task_dir).as_posix())):
+                return None
+        return {"folder": folder, "sheet": expected[0], "intervals": intervals}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 async def _prepare_candidate_preview(
     candidate: dict, excerpt: str, task_dir: Path, *, source_path: Path | None = None,
 ) -> dict:
@@ -724,6 +767,10 @@ async def _prepare_candidate_preview(
     key = hashlib.sha256(candidate["source_page_url"].encode()).hexdigest()[:16]
     folder = task_dir / "footage" / "evidence" / "previews" / key
     folder.mkdir(parents=True, exist_ok=True)
+    if source_path is None:
+        cached = _load_prepared_preview(candidate, folder, task_dir)
+        if cached is not None:
+            return cached
     proposal = _fallback_analysis(candidate, reason="Unreviewed preview proposal")
     duration = float(candidate.get("duration_seconds") or 0)
     length = proposal["end_seconds"] - proposal["start_seconds"]
@@ -764,7 +811,10 @@ async def _prepare_candidate_preview(
         "-filter_complex", f"vstack=inputs={len(sheets)}" if len(sheets) > 1 else "null",
         "-frames:v", "1", str(sheet),
     ], timeout=60)
-    return {"folder": folder, "sheet": sheet, "intervals": intervals}
+    prepared = {"folder": folder, "sheet": sheet, "intervals": intervals}
+    if source_path is None:
+        _save_prepared_preview(candidate, prepared, task_dir)
+    return prepared
 
 
 async def _analyze_candidate_preview(
@@ -834,7 +884,7 @@ async def _analyze_preview_batch(
     from backend.pipeline.multimodal_review import _response_payload, _review_command
 
     prepared = []
-    results: list[dict | Exception] = [WebFootageError("Missing batch verdict") for _ in requests]
+    results: list[dict | Exception] = [WebFootageReviewUnavailable("Missing batch verdict") for _ in requests]
     for index, (candidate, excerpt) in enumerate(requests):
         try:
             _emit(log, f"Web footage preview {index + 1}/{len(requests)}: sampling {candidate.get('title') or candidate['source_page_url']}")
@@ -908,7 +958,7 @@ async def _analyze_preview_batch(
                 results[index] = exc
     except Exception as exc:
         for index, _ in prepared:
-            results[index] = exc
+            results[index] = WebFootageReviewUnavailable(str(exc))
     return results
 
 
@@ -1222,6 +1272,18 @@ async def supplement_web_footage(
                 evidence_root / clip_id,
                 trimmed["duration_seconds"],
             )
+        except (WebFootageReviewUnavailable, OpenCLIError) as exc:
+            manifest.setdefault("errors", []).append({
+                "query": query, "plan_query": shot["plan_query"],
+                "stage": "web-review", "message": str(exc),
+                "pending_source_page_url": candidate["source_page_url"],
+            })
+            manifest.update(status="review_unavailable", updated_at=_now())
+            _write_manifest(manifest_file, manifest)
+            raise WebFootageReviewUnavailable(
+                "Public-footage visual review unavailable; downloaded previews and verified clips "
+                f"were retained. Restore the browser connection and retry acquisition. {exc}"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - try the next query/candidate
             if "review rejected" in str(exc).casefold():
                 manifest.setdefault("rejected_candidates", []).append({
