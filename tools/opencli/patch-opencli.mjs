@@ -477,7 +477,8 @@ utils = replaceOnce(
   )
 }
 // Upgrade already-patched installations as well as clean installs.
-utils = replaceWithinFunction(
+if (!utils.includes('const failedComposerSubmission = async () =>')) {
+  utils = replaceWithinFunction(
   utils,
   'export async function sendGeminiMessage(page, text) {',
   'function normalizeGeminiExportUrls(value) {',
@@ -492,6 +493,7 @@ utils = replaceWithinFunction(
                 throw new CommandExecutionError('Gemini did not accept the composer submission');`,
   'Gemini no-op selector native retry',
 )
+}
 utils = replaceOnce(
   utils,
   `      return {
@@ -648,6 +650,35 @@ utils = replaceWithinFunction(
         return accepted;`,
   'Gemini confirmed DOM submit diagnostic',
 )
+if (!utils.includes('const failedComposerSubmission = async () =>')) {
+  const start = utils.indexOf('export async function sendGeminiMessage(page, text) {')
+  const end = utils.indexOf('function normalizeGeminiExportUrls(value) {', start)
+  if (start < 0 || end < 0) throw new Error('Gemini submission diagnostic boundary was not found')
+  let section = utils.slice(start, end)
+  const diagnostic = `    const failedComposerSubmission = async () => {
+        let diagnostic;
+        try {
+            const state = await exactComposerState();
+            const controls = await page.evaluate(\`(() => {
+                const composer = document.querySelector('[data-opencli-gemini-composer="1"]');
+                const rect = composer?.getBoundingClientRect();
+                const buttons = Array.from(document.querySelectorAll('button')).filter(button => /send|submit|stop|发送|提交|停止/i.test((button.getAttribute('aria-label') || '') + ' ' + (button.textContent || ''))).map(button => {
+                    const box = button.getBoundingClientRect();
+                    return { label: button.getAttribute('aria-label'), disabled: !!button.disabled, ariaDisabled: button.getAttribute('aria-disabled'), width: box.width, height: box.height, verticalDistance: rect ? Math.abs((box.top + box.bottom - rect.top - rect.bottom) / 2) : null };
+                });
+                return { buttons, busy: !!document.querySelector('[aria-busy="true"], mat-progress-spinner'), alerts: Array.from(document.querySelectorAll('[role="alert"], [role="dialog"]')).map(el => (el.textContent || '').trim().slice(0, 500)).slice(0, 4) };
+            })()\`);
+            diagnostic = { exact: state.exact, actualLength: state.actual.length, expectedLength: expectedText.length, controls };
+        } catch (error) {
+            diagnostic = { diagnosticError: String(error?.message || error) };
+        }
+        return new CommandExecutionError('Gemini did not accept the composer submission: ' + JSON.stringify(diagnostic));
+    };
+`
+  section = replaceOnce(section, '    const dispatchPreparedGeminiSubmit = async () => {', diagnostic + '    const dispatchPreparedGeminiSubmit = async () => {', 'Gemini failed submission control diagnostics')
+  section = section.replaceAll("throw new CommandExecutionError('Gemini did not accept the composer submission');", 'throw await failedComposerSubmission();')
+  utils = utils.slice(0, start) + section + utils.slice(end)
+}
 utils = replaceOnce(
   utils,
   `        const expectedVariant = String(modelId).replace(/^\\d+(?:\\.\\d+)?-/, '').toLowerCase();

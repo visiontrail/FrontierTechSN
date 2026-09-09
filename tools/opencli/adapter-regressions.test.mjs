@@ -1218,6 +1218,7 @@ test(`Gemini DOM submit recovery respects ${scenario} composer state`, async () 
           getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
         })
       }
+      if (script.includes('verticalDistance: rect ?')) return { buttons: [{ label: button.textContent, disabled: button.disabled }], busy: false, alerts: [] }
       throw new Error(`Unexpected Gemini evaluate script: ${String(script).slice(0, 100)}`)
     },
     async fillText(_selector, text) { composerText = text; return { verified: true, actual: text } },
@@ -1229,7 +1230,15 @@ test(`Gemini DOM submit recovery respects ${scenario} composer state`, async () 
     assert.equal(await sendGeminiMessage(page, 'hello'), 'button')
     assert.equal(domClicks, 1)
   } else {
-    await assert.rejects(sendGeminiMessage(page, 'hello'), /did not accept the composer submission/)
+    await assert.rejects(sendGeminiMessage(page, 'hello'), error => {
+      assert.match(error.message, /did not accept the composer submission/)
+      const diagnostic = JSON.parse(error.message.split('submission: ')[1])
+      assert.equal(diagnostic.exact, scenario !== 'changed-text')
+      assert.equal(diagnostic.expectedLength, 5)
+      assert.equal(diagnostic.controls.buttons[0].disabled, scenario === 'disabled')
+      assert.equal(error.message.includes('A different prompt'), false)
+      return true
+    })
     assert.equal(domClicks, 0)
   }
 })
