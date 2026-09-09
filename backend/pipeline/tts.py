@@ -1464,7 +1464,17 @@ def _split_pocket_tts_text(text: str, max_words: int) -> list[str]:
             chunks.append(line)
             continue
 
-        sentences = [item.strip() for item in SENTENCE_BOUNDARY_RE.split(line) if item.strip()]
+        # Initials and abbreviations are internal punctuation, not safe voice
+        # reset points (for example E. coli, U.S. manufacturers, or Dr. Earley).
+        # Keeping an ambiguous abbreviation with the next sentence is safer
+        # than cutting a spoken name in half; max_words is a soft target.
+        boundaries = [0]
+        for match in SENTENCE_BOUNDARY_RE.finditer(line):
+            if re.search(r"\b(?:(?:[A-Z]\.)+|(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)\.)$", line[:match.start()]):
+                continue
+            boundaries.append(match.end())
+        boundaries.append(len(line))
+        sentences = [line[start:end].strip() for start, end in zip(boundaries, boundaries[1:])]
         if len(sentences) <= 1:
             # Pocket's own tokenizer can still split a punctuation-poor line on
             # commas. Do not introduce a mid-phrase application seam here.

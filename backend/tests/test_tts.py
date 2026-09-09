@@ -83,6 +83,19 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(" ".join(chunks), text)
 
+    def test_pocket_split_keeps_abbreviations_inside_complete_sentences(self):
+        sentences = [
+            "Inspectors identified E. coli in the food.",
+            "Dr. Earley spoke to U.S. manufacturers.",
+            "The final sentence remains separate.",
+        ]
+        text = " ".join(sentences)
+
+        chunks = tts._split_pocket_tts_text(text, max_words=5)
+
+        self.assertEqual(chunks, sentences)
+        self.assertEqual(" ".join(chunks), text)
+
     def test_normalizes_pocket_streaming_wav_placeholder_header(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "stream.wav"

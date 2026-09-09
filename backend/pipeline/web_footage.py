@@ -1086,6 +1086,30 @@ async def supplement_web_footage(
                 reserved_plans.add(upcoming["plan_query"])
                 if len(batch) >= min(4, target_total - len(manifest.get("clips", []))):
                     break
+            # Use spare review capacity for alternative candidates of the same
+            # missing shot. A single remaining slot must not cost three paced
+            # requests simply because its first search result is unsuitable.
+            for seed in list(batch):
+                previous = seed
+                for attempt in range(int(seed.get("_candidate_attempt") or 1) + 1,
+                                     MAX_CANDIDATE_ATTEMPTS_PER_QUERY + 1):
+                    if len(batch) >= 4:
+                        break
+                    alternative = {key: value for key, value in seed.items()
+                                   if key not in {"_candidate", "_preview_result", "_batch_followup"}}
+                    alternative["_candidate_attempt"] = attempt
+                    try:
+                        candidate = await choose_candidate(alternative, reserved_sources)
+                    except Exception:
+                        break
+                    if candidate is None:
+                        break
+                    alternative["_candidate"] = candidate
+                    previous["_batch_followup"] = True
+                    batch.append(alternative)
+                    pending_shots.append(alternative)
+                    reserved_sources.add(candidate["source_page_url"])
+                    previous = alternative
             if batch:
                 _emit(log, f"Web footage: reviewing actual preview frames for {len(batch)} candidates in one Gemini request")
                 reviews = await _analyze_preview_batch(
@@ -1218,7 +1242,9 @@ async def supplement_web_footage(
             )
             manifest["updated_at"] = _now()
             _write_manifest(manifest_file, manifest)
-            if candidate_attempt < MAX_CANDIDATE_ATTEMPTS_PER_QUERY:
+            if shot.get("_batch_followup"):
+                _emit(log, f"Web footage candidate failed; consuming the next already-reviewed candidate for '{query}'")
+            elif candidate_attempt < MAX_CANDIDATE_ATTEMPTS_PER_QUERY:
                 pending_shots.append(
                     {
                         **shot,

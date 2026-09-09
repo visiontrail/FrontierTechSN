@@ -241,6 +241,46 @@ def test_scout_consumes_batch_results_before_reviewing_alternate_queries(tmp_pat
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('approved_index', [2, None])
+def test_one_remaining_shot_reviews_three_candidates_once(tmp_path, approved_index):
+    plan = [{'query': 'convention centre', 'purpose': 'Narrated venue', 'script_excerpt': 'The venue opened.'}]
+    manifest = {'provider_id': 'youtube-web', 'clips': [], 'errors': [], 'url_inspection_unavailable': True}
+    candidates = [{'source_page_url': f'https://youtu.be/{i}', 'title': f'Centre {i}',
+                   'platform': 'youtube', 'duration_seconds': 60} for i in range(3)]
+    async def download(candidate, raw_dir, analysis):
+        path = raw_dir / 'source.mp4'
+        path.write_bytes(b'source')
+        return path, True
+    async def trim(source, target, analysis, orientation):
+        target.write_bytes(b'trimmed')
+    async def review_batch(requests, root, **kwargs):
+        assert [entry[0]['source_page_url'] for entry in requests] == [c['source_page_url'] for c in candidates]
+        return [({'start_seconds': 5, 'end_seconds': 20, 'suitable': True, 'confidence': .9,
+                  'analyzer': 'test'} if i == approved_index else
+                 web_footage.WebFootageError('Preview visual review rejected: unrelated event'))
+                for i in range(3)]
+    async def run():
+        with (patch.object(web_footage, 'search_youtube', AsyncMock(return_value=candidates)),
+              patch.object(web_footage, '_analyze_preview_batch', AsyncMock(side_effect=review_batch)) as review,
+              patch.object(web_footage, '_download_youtube', AsyncMock(side_effect=download)),
+              patch.object(web_footage, '_trim', AsyncMock(side_effect=trim)),
+              patch.object(web_footage, '_probe', AsyncMock(return_value={'duration_seconds': 15, 'width': 1280, 'height': 720})),
+              patch.object(web_footage, '_evidence_frames', AsyncMock(return_value=['frame-01.jpg']))):
+            result = await web_footage.supplement_web_footage(
+                task_dir=tmp_path, manifest=manifest, query_plan=plan, target_total=1,
+                orientation='landscape', script='The venue opened.',
+            )
+        assert review.await_count == 1
+        assert len(result['clips']) == (1 if approved_index is not None else 0)
+        assert len(result['rejected_candidates']) == (2 if approved_index is not None else 3)
+        if approved_index is not None:
+            assert result['clips'][0]['source_page_url'] == candidates[approved_index]['source_page_url']
+            assert result['status'] == 'ready'
+        else:
+            assert result['status'] != 'ready'
+    asyncio.run(run())
+
+
 def test_redownload_refreshes_an_existing_raw_interval(tmp_path):
     path = tmp_path / 'video.mp4'
     path.write_bytes(b'old interval')
