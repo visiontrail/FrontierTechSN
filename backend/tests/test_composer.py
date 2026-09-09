@@ -10,6 +10,23 @@ from backend.pipeline import composer, visual_plan
 from backend.pipeline.video_format import PORTRAIT
 
 
+def test_collage_planning_respects_existing_media_and_explicit_quantity():
+    board = {'scenes': [
+        {'id': 'opening', 'program_segment_kind': 'opening'},
+        {'id': 'story-one'}, {'id': 'story-two'},
+        {'id': 'closing', 'program_segment_kind': 'closing'},
+    ]}
+    plans = [{'id': 'story-one', 'archetype': 'footage', 'footage_src': 'actual.mp4'}]
+    original = copy.deepcopy(board)
+    available = composer._available_collage_storyboard(board, plans, None)
+    assert [scene['id'] for scene in available['scenes']] == ['story-two']
+    assert board == original
+    with pytest.raises(RuntimeError, match='2 clips requested but only 1'):
+        composer._available_collage_storyboard(board, plans, 2)
+    plans.append({'id': 'story-two', 'archetype': 'footage', 'footage_src': 'other.mp4'})
+    assert composer._available_collage_storyboard(board, plans, None)['scenes'] == []
+
+
 def test_verified_orpheus_chunks_define_exact_program_segments(tmp_path: Path):
     audio_dir = tmp_path / "audio"
     audio_dir.mkdir()

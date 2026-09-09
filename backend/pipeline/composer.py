@@ -1168,6 +1168,21 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
         )
 
 
+def _available_collage_storyboard(board: dict, plans: list[dict], count: int | None) -> dict:
+    """Plan generated media only where it can actually be placed."""
+    occupied = {str(plan.get("id")) for plan in plans
+                if plan.get("archetype") == "footage" and plan.get("footage_src")}
+    scenes = [scene for scene in board.get("scenes", [])
+              if str(scene.get("id")) not in occupied
+              and scene.get("program_segment_kind") not in {"opening", "closing"}]
+    if count is not None and count > len(scenes):
+        raise RuntimeError(
+            f"Collage B-roll placement unavailable: {count} clips requested but only "
+            f"{len(scenes)} narration scenes remain after public footage and program bookends"
+        )
+    return {**board, "scenes": scenes}
+
+
 async def compose_video(
     script_path: str,
     audio_path: str,
@@ -1385,8 +1400,9 @@ async def compose_video(
     )
     if collage_broll_enabled or force_collage_opening:
         requested_collages = collage_broll_count if collage_broll_enabled else 1
+        collage_board = _available_collage_storyboard(board, plans, requested_collages)
         collage_manifest = await collage_broll.generate_collage_broll(
-            board,
+            collage_board,
             output_dir_path,
             count=requested_collages,
             force_opening=force_collage_opening,
