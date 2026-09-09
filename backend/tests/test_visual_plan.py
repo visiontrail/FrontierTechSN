@@ -824,6 +824,13 @@ def test_footage_body_preserves_statistics_and_quote_attribution():
     assert visual_plan._footage_body({"quote": "Up to tenfold", "attribution": "a16z claims"}) == "Up to tenfold — a16z claims"
 
 
+def test_footage_body_keeps_statistics_alongside_existing_body_without_duplicates():
+    plan = {"body": "Heterogeneous inference", "stat": "$1 trillion", "stat_label": "Investor estimate"}
+    body = visual_plan._footage_body(plan)
+    assert body == "Heterogeneous inference · $1 trillion — Investor estimate"
+    assert visual_plan._footage_body({**plan, "body": body}) == body
+
+
 def test_repair_prompt_limits_review_feedback_to_requested_scenes():
     data = board(2)
     data["visual_review_feedback"] = [

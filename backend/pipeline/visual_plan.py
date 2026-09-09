@@ -529,19 +529,18 @@ async def plan_scene_visuals(
 
 def _footage_body(plan: dict) -> str:
     """Keep structured editorial copy visible after changing the scene type."""
-    if str(plan.get("body") or "").strip():
-        return str(plan["body"])
+    body = str(plan.get("body") or "").strip()
+    structured = []
+    for keys in (("stat", "stat_label"), ("quote", "attribution")):
+        values = [str(plan.get(key) or "").strip() for key in keys]
+        detail = " — ".join(value for value in values if value)
+        if detail and detail not in body:
+            structured.append(detail)
+    if body or structured:
+        return " · ".join(value for value in (body, *structured) if value)
     items = [str(item).strip() for item in plan.get("items") or [] if str(item).strip()]
     if items:
         return " · ".join(items)
-    stat = str(plan.get("stat") or "").strip()
-    stat_label = str(plan.get("stat_label") or "").strip()
-    if stat or stat_label:
-        return " — ".join(value for value in (stat, stat_label) if value)
-    quote = str(plan.get("quote") or "").strip()
-    if quote:
-        attribution = str(plan.get("attribution") or "").strip()
-        return " — ".join(value for value in (quote, attribution) if value)
     sides = []
     for side in ("left", "right"):
         value = plan.get(side) or {}
