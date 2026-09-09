@@ -1523,6 +1523,27 @@ chatgptUtils = replaceOnce(chatgptUtils,
 }`,
   'ChatGPT fresh navigation readiness and blank-page recovery',
 )
+chatgptUtils = chatgptUtils.replaceAll(
+  '[data-message-author-role], article[data-testid*="conversation-turn"]',
+  '[data-message-author-role], [data-testid^="conversation-turn-"]',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getVisibleMessages(', 'function formatChatGPTDetailMessages(',
+  `            if (/you|user/i.test(label)) return 'User';
+            return '';`,
+  `            if (/you|user/i.test(label)) return 'User';
+            const speaker = normalize(node.querySelector('h4')?.textContent || '');
+            if (/^ChatGPT said:?$/i.test(speaker)) return 'Assistant';
+            if (/^You said:?$/i.test(speaker)) return 'User';
+            return '';`,
+  'ChatGPT current section speaker roles',
+)
+chatgptUtils = replaceOnce(chatgptUtils,
+  `            const contentNode = node.querySelector('[data-message-author-role] .markdown')`,
+  `            const contentNode = node.querySelector('[data-testid="collapsible-user-message-content"]')
+                || node.querySelector('[data-message-author-role] .markdown')`,
+  'ChatGPT collapsed prompt content without speaker or toggle controls',
+)
 fs.writeFileSync(chatgptUtilsPath, chatgptUtils)
 
 let ask = fs.readFileSync(askPath, 'utf8')

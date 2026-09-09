@@ -7,7 +7,7 @@ import vm from 'node:vm'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { isGenerating, selectChatGPTModel, uploadChatGPTImages, startNewChat } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { isGenerating, selectChatGPTModel, uploadChatGPTImages, startNewChat, getVisibleMessages } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
 import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
@@ -33,6 +33,32 @@ test('Gemini generation errors fail explicitly while ordinary review content is 
   const review = '{"image_received":true,"reviews":[{"issues":["An error message is visible on screen."]}]}'
   assert.equal(requireGeminiGeneratedReply(review), review)
   assert.equal(requireGeminiGeneratedReply('I can explain an error in your code.'), 'I can explain an error in your code.')
+})
+
+test('ChatGPT reads section turns and full collapsed prompts without UI labels', async () => {
+  class Element {
+    constructor(text) { this.textContent = text; this.innerText = text; this.innerHTML = text }
+    getBoundingClientRect() { return { width: 600, height: 200 } }
+    getAttribute() { return null }
+    querySelector() { return null }
+  }
+  const prompt = new Element('The complete multi-line prompt.\nIncluding its hidden final line.')
+  const answer = new Element('{"image_received":true,"reviews":[]}')
+  const user = new Element('You said: Show more'); const assistant = new Element('ChatGPT said: Copy response')
+  user.querySelector = selector => selector === 'h4' ? new Element('You said:')
+    : selector.includes('collapsible-user-message-content') ? prompt : null
+  assistant.querySelector = selector => selector === 'h4' ? new Element('ChatGPT said:')
+    : selector === '.markdown' ? answer : null
+  const page = { async evaluate(script) {
+    return vm.runInNewContext(script, { HTMLElement: Element,
+      window: { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+      document: { querySelectorAll: selector => selector === '[data-message-author-role], [data-testid^="conversation-turn-"]' ? [user, assistant] : [] },
+    })
+  } }
+  const rows = await getVisibleMessages(page, { textOnly: true })
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].Role, 'User'); assert.equal(rows[0].Text, prompt.textContent)
+  assert.equal(rows[1].Role, 'Assistant'); assert.equal(rows[1].Text, answer.textContent)
 })
 
 for (const outcome of ['loaded', 'blank', 'login', 'conversation']) {
