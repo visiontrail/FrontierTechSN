@@ -645,6 +645,29 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("ChatGPT upload unavailable", json.loads(fallback.read_text())["stderr"])
             self.assertTrue(any("exhausted" in message and "disabled button" in message for message in messages))
 
+    async def test_completed_review_is_reused_only_for_identical_pixels_and_narration(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
+            frames = _frames(root, scenes)
+            sheet = multimodal_review.create_contact_sheet(frames, root / "sheet.jpg")
+            call = AsyncMock(return_value=_opencli_result(_matching_payload(scenes, 90)))
+            args = dict(title="Gold", batch_frames=frames, sheet=sheet, match_floor=70,
+                        minimum_average_score=82, timeout=120, maximum_retries=0,
+                        batch_index=1, phase="initial", log=None)
+            with patch.object(multimodal_review, "run_opencli", call):
+                first = await multimodal_review._review_batch(**args)
+                cached = await multimodal_review._review_batch(**args)
+                self.assertEqual(first[0], cached[0])
+                self.assertEqual(call.await_count, 1)
+                self.assertEqual(cached[1], 0)
+                sheet.write_bytes(sheet.read_bytes() + b"changed pixels")
+                await multimodal_review._review_batch(**args)
+                self.assertEqual(call.await_count, 2)
+                scenes[0]["text"] = "A different narrated claim"
+                await multimodal_review._review_batch(**args)
+                self.assertEqual(call.await_count, 3)
+
     async def test_low_scene_score_rejects_video_even_when_average_is_high(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

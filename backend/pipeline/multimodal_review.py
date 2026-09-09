@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 import logging
 import math
 from collections.abc import Callable
@@ -313,6 +314,8 @@ def _review_command(provider: str, prompt: str, sheet: Path, timeout: int) -> li
         "ephemeral",
         "--keep-tab",
         "false",
+        "--trace",
+        "retain-on-failure",
         "-f",
         "json",
     ]
@@ -503,6 +506,34 @@ async def _review_batch(
     last_normalized: dict | None = None
     last_error = ""
     attempts = 0
+    prompt = _review_prompt(
+        title, batch_frames, match_floor, minimum_average_score,
+        aggregate_calibration=phase == "aggregate_calibration",
+    )
+    cache_path = None
+    if sheet.is_file():
+        digest = hashlib.sha256(b"visual-review-v1\0" + prompt.encode() + b"\0" + sheet.read_bytes()).hexdigest()
+        cache_path = sheet.parent / f"verified-review-{digest}.json"
+        try:
+            cached = json.loads(cache_path.read_text())
+            normalized = normalise_batch(cached["payload"], batch_frames, match_floor)
+            allowed = {"gemini", str(getattr(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""))}
+            if _batch_is_valid(normalized) and cached.get("provider") in allowed:
+                normalized["review_provider"] = cached["provider"]
+                _emit(log, f"Visual review: reusing verified {phase} batch {batch_index} for identical pixels and narration")
+                return normalized, 0, ""
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+    def cache_review(provider: str, payload: dict) -> None:
+        if cache_path is not None:
+            try:
+                temporary = cache_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps({"provider": provider, "payload": payload}, ensure_ascii=False))
+                temporary.replace(cache_path)
+            except OSError:
+                pass
+
     for attempt in range(maximum_retries + 1):
         attempts = attempt + 1
         result = None
@@ -531,6 +562,7 @@ async def _review_batch(
             normalized = normalise_batch(payload, batch_frames, match_floor)
             if _batch_is_valid(normalized):
                 normalized["review_provider"] = "gemini"
+                cache_review("gemini", payload)
                 return normalized, attempts, ""
             last_normalized = normalized
             raise OpenCLIError(
@@ -594,6 +626,7 @@ async def _review_batch(
             normalized = normalise_batch(payload, batch_frames, match_floor)
             if _batch_is_valid(normalized):
                 normalized["review_provider"] = fallback_provider
+                cache_review(fallback_provider, payload)
                 return normalized, attempts, ""
             last_normalized = normalized
             raise OpenCLIError(

@@ -9,6 +9,7 @@ import { isGenerating, selectChatGPTModel } from './node_modules/@jackwener/open
 import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
 import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
+import { askCommand as chatgptAskCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/ask.js'
 import {
   attachGeminiFile,
   sendGeminiMessage,
@@ -51,6 +52,19 @@ test('ChatGPT generation includes status outside the message in a section turn',
   thinking.textContent = ''
   answer.textContent = 'An answer mentioning Thinking'
   assert.equal(await isGenerating(page), false)
+})
+
+test('ChatGPT ask exposes image attachments and refuses to send a missing image', async () => {
+  assert.ok(chatgptAskCommand.args.some(arg => arg.name === 'file'))
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('isLoggedIn')) return { isLoggedIn: true, hasComposer: true, hasLoginGate: false }
+      if (script.includes('stop-button')) return false
+      throw new Error('Unexpected action after failed attachment')
+    },
+  }
+  await assert.rejects(chatgptAskCommand.func(page, { prompt: 'Review this image', file: '/missing-review-image.jpg' }), /not found|does not exist/i)
 })
 
 for (const current of ['https://chatgpt.com/c/abcdefgh1234', 'https://chatgpt.com/c/otherchat1234', 'about:blank']) {

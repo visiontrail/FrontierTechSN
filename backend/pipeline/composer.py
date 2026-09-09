@@ -125,6 +125,7 @@ def _record_quality_retry(
             {
                 "id": str(review.get("id") or ""),
                 "score": review.get("score"),
+                "review_available": review.get("rubric_consistent") is True,
                 "issues": [str(value) for value in review.get("issues") or []],
                 "suggested_visual": str(review.get("suggested_visual") or ""),
             }
@@ -375,6 +376,7 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
             if (
                 scene_id not in failed
                 or previous is None
+                or review.get("review_available") is not True
                 or previous.get("review_repair_source_sha256") == source_hash
             ):
                 continue
@@ -1253,6 +1255,52 @@ def _available_collage_storyboard(board: dict, plans: list[dict], count: int | N
     return {**board, "scenes": scenes}
 
 
+def _review_retry_fingerprint(directory: Path, request: dict) -> str:
+    """Bind review-only recovery to the unchanged render inputs and settings."""
+    paths = {Path(request[key]) for key in ("script_path", "audio_path", "background_music_path") if request.get(key)}
+    for name in ("index.html", "storyboard.json", "visual_plan.json", "footage/manifest.json",
+                 "audio/paced_narration.wav", "audio/program_mix.wav"):
+        paths.add(directory / name)
+    for name in ("compositions", "assets", "news_images"):
+        paths.update(path for path in (directory / name).rglob("*") if path.is_file())
+    paths.update((directory / "footage").glob("*-render.mp4"))
+    paths.update(Path(__file__).parent / name for name in ("scene_kit.py", "assembler.py", "storyboard.py"))
+    evidence = {
+        "request": request,
+        "render": [config.RENDER_FPS, config.RENDER_QUALITY, config.RENDER_WORKERS],
+        "files": {str(path.resolve()): _sha256_path(path) if path.is_file() else None for path in sorted(paths)},
+    }
+    return hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest()
+
+
+async def _resume_unavailable_visual_review(directory: Path, request: dict, frame: FrameSpec, emit) -> str | None:
+    try:
+        checkpoint = json.loads((directory / "render_review_checkpoint.json").read_text())
+        report_path = directory / "av_sync_report.next.json"
+        report = json.loads(report_path.read_text())
+        candidate = directory / "video.next.mp4"
+        if (
+            not config.AV_SYNC_GEMINI_REVIEW_ENABLED
+            or not (report.get("multimodal") or {}).get("errors")
+            or checkpoint.get("input_sha256") != _review_retry_fingerprint(directory, request)
+            or not candidate.is_file()
+        ):
+            return None
+        digest = _sha256_path(candidate)
+        if digest != checkpoint.get("video_sha256") or digest != report.get("rendered_video_sha256"):
+            return None
+        board = json.loads((directory / "storyboard.json").read_text())
+        if _rendered_video_failures(candidate, frame=frame, expected_duration=float(board["total_duration"])):
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    emit("Visual review: resuming the unchanged rendered candidate after provider unavailability")
+    review = await multimodal_review.review_video(candidate, board, directory, log=emit)
+    _finalize_quality_report(report, board["alignment"], report["visual_grounding"], review, multimodal_enabled=True)
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    return str(_promote_quality_gated_candidate(candidate, report_path, directory, digest, report))
+
+
 async def compose_video(
     script_path: str,
     audio_path: str,
@@ -1283,6 +1331,7 @@ async def compose_video(
     program_music_story_gap_seconds: float = 1.5,
     log: LogCallback | None = None,
 ) -> str:
+    review_request = {key: value for key, value in locals().items() if key != "log"}
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
     frame = resolve_frame_spec(video_orientation)
@@ -1304,6 +1353,9 @@ async def compose_video(
             "Narration audio does not retain a 100% verified script contract; "
             f"refusing to render. {detail}"
         )
+    resumed = await _resume_unavailable_visual_review(output_dir_path, review_request, frame, emit)
+    if resumed is not None:
+        return resumed
     if source_contract_verified:
         emit(
             f"Narration integrity: {tts_provider} manifest verifies 100% of source parts"
@@ -1945,6 +1997,10 @@ async def compose_video(
         f"Video rendered: {staged_video_path} "
         f"({staged_video_path.stat().st_size / 1024 / 1024:.1f} MB)"
     )
+    (output_dir_path / "render_review_checkpoint.json").write_text(json.dumps({
+        "input_sha256": _review_retry_fingerprint(output_dir_path, review_request),
+        "video_sha256": _sha256_path(staged_video_path),
+    }))
     if config.AV_SYNC_GEMINI_REVIEW_ENABLED:
         gemini_review = await multimodal_review.review_video(
             staged_video_path,

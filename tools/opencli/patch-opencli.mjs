@@ -1367,12 +1367,36 @@ ask = replaceOnce(
 )
 fs.writeFileSync(askPath, ask)
 
+const chatgptAskPath = path.join(chatgptDir, 'ask.js')
+let chatgptAsk = fs.readFileSync(chatgptAskPath, 'utf8')
+chatgptAsk = replaceOnce(chatgptAsk, '    sendChatGPTMessage,', '    sendChatGPTMessage,\n    uploadChatGPTImages,', 'ChatGPT ask image upload import')
+chatgptAsk = replaceOnce(chatgptAsk,
+  "        { name: 'prompt', positional: true, required: true, help: 'Prompt to send' },",
+  "        { name: 'prompt', positional: true, required: true, help: 'Prompt to send' },\n        { name: 'file', required: false, help: 'Attach one local image before sending the prompt' },",
+  'ChatGPT ask image option',
+)
+chatgptAsk = replaceOnce(chatgptAsk,
+  '        const baselineMessages = await getVisibleMessages(page);',
+  `        if (kwargs.file) {
+            const upload = await uploadChatGPTImages(page, [kwargs.file]);
+            if (!upload?.ok) throw new CommandExecutionError(upload?.reason || 'ChatGPT image attachment was not ready');
+        }
+        const baselineMessages = await getVisibleMessages(page);`,
+  'ChatGPT ask verified image upload',
+)
+fs.writeFileSync(chatgptAskPath, chatgptAsk)
+
 fs.copyFileSync(
   path.join(runtimeDir, 'patches', 'gemini-video-command.js'),
   videoPath,
 )
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+const chatgptAskEntry = manifest.find(entry => entry?.site === 'chatgpt' && entry?.name === 'ask')
+if (!chatgptAskEntry?.args) throw new Error('ChatGPT ask manifest entry not found')
+if (!chatgptAskEntry.args.some(arg => arg.name === 'file')) {
+  chatgptAskEntry.args.push({ name: 'file', type: 'str', required: false, help: 'Attach one local image before sending the prompt' })
+}
 const chatgptDetailEntry = manifest.find(
   (entry) => entry?.site === 'chatgpt' && entry?.name === 'detail',
 )
