@@ -162,7 +162,68 @@ test('Gemini ask supports the current unnamed images-files-uploader input', asyn
     page.actions.some(([action, method]) => action === 'cdp' && method === 'Page.bringToFront'),
     true,
   )
+  assert.equal(page.actions.some(([action]) => action === 'goto'), false)
 })
+
+test('Gemini attachment waits for upload-menu hydration without resetting the conversation', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('fileChooserOpened not received')
+  const originalEvaluate = page.evaluate
+  let menuReads = 0
+  page.evaluate = async (script) => {
+    if (script.includes('const inputSelector = selectors.find') && ++menuReads < 20) {
+      return { inputSelector: '', buttonSelector: '', expanded: true }
+    }
+    if (script.includes('button.getBoundingClientRect()')) return null
+    return originalEvaluate(script)
+  }
+  await attachGeminiFile(page, image)
+  assert.equal(menuReads, 20)
+  assert.equal(page.actions.some(([action]) => action === 'goto'), false)
+  assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
+})
+
+test('Gemini attachment never reports success while its preview remains unavailable', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('fileChooserOpened not received')
+  const originalEvaluate = page.evaluate
+  let previewReads = 0
+  page.evaluate = async (script) => {
+    if (script.includes('const candidates = Array.from')) {
+      previewReads += 1
+      return { ready: false }
+    }
+    return originalEvaluate(script)
+  }
+  await assert.rejects(attachGeminiFile(page, image), /review prompt was not submitted/)
+  assert.equal(previewReads, 60)
+})
+
+for (const visible of [false, true]) {
+  test(`Gemini attachment waits only for visible composer upload progress: ${visible}`, async (t) => {
+    const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+    const page = geminiAttachmentPage('fileChooserOpened not received')
+    const originalEvaluate = page.evaluate
+    page.evaluate = async (script) => {
+      if (!script.includes('const candidates = Array.from')) return originalEvaluate(script)
+      return vm.runInNewContext(script, {
+        document: {
+          querySelector() { return { innerText: '' } },
+          querySelectorAll(selector) {
+            if (selector.includes('progressbar')) {
+              assert.match(selector, /input-container/)
+              return [{ getBoundingClientRect: () => ({ width: visible ? 24 : 0, height: visible ? 24 : 0 }) }]
+            }
+            return [{ getAttribute: name => name === 'src' ? 'blob:attachment' : '' }]
+          },
+        },
+        getComputedStyle: () => ({ visibility: 'visible' }),
+      })
+    }
+    if (visible) await assert.rejects(attachGeminiFile(page, image), /did not become ready/)
+    else await assert.doesNotReject(attachGeminiFile(page, image))
+  })
+}
 
 function videoUploadPage({
   native = 'success',

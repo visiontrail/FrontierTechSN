@@ -18,9 +18,9 @@ export async function attachGeminiFile(page, filePath) {
     }
 
     await ensureGeminiPage(page);
-    await page.goto(GEMINI_APP_URL, { waitUntil: 'load', settleMs: 8000 });
-    // The zero-state composer appears before Gemini has hydrated the upload
-    // entries. Opening the menu too early leaves an empty overlay indefinitely.
+    // The ask adapter has already opened the intended conversation and selected
+    // its model. Navigating again discards that hydrated composer and exposes a
+    // zero-state upload button whose menu entries are still loading.
     await page.wait(2);
     // A foreground site session can still lose focus while Chrome restores the
     // prior user tab. Gemini ignores the native upload-menu click in that
@@ -44,7 +44,7 @@ export async function attachGeminiFile(page, filePath) {
         'input[type="file"]',
     ];
     let fileInputSelector = '';
-    for (let attempt = 0; attempt < 12; attempt += 1) {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
         await page.wait(attempt === 0 ? 1 : 0.5);
         const picker = await page.evaluate(`(() => {
             const selectors = ${JSON.stringify(fileInputSelectors)};
@@ -77,7 +77,7 @@ export async function attachGeminiFile(page, filePath) {
                 fileInputSelector = discovered;
                 break;
             }
-        } else if (attempt === 4 || attempt === 8) {
+        } else if ([4, 8, 16, 32, 48].includes(attempt)) {
             // Re-open an overlay that was created before its async menu entries
             // hydrated. Two trusted clicks close then reopen it.
             if (picker?.expanded) await page.click('button[aria-label="Upload & tools"]');
@@ -162,7 +162,7 @@ export async function attachGeminiFile(page, filePath) {
     }
 
     const fileName = path.default.basename(absPath).toLowerCase();
-    for (let attempt = 0; attempt < 12; attempt += 1) {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
         await page.wait(1);
         const state = await page.evaluate(`(() => {
             const name = ${JSON.stringify(fileName)};
@@ -178,13 +178,19 @@ export async function attachGeminiFile(page, filePath) {
                 const value = String(node.getAttribute('src') || '');
                 return value.startsWith('blob:') || value.startsWith('data:image/');
             });
-            const busy = !!document.querySelector('[role="progressbar"], mat-progress-spinner');
-            return { ready: text.includes(name) || named || (preview && !busy) };
+            // The sidebar retains a hidden "Loading Gems and Recent conversations"
+            // spinner after startup. Only a visible composer spinner represents
+            // an attachment that is still uploading.
+            const busy = Array.from(document.querySelectorAll(
+                'input-container [role="progressbar"], input-container mat-progress-spinner'
+            )).some((node) => {
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0
+                    && getComputedStyle(node).visibility !== 'hidden';
+            });
+            return { ready: (text.includes(name) || named || preview) && !busy };
         })()`);
         if (state?.ready) return true;
     }
-    // Gemini's current XAP preview lives outside the stable composer DOM in
-    // some layouts. The downstream review prompt must report image_received,
-    // so an undetected/failed upload still fails closed at the product layer.
-    return true;
+    throw new CommandExecutionError('Gemini attachment did not become ready; the review prompt was not submitted');
 }
