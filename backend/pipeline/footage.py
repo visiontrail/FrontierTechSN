@@ -758,11 +758,16 @@ async def _normalize_render_clip(source: Path, destination: Path) -> dict:
             f"footage render normalization failed ({process.returncode}): {detail}"
         )
     temporary.replace(destination)
+    from backend.pipeline.web_footage import _probe
+
+    metadata = await _probe(destination)
     return {
+        **metadata,
         "bytes": destination.stat().st_size,
         "sha256": _file_sha256(destination),
         "local_path": destination,
         "render_safe": True,
+        "render_metadata_version": 1,
         "render_profile": {
             "container": "mp4",
             "video_codec": "h264",
@@ -788,13 +793,22 @@ async def normalize_manifest_clips(
         return current
     changed = False
     for clip in current.get("clips") or []:
-        if not isinstance(clip, dict) or clip.get("render_safe") is True:
+        if not isinstance(clip, dict):
             continue
         relative = str(clip.get("local_path") or "").strip()
         if not relative:
             continue
         source = (task_dir / relative).resolve()
         if not source.is_file() or task_dir.resolve() not in source.parents:
+            continue
+        if clip.get("render_safe") is True:
+            if clip.get("render_metadata_version") != 1:
+                from backend.pipeline.web_footage import _probe
+
+                metadata = await _probe(source)
+                clip.setdefault("source_duration_seconds", clip.get("duration_seconds"))
+                clip.update(metadata, render_metadata_version=1)
+                changed = True
             continue
         clip_id = str(clip.get("id") or source.stem)
         destination = task_dir / "footage" / f"{clip_id}-render.mp4"
@@ -806,6 +820,9 @@ async def normalize_manifest_clips(
         clip["source_local_path"] = relative
         clip["source_bytes"] = int(clip.get("bytes") or source.stat().st_size)
         clip["source_sha256"] = str(clip.get("sha256") or _file_sha256(source))
+        clip.setdefault("source_duration_seconds", clip.get("duration_seconds"))
+        for key in ("duration_seconds", "width", "height", "render_metadata_version"):
+            clip[key] = normalized[key]
         clip["bytes"] = normalized["bytes"]
         clip["sha256"] = normalized["sha256"]
         clip["local_path"] = normalized["local_path"].relative_to(task_dir).as_posix()
@@ -1112,6 +1129,11 @@ async def acquire_public_footage(
                     "purpose": shot.get("purpose") or "",
                     "script_excerpt": shot.get("script_excerpt") or "",
                     **candidate,
+                    "source_duration_seconds": candidate.get("duration_seconds"),
+                    "duration_seconds": normalized["duration_seconds"],
+                    "width": normalized["width"],
+                    "height": normalized["height"],
+                    "render_metadata_version": normalized["render_metadata_version"],
                     "source_bytes": source_bytes,
                     "source_sha256": source_sha256,
                     "source_local_path": source_destination.relative_to(task_dir).as_posix(),

@@ -628,9 +628,19 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
             == "wikimedia commons"
         )
         minimum_excerpt_matches = min(3, len(excerpt_terms))
+        normalized_excerpt = " ".join(str(clip.get("script_excerpt") or "").casefold().split())
+        bound_scene_ids = {
+            scene_id for scene_id, scene in scenes_by_id.items()
+            if normalized_excerpt and normalized_excerpt in " ".join(str(scene.get("text") or "").casefold().split())
+        }
 
         best_id, best_score, best_matches, best_excerpt_matches = None, 0.0, [], []
         for plan in plans:
+            # An exact excerpt is ownership, not a soft keyword preference.
+            # Metadata rejection in its own story must never move the clip to
+            # another story that happens to share a few generic words.
+            if bound_scene_ids and plan["id"] not in bound_scene_ids:
+                continue
             if plan["id"] in used and not allow_sequences:
                 continue
             scene = scenes_by_id.get(plan["id"])
@@ -672,6 +682,7 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
                 "duration_seconds": round(clip_duration, 3),
                 "credit": _footage_credit(clip),
                 "query": str(clip.get("query") or "")[:160],
+                "script_excerpt": str(clip.get("script_excerpt") or ""),
             }
         )
         plan["body"] = _footage_body(plan)
@@ -791,6 +802,16 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
                 if grounded
                 else "footage lacked two distinctive narration matches"
             )
+        for item in plan.get("footage_sequence") or []:
+            excerpt = " ".join(str(item.get("script_excerpt") or "").casefold().split())
+            owners = {
+                other["id"] for other in storyboard.get("scenes", [])
+                if excerpt and excerpt in " ".join(str(other.get("text") or "").casefold().split())
+            }
+            if owners and scene["id"] not in owners:
+                grounded = False
+                reason = f"footage sequence moved away from its narration: {item.get('src')}"
+                break
         results.append(
             {
                 "id": scene["id"],

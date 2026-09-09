@@ -1386,7 +1386,9 @@ async def compose_video(
         log=emit,
     )
 
-    manifest = footage.read_manifest(output_dir_path)
+    manifest = await footage.normalize_manifest_clips(
+        output_dir_path, footage.read_manifest(output_dir_path), log=emit,
+    )
     attached = visual_plan.attach_footage(plans, board, manifest, output_dir_path)
     if attached:
         emit(f"Footage: {attached} manifest clip(s) placed as full-bleed scenes")

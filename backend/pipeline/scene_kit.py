@@ -19,6 +19,7 @@ import html
 import json
 import math
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_FLOOR
 
 from backend.pipeline.video_format import FrameSpec, LANDSCAPE
 
@@ -904,6 +905,22 @@ def _render_quote(plan: ScenePlan) -> str:
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(78, 22))
 
 
+def _footage_intervals(sequence, scene_duration: float):
+    """Serialize one shared centisecond timeline without extending a source."""
+    limit = int((Decimal(str(scene_duration)) * 100).to_integral_value(rounding=ROUND_FLOOR))
+    cursor = 0
+    for index, item in enumerate(sequence):
+        source_duration = max(0.0, float(item.get("duration_seconds") or 0)) or 5.0
+        ticks = int((Decimal(str(source_duration)) * 100).to_integral_value(rounding=ROUND_FLOOR))
+        duration = min(ticks, limit - cursor)
+        if duration <= 0:
+            continue
+        yield index, item, cursor / 100, duration / 100
+        cursor += duration
+        if cursor >= limit:
+            break
+
+
 def _render_footage(plan: ScenePlan) -> str:
     """Render a full-bleed media plate that remains populated for the full scene."""
     accent = accent_hex(plan.accent, plan.theme)
@@ -945,23 +962,13 @@ def _render_footage(plan: ScenePlan) -> str:
                 },
             )
             sequence_markup: list[str] = []
-            cursor = 0.0
-            for index, item in enumerate(sequence):
-                if cursor >= plan.duration:
-                    break
-                source_duration = max(0.0, float(item.get("duration_seconds") or 0))
-                if source_duration <= 0:
-                    source_duration = min(5.0, plan.duration - cursor)
-                duration = min(source_duration, plan.duration - cursor)
-                if duration <= 0:
-                    continue
+            for index, item, cursor, duration in _footage_intervals(sequence, plan.duration):
                 sequence_markup.append(
                     f'      <video id="{plan.id}-media-{index + 1}" class="clip media public-footage-once" '
                     f'src="{_esc(str(item.get("src") or ""))}" data-start="{cursor:.2f}" '
                     f'data-duration="{duration:.2f}" data-track-index="0" muted playsinline '
                     'crossorigin="anonymous"></video>\n'
                 )
-                cursor += duration
             media = "".join(sequence_markup)
     else:
         media = f'      <img id="{plan.id}-media" class="media" src="{_esc(plan.footage_src)}" alt="">\n'
@@ -1074,14 +1081,7 @@ def _render_news_webpage_overlay(plan: ScenePlan) -> str:
             {"src": plan.footage_src, "duration_seconds": min(5.0, plan.duration)},
         )
         background_parts: list[str] = []
-        cursor = 0.0
-        for index, item in enumerate(sequence):
-            if cursor >= plan.duration:
-                break
-            source_duration = max(0.0, float(item.get("duration_seconds") or 0))
-            duration = min(source_duration or 5.0, plan.duration - cursor)
-            if duration <= 0:
-                continue
+        for index, item, cursor, duration in _footage_intervals(sequence, plan.duration):
             element_id = (
                 f"{plan.id}-background"
                 if index == 0
@@ -1093,7 +1093,6 @@ def _render_news_webpage_overlay(plan: ScenePlan) -> str:
                 f'data-duration="{duration:.2f}" data-track-index="0" muted playsinline '
                 'crossorigin="anonymous"></video>\n'
             )
-            cursor += duration
         background = "".join(background_parts)
     else:
         background_src = plan.footage_src or plan.news_image_src

@@ -449,3 +449,20 @@ def test_legacy_migration_keeps_the_narration_used_by_an_old_rejection(tmp_path)
     result = resume(tmp_path, script)
     assert result['queries'][0]['script_excerpt'].startswith('WAIC')
     assert result['errors'][0]['script_excerpt'].startswith('Vaire')
+
+
+def test_legacy_normalized_clip_metadata_uses_the_saved_render_file(tmp_path):
+    path = tmp_path / "footage" / "clip-01-render.mp4"
+    path.parent.mkdir()
+    path.write_bytes(b"render-video")
+    manifest = {"clips": [{"id": "clip-01", "local_path": "footage/clip-01-render.mp4", "duration_seconds": 38.9, "width": 1920, "height": 1280, "render_safe": True}]}
+    probe = AsyncMock(return_value={"duration_seconds": 19.34, "width": 1620, "height": 1080})
+    with patch.object(web_footage, "_probe", probe):
+        result = asyncio.run(footage.normalize_manifest_clips(tmp_path, manifest))
+        asyncio.run(footage.normalize_manifest_clips(tmp_path, result))
+    probe.assert_awaited_once_with(path.resolve())
+    clip = result["clips"][0]
+    assert clip["source_duration_seconds"] == 38.9
+    assert clip["duration_seconds"] == 19.34
+    assert clip["height"] == 1080
+    assert path.read_bytes() == b"render-video"

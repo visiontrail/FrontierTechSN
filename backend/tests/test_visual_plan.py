@@ -817,3 +817,32 @@ def test_footage_promotion_preserves_structured_story_details(tmp_path):
 def test_footage_body_keeps_existing_copy_and_comparison_labels():
     assert visual_plan._footage_body({'body': 'Original', 'items': ['Other']}) == 'Original'
     assert visual_plan._footage_body({'left': {'label': 'BEFORE', 'text': 'Manual'}, 'right': {'label': 'AFTER', 'text': 'Automatic'}}) == 'BEFORE: Manual · AFTER: Automatic'
+
+
+def test_exact_excerpt_cannot_migrate_to_another_story_after_metadata_rejection(tmp_path):
+    data = board(2)
+    excerpt = "The company plans to supply electricity to the busiest seaport complex in the United States."
+    data["scenes"][0].update(text=excerpt, keywords=[])
+    data["scenes"][1].update(text="The United States company plans food inspection plants for the government.", keywords=[])
+    plans = visual_plan.fallback_plan(data)
+    (tmp_path / "port.mp4").write_bytes(b"video")
+    manifest = {"clips": [{
+        "local_path": "port.mp4", "provider_id": "wikimedia", "query": "container port ship cranes",
+        "script_excerpt": excerpt, "title": "Container ships", "description": "Company government food inspection plants.",
+    }]}
+    assert visual_plan.attach_footage(plans, data, manifest, tmp_path) == 0
+    assert all(not p.get("footage_src") for p in plans)
+
+
+def test_semantic_gate_checks_each_clip_in_a_sequence(tmp_path):
+    data = board(2)
+    data['scenes'][0]['text'] = 'The port handles shipping containers.'
+    data['scenes'][1]['text'] = 'NASA established space food inspection.'
+    plans = visual_plan.fallback_plan(data)
+    plans[1]['footage_sequence'] = [
+        {'src': 'port.mp4', 'script_excerpt': data['scenes'][0]['text']},
+        {'src': 'food.mp4', 'script_excerpt': data['scenes'][1]['text']},
+    ]
+    report = visual_plan.visual_grounding_report(plans, data)
+    assert report['passed'] is False
+    assert 'port.mp4' in report['scenes'][1]['reason']

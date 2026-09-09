@@ -375,6 +375,10 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                 "sha256": "render-sha256",
                 "local_path": destination,
                 "render_safe": True,
+                "render_metadata_version": 1,
+                "duration_seconds": 20.0,
+                "width": 1280,
+                "height": 720,
                 "render_profile": {"video_codec": "h264"},
             }
 
@@ -411,6 +415,8 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved["clips"][0]["source_sha256"], "demo-sha256")
             self.assertEqual(saved["clips"][0]["sha256"], "render-sha256")
             self.assertTrue(saved["clips"][0]["render_safe"])
+            self.assertEqual(saved["clips"][0]["duration_seconds"], 20.0)
+            self.assertEqual(saved["clips"][0]["source_duration_seconds"], candidate["duration_seconds"])
             self.assertTrue(
                 (task_dir / saved["clips"][0]["local_path"]).is_file()
             )
@@ -442,6 +448,10 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                 "sha256": hashlib.sha256(b"render-safe-video").hexdigest(),
                 "local_path": destination,
                 "render_safe": True,
+                "render_metadata_version": 1,
+                "duration_seconds": 20.0,
+                "width": 1280,
+                "height": 720,
                 "render_profile": {"video_codec": "h264"},
             }
 

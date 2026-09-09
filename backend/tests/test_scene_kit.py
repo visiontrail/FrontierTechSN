@@ -465,3 +465,25 @@ def test_portrait_scene_uses_portrait_root_contract():
     assert 'data-height="1920"' in html
     assert "width:1080px; height:1920px" in html
     assert validate_scene_html(html, "scene-01", PORTRAIT) == []
+
+
+@pytest.mark.parametrize("webpage", [False, True])
+def test_fractional_footage_intervals_do_not_overlap_or_exceed_their_sources(webpage):
+    from decimal import Decimal
+
+    durations = [33.867, 15.017, 15.0, 15.0]
+    html = sk.render_scene(plan(
+        archetype="footage", duration=72.669, footage_src="one.mp4", footage_kind="video",
+        footage_sequence=tuple({"src": f"{i}.mp4", "duration_seconds": d} for i, d in enumerate(durations)),
+        news_webpage_src="page.png" if webpage else "",
+    ))
+    previous_end = Decimal(0)
+    videos = re.findall(r"<video[^>]*>", html)
+    assert len(videos) == 4
+    for video, source_duration in zip(videos, durations):
+        start = Decimal(re.search(r'data-start="([^"]+)"', video).group(1))
+        duration = Decimal(re.search(r'data-duration="([^"]+)"', video).group(1))
+        assert start == previous_end
+        assert duration <= Decimal(str(source_duration))
+        previous_end = start + duration
+    assert previous_end <= Decimal("72.669")
