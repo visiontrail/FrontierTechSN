@@ -86,6 +86,19 @@ after installation, then run `npm --prefix tools/opencli run test:adapter`.
 The next CLI subprocess loads the patched adapter; a running backend does not
 need a restart for this JavaScript-only repair.
 
+Do not attach Computer Use's browser debugger or DevTools to an OpenCLI-owned
+provider tab while the pipeline is running. A read-only DOM inspection can still
+retain debugger ownership after the inspection finishes. OpenCLI may reuse that
+tab for its next ephemeral session, causing navigation timeouts and
+`Another debugger is already attached to the tab`. Inspect backend and daemon
+logs during generation, and use a separate application tab for playback only
+after provider work finishes. If a diagnostic debugger is left attached, wait
+for the affected command to stop, then disconnect that diagnostic debugger
+(the diagnostic extension's browser debugging infobar has a Cancel control).
+Confirm the intended browser remains connected and daemon pending commands and
+session leases are clear before retrying. Do not cancel another active worker's
+debugger or restart a shared browser to clear an unrelated session.
+
 ChatGPT's vision fallback can briefly expose a stable-looking partial answer
 before the complete answer reaches the page. If an ask receipt identifies one
 conversation but contains zero complete review objects, the reviewer now reads
