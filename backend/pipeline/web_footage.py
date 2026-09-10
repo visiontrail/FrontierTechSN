@@ -1111,10 +1111,26 @@ async def supplement_web_footage(
         original = str(shot.get("plan_query") or shot["query"])
         key = hashlib.sha256((original + "\n" + str(shot.get("script_excerpt"))).encode()).hexdigest()[:16]
         ledger = manifest.setdefault("query_replans", {})
-        if key not in ledger or (ledger[key].get("error") and key not in replanned_this_run):
+        failures = [error for error in manifest.get("errors", []) if
+                    error.get("plan_query", str(error.get("query", "")).removesuffix(" stock footage")) == original
+                    and (not shot.get("script_excerpt") or not error.get("script_excerpt")
+                         or error["script_excerpt"] == shot["script_excerpt"])]
+        previous = ledger.get(key)
+        # A retry must learn from failures of the cached alternatives. Keep a
+        # proposal stable within one scout, and across transport-only failures
+        # whose prepared previews are still waiting for an actual verdict.
+        new_failures = [error for error in failures if previous
+                        and error not in previous.get("failures", [])
+                        and error.get("query") in previous.get("queries", [])
+                        and error.get("stage") in {"web-download-edit", "web-selection"}]
+        if key not in ledger or (key not in replanned_this_run and (
+            previous.get("error") or new_failures
+        )):
             replanned_this_run.add(key)
-            failures = [error for error in manifest.get("errors", []) if
-                        error.get("plan_query", str(error.get("query", "")).removesuffix(" stock footage")) == original]
+            if previous:
+                manifest.setdefault("query_replan_history", []).append({"key": key, **previous})
+            previous_queries = {q.casefold() for entry in manifest.get("query_replan_history", [])
+                                if entry.get("key") == key for q in entry.get("queries", [])}
             try:
                 if repair_provider_unavailable:
                     raise WebFootageError("Search repair provider unavailable during this scout")
@@ -1126,9 +1142,14 @@ async def supplement_web_footage(
                     "Use its exact company/product/event, or a concrete narrated process. Read the rejection "
                     "reasons, but treat the supplied narration as authoritative if an old rejection used a wrong story. "
                     "Change the failed direction. Do not merely append stock footage, broaden "
-                    "to a generic theme, or substitute an unrelated event. Never claim footage exists.",
+                    "to a generic theme, or substitute an unrelated event. Search for the planned visible "
+                    "subject/action: contextual footage need not prove the report's spoken statistics. "
+                    "When talking heads were rejected, avoid interviews, press conferences, explainers "
+                    "and report presentations; search for the actual depicted activity instead. "
+                    "Do not repeat previous_queries_to_avoid. Never claim footage exists.",
                     json.dumps({"query": original, "purpose": shot.get("purpose"),
-                                "narration": shot.get("script_excerpt"), "failures": failures[-6:]}, ensure_ascii=False),
+                                "narration": shot.get("script_excerpt"), "failures": failures[-6:],
+                                "previous_queries_to_avoid": sorted(previous_queries)}, ensure_ascii=False),
                     endpoint, model, api_key, log, "Footage search repair", max_tokens=500,
                     enable_skills=False, disable_thinking=True,
                 ), timeout=SEARCH_REPAIR_TIMEOUT_SECONDS)
@@ -1138,6 +1159,7 @@ async def supplement_web_footage(
                 alternatives = list(dict.fromkeys(
                     _sanitize_query(value) for value in values if isinstance(value, str)
                     and _sanitize_query(value).casefold() != original.casefold()
+                    and _sanitize_query(value).casefold() not in previous_queries
                 ))[:2]
                 ledger[key] = {"plan_query": original, "queries": [q for q in alternatives if q], "failures": failures[-6:]}
             except Exception as exc:
@@ -1301,7 +1323,9 @@ async def supplement_web_footage(
             continue
         if candidate is None:
             manifest.setdefault("errors", []).append(
-                {"query": query, "stage": "web-selection", "message": "No unique web candidate found"}
+                {"query": query, "plan_query": shot["plan_query"],
+                 "script_excerpt": shot.get("script_excerpt", ""),
+                 "stage": "web-selection", "message": "No unique web candidate found"}
             )
             # Long entity lists can overconstrain YouTube. Broaden only the
             # query, retaining the same narration binding and suitability gate.

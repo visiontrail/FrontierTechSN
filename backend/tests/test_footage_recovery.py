@@ -433,6 +433,51 @@ def test_search_metadata_rejects_single_generic_anchor_before_visual_review():
     )
 
 
+@pytest.mark.parametrize('failure_stage', ['web-download-edit', 'web-selection', 'web-review'])
+def test_retry_refreshes_failed_alternatives_but_preserves_pending_review(tmp_path, failure_stage):
+    shot = {'query': 'students classroom lesson', 'purpose': 'Students learning basic skills',
+            'script_excerpt': 'Technology affects students learning basic skills.'}
+    key = hashlib.sha256((shot['query'] + '\n' + shot['script_excerpt']).encode()).hexdigest()[:16]
+    original_errors = [{'query': shot['query'], 'plan_query': shot['query'],
+                        'source_page_url': f'https://youtu.be/old{i}',
+                        'stage': 'web-download-edit', 'message': 'Talking head'} for i in range(3)]
+    previous = {'plan_query': shot['query'], 'queries': ['students taking Pisa test'],
+                'failures': original_errors.copy()}
+    failure = {'query': previous['queries'][0], 'plan_query': shot['query'],
+               'script_excerpt': shot['script_excerpt'], 'stage': failure_stage,
+               'message': 'No classroom frames' if failure_stage != 'web-review' else 'Browser disconnected'}
+    retained = {'id': 'verified-clip', 'plan_query': 'other shot'}
+    manifest = {'provider_id': 'hybrid-youtube', 'clips': [retained],
+                'errors': [*original_errors, failure], 'query_replans': {key: previous}}
+
+    async def run():
+        with (patch.object(footage, '_chat', AsyncMock(return_value=json.dumps({
+                  'queries': ['students taking Pisa test', 'students classroom writing exercise']}))) as chat,
+              patch.object(web_footage, 'search_youtube', AsyncMock(return_value=[])) as search,
+              patch.object(web_footage, '_analyze_preview_batch', AsyncMock()) as review):
+            result = await web_footage.supplement_web_footage(
+                task_dir=tmp_path, manifest=manifest, query_plan=[shot], target_total=2,
+                orientation='landscape', script=shot['script_excerpt'],
+            )
+        assert result['clips'] == [retained]
+        assert result['status'] == 'partial'
+        assert failure in result['errors']
+        review.assert_not_awaited()
+        if failure_stage == 'web-review':
+            chat.assert_not_awaited()
+            assert not result.get('query_replan_history')
+        else:
+            assert chat.await_count == 1
+            assert result['query_replan_history'] == [{'key': key, **previous}]
+            assert result['query_replans'][key]['queries'] == ['students classroom writing exercise']
+            assert all(call.args[0] != 'students taking Pisa test' for call in search.await_args_list)
+            assert all(error.get('plan_query') == shot['query'] for error in result['errors']
+                       if error.get('stage') == 'web-selection')
+            prompt = json.loads(chat.await_args.args[1])
+            assert prompt['previous_queries_to_avoid'] == ['students taking pisa test']
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('tampered', [False, True])
 def test_approved_preview_is_reused_without_redownload_or_evidence_deletion(tmp_path, tampered):
     preview = tmp_path / 'footage/evidence/approved.mp4'
