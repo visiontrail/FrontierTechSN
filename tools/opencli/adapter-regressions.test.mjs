@@ -18,6 +18,7 @@ import {
   startNewGeminiChat,
   waitForGeminiResponse,
   requireGeminiGeneratedReply,
+  getGeminiVisibleTurns,
 } from './node_modules/@jackwener/opencli/clis/gemini/utils.js'
 import {
   uploadFrame,
@@ -33,6 +34,61 @@ test('Gemini generation errors fail explicitly while ordinary review content is 
   const review = '{"image_received":true,"reviews":[{"issues":["An error message is visible on screen."]}]}'
   assert.equal(requireGeminiGeneratedReply(review), review)
   assert.equal(requireGeminiGeneratedReply('I can explain an error in your code.'), 'I can explain an error in your code.')
+})
+
+test('Gemini canonical turns exclude changing prompt summaries and nested speaker labels', async () => {
+  class Element {
+    constructor(tagName, text) { this.tagName = tagName; this.innerText = text; this.textContent = text }
+    getBoundingClientRect() { return { width: 600, height: 200 } }
+    getAttribute() { return null }
+    querySelector() { return null }
+    querySelectorAll() { return [] }
+    compareDocumentPosition() { return this.tagName === 'USER-QUERY' ? 4 : 2 }
+  }
+  const prompt = 'Review the image.\nReturn exactly one JSON object.'
+  const answer = '{"image_received":true,"reviews":[{"id":"scene-09","score":72}]}'
+  const user = new Element('USER-QUERY', 'You said Review the image… Show more')
+  const model = new Element('MODEL-RESPONSE', 'Gemini said JSON' + answer)
+  user.querySelectorAll = selector => selector === '.query-text-line'
+    ? prompt.split('\n').map(line => new Element('P', line)) : []
+  model.querySelector = selector => selector === '.markdown, .model-response-text'
+    ? new Element('DIV', answer) : null
+  let broadReads = 0
+  const page = { async evaluate(script) {
+    if (script === 'window.location.href') return 'https://gemini.google.com/app/current'
+    return vm.runInNewContext(script, { HTMLElement: Element, Node: {
+      DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2,
+    }, window: { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+    document: { querySelectorAll: selector => {
+      if (selector === 'user-query, model-response') return [user, model]
+      broadReads++
+      return [new Element('DIV', 'Gemini said'), user, model]
+    } } })
+  } }
+  const before = await getGeminiVisibleTurns(page)
+  user.innerText = 'You said Review the image. Return exactly one JSON object. Show less'
+  const after = await getGeminiVisibleTurns(page)
+  assert.equal(broadReads, 0)
+  assert.equal(JSON.stringify(before), JSON.stringify(after))
+  assert.equal(before.length, 2)
+  assert.equal(before[0].Role, 'User'); assert.equal(before[0].Text, prompt)
+  assert.equal(before[1].Role, 'Assistant'); assert.equal(before[1].Text, answer)
+  model.querySelector = () => null
+  assert.equal((await getGeminiVisibleTurns(page)).length, 1)
+})
+
+test('Gemini rejects whole-page transcript fallback even when the prompt is escaped or collapsed', async () => {
+  const prompt = 'Review this image. Return {"image_received":true,"reviews":[]}.'
+  const baseline = { url: 'https://gemini.google.com/app/current', turns: [],
+    transcriptLines: [], composerHasText: false, isGenerating: false, structuredTurnsTrusted: false }
+  const pageText = 'GeminiNew chatSearch chatsConversation with Gemini You said '
+    + JSON.stringify(prompt) + ' Gemini said JSON{"image_received":true,"reviews":[]}'
+  const page = { async wait() {}, async evaluate(script) {
+    if (script === 'window.location.href') return baseline.url
+    if (script.includes('structuredTurnsTrusted')) return { ...baseline, transcriptLines: [pageText] }
+    throw new Error('Unexpected snapshot script')
+  } }
+  assert.equal(await waitForGeminiResponse(page, { snapshot: baseline, userAnchorTurn: null }, prompt, 10), '')
 })
 
 test('ChatGPT reads section turns and full collapsed prompts without UI labels', async () => {

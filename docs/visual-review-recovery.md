@@ -70,6 +70,22 @@ can also survive recovery. Its source identity, narration binding, file checksum
 actual-frame Gemini approval, and pending rights review must all remain intact.
 A link-only verdict does not qualify a publisher clip for reuse.
 
+The end-to-end recovery also exposed a separate OpenCLI extraction failure in
+the final video's second batch. Gemini returned one answer, but the adapter's
+transcript fallback included the entire English page: navigation, the user
+prompt's example JSON, and the assistant's JSON. Rejecting those two objects was
+correct. Current Gemini turns are now read from `user-query` and `model-response`
+boundaries, with full `.query-text-line` prompt text and the assistant's Markdown
+body. Collapsed prompt summaries and nested speaker labels no longer destabilize
+turn ownership. The transcript fallback rejects page chrome even when escaping
+or whitespace prevents an exact prompt match. No parser rule selects one of
+multiple complete answers.
+
+Apply the checked-in OpenCLI patches with `node tools/opencli/patch-opencli.mjs`
+after installation, then run `npm --prefix tools/opencli run test:adapter`.
+The next CLI subprocess loads the patched adapter; a running backend does not
+need a restart for this JavaScript-only repair.
+
 Regression checks:
 
 ```sh

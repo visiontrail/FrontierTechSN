@@ -495,6 +495,50 @@ utils = replaceOnce(
   )
 }
 // Upgrade already-patched installations as well as clean installs.
+utils = replaceWithinFunction(
+  utils,
+  'function getTurnsScript() {',
+  'function prepareComposerScript() {',
+  '      const roots = selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));',
+  `      // Current Gemini exposes explicit turn boundaries. Broad message-class
+      // selectors also match nested labels and mutable collapsed prompt copies.
+      const canonicalRoots = Array.from(document.querySelectorAll('user-query, model-response'));
+      const roots = canonicalRoots.length ? canonicalRoots
+        : selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));`,
+  'Gemini canonical turn boundaries',
+)
+utils = replaceWithinFunction(
+  utils,
+  'function getTurnsScript() {',
+  'function prepareComposerScript() {',
+  `        const text = clean(el.innerText || el.textContent || '');`,
+  `        const tag = el.tagName.toLowerCase();
+        const queryLines = tag === 'user-query'
+          ? Array.from(el.querySelectorAll('.query-text-line')) : [];
+        const answer = tag === 'model-response'
+          ? el.querySelector('.markdown, .model-response-text') : null;
+        const text = clean(queryLines.length
+          ? queryLines.map((line) => line.textContent || '').join('\\\\n')
+          : tag === 'model-response' ? (answer?.innerText || answer?.textContent || '')
+          : (el.innerText || el.textContent || ''));`,
+  'Gemini stable prompt and assistant body text',
+)
+utils = replaceOnce(
+  utils,
+  "const GEMINI_TRANSCRIPT_CHROME_MARKERS = ['gemini', '我的内容', '对话', 'google terms', 'google privacy policy'];",
+  "const GEMINI_TRANSCRIPT_CHROME_MARKERS = ['gemini', '我的内容', '对话', 'google terms', 'google privacy policy', 'new chat', 'search chats', 'conversation with gemini'];",
+  'Gemini English page chrome markers',
+)
+utils = replaceWithinFunction(
+  utils,
+  'function extractGeminiTranscriptLineCandidate(transcriptLine, promptText) {',
+  'function getStateScript() {',
+  `    if (!candidate)
+        return '';`,
+  `    if (!candidate || isLikelyGeminiTranscriptChrome(candidate))
+        return '';`,
+  'Gemini never treats flattened page chrome as a reply',
+)
 if (!utils.includes('const failedComposerSubmission = async () =>')) {
   utils = replaceWithinFunction(
   utils,
