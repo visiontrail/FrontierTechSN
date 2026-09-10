@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from backend import config
+from backend.pipeline.music_loop import render_music_bed
 from backend.pipeline.opencli import OpenCLIError, run_opencli
 
 logger = logging.getLogger(__name__)
@@ -757,12 +758,26 @@ async def mix_narration_and_music(
     output = mix_dir / "program_mix.wav"
     music_probe = mix_dir / ".music_bed_probe.wav"
     duration = await _probe_duration(narration)
+    # Decode once, find recurring interior passages, then construct the complete
+    # bed before loudness measurement and either narration-ducking mode.
+    continuous_music = mix_dir / "continuous_music.wav"
+    decoded_music = mix_dir / ".music_source.f32"
+    try:
+        await _media_command(
+            ["ffmpeg", "-y", "-i", str(music), "-vn", "-ar", "48000",
+             "-ac", "2", "-f", "f32le", str(decoded_music)], timeout=180,
+        )
+        loop_report = await asyncio.to_thread(
+            render_music_bed, decoded_music, continuous_music, duration,
+        )
+    finally:
+        decoded_music.unlink(missing_ok=True)
     intro_db = bed_db
     speech_music_db = bed_db + duck_db
     ratio = max(4.0, min(20.0, abs(duck_db) * 1.2))
     narration_lufs, music_lufs = await asyncio.gather(
         _integrated_loudness(narration),
-        _integrated_loudness(music),
+        _integrated_loudness(continuous_music),
     )
     if music_lufs is None or not math.isfinite(music_lufs) or music_lufs <= -60.0:
         raise RuntimeError("Background music is silent or has no measurable loudness")
@@ -820,14 +835,14 @@ async def mix_narration_and_music(
             f"pow(10\\,{speech_gain_db}/20))"
         )
         music_filter = (
-            f"[1:a]aloop=loop=-1:size=2147483647,atrim=0:{duration:.6f},"
+            f"[1:a]atrim=0:{duration:.6f},"
             f"asetpts=N/SR/TB,volume='{volume_expression}':eval=frame[ducked];"
         )
         ducking_mode = "program_timeline_envelope"
     else:
         volume_expression = f"pow(10\\,{content_gain_db}/20)"
         music_filter = (
-            f"[1:a]aloop=loop=-1:size=2147483647,atrim=0:{duration:.6f},"
+            f"[1:a]atrim=0:{duration:.6f},"
             f"asetpts=N/SR/TB,volume='{volume_expression}':eval=frame[music];"
             f"[music][0:a]sidechaincompress=threshold=0.018:ratio={ratio:.2f}:"
             "attack=18:release=650:makeup=1[ducked];"
@@ -852,7 +867,7 @@ async def mix_narration_and_music(
                 "-i",
                 str(narration),
                 "-i",
-                str(music),
+                str(continuous_music),
                 "-filter_complex",
                 filter_graph,
                 "-map",
@@ -971,6 +986,8 @@ async def mix_narration_and_music(
         "narration_path": str(narration.resolve()),
         "music_path": str(music.resolve()),
         "program_mix_path": str(output.resolve()),
+        "continuous_music_path": str(continuous_music.resolve()),
+        "music_loop": loop_report,
         "narration_duration_seconds": duration,
         "program_mix_duration_seconds": mixed_duration,
         "intro_music_db": intro_db,
