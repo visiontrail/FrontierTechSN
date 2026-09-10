@@ -1,7 +1,14 @@
 # OpenCLI integration
 
-- Upstream: `jackwener/opencli`
-- Project-local package: `@jackwener/opencli@1.8.7` (npm `latest` as of 2026-09-01)
+- Upstream: [jackwener/OpenCLI](https://github.com/jackwener/OpenCLI)
+- Project-local package: `@jackwener/opencli@1.8.8`, from the official
+  [v1.8.8 release](https://github.com/jackwener/OpenCLI/releases/tag/v1.8.8)
+  published on 2026-08-30 UTC, pinned to commit
+  `8271afc67e8504bda94c147f446ee29775d08274`.
+- As checked on 2026-09-10, npm still exposes `1.8.7` as `latest` and has no
+  `1.8.8` package. The dependency therefore uses the immutable official Git
+  commit; npm builds it with upstream's `prepare` script during installation.
+- Node.js requirement: `>=20.18.1`.
 - Runtime install: `npm install --prefix tools/opencli`
 - Wrapper: `scripts/opencli.sh`
 - Upstream skills copied project-locally to `.claude/skills/opencli-*`
@@ -12,9 +19,32 @@
   download. It detects Gemini's `generated-video` completion component (rather
   than assuming a native `<video>` element) and can resume an existing Gemini
   conversation when a late result only needs downloading. The patch is pinned
-  to 1.8.7 and fails installation if its upstream anchors change.
+  to 1.8.8 and fails installation before editing adapters if the package version
+  differs; changed upstream anchors also fail installation.
+
+The release updates Undici to `7.29.0`, adds `OPENCLI_SITE_SESSION` defaults,
+fixes YouTube search pagination and structured network captures, and updates
+the adapter-author Deep Recon workflow. The project's session namespace,
+provider pacing, model gate, and ChatGPT/Gemini recovery patches remain applied.
+The release's Browser Bridge is `1.0.24`, matching the installed Ego Lite bridge.
 
 No global OpenCLI npm package or global Claude Code skill is required.
+
+## v1.8.8 synchronization verification (2026-09-10)
+
+- A clean `npm ci --no-audit --no-fund` in `tools/opencli` installs the pinned
+  release and reapplies the project patches; `npm ls --depth=0` is valid.
+- Project validation: 100 adapter regressions and 46 backend OpenCLI tests pass.
+- Official source validation: build succeeds; 82 execution/browser tests and
+  30 YouTube search tests pass.
+- All six copied OpenCLI skills (25 files) match the release byte-for-byte;
+  their YAML frontmatter parses successfully.
+- Live checks use `backend.pipeline.opencli.run_opencli`, the configured Ego
+  Lite profile, and the project wrapper: CLI and daemon both report `1.8.8`,
+  `doctor` passes, and YouTube search returns the requested three results.
+  Verification sessions are released; the daemon has no pending commands or
+  leases, and the application's `/api/health` reports `ok`.
+- This upgrade check does not rerun the full fact-check/TTS/video pipeline.
 
 ## Browser imports and model-check recovery
 

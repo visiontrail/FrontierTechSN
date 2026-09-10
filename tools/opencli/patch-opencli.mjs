@@ -3,6 +3,15 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
+const supportedVersion = '1.8.8'
+const upstreamPackage = JSON.parse(fs.readFileSync(
+  path.join(runtimeDir, 'node_modules', '@jackwener', 'opencli', 'package.json'),
+  'utf8',
+))
+if (upstreamPackage.version !== supportedVersion) {
+  throw new Error(`OpenCLI patches require ${supportedVersion}; found ${upstreamPackage.version}`)
+}
+
 const geminiDir = path.join(
   runtimeDir,
   'node_modules',
@@ -1787,4 +1796,4 @@ if (videoIndex >= 0) manifest[videoIndex] = videoEntry
 else manifest.push(videoEntry)
 fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
-console.log('Applied project ChatGPT/Gemini browser patches to OpenCLI 1.8.7')
+console.log(`Applied project ChatGPT/Gemini browser patches to OpenCLI ${supportedVersion}`)

@@ -214,6 +214,21 @@ test(`ChatGPT new chat distinguishes stalled navigation from login: ${outcome}`,
 })
 }
 
+test('browser patches reject an unsupported upstream before changing any adapters', (t) => {
+  const source = path.dirname(fileURLToPath(import.meta.url))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencli-patch-version-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const packageDir = path.join(root, 'node_modules', '@jackwener', 'opencli')
+  fs.mkdirSync(packageDir, { recursive: true })
+  fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ version: '0.0.0' }))
+  fs.copyFileSync(path.join(source, 'patch-opencli.mjs'), path.join(root, 'patch-opencli.mjs'))
+  assert.throws(
+    () => execFileSync(process.execPath, [path.join(root, 'patch-opencli.mjs')], { stdio: 'pipe' }),
+    error => /OpenCLI patches require 1\.8\.8; found 0\.0\.0/.test(String(error.stderr)),
+  )
+  assert.deepEqual(fs.readdirSync(packageDir), ['package.json'])
+})
+
 test('reapplying browser patches keeps every adapter byte-identical and recovery arguments unique', (t) => {
   const source = path.dirname(fileURLToPath(import.meta.url))
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencli-patch-idempotence-'))
