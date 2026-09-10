@@ -91,7 +91,7 @@ def test_pocket_request_spells_short_integers_without_changing_source_tokens():
 
 
 @pytest.mark.parametrize("source", [
-    "D1 Qwen3 R2-D2 2026 44.5 8.5 61.1 7.08 1,000 $44 01",
+    "D1 Qwen3 R2-D2 2026 44.5 8.5 61.1 7.08 $1,000 $44 01",
     "It costs 1 dollar, 44 yuan, or 99 cents.",
     "From 20 to 50 percent in September 8, 2026.",
 ])
@@ -100,3 +100,25 @@ def test_pocket_number_pronunciation_preserves_numeric_identity(source):
     assert tts._lexical_tokens(spoken) == tts._lexical_tokens(source)
     if source.startswith("D1"):
         assert spoken == source
+
+
+@pytest.mark.parametrize(("literal", "spoken"), [
+    ("600,000", "six hundred thousand"),
+    ("250,000", "two hundred fifty thousand"),
+    ("12,000", "twelve thousand"),
+    ("1,000", "one thousand"),
+])
+def test_pocket_grouped_quantity_pronunciation_preserves_value_and_unit(literal, spoken):
+    source = f"Enough for the daily electricity needs of {literal} homes."
+    result = tts._pocket_synthesis_text(source)
+    assert result.endswith(f"{spoken} homes.")
+    assert tts._lexical_tokens(result) == tts._lexical_tokens(source)
+    assert tts._lexical_tokens(result.replace("homes", "")) != tts._lexical_tokens(source)
+
+
+@pytest.mark.parametrize("source", [
+    "ID-600,000 AX600,000 600,000-R2 600,000.25 $600,000 000,123",
+    "3,000,000 homes, 1,234,567 items, 12,34,567 items, 1,000,000,000,000 stars.",
+])
+def test_pocket_grouped_numbers_do_not_change_protected_or_unsupported_values(source):
+    assert tts._pocket_synthesis_text(source) == source

@@ -3954,11 +3954,12 @@ def _pocket_http_headers() -> dict[str, str]:
 
 
 def _pocket_synthesis_text(text: str) -> str:
-    """Expose short integer pronunciation without changing canonical narration.
+    """Expose integer pronunciation without changing canonical narration.
 
     Pocket repeatedly read the literal 44 as four in a real paragraph. Spell
-    standalone integers below 100 in the provider request, preserving decimals,
-    grouped amounts, years, and alphanumeric/hyphenated model identifiers.
+    standalone integers below 100 and supported comma-grouped quantities in
+    the provider request. The latter also lost the following word in repeated
+    readings of "600,000 homes". Preserve decimals, years, and model identifiers.
     Acoustic verification and cache identity still use the original script.
     """
     small = (
@@ -3968,15 +3969,33 @@ def _pocket_synthesis_text(text: str) -> str:
     )
     tens = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
 
+    def integer_words(value: int) -> str:
+        if value < 20:
+            return small[value]
+        if value < 100:
+            return tens[value // 10] + (f"-{small[value % 10]}" if value % 10 else "")
+        for scale, label in ((10**9, "billion"), (10**6, "million"), (1000, "thousand"), (100, "hundred")):
+            if value >= scale:
+                head = f"{integer_words(value // scale)} {label}"
+                return head + (f" {integer_words(value % scale)}" if value % scale else "")
+        raise ValueError("Invalid integer")
+
+    def grouped(match: re.Match) -> str:
+        literal = match.group(0)
+        if literal.startswith("0") or len(literal.replace(",", "")) > 12:
+            return literal
+        words = integer_words(int(literal.replace(",", "")))
+        # Do not broaden the integrity normalizer to accommodate a request
+        # rewrite. Unsupported compound readings retain their original form.
+        return words if _lexical_tokens(words) == _lexical_tokens(literal) else literal
+
     def spoken(match: re.Match) -> str:
         literal = match.group(0)
         if len(literal) > 1 and literal.startswith("0"):
             return literal
-        value = int(literal)
-        if value < 20:
-            return small[value]
-        return tens[value // 10] + (f"-{small[value % 10]}" if value % 10 else "")
+        return integer_words(int(literal))
 
+    text = re.sub(r"(?<![\w.,$-])\d{1,3}(?:,\d{3})+(?![\w,]|\.\d|-\w)", grouped, text)
     return re.sub(
         r"(?<![\w.,$-])\d{1,2}(?![\w]|\.\d|,\d|-\w)", spoken, text
     )
