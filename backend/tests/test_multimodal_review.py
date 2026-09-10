@@ -12,6 +12,23 @@ from backend.pipeline import multimodal_review
 from backend.pipeline.opencli import OpenCLIError, OpenCLIResult
 
 
+def test_bookend_review_uses_spoken_scope_without_dropping_score_thresholds():
+    prompt = multimodal_review._review_prompt(
+        "A headline from a later story",
+        [{"id": "scene-01", "scene": {
+            "text": "Good morning. This is ByteFront Espresso.",
+            "start": 0, "duration": 6, "program_segment_kind": "opening",
+        }}],
+        70, 82,
+    )
+    assert '"program_segment_kind": "opening"' in prompt
+    assert "not a required claim in every scene" in prompt
+    assert "unless that opening narration actually introduces it" in prompt
+    assert "missing or contradictory claim" in prompt
+    assert "match requires score 70-100 and issues=[]" in prompt
+    assert "release average is 82/100" in prompt
+
+
 def _scene(scene_id: str, start: float, text: str) -> dict:
     return {
         "id": scene_id,
