@@ -112,3 +112,10 @@ assertion prevents idle display/system sleep; completion, failure or cancellatio
 releases it. It is also tied to the backend PID. This does not change system
 preferences, unlock the Mac, or override a manual lock. Headless and non-macOS
 runtimes do not use this desktop guard.
+
+If the backend stops during final review, retry can resume the completed render
+checkpoint even when the review report is still pending. The render input
+fingerprint, candidate SHA-256, full decode and duration must still match. A
+pending report is never treated as approval: the real multimodal review and all
+final quality gates run before promotion. Missing or changed evidence requires
+the ordinary render path.

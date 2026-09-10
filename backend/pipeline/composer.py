@@ -1217,29 +1217,44 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
         checkpoint = json.loads((directory / "render_review_checkpoint.json").read_text())
         report_path = directory / "av_sync_report.next.json"
         report = json.loads(report_path.read_text())
+        prior_review = report.get("multimodal") or {}
+        interrupted = (
+            report.get("quality_status") == "pending"
+            and report.get("delivery_status") == "pending"
+            and prior_review.get("status") == "pending"
+        )
+        unavailable = bool(prior_review.get("errors"))
         candidate = directory / "video.next.mp4"
         if (
             not config.AV_SYNC_GEMINI_REVIEW_ENABLED
-            or not (report.get("multimodal") or {}).get("errors")
+            or not (unavailable or interrupted)
             or checkpoint.get("input_sha256") != _review_retry_fingerprint(directory, request)
             or not candidate.is_file()
         ):
             return None
         digest = _sha256_path(candidate)
-        if digest != checkpoint.get("video_sha256") or digest != report.get("rendered_video_sha256"):
+        report_digest = report.get("rendered_video_sha256")
+        if (
+            digest != checkpoint.get("video_sha256")
+            or (report_digest is not None and digest != report_digest)
+            or (not interrupted and report_digest is None)
+        ):
             return None
         board = json.loads((directory / "storyboard.json").read_text())
         if _rendered_video_failures(candidate, frame=frame, expected_duration=float(board["total_duration"])):
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    emit("Visual review: resuming the unchanged rendered candidate after provider unavailability")
+    reason = "an interrupted review" if interrupted else "provider unavailability"
+    emit(f"Visual review: resuming the unchanged rendered candidate after {reason}")
     # A resumed unavailable review has already exhausted the primary path.
     # Give the configured fallback one chance before repeating that cycle.
     review = await multimodal_review.review_video(
-        candidate, board, directory, log=emit, prefer_fallback=True
+        candidate, board, directory, log=emit, prefer_fallback=unavailable
     )
     _finalize_quality_report(report, board["alignment"], report["visual_grounding"], review, multimodal_enabled=True)
+    report["rendered_video_sha256"] = digest
+    report["rendered_video_filename"] = f"video-{digest[:16]}.mp4"
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
     return str(_promote_quality_gated_candidate(candidate, report_path, directory, digest, report))
 

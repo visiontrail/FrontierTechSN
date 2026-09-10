@@ -327,8 +327,10 @@ def test_unavailable_visual_review_does_not_replan_scene_content(tmp_path):
     assert composer._pending_visual_repairs(tmp_path, _cache_plans())[1] == []
 
 
-@pytest.mark.parametrize("mutation", [None, "video", "script", "setting"])
-def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, monkeypatch, mutation):
+@pytest.mark.parametrize("mutation", [None, "video", "script", "setting", "report_hash", "missing_checkpoint"])
+@pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize("accepted", [False, True])
+def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, monkeypatch, mutation, interrupted, accepted):
     from unittest.mock import AsyncMock
     script = tmp_path / "script.txt"
     script.write_text("The complete narration")
@@ -341,23 +343,37 @@ def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, 
     (tmp_path / "render_review_checkpoint.json").write_text(json.dumps({
         "input_sha256": composer._review_retry_fingerprint(tmp_path, request), "video_sha256": digest,
     }))
-    (tmp_path / "av_sync_report.next.json").write_text(json.dumps({
+    report = {
         "rendered_video_sha256": digest, "visual_grounding": {"passed": True},
         "multimodal": {"passed": False, "errors": ["provider unavailable"]},
-    }))
-    review = AsyncMock(return_value={"passed": True, "scenes": [], "errors": []})
+    }
+    if interrupted:
+        report.pop("rendered_video_sha256")
+        report.update(quality_status="pending", delivery_status="pending", multimodal={"status": "pending", "passed": False})
+    if mutation == "report_hash": report["rendered_video_sha256"] = "another video"
+    (tmp_path / "av_sync_report.next.json").write_text(json.dumps(report))
+    review = AsyncMock(return_value={"passed": accepted, "scenes": [], "errors": []})
     monkeypatch.setattr(composer.multimodal_review, "review_video", review)
     monkeypatch.setattr(composer, "_rendered_video_failures", lambda *args, **kwargs: [])
     monkeypatch.setattr(composer.config, "AV_SYNC_GEMINI_REVIEW_ENABLED", True)
     if mutation == "video": candidate.write_bytes(b"changed candidate")
     if mutation == "script": script.write_text("Changed narration")
     if mutation == "setting": request["captions_enabled"] = True
+    if mutation == "missing_checkpoint": (tmp_path / "render_review_checkpoint.json").unlink()
+    if mutation is None and not accepted:
+        with pytest.raises(composer.QualityGateRetry):
+            asyncio.run(composer._resume_unavailable_visual_review(tmp_path, request, composer.LANDSCAPE, lambda _: None))
+        assert candidate.is_file()
+        assert not (tmp_path / "av_sync_report.json").exists()
+        assert json.loads((tmp_path / "av_sync_report.next.json").read_text())["passed"] is False
+        return
     result = asyncio.run(composer._resume_unavailable_visual_review(tmp_path, request, composer.LANDSCAPE, lambda _: None))
     if mutation is None:
         assert Path(result).read_bytes() == b"rendered video"
         assert json.loads((tmp_path / "av_sync_report.json").read_text())["passed"] is True
         review.assert_awaited_once()
-        assert review.await_args.kwargs["prefer_fallback"] is True
+        assert review.await_args.kwargs["prefer_fallback"] is (not interrupted)
+        assert json.loads((tmp_path / "av_sync_report.json").read_text())["rendered_video_sha256"] == digest
     else:
         assert result is None
         review.assert_not_awaited()
