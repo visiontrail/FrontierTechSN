@@ -507,6 +507,12 @@ utils = replaceWithinFunction(
         : selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));`,
   'Gemini canonical turn boundaries',
 )
+// Upgrade the previous canonical-body patch before checking its full template.
+// Provider errors use message-content without a Markdown child.
+utils = utils.replace(
+  "? el.querySelector('.markdown, .model-response-text') : null;",
+  "? (el.querySelector('.markdown, .model-response-text') || el.querySelector('message-content')) : null;",
+)
 utils = replaceWithinFunction(
   utils,
   'function getTurnsScript() {',
@@ -516,7 +522,7 @@ utils = replaceWithinFunction(
         const queryLines = tag === 'user-query'
           ? Array.from(el.querySelectorAll('.query-text-line')) : [];
         const answer = tag === 'model-response'
-          ? el.querySelector('.markdown, .model-response-text') : null;
+          ? (el.querySelector('.markdown, .model-response-text') || el.querySelector('message-content')) : null;
         const text = clean(queryLines.length
           ? queryLines.map((line) => line.textContent || '').join('\\\\n')
           : tag === 'model-response' ? (answer?.innerText || answer?.textContent || '')

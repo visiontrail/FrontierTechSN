@@ -88,6 +88,32 @@ test('Gemini ignores old generation errors and waits for the owned answer to fin
   assert.equal(reads, 4)
 })
 
+test('Gemini reads provider errors from message-content when no Markdown answer exists', async () => {
+  const failure = 'I encountered an error doing what you asked. Could you try again?'
+  const body = { innerText: failure }
+  class Element {
+    constructor(tagName, text) { this.tagName = tagName; this.innerText = text }
+    getBoundingClientRect() { return { width: 500, height: 100 } }
+    getAttribute() { return null }
+    querySelectorAll() { return [] }
+    querySelector(selector) { return this.tagName === 'MODEL-RESPONSE' && selector === 'message-content' ? body : null }
+    compareDocumentPosition() { return this.tagName === 'USER-QUERY' ? 4 : 2 }
+  }
+  const roots = [new Element('USER-QUERY', 'Review the image.'), new Element('MODEL-RESPONSE', 'Gemini said ' + failure)]
+  const page = { async evaluate(script) {
+    if (script === 'window.location.href') return 'https://gemini.google.com/app/current'
+    return vm.runInNewContext(script, { HTMLElement: Element,
+      Node: { DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2 },
+      window: { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+      document: { querySelectorAll: selector => selector === 'user-query, model-response' ? roots : [] },
+    })
+  } }
+  const turns = await getGeminiVisibleTurns(page)
+  assert.deepEqual(turns.map(turn => [turn.Role, turn.Text]), [
+    ['User', 'Review the image.'], ['Assistant', failure],
+  ])
+})
+
 test('Gemini canonical turns exclude changing prompt summaries and nested speaker labels', async () => {
   class Element {
     constructor(tagName, text) { this.tagName = tagName; this.innerText = text; this.textContent = text }

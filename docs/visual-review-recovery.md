@@ -104,6 +104,8 @@ button remains visible. After the same owned assistant error is observed twice,
 the adapter reports that provider error instead of waiting for the busy indicator
 to clear and misreporting an empty-response timeout. Errors from earlier turns
 are ignored, and ordinary answers still require generation to finish.
+The error can live directly in `message-content` without a Markdown child; that
+fallback is read only inside its canonical `model-response` boundary.
 
 ChatGPT's vision fallback can briefly expose a stable-looking partial answer
 before the complete answer reaches the page. If an ask receipt identifies one
