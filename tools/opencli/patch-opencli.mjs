@@ -876,6 +876,22 @@ utils = replaceOnce(
 export async function waitForGeminiResponse(page, baseline, promptText, timeoutSeconds) {`,
   'Gemini explicit generation failures retain diagnostic traces',
 )
+utils = replaceWithinFunction(
+  utils,
+  'export async function waitForGeminiResponse(page, baseline, promptText, timeoutSeconds) {',
+  'function selectModelInMenuScript(modelId) {',
+  `            if (!current.isGenerating && structuredStableCount >= 2) {
+                return structuredCandidate;
+            }`,
+  `            if (structuredStableCount >= 2) {
+                // Gemini can leave its stop button visible after a terminal
+                // provider error. Only inspect this request's owned reply;
+                // ordinary answers must still wait for generation to stop.
+                requireGeminiGeneratedReply(structuredCandidate);
+                if (!current.isGenerating) return structuredCandidate;
+            }`,
+  'Gemini stable owned provider errors do not wait on a stuck stop button',
+)
 fs.writeFileSync(utilsPath, utils)
 
 let models = fs.readFileSync(modelsPath, 'utf8')

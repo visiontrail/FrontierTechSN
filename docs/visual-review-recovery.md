@@ -99,6 +99,12 @@ Confirm the intended browser remains connected and daemon pending commands and
 session leases are clear before retrying. Do not cancel another active worker's
 debugger or restart a shared browser to clear an unrelated session.
 
+Gemini can display an explicit generation-error reply while its Stop response
+button remains visible. After the same owned assistant error is observed twice,
+the adapter reports that provider error instead of waiting for the busy indicator
+to clear and misreporting an empty-response timeout. Errors from earlier turns
+are ignored, and ordinary answers still require generation to finish.
+
 ChatGPT's vision fallback can briefly expose a stable-looking partial answer
 before the complete answer reaches the page. If an ask receipt identifies one
 conversation but contains zero complete review objects, the reviewer now reads

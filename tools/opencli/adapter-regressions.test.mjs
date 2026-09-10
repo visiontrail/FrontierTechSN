@@ -36,6 +36,58 @@ test('Gemini generation errors fail explicitly while ordinary review content is 
   assert.equal(requireGeminiGeneratedReply('I can explain an error in your code.'), 'I can explain an error in your code.')
 })
 
+for (const failure of ['I encountered an error doing what you asked. Could you try again?',
+  'I seem to be encountering an error. Can I try something else for you?']) {
+test('Gemini reports an owned stable generation error while the stop button remains visible: ' + failure, async () => {
+  const user = { Role: 'User', Text: 'Review the supplied image.' }
+  const baseline = { url: 'https://gemini.google.com/app/current', turns: [user],
+    transcriptLines: [user.Text], composerHasText: false, isGenerating: true,
+    structuredTurnsTrusted: true }
+  let reads = 0
+  const page = {
+    async wait() {},
+    async evaluate(script) {
+      if (script === 'window.location.href') return baseline.url
+      if (script.includes('structuredTurnsTrusted')) {
+        reads++
+        return { ...baseline, turns: [user, { Role: 'Assistant', Text: failure }] }
+      }
+      throw new Error('Unexpected Gemini snapshot script')
+    },
+  }
+  await assert.rejects(waitForGeminiResponse(page, {
+    snapshot: baseline, userAnchorTurn: user,
+  }, user.Text, 10), /Gemini generation failed/)
+  assert.equal(reads, 2)
+})
+}
+
+test('Gemini ignores old generation errors and waits for the owned answer to finish', async () => {
+  const user = { Role: 'User', Text: 'Review the supplied image.' }
+  const old = { Role: 'Assistant', Text: 'I encountered an error doing what you asked. Could you try again?' }
+  const answer = '{"image_received":true,"reviews":[]}'
+  const baseline = { url: 'https://gemini.google.com/app/current', turns: [old, user],
+    transcriptLines: [], composerHasText: false, isGenerating: true,
+    structuredTurnsTrusted: true }
+  let reads = 0
+  const page = {
+    async wait() {},
+    async evaluate(script) {
+      if (script === 'window.location.href') return baseline.url
+      if (script.includes('structuredTurnsTrusted')) {
+        reads++
+        return { ...baseline, isGenerating: reads < 4,
+          turns: [old, user, { Role: 'Assistant', Text: answer }] }
+      }
+      throw new Error('Unexpected Gemini snapshot script')
+    },
+  }
+  assert.equal(await waitForGeminiResponse(page, {
+    snapshot: baseline, userAnchorTurn: user,
+  }, user.Text, 10), answer)
+  assert.equal(reads, 4)
+})
+
 test('Gemini canonical turns exclude changing prompt summaries and nested speaker labels', async () => {
   class Element {
     constructor(tagName, text) { this.tagName = tagName; this.innerText = text; this.textContent = text }
