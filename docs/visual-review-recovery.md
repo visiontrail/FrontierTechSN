@@ -65,6 +65,11 @@ has no legacy six-query ceiling: it can carry a complete eight- or sixteen-shot
 plan just like automatic planning. Supplied terms still pass through normal
 script grounding, source discovery, and visual suitability checks.
 
+Direct publisher media prepared through the existing local-source preview path
+can also survive recovery. Its source identity, narration binding, file checksum,
+actual-frame Gemini approval, and pending rights review must all remain intact.
+A link-only verdict does not qualify a publisher clip for reuse.
+
 Regression checks:
 
 ```sh

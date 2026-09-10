@@ -120,6 +120,32 @@ def test_changed_script_cannot_reuse_previous_review(tmp_path):
     assert resume(tmp_path, script + ' A newly added claim.') is None
 
 
+@pytest.mark.parametrize('defect', [None, 'checksum', 'rejected', 'missing_image', 'missing_rights', 'link_only'])
+def test_publisher_preview_resume_preserves_review_and_rights_requirements(tmp_path, defect):
+    script, manifest = saved_hybrid(tmp_path)
+    clip = manifest['clips'][1]
+    clip.update(platform='publisher', provider_id='publisher-direct',
+                source_page_url='https://example.org/research/demo',
+                review_required=True, rights_status='review_required',
+                license='Rights not verified — human review required')
+    if defect == 'checksum':
+        (tmp_path / clip['local_path']).write_bytes(b'changed')
+    elif defect == 'rejected':
+        clip['analysis']['suitable'] = False
+    elif defect == 'missing_image':
+        clip['analysis']['image_received'] = False
+    elif defect == 'missing_rights':
+        clip.pop('rights_status')
+    elif defect == 'link_only':
+        clip['analysis']['analyzer'] = 'gemini-web'
+    footage._write_manifest(tmp_path, manifest)
+    result = resume(tmp_path, script)
+    assert len(result['clips']) == (1 if defect else 2)
+    if not defect:
+        assert result['clips'][1]['rights_status'] == 'review_required'
+        assert result['clips'][1]['license'] == clip['license']
+
+
 def test_batch_verdicts_are_mapped_by_id_and_missing_or_duplicate_results_fail(tmp_path):
     async def prepare(candidate, excerpt, task_dir):
         folder = task_dir / candidate['source_page_url']

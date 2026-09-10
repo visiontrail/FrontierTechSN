@@ -1251,9 +1251,16 @@ def _resume_web_manifest(
             reason = "Local artifact missing or outside task directory"
         elif not clip.get("sha256") or _file_sha256(path) != clip["sha256"]:
             reason = "Artifact checksum mismatch"
-        elif clip.get("platform") == "youtube" or clip.get("provider_id") == "youtube-ytdlp":
+        elif (clip.get("platform") == "youtube" or clip.get("provider_id") == "youtube-ytdlp"
+              or (clip.get("platform") == "publisher"
+                  and clip.get("provider_id") == "publisher-direct"
+                  and clip.get("review_required") is True
+                  and clip.get("rights_status") == "review_required")):
             analysis = clip.get("analysis") or {}
             reason = analysis_rejection(analysis)
+            if (clip.get("platform") == "publisher"
+                    and analysis.get("analyzer") != "gemini-web-contact-sheet"):
+                reason = "Publisher footage requires actual downloaded-frame review"
             if analysis.get("analyzer") == "gemini-web-contact-sheet" and (
                 analysis.get("image_received") is not True
                 or analysis.get("suitable") is not True
