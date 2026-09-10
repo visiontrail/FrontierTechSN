@@ -35,6 +35,7 @@ MAX_PAGE_OVERLAYS = 2
 VIEWPORT_WIDTH = 1440
 VIEWPORT_HEIGHT = 900
 PAGE_LOAD_TIMEOUT_SECONDS = 24.0
+PAGE_CAPTURE_TIMEOUT_SECONDS = 75.0
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
     "about",
@@ -867,17 +868,26 @@ async def acquire_news_webpages(
                 f"{urlsplit(assignment['source_url']).hostname}",
             )
             try:
-                info = await _capture_page(browser_ws_url, assignment, destination)
+                # Navigation and Runtime.evaluate can hang before the page's
+                # load polling loop gets a chance to check its own deadline.
+                # Bound the entire candidate, including publisher redirects.
+                async with asyncio.timeout(PAGE_CAPTURE_TIMEOUT_SECONDS):
+                    info = await _capture_page(browser_ws_url, assignment, destination)
             except Exception as exc:  # noqa: BLE001 - preserve other eligible captures
                 destination.unlink(missing_ok=True)
+                message = (
+                    f"Article capture exceeded {PAGE_CAPTURE_TIMEOUT_SECONDS:g}s deadline"
+                    if isinstance(exc, TimeoutError) else str(exc)
+                )
                 manifest["errors"].append(
                     {
                         "scene_id": assignment["scene_id"],
                         "source_url": assignment["source_url"],
-                        "message": str(exc),
+                        "message": message,
                     }
                 )
-                _emit(log, f"News webpage capture rejected: {exc}")
+                _write_manifest(task_dir, manifest)
+                _emit(log, f"News webpage capture rejected: {message}")
                 continue
             item = {
                 **assignment,

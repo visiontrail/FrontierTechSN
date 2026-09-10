@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import io
 import json
@@ -338,8 +339,9 @@ def test_overlay_assignment_rejects_generic_reporting_word_overlap():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["blocked", "hung_command"])
 async def test_capture_uses_later_english_story_when_a_publisher_blocks(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, failure_kind
 ):
     dossier = {
         "selected": [
@@ -382,13 +384,21 @@ async def test_capture_uses_later_english_story_when_a_publisher_blocks(
         return None
 
     attempted = []
+    cancelled = []
 
     async def fake_capture(_browser_ws_url, assignment, destination):
         attempted.append(assignment["source_url"])
         if assignment["source_url"].endswith("story-1"):
+            if failure_kind == "hung_command":
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.append(assignment["source_url"])
             raise RuntimeError(
                 "Rendered source blocked article capture: human verification challenge"
             )
+        saved = json.loads((tmp_path / "news_webpages/manifest.json").read_text())
+        assert saved["errors"][0]["source_url"].endswith("story-1")
         Image.new("RGB", (1440, 900), "white").save(destination)
         return {
             "document_language": "en",
@@ -402,6 +412,7 @@ async def test_capture_uses_later_english_story_when_a_publisher_blocks(
     monkeypatch.setattr(news_webpages, "_start_chrome", fake_start_chrome)
     monkeypatch.setattr(news_webpages, "_stop_chrome", fake_stop_chrome)
     monkeypatch.setattr(news_webpages, "_capture_page", fake_capture)
+    monkeypatch.setattr(news_webpages, "PAGE_CAPTURE_TIMEOUT_SECONDS", 0.05)
 
     manifest = await news_webpages.acquire_news_webpages(
         storyboard, plans, tmp_path, limit=2
@@ -411,6 +422,9 @@ async def test_capture_uses_later_english_story_when_a_publisher_blocks(
     assert manifest["requested_count"] == 2
     assert manifest["candidate_count"] == 3
     assert len(manifest["pages"]) == 2
+    if failure_kind == "hung_command":
+        assert cancelled == ["https://example.com/story-1"]
+        assert manifest["errors"][0]["message"] == "Article capture exceeded 0.05s deadline"
     assert attempted == [
         "https://example.com/story-1",
         "https://example.com/story-2",
