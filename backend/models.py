@@ -275,7 +275,9 @@ class ScriptUpdate(BaseModel):
 
 
 class FootageAcquireRequest(BaseModel):
-    queries: list[str] = Field(default_factory=list, max_length=6)
+    # The planner derives its shot count from the script. Recovery must accept
+    # that same plan, including editions with more than six narration stories.
+    queries: list[str] = Field(default_factory=list)
 
 
 class ContentPlanStatus(str, Enum):

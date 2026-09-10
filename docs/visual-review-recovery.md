@@ -59,6 +59,12 @@ endpoint. Verify the final quality report, promoted artifact, full video decode,
 HTTP Range response, browser playback, and terminal task status before reporting
 the video as recovered.
 
+If the saved plan contains unsuitable discovery terms, the same endpoint accepts
+`{"queries": ["story-specific product demonstration", "..."]}`. The retry request
+has no legacy six-query ceiling: it can carry a complete eight- or sixteen-shot
+plan just like automatic planning. Supplied terms still pass through normal
+script grounding, source discovery, and visual suitability checks.
+
 Regression checks:
 
 ```sh
