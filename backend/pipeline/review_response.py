@@ -11,6 +11,10 @@ from backend.pipeline.opencli import OpenCLIError
 class ReviewResponseError(OpenCLIError):
     """The provider replied, but its answer does not satisfy the review protocol."""
 
+    def __init__(self, message: str, *, complete_count: int | None = None):
+        super().__init__(message)
+        self.complete_count = complete_count
+
 
 def parse_review_response(
     output: str, *, required_fields: Collection[str], label: str,
@@ -62,6 +66,7 @@ def parse_review_response(
     if len(envelopes) != 1:
         raise ReviewResponseError(
             f"{label} must contain exactly one complete review object "
-            f"with fields {', '.join(sorted(required_fields))}; found {len(envelopes)}"
+            f"with fields {', '.join(sorted(required_fields))}; found {len(envelopes)}",
+            complete_count=len(envelopes),
         )
     return envelopes[0]

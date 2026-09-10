@@ -20,6 +20,8 @@ import json
 import hashlib
 import logging
 import math
+import re
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -28,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from backend import config
 from backend.pipeline.opencli import OpenCLIError, run_opencli
-from backend.pipeline.review_response import parse_review_response
+from backend.pipeline.review_response import ReviewResponseError, parse_review_response
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -268,6 +270,58 @@ def _response_payload(stdout: str) -> dict:
         stdout, required_fields={"image_received", "reviews"},
         label="Gemini multimodal review",
     )
+
+
+async def _review_result_payload(
+    result, *, provider: str, prompt: str, sheet: Path, timeout: int,
+    phase: str, batch_index: int, attempt: int, log: LogCallback | None,
+) -> dict:
+    """Read an unfinished ChatGPT answer to completion in its original conversation."""
+    try:
+        return _response_payload(f"{result.stdout}\n{result.stderr}")
+    except ReviewResponseError as error:
+        # Never replace an ambiguous complete answer with a later verdict.
+        if provider != "chatgpt" or error.complete_count != 0:
+            raise
+        try:
+            envelope = json.loads(result.stdout)
+            if not isinstance(envelope, list) or len(envelope) != 1:
+                raise ValueError("not one conversation receipt")
+            conversation_id = str(uuid.UUID(envelope[0]["conversationId"]))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise error
+        _emit(log, "Visual review: reading the unfinished ChatGPT reply from its original conversation")
+        detail = None
+        try:
+            detail = await run_opencli([
+                "chatgpt", "detail", conversation_id, "--wait", "true",
+                "--timeout", str(timeout), "--stable", "12", "--refresh", "true",
+                "--window", "foreground", "--site-session", "ephemeral",
+                "--keep-tab", "false", "-f", "json",
+            ], timeout=timeout + 90)
+            rows = json.loads(detail.stdout)
+            if (not isinstance(rows, list) or len(rows) != 2
+                    or not all(isinstance(row, dict) for row in rows)
+                    or [row.get("Role") for row in rows] != ["User", "Assistant"]):
+                raise ReviewResponseError("ChatGPT recovery did not expose one owned prompt/reply pair")
+
+            def normalize(text):
+                return re.sub(r"\s+", " ", str(text)).strip()
+
+            if normalize(rows[0].get("Text")) != normalize(prompt):
+                raise ReviewResponseError("ChatGPT recovery prompt differs from the review request")
+            answer = rows[1]
+            stable = answer.get("StableSeconds")
+            if (answer.get("Generating") is not False
+                    or type(stable) not in (int, float) or not math.isfinite(stable) or stable < 12):
+                raise ReviewResponseError("ChatGPT recovery reply has not finished and stabilized")
+            return _response_payload(answer.get("Text") or "")
+        finally:
+            _persist_provider_response(
+                sheet, phase=phase, batch_index=batch_index, attempt=attempt,
+                provider="chatgpt-detail", stdout=detail.stdout if detail else "",
+                stderr=detail.stderr if detail else "Same-conversation recovery unavailable",
+            )
 
 
 def _review_command(provider: str, prompt: str, sheet: Path, timeout: int) -> list[str]:
@@ -546,7 +600,11 @@ async def _review_batch(
                 stdout=result.stdout,
                 stderr=result.stderr,
             )
-            payload = _response_payload(f"{result.stdout}\n{result.stderr}")
+            payload = await _review_result_payload(
+                result, provider=fallback_provider, prompt=prompt, sheet=sheet,
+                timeout=timeout, phase=phase, batch_index=batch_index,
+                attempt=attempts, log=log,
+            )
             normalized = normalise_batch(payload, batch_frames, match_floor)
             if _batch_is_valid(normalized):
                 normalized["review_provider"] = fallback_provider

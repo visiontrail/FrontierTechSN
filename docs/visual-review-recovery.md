@@ -86,6 +86,15 @@ after installation, then run `npm --prefix tools/opencli run test:adapter`.
 The next CLI subprocess loads the patched adapter; a running backend does not
 need a restart for this JavaScript-only repair.
 
+ChatGPT's vision fallback can briefly expose a stable-looking partial answer
+before the complete answer reaches the page. If an ask receipt identifies one
+conversation but contains zero complete review objects, the reviewer now reads
+that same conversation with `detail --wait true --stable 12` before submitting
+another prompt. Recovery requires exactly one user/assistant pair, an identical
+review prompt, and an idle, stable answer. Its actual verdict is retained even
+when negative. Multiple complete objects remain ambiguous and never enter this
+recovery path. The detail response is saved beside the original ask receipt.
+
 Regression checks:
 
 ```sh
