@@ -100,3 +100,15 @@ Regression checks:
 ```sh
 .venv/bin/python -m pytest backend/tests/test_review_response.py backend/tests/test_multimodal_review.py backend/tests/test_web_footage.py backend/tests/test_footage_recovery.py -q
 ```
+
+### macOS foreground browser availability
+
+Explicit `--window foreground` calls on the macOS bridge runtime check the active
+console session before reserving a provider request and again before launching
+the browser command. A locked screen produces `BROWSER_SCREEN_LOCKED` with an
+unlock instruction instead of spending repeated upload attempts on an unusable
+desktop. During provider pacing and browser execution, a call-owned `caffeinate`
+assertion prevents idle display/system sleep; completion, failure or cancellation
+releases it. It is also tied to the backend PID. This does not change system
+preferences, unlock the Mac, or override a manual lock. Headless and non-macOS
+runtimes do not use this desktop guard.

@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from backend import config
+from backend.pipeline.desktop_browser import (
+    DesktopBrowserLockedError,
+    foreground_browser_session,
+)
 from backend.pipeline.opencli_rate_limit import (
     is_rate_limited_command,
     needs_generation_quiet_period,
@@ -136,79 +140,91 @@ async def run_opencli(
         except OpenCLIBrowserRuntimeError as exc:
             raise OpenCLIError(f"Isolated OpenCLI browser is not ready: {exc}") from exc
 
-    command = [str(binary), *[str(arg) for arg in args]]
-    env = _environment(site_session_namespace=site_session_namespace)
-    if mode == ISOLATED_HEADLESS_RUNTIME:
-        env["OPENCLI_ISOLATED_RUNTIME_READY"] = "1"
-    site = str(args[0]).lower() if args else ""
-    await _wait_for_provider_cooldown(site)
-    if is_rate_limited_command(args):
-        # Pace before starting the subprocess so the provider-command timeout
-        # measures the web operation, not time intentionally spent in queue.
-        await asyncio.to_thread(
-            wait_for_opencli_web_slot,
-            str(args[0]).lower(),
-            interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
-        )
-        env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
-    elif needs_generation_quiet_period(args):
-        # A model-policy check is not a generation request and therefore does
-        # not reserve the next slot. It still waits behind the prior prompt so
-        # ChatGPT does not receive a model-page access immediately after an
-        # audit response. Recovery reads deliberately remain unpaced here.
-        await asyncio.to_thread(
-            wait_for_opencli_generation_quiet_period,
-            site,
-            interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
-        )
-        env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
-    # Another process may have opened the breaker while this generation waited
-    # for its normal start slot. Recheck immediately before launching the CLI.
-    await _wait_for_provider_cooldown(site)
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(config.PROJECT_ROOT),
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
+    foreground = any(
+        str(args[index]) == "--window" and str(args[index + 1]) == "foreground"
+        for index in range(len(args) - 1)
     )
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            process.communicate(), timeout=timeout or config.OPENCLI_TIMEOUT
-        )
-    except TimeoutError as exc:
-        await _stop_command(process)
-        raise OpenCLIError(
-            f"OpenCLI command timed out after {timeout or config.OPENCLI_TIMEOUT}s: "
-            f"{' '.join(args[:3])}"
-        ) from exc
-    except asyncio.CancelledError:
-        await _stop_command(process)
-        raise
+        async with foreground_browser_session(
+            enabled=foreground and mode != ISOLATED_HEADLESS_RUNTIME,
+        ) as check_browser:
+            command = [str(binary), *[str(arg) for arg in args]]
+            env = _environment(site_session_namespace=site_session_namespace)
+            if mode == ISOLATED_HEADLESS_RUNTIME:
+                env["OPENCLI_ISOLATED_RUNTIME_READY"] = "1"
+            site = str(args[0]).lower() if args else ""
+            await _wait_for_provider_cooldown(site)
+            if is_rate_limited_command(args):
+                # Pace before starting the subprocess so the provider-command timeout
+                # measures the web operation, not time intentionally spent in queue.
+                await asyncio.to_thread(
+                    wait_for_opencli_web_slot,
+                    str(args[0]).lower(),
+                    interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
+                )
+                env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
+            elif needs_generation_quiet_period(args):
+                # A model-policy check is not a generation request and therefore does
+                # not reserve the next slot. It still waits behind the prior prompt so
+                # ChatGPT does not receive a model-page access immediately after an
+                # audit response. Recovery reads deliberately remain unpaced here.
+                await asyncio.to_thread(
+                    wait_for_opencli_generation_quiet_period,
+                    site,
+                    interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
+                )
+                env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
+            # Another process may have opened the breaker while this generation waited
+            # for its normal start slot. Recheck immediately before launching the CLI.
+            await _wait_for_provider_cooldown(site)
+            await check_browser()
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(config.PROJECT_ROOT),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    process.communicate(), timeout=timeout or config.OPENCLI_TIMEOUT
+                )
+            except TimeoutError as exc:
+                await _stop_command(process)
+                raise OpenCLIError(
+                    f"OpenCLI command timed out after {timeout or config.OPENCLI_TIMEOUT}s: "
+                    f"{' '.join(args[:3])}"
+                ) from exc
+            except asyncio.CancelledError:
+                await _stop_command(process)
+                raise
 
-    result = OpenCLIResult(
-        args=tuple(args),
-        returncode=process.returncode or 0,
-        stdout=stdout_bytes.decode("utf-8", errors="replace").strip(),
-        stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
-    )
-    if result.returncode != 0 and "CHATGPT_RATE_LIMITED" in result.stderr + result.stdout:
-        until = record_opencli_rate_limit("chatgpt")
-        detail = next(
-            value for value in (result.stderr, result.stdout)
-            if "CHATGPT_RATE_LIMITED" in value
-        )[-1600:]
-        raise OpenCLIRateLimitError(
-            f"ChatGPT conversation access is rate limited; all browser operations "
-            f"are paused until Unix time {until:.0f}. {detail}"
-        )
-    if check and result.returncode != 0:
-        detail = (result.stderr or result.stdout or "unknown OpenCLI failure")[-1200:]
-        raise OpenCLIError(
-            f"OpenCLI {' '.join(args[:2])} failed with exit {result.returncode}: {detail}"
-        )
-    return result
+            result = OpenCLIResult(
+                args=tuple(args),
+                returncode=process.returncode or 0,
+                stdout=stdout_bytes.decode("utf-8", errors="replace").strip(),
+                stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
+            )
+            if result.returncode != 0 and "CHATGPT_RATE_LIMITED" in result.stderr + result.stdout:
+                until = record_opencli_rate_limit("chatgpt")
+                detail = next(
+                    value for value in (result.stderr, result.stdout)
+                    if "CHATGPT_RATE_LIMITED" in value
+                )[-1600:]
+                raise OpenCLIRateLimitError(
+                    f"ChatGPT conversation access is rate limited; all browser operations "
+                    f"are paused until Unix time {until:.0f}. {detail}"
+                )
+            if check and result.returncode != 0:
+                detail = (result.stderr or result.stdout or "unknown OpenCLI failure")[-1200:]
+                raise OpenCLIError(
+                    f"OpenCLI {' '.join(args[:2])} failed with exit {result.returncode}: {detail}"
+                )
+            return result
+
+    except DesktopBrowserLockedError as exc:
+        raise OpenCLIError(str(exc)) from exc
 
 
 async def _stop_command(process: asyncio.subprocess.Process) -> None:
