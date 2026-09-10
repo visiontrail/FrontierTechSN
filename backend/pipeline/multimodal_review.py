@@ -27,7 +27,8 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from backend import config
-from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
+from backend.pipeline.opencli import OpenCLIError, run_opencli
+from backend.pipeline.review_response import parse_review_response
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -263,37 +264,10 @@ def _review_prompt(
 
 
 def _response_payload(stdout: str) -> dict:
-    outer = first_json(stdout)
-    response: Any = outer
-    if isinstance(outer, list) and outer:
-        response = outer[0]
-    if isinstance(response, dict):
-        response = response.get("response") or response.get("Response") or response
-    if isinstance(response, dict):
-        return response
-    # A streamed reply can retain an abandoned JSON prefix before restarting
-    # with a complete answer. The first decodable object may then be just one
-    # scene row. Recover the review envelope, never a nested row or a preferred
-    # verdict; ambiguous complete answers still require a fresh review.
-    text = str(response)
-    decoder = json.JSONDecoder()
-    envelopes: list[dict] = []
-    cursor = 0
-    while cursor < len(text):
-        start = text.find("{", cursor)
-        if start < 0:
-            break
-        try:
-            parsed, consumed = decoder.raw_decode(text[start:])
-        except json.JSONDecodeError:
-            cursor = start + 1
-            continue
-        cursor = start + consumed
-        if isinstance(parsed, dict) and "image_received" in parsed and "reviews" in parsed:
-            envelopes.append(parsed)
-    if len(envelopes) != 1:
-        raise OpenCLIError("Gemini multimodal review must contain exactly one complete review object")
-    return envelopes[0]
+    return parse_review_response(
+        stdout, required_fields={"image_received", "reviews"},
+        label="Gemini multimodal review",
+    )
 
 
 def _review_command(provider: str, prompt: str, sheet: Path, timeout: int) -> list[str]:

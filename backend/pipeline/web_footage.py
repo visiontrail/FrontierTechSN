@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from pathlib import Path
 from backend import config
 from backend.pipeline.extractors.youtube import _yt_dlp_common_args
 from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
+from backend.pipeline.review_response import ReviewResponseError, parse_review_response
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -32,6 +34,7 @@ YOUTUBE_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch|youtu\.be
 GEMINI_RECOVERY_TIMEOUT_SECONDS = 60.0
 GEMINI_RECOVERY_POLL_SECONDS = 5.0
 MAX_CANDIDATE_ATTEMPTS_PER_QUERY = 3
+MAX_PREVIEW_REVIEW_ATTEMPTS = 3
 SEARCH_REPAIR_TIMEOUT_SECONDS = 60
 SEARCH_STOPWORDS = frozenset(
     "a an and are as at be by for from how in into is it of on or the this to use with".split()
@@ -48,6 +51,10 @@ class WebFootageError(RuntimeError):
 
 class WebFootageReviewUnavailable(WebFootageError):
     """The review did not execute; candidate suitability remains undecided."""
+
+    def __init__(self, message: str, *, failure_kind: str = "transport") -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -819,6 +826,7 @@ async def _prepare_candidate_preview(
 
 async def _analyze_candidate_preview(
     candidate: dict, excerpt: str, task_dir: Path, *, source_path: Path | None = None,
+    log: LogCallback | None = None,
 ) -> dict:
     prepared = await _prepare_candidate_preview(candidate, excerpt, task_dir, source_path=source_path)
     folder, sheet, intervals = (prepared[key] for key in ("folder", "sheet", "intervals"))
@@ -839,25 +847,108 @@ async def _analyze_candidate_preview(
         "Mere theme or keyword overlap is insufficient: for example, synthetic political "
         "or religious memes do not depict government AI policy. Do not treat invented "
         "events as real-world context. Reject unrelated footage and text-only/talking-head filler. "
-        "Return JSON with image_received (boolean), suitable (boolean), confidence (0..1), "
+        "Return ONLY one complete JSON object with image_received (boolean), suitable (boolean), confidence (0..1), "
         "selected_window (integer row index of the best suitable interval), "
         "visible_content (concrete visual description of THAT row), reason. If the image is absent, "
         "unreadable or insufficient to establish relevance, suitable must be false."
     )
-    from backend.pipeline.multimodal_review import _response_payload, _review_command
-
-    result = await run_opencli(
-        _review_command("gemini", prompt, sheet, config.WEB_FOOTAGE_GEMINI_TIMEOUT),
-        timeout=config.WEB_FOOTAGE_GEMINI_TIMEOUT + 60,
+    verdict = await _request_preview_review(
+        prompt, sheet, {0: prepared}, batch=False, log=log,
     )
-    verdict = _response_payload(result.stdout)
     (folder / "review.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
     return _validated_preview(verdict, prepared, task_dir)
 
 
+def _preview_response_payload(output: str, *, batch: bool) -> dict:
+    return parse_review_response(
+        output, required_fields={"results"} if batch else {"image_received", "suitable"},
+        label="Gemini batch footage preview" if batch else "Gemini footage preview",
+    )
+
+
+def _validate_preview_response(payload: dict, prepared: dict[int, dict], *, batch: bool) -> None:
+    """Separate an unusable answer from an explicit rejection of the pixels."""
+    if batch:
+        rows = payload.get("results")
+        if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+            raise ReviewResponseError("Footage preview results must be an array of verdicts")
+        # Map and validate each candidate independently below. Preserve valid
+        # reviews/rejections when another row is missing or ambiguous.
+        return
+    if payload.get("image_received") is not True:
+        raise ReviewResponseError("Footage preview image was not received or readable")
+    if type(payload.get("suitable")) is not bool:
+        raise ReviewResponseError("Footage preview requires an explicit boolean suitability verdict")
+    if payload["suitable"] is False:
+        # A real rejection is terminal for this candidate, never retried
+        # in search of a more favorable answer.
+        return
+    confidence = payload.get("confidence")
+    if (type(confidence) not in (int, float) or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1):
+        raise ReviewResponseError("Footage preview confidence must be a finite number from 0 to 1")
+    selected = payload.get("selected_window")
+    if type(selected) is not int or not 0 <= selected < len(prepared[0]["intervals"]):
+        raise ReviewResponseError("Footage preview did not select a valid sampled interval")
+    if not isinstance(payload.get("visible_content"), str) or not payload["visible_content"].strip():
+        raise ReviewResponseError("Footage preview omitted visible-content evidence")
+
+
+async def _request_preview_review(
+    prompt: str, sheet: Path, prepared: dict[int, dict], *, batch: bool,
+    log: LogCallback | None,
+) -> dict:
+    from backend.pipeline.multimodal_review import _review_command
+
+    # Each retry invocation gets its own directory so resuming a failed task
+    # cannot overwrite the response that explains the original failure.
+    evidence = sheet.parent / "review-attempts" / uuid.uuid4().hex
+    evidence.mkdir(parents=True, exist_ok=True)
+    _write_manifest(evidence / "request.json", {
+        "prompt": prompt, "sheet_sha256": _sha256(sheet) if sheet.is_file() else None,
+        "contract": "footage-preview-batch" if batch else "footage-preview",
+        "candidate_ids": list(prepared),
+    })
+    last_error: Exception | None = None
+    failure_kind = "transport"
+    for attempt in range(1, MAX_PREVIEW_REVIEW_ATTEMPTS + 1):
+        result = None
+        record = {"provider": "gemini", "attempt": attempt}
+        try:
+            result = await run_opencli(
+                _review_command("gemini", prompt, sheet, config.WEB_FOOTAGE_GEMINI_TIMEOUT),
+                timeout=config.WEB_FOOTAGE_GEMINI_TIMEOUT + 60,
+                check=False,
+            )
+            record.update(stdout=result.stdout, stderr=result.stderr, returncode=result.returncode)
+            if result.returncode:
+                raise OpenCLIError(
+                    f"OpenCLI Gemini preview failed with exit {result.returncode}: "
+                    f"{(result.stderr or result.stdout)[-1200:]}"
+                )
+            payload = _preview_response_payload(f"{result.stdout}\n{result.stderr}", batch=batch)
+            _validate_preview_response(payload, prepared, batch=batch)
+            record["status"] = "reviewed"
+            return payload
+        except OpenCLIError as exc:
+            last_error = exc
+            failure_kind = "response_contract" if isinstance(exc, ReviewResponseError) else "transport"
+            record.update(status="unavailable", failure_kind=failure_kind, error=str(exc))
+            _emit(log, f"Web footage: Gemini preview attempt {attempt}/{MAX_PREVIEW_REVIEW_ATTEMPTS} "
+                  f"unavailable ({failure_kind}): {exc}")
+        finally:
+            _write_manifest(evidence / f"attempt-{attempt:02d}.json", record)
+    raise WebFootageReviewUnavailable(
+        f"Gemini footage preview {failure_kind} failure after "
+        f"{MAX_PREVIEW_REVIEW_ATTEMPTS} attempts: {last_error}", failure_kind=failure_kind,
+    ) from last_error
+
+
 def _validated_preview(verdict: dict, prepared: dict, task_dir: Path) -> dict:
     intervals, sheet = prepared["intervals"], prepared["sheet"]
-    if verdict.get("image_received") is not True or verdict.get("suitable") is not True:
+    if verdict.get("image_received") is not True:
+        raise WebFootageReviewUnavailable("Preview image was not received or readable", failure_kind="response_contract")
+    if verdict.get("suitable") is not True:
         raise WebFootageError(f"Preview visual review rejected: {verdict.get('reason', 'No explicit image verdict')}")
     rejection = analysis_rejection(verdict)
     if rejection or not str(verdict.get("visible_content") or "").strip():
@@ -881,10 +972,12 @@ async def _analyze_preview_batch(
 ) -> list[dict | Exception]:
     """Review up to four separately labelled candidates in one paced request."""
     from PIL import Image, ImageDraw, ImageFont
-    from backend.pipeline.multimodal_review import _response_payload, _review_command
 
     prepared = []
-    results: list[dict | Exception] = [WebFootageReviewUnavailable("Missing batch verdict") for _ in requests]
+    results: list[dict | Exception] = [
+        WebFootageReviewUnavailable("Missing or ambiguous batch verdict", failure_kind="response_contract")
+        for _ in requests
+    ]
     for index, (candidate, excerpt) in enumerate(requests):
         try:
             _emit(log, f"Web footage preview {index + 1}/{len(requests)}: sampling {candidate.get('title') or candidate['source_page_url']}")
@@ -931,18 +1024,16 @@ async def _analyze_preview_batch(
         "different named product or event. "
         "Unrelated visuals, invented events, text-only and talking-head filler must be rejected. "
         "If an image is missing, unreadable or insufficient to establish relevance, suitable must be false. "
-        "Return JSON {\"results\":[{\"candidate_id\":0,\"image_received\":true,\"suitable\":false,"
+        "Return ONLY one complete JSON object {\"results\":[{\"candidate_id\":0,\"image_received\":true,\"suitable\":false,"
         "\"confidence\":0.0,\"selected_window\":0,\"visible_content\":\"concrete description of that row\","
         "\"reason\":\"reason\"}]}. Include one result for every candidate, even rejections. "
         + json.dumps(descriptions, ensure_ascii=False)
     )
     (folder / "request.json").write_text(json.dumps(descriptions, indent=2), encoding="utf-8")
     try:
-        response = await run_opencli(
-            _review_command("gemini", prompt, sheet_path, config.WEB_FOOTAGE_GEMINI_TIMEOUT),
-            timeout=config.WEB_FOOTAGE_GEMINI_TIMEOUT + 60,
+        payload = await _request_preview_review(
+            prompt, sheet_path, dict(prepared), batch=True, log=log,
         )
-        payload = _response_payload(response.stdout)
         (folder / "review.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
         verdicts = payload.get("results", [])
         for index, item in prepared:
@@ -952,13 +1043,18 @@ async def _analyze_preview_batch(
             verdict = matched[0]
             (item["folder"] / "review.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
             try:
+                _validate_preview_response(verdict, {0: item}, batch=False)
                 results[index] = {**_validated_preview(verdict, item, task_dir),
                                   "batch_evidence": sheet_path.relative_to(task_dir).as_posix()}
+            except ReviewResponseError as exc:
+                results[index] = WebFootageReviewUnavailable(str(exc), failure_kind="response_contract")
             except Exception as exc:
                 results[index] = exc
     except Exception as exc:
         for index, _ in prepared:
-            results[index] = WebFootageReviewUnavailable(str(exc))
+            results[index] = WebFootageReviewUnavailable(
+                str(exc), failure_kind=getattr(exc, "failure_kind", "transport"),
+            )
     return results
 
 
@@ -1244,7 +1340,7 @@ async def supplement_web_footage(
             if preview_result is not None:
                 analysis = preview_result
             elif manifest.get("url_inspection_unavailable"):
-                analysis = await _analyze_candidate_preview(candidate, excerpt, task_dir)
+                analysis = await _analyze_candidate_preview(candidate, excerpt, task_dir, log=log)
             else:
                 analysis = await analyze_candidate_link(candidate, excerpt)
             rejection = analysis_rejection(analysis)
@@ -1255,7 +1351,7 @@ async def supplement_web_footage(
                 _emit(log, "Web footage: URL inspection unavailable; reviewing actual preview frames")
                 manifest["url_inspection_unavailable"] = True
                 _write_manifest(manifest_file, manifest)
-                analysis = await _analyze_candidate_preview(candidate, excerpt, task_dir)
+                analysis = await _analyze_candidate_preview(candidate, excerpt, task_dir, log=log)
                 rejection = analysis_rejection(analysis)
             if rejection:
                 manifest.setdefault("rejected_candidates", []).append({
@@ -1304,13 +1400,15 @@ async def supplement_web_footage(
             manifest.setdefault("errors", []).append({
                 "query": query, "plan_query": shot["plan_query"],
                 "stage": "web-review", "message": str(exc),
+                "failure_kind": getattr(exc, "failure_kind", "transport"),
                 "pending_source_page_url": candidate["source_page_url"],
             })
             manifest.update(status="review_unavailable", updated_at=_now())
             _write_manifest(manifest_file, manifest)
             raise WebFootageReviewUnavailable(
                 "Public-footage visual review unavailable; downloaded previews and verified clips "
-                f"were retained. Restore the browser connection and retry acquisition. {exc}"
+                f"were retained. Retry acquisition to resume from saved evidence. {exc}",
+                failure_kind=getattr(exc, "failure_kind", "transport"),
             ) from exc
         except Exception as exc:  # noqa: BLE001 - try the next query/candidate
             if "review rejected" in str(exc).casefold():
