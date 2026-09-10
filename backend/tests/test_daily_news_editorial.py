@@ -281,3 +281,35 @@ def test_audit_correction_exhausts_length_retries_without_truncating_or_switchin
         ))
     assert len(calls) == scriptwriter.DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS
     assert all(call[2:5] == ("selected-endpoint", "selected-model", "selected-key") for call in calls[1:])
+
+
+def test_generation_spells_grouped_quantity_before_review():
+    data = dossier(("bloomberg", "Bloomberg", "en"))
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", AsyncMock(return_value="Bloomberg reports capacity for 600,000 homes.")),
+    ):
+        result = asyncio.run(scriptwriter.generate_daily_script(
+            data, EDITION, target_duration_minutes=None, language="en",
+            closing_remarks=CLOSING, ai_endpoint=None, ai_model=None, provider_id=None,
+        ))
+    assert result.splitlines()[1] == "Bloomberg reports capacity for six hundred thousand homes."
+    assert len(result.splitlines()) == 3
+
+
+def test_correction_spells_quantity_only_in_failed_story():
+    data = dossier(("bloomberg", "Bloomberg", "en"), ("bbc", "BBC", "en"))
+    passing = "BBC reports capacity for 250,000 homes."
+    original = "\n".join([scriptwriter.morning_opening(EDITION), "Bloomberg reports a trial.", passing, CLOSING])
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", AsyncMock(return_value=json.dumps({"1": "Bloomberg reports capacity for 600,000 homes."}))),
+    ):
+        result = asyncio.run(scriptwriter.revise_daily_script(
+            original, data, [{"evidence_story_numbers": [1]}], EDITION,
+            language="en", closing_remarks=CLOSING, ai_endpoint=None, ai_model=None,
+            provider_id=None, target_duration_minutes=None,
+        ))
+    assert result.splitlines()[1] == "Bloomberg reports capacity for six hundred thousand homes."
+    assert result.splitlines()[2] == passing
+    assert len(result.splitlines()) == 4

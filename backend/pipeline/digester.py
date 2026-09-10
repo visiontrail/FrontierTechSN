@@ -8,6 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, urlunsplit
+from backend.spoken_numbers import SPOKEN_NUMBER_RULES, normalize_spoken_quantities
 from backend import config
 from backend.pipeline.extractors.base import ExtractedContent
 from backend.provider_credentials import redact_api_keys
@@ -673,6 +674,7 @@ async def generate_script(
 
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
     system_prompt = (config.PROMPTS_DIR / prompt_file).read_text()
+    system_prompt += "\n" + SPOKEN_NUMBER_RULES
     system_prompt = system_prompt.replace("{word_count}", str(word_count))
     system_prompt = system_prompt.replace("{duration_minutes}", str(target_duration_minutes))
     if closing_remarks:
@@ -727,6 +729,7 @@ async def generate_script(
         if _contains_cjk(joined):
             raise RuntimeError("Generated script still contains non-English/CJK text after repair")
 
+    lines = [normalize_spoken_quantities(line) for line in lines]
     lines = _ensure_closing_remarks(lines, closing_remarks, script_format, log)
     joined = "\n".join(lines)
 

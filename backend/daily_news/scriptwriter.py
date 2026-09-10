@@ -6,6 +6,7 @@ import re
 from collections.abc import Callable
 from datetime import date
 
+from backend.spoken_numbers import normalize_spoken_quantities
 from backend.daily_news.editorial import DAILY_NEWS_EDITORIAL_RULES, requires_chinese_media_label
 from backend.daily_news.research import ResearchDossier, dossier_markdown
 from backend.pipeline.digester import _chat, _resolve_provider
@@ -207,6 +208,7 @@ def enforce_script_contract(
     opening: str,
     closing: str,
     language: str,
+    normalize_numbers: bool = True,
 ) -> str:
     lines = _spoken_lines(script)
     opening_folded = opening.casefold()
@@ -219,6 +221,8 @@ def enforce_script_contract(
     ]
     if not body:
         raise RuntimeError("Daily-news script contained no spoken story body")
+    if language == "en" and normalize_numbers:
+        body = [normalize_spoken_quantities(line) for line in body]
     final = "\n".join([opening, *body, closing]).strip()
     if language == "en" and NON_ENGLISH_RE.search(final):
         raise RuntimeError("English daily-news script contains CJK text")
@@ -1096,7 +1100,9 @@ For an English edition, output no Chinese, Japanese, or Korean characters.
             )
         revised_paragraphs = list(current_paragraphs)
         for story_number, paragraph in corrections.items():
-            revised_paragraphs[story_number] = paragraph
+            revised_paragraphs[story_number] = (
+                normalize_spoken_quantities(paragraph) if language == "en" else paragraph
+            )
         revised = "\n".join(revised_paragraphs)
         # Old saved review reports predate claim identifiers. Preserve their
         # conservative first-sentence fallback, but never apply that paragraph-wide
@@ -1119,6 +1125,7 @@ For an English edition, output no Chinese, Japanese, or Korean characters.
             opening=opening,
             closing=closing_remarks,
             language=language,
+            normalize_numbers=False,
         )
 
         length_failures = _analysis_length_failures(candidate, dossier, language)
