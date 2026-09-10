@@ -3982,6 +3982,46 @@ def _pocket_synthesis_text(text: str) -> str:
     )
 
 
+def _pocket_pronunciation_retry_text(
+    synthesis_text: str, source_text: str, verification_dir: Path,
+) -> str:
+    """Separate a lost plural ending from a following s-sound on resynthesis.
+
+    Two failed decodes of the same utterance must agree on exactly one lost
+    final s (for example, signals shaping -> signal shaping). This is only a
+    provider punctuation hint: the original words and all acoustic gates are
+    unchanged, and the new waveform must pass independent verification.
+    """
+    try:
+        evidence = json.loads((verification_dir / "llm_asr_adjudication.json").read_text())
+        request = evidence["request"]
+        if evidence.get("status") != "rejected" or request["source_text"] != source_text:
+            return synthesis_text
+        expected = _lexical_tokens(source_text)
+        observed = _lexical_tokens(request["normal_speed_transcript"])
+        slower = _lexical_tokens(request["slower_speed_transcript"])
+        if len(expected) != len(observed) or observed != slower:
+            return synthesis_text
+        differences = [i for i, pair in enumerate(zip(expected, observed)) if pair[0] != pair[1]]
+        if len(differences) != 1:
+            return synthesis_text
+        index = differences[0]
+        word = expected[index]
+        if (index + 1 >= len(expected) or len(word) < 4 or not word.isalpha()
+                or not word.endswith("s") or observed[index] != word[:-1]
+                or not expected[index + 1].startswith("s")):
+            return synthesis_text
+        boundary = re.compile(
+            rf"\b({re.escape(word)})\s+(?={re.escape(expected[index + 1])}\b)", re.I,
+        )
+        if len(list(boundary.finditer(synthesis_text))) != 1:
+            return synthesis_text
+        repaired = boundary.sub(r"\1, ", synthesis_text)
+        return repaired if _lexical_tokens(repaired) == expected else synthesis_text
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return synthesis_text
+
+
 async def _generate_pocket_tts(
     script_path: str,
     output_dir: str,
@@ -4051,6 +4091,12 @@ async def _generate_pocket_tts(
             staged_part = expected_part.with_suffix(".tmp.wav")
             staged_part.unlink(missing_ok=True)
             synthesis_text = _pocket_synthesis_text(chunk)
+            retry_text = _pocket_pronunciation_retry_text(
+                synthesis_text, chunk, output_dir_path / "verification" / input_path.stem,
+            )
+            if retry_text != synthesis_text:
+                emit(f"{name}: separating a previously lost plural ending for resynthesis; canonical words unchanged")
+                synthesis_text = retry_text
             if _lexical_tokens(synthesis_text) != _lexical_tokens(chunk):
                 raise TtsIntegrityError("Pocket TTS pronunciation changed source tokens")
             synthesis_dir = output_dir_path / "synthesis"

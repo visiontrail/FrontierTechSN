@@ -21,7 +21,12 @@ when the reply was a string. Direct-object test fixtures bypassed that check.
 Both single and batch production wrappers therefore failed even with otherwise
 valid preview answers. The outer error incorrectly recommended restoring the
 browser connection for every failure. The original preview response was not
-retained, so its exact contents cannot be reconstructed from that task's logs.
+retained in the task logs. After unlocking the Mac, its authenticated Gemini
+conversation was recovered: the image was received, `suitable` was `false`,
+confidence was `0.68`, and `selected_window` was `null`. Gemini rejected the
+conference interview as talking-head filler. This was a valid rejection that
+should have advanced discovery to another candidate, rather than failing the
+task as a browser outage.
 
 Preview requests now make at most three attempts for transport failures or
 unusable response envelopes, retaining the same sampled media and prompt and

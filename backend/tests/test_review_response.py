@@ -140,7 +140,12 @@ def test_preview_retries_are_bounded_and_never_mark_unavailable_as_rejected(tmp_
     assert len(list(prepared["folder"].glob("review-attempts/*/attempt-*.json"))) == 3
 
 
-@pytest.mark.parametrize("verdict", [{**PREVIEW, "suitable": False}, {**PREVIEW, "confidence": .64}])
+@pytest.mark.parametrize("verdict", [
+    {**PREVIEW, "suitable": False}, {**PREVIEW, "confidence": .64},
+    # Original Silver Lake response recovered from its Gemini conversation:
+    # a valid rejection deliberately has no selected interval.
+    {**PREVIEW, "suitable": False, "confidence": .68, "selected_window": None},
+])
 def test_explicit_negative_review_is_not_retried(tmp_path, verdict):
     prepared = prepared_preview(tmp_path)
     async def run():
