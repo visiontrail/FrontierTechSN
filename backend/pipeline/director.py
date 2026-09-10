@@ -306,6 +306,14 @@ def _scene_brief(scene: dict, plan: dict, theme: scene_kit.Theme) -> str:
         )
     else:
         lines.append(f"narration spoken over this scene:\n\"{scene['text']}\"")
+    feedback = plan.get("visual_review_feedback")
+    if feedback:
+        lines.extend([
+            "Required repair from review of the previously rendered pixels:",
+            *[f"- {issue}" for issue in feedback.get("issues", [])],
+            f"Suggested visual repair: {feedback.get('suggested_visual', '')}",
+            "Apply this feedback to the editable overlay while preserving the locked media and narration meaning.",
+        ])
     return "\n".join(lines)
 
 

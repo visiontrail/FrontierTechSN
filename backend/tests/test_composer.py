@@ -23,6 +23,19 @@ def test_quality_retry_preserves_configured_bookends_but_still_directs_unlocked_
     assert [p["id"] for p in composer._director_scene_plans(plans, quality_retry=True)] == ["graphic"]
 
 
+def test_rejected_bookend_keeps_locked_preset_and_reaches_overlay_editor():
+    feedback = {"issues": ["Closing controls too small"], "suggested_visual": "Large end screen"}
+    staged = {"id": "outro", "archetype": "outro", "footage_src": "selected.mp4"}
+    repaired = {"id": "outro", "archetype": "statement", "footage_src": "unapproved.mp4",
+                "visual_review_feedback": feedback, "review_repair_source_sha256": "candidate"}
+    plan = composer._retain_bookend_review_feedback(staged, repaired)
+    assert plan["archetype"] == "outro"
+    assert plan["footage_src"] == "selected.mp4"
+    assert plan["review_repair_source_sha256"] == "candidate"
+    assert plan["visual_review_feedback"] == feedback
+    assert composer._director_scene_plans([plan], quality_retry=True) == [plan]
+
+
 @pytest.mark.parametrize("enabled,passed,providers,valid,expected", [
     (True, False, ["chatgpt", "chatgpt"], True, True),
     (True, False, ["gemini", "chatgpt"], True, False),
@@ -306,6 +319,10 @@ def test_quality_retry_replans_only_failed_scenes_and_checkpoints_feedback(tmp_p
     repaired = asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs))
     assert repaired[0] == before[0]
     assert repaired[1]["review_repair_source_sha256"] == digest
+    assert repaired[1]["visual_review_feedback"] == {
+        "issues": ["Missing quantified context"],
+        "suggested_visual": "Show the narrated figures",
+    }
     assert [s["id"] for s in calls[0]["scenes"]] == ["scene-02"]
     assert calls[0]["visual_review_feedback"][0]["issues"] == ["Missing quantified context"]
     assert asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs)) == repaired

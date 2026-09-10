@@ -434,6 +434,10 @@ async def _load_or_plan_scene_visuals(
                 )
             for repaired_plan in repaired:
                 repaired_plan["review_repair_source_sha256"] = source_hash
+                repaired_plan["visual_review_feedback"] = next(
+                    {key: row[key] for key in ("issues", "suggested_visual")}
+                    for row in feedback if row["id"] == repaired_plan["id"]
+                )
             plans = [by_id.get(plan["id"], plan) for plan in plans]
             _write_visual_plan_checkpoint(output_dir, board, plans)
         return plans
@@ -1278,19 +1282,27 @@ def _previous_rejection_used_fallback(output_dir: Path) -> bool:
 
 
 def _director_scene_plans(plans: list[dict], *, quality_retry: bool) -> list[dict]:
-    # A quality retry applies concrete frame feedback. Reauthoring configured
-    # bookends here can erase that repair and repeat an unrelated provider call.
-    # Keep their deterministic overlays; the rendered-pixel gate still applies.
+    # Preserve unrelated bookends on retry, but route rejected bookends to the
+    # overlay editor: staging their locked media cannot apply layout feedback.
     return [
         plan for plan in plans
         if (
-            plan.get("archetype") in {"intro", "outro"} and not quality_retry
+            plan.get("archetype") in {"intro", "outro"}
+            and (not quality_retry or bool(plan.get("visual_review_feedback")))
         ) or (
             not plan.get("footage_src")
             and not plan.get("news_image")
             and not plan.get("news_webpage")
         )
     ]
+
+
+def _retain_bookend_review_feedback(staged: dict, previous: dict) -> dict:
+    """Keep the selected preset while carrying pixel feedback to its editor."""
+    for key in ("review_repair_source_sha256", "visual_review_feedback"):
+        if key in previous:
+            staged[key] = previous[key]
+    return staged
 
 
 async def compose_video(
@@ -1752,12 +1764,16 @@ async def compose_video(
     intro_index = next(
         index for index, plan in enumerate(scene_plans) if plan.get("id") == intro_plan["id"]
     )
-    scene_plans[intro_index] = intro_plan
+    scene_plans[intro_index] = _retain_bookend_review_feedback(
+        intro_plan, scene_plans[intro_index]
+    )
     outro_plan = outros.stage_outro(output_dir_path, board, outro_style)
     outro_index = next(
         index for index, plan in enumerate(scene_plans) if plan.get("id") == outro_plan["id"]
     )
-    scene_plans[outro_index] = outro_plan
+    scene_plans[outro_index] = _retain_bookend_review_feedback(
+        outro_plan, scene_plans[outro_index]
+    )
     plans = scene_plans
     sb.write_storyboard(output_dir_path, board)
     emit(
@@ -1796,10 +1812,13 @@ async def compose_video(
     # intro/outro are deliberate exceptions: their Gemini videos remain locked
     # while the video-editing agent authors only the editable HyperFrames overlay.
     director_plans = _director_scene_plans(
-        scene_plans, quality_retry=bool(quality_retry_source)
+        scene_plans,
+        quality_retry=bool(quality_retry_source) or any(
+            plan.get("visual_review_feedback") for plan in scene_plans
+        ),
     )
     if quality_retry_source:
-        emit("Quality retry: preserving configured bookend overlays after frame-feedback repair")
+        emit("Quality retry: preserving bookend media and directing overlays with frame feedback")
     if config.DIRECTOR_ENABLED and director_plans and model:
         if config.DIRECTOR_MAX_SCENES:
             budget = director_plans[: config.DIRECTOR_MAX_SCENES]

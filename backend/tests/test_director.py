@@ -128,6 +128,10 @@ def test_director_brief_assigns_the_editable_outro_overlay_to_the_agent():
         "archetype": "outro",
         "footage_src": "assets/outro/background.mp4",
         "outro_logo_src": "assets/outro/bytefront-logo.png",
+        "visual_review_feedback": {
+            "issues": ["Closing controls too small"],
+            "suggested_visual": "Large end screen",
+        },
     }
 
     prompt = director._batch_prompt(
@@ -141,6 +145,8 @@ def test_director_brief_assigns_the_editable_outro_overlay_to_the_agent():
     assert "dedicated outro scene timed to this spoken closing narration" in prompt
     assert "Like / Comment / Share layers" in prompt
     assert 'narration spoken over this scene:\n"End card"' in prompt
+    assert "Closing controls too small" in prompt
+    assert "Suggested visual repair: Large end screen" in prompt
 
 
 def test_director_brief_assigns_the_dynamic_intro_overlay_to_the_agent():

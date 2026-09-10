@@ -1022,7 +1022,28 @@ def _render_footage(plan: ScenePlan) -> str:
       background:rgba(17,19,24,.8); padding:9px 16px; border-radius:999px;
       border:1px solid {_rgba(accent, 0.3)}; }}
 """
-    if plan.items:
+    comparison_markup = ""
+    if plan.left_text and plan.right_text:
+        comparison_markup = (
+            f'<div class="footage-comparison" id="{plan.id}-comparison">'
+            + "".join(
+                '<div class="comparison-side">'
+                f'<div class="comparison-label">{_esc(label)}</div>'
+                f'<div class="comparison-text">{_esc(value)}</div></div>'
+                for label, value in (
+                    (plan.left_label or "Before", plan.left_text),
+                    (plan.right_label or "After", plan.right_text),
+                )
+            )
+            + '</div>\n'
+        )
+        css += f"""
+  #{plan.id} .footage-comparison {{ display:grid; grid-template-columns:1fr 1fr; gap:32px; width:100%; max-width:1500px; }}
+  #{plan.id} .comparison-side {{ padding:24px 28px; border-left:5px solid {accent}; background:rgba(17,19,24,.88); }}
+  #{plan.id} .comparison-label {{ font:700 24px/1.2 {SANS}; letter-spacing:.08em; color:#F5F2EA; margin-bottom:14px; }}
+  #{plan.id} .comparison-text {{ font:800 46px/1.12 {SANS}; font-variant-numeric:tabular-nums; color:#F5F2EA; }}
+"""
+    if plan.items or comparison_markup:
         css += f"""
   #{plan.id} .stage {{ justify-content:center; padding:140px 150px 210px; gap:20px; }}
   #{plan.id} .headline {{ font-size:60px; max-width:1500px; }}
@@ -1099,6 +1120,7 @@ def _render_footage(plan: ScenePlan) -> str:
         + '    <div class="stage">\n'
         + (f'      <div class="kicker" id="{plan.id}-kicker">{_esc(plan.kicker)}</div>\n' if plan.kicker else "")
         + (f'      <div class="headline" id="{plan.id}-head">{_esc(plan.headline)}</div>\n' if plan.headline else "")
+        + comparison_markup
         + _editorial_details(plan)
         + '    </div>\n'
     )

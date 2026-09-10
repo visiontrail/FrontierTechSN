@@ -37,6 +37,20 @@ def test_archetypes_degrade_when_their_required_content_is_missing():
     assert 'class="frame"' not in sk.render_scene(plan(archetype="footage"))
 
 
+def test_footage_preserves_both_sides_of_the_planned_comparison():
+    html = sk.render_scene(plan(
+        archetype="footage", footage_src="verified.mp4", footage_kind="video",
+        left_label="ONE YEAR AGO", left_text="Devin wrote 13%",
+        right_label="TODAY", right_text="More than 90%",
+        body="Claim by an investor backing Cognition.",
+    ))
+    assert validate_scene_html(html, "scene-01") == []
+    assert 'class="footage-comparison"' in html
+    assert "Devin wrote 13%" in html and "More than 90%" in html
+    assert "Claim by an investor backing Cognition." in html
+    assert "verified.mp4" in html
+
+
 def test_scene_root_does_not_declare_its_own_timing():
     # The spine owns scene timing; a scene declaring data-start would double-schedule.
     html = sk.render_scene(plan(archetype="topic"))
