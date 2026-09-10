@@ -9,15 +9,51 @@ from pathlib import Path
 import numpy as np
 
 RATE = 48_000
-HOP = 480
+HOP = 240
 
 
-def _loop_points(samples: np.ndarray) -> tuple[int, int, int, float]:
+def _metered_period(power: np.ndarray) -> tuple[int, float] | None:
+    """Estimate a pulse from agreement at beat, bar, and phrase scales.
+
+    Restricted to 75--150 BPM newsroom beds in common time. A weak grid is
+    explicitly rejected; spectral similarity alone cannot establish a beat.
+    """
+    flux = np.maximum(0, np.diff(np.log1p(np.sqrt(power) * 10), axis=0)).sum(axis=1)
+    flux = flux[:round(60 * RATE / HOP)]
+    flux -= flux.mean()
+    if np.linalg.norm(flux) < 1e-7 or len(flux) * HOP / RATE < 8:
+        return None
+
+    def correlation(lag: int) -> float:
+        a, b = flux[:-lag], flux[lag:]
+        return float(np.dot(a, b) / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-12))
+
+    max_lag = len(flux) - round(3 * RATE / HOP)
+    correlations = {lag: correlation(lag) for lag in range(1, max_lag)}
+    best = (-1.0, 0.0)
+    for beat in np.arange(0.4, 0.8001, 0.0005):
+        lags = [round(beat * n * RATE / HOP) for n in (1, 2, 4, 8, 16, 32)
+                if beat * n * RATE / HOP < max_lag]
+        score = sum(correlations[lag] for lag in lags) / len(lags)
+        if score > best[0]:
+            best = (score, float(beat))
+    score, beat = best
+    if score < 0.35:
+        return None
+    # Preserve long sources in whole four-bar units; the 60-second analysis
+    # window must not truncate a three-minute track to a short loop.
+    available = (len(power) * HOP / RATE) - 3.0
+    beats = int(available / beat) // 16 * 16
+    beats = beats if beats >= 16 else None
+    return (round(beats * beat * RATE), score) if beats else None
+
+
+def _loop_points(samples: np.ndarray) -> tuple[int, int, int, float, bool]:
     # Compare entire overlapping passages, including their transient envelopes.
     # This is recurrence matching, not a claim to infer meter or musical quality.
-    mono = samples.mean(axis=1)
-    frames = np.lib.stride_tricks.sliding_window_view(mono, 2048)[::HOP]
-    power = abs(np.fft.rfft(frames * np.hanning(2048), axis=1)) ** 2
+    mono = samples.mean(axis=1)[::4]
+    frames = np.lib.stride_tricks.sliding_window_view(mono, 512)[::HOP // 4]
+    power = abs(np.fft.rfft(frames * np.hanning(512), axis=1)) ** 2
     edges = np.unique(np.geomspace(1, power.shape[1], 25).astype(int))
     bands = np.stack([power[:, a:b].mean(axis=1) for a, b in zip(edges[:-1], edges[1:])], axis=1)
     level = np.sqrt((frames ** 2).mean(axis=1))
@@ -26,11 +62,34 @@ def _loop_points(samples: np.ndarray) -> tuple[int, int, int, float]:
         raise ValueError("Music has too little active audio to loop")
     first, last = int(active[0]), int(active[-1])
     span = last - first
-    overlap = min(200, max(1, span // 8))
+    overlap = min(round(2 * RATE / HOP), max(1, span // 8))
     # Log spectra capture recurring harmony/timbre; explicit level comparison
     # prevents matching a fade-out to a quiet introduction.
     features = np.log(np.maximum(bands, 1e-8))
     features -= features.mean(axis=1, keepdims=True)
+    metered = _metered_period(power)
+    if metered:
+        period, grid_score = metered
+        lag = round(period / HOP)
+        match = min(round(RATE / HOP), max(1, span // 10))
+        candidates = range(first, last - lag - match, 2)
+        # A one-second musical context selects compatible harmony. Prefer a
+        # low-energy edit between attacks; the overlap itself is only 10 ms.
+        def boundary_score(a: int) -> float:
+            spectral = np.mean((features[a:a + match] - features[a + lag:a + lag + match]) ** 2)
+            energy = (level[a] + level[a + lag]) / max(float(np.median(level)), 1e-7)
+            return float(spectral + 0.5 * energy)
+        if candidates:
+            start = min(candidates, key=boundary_score) * HOP
+            # Fine phase alignment within 5 ms does not move a beat into a new
+            # musical position. Linear blending avoids doubling correlated audio.
+            overlap_samples = RATE // 100
+            head = samples[start:start + overlap_samples]
+            def error(delta: int) -> float:
+                tail = samples[start + period + delta:start + period + delta + overlap_samples]
+                return float(np.mean((tail - head) ** 2)) if len(tail) == len(head) else float('inf')
+            delta = min(range(-RATE // 200, RATE // 200 + 1, 8), key=error)
+            return start, start + period + delta, overlap_samples, grid_score, True
     min_period = max(overlap * 2, int(span * 0.45))
     step = max(10, span // 300)
     starts = range(first, max(first + 1, first + span // 3 - overlap), step)
@@ -55,7 +114,7 @@ def _loop_points(samples: np.ndarray) -> tuple[int, int, int, float]:
                 if value < best[0]:
                     best = (value, a, b)
     value, a, b = best
-    return a * HOP, b * HOP, overlap * HOP, value
+    return a * HOP, b * HOP, overlap * HOP, value, False
 
 
 def render_music_bed(decoded: Path, output: Path, duration: float) -> dict:
@@ -74,20 +133,23 @@ def render_music_bed(decoded: Path, output: Path, duration: float) -> dict:
         cycle = samples[:count].copy()
         report.update(mode="single_pass", seam_seconds=[])
     else:
-        start, end, overlap, score = _loop_points(samples)
+        start, end, overlap, score, rhythmic = _loop_points(samples)
         head, tail = samples[start:start + overlap], samples[end:end + overlap]
-        t = np.linspace(0, np.pi / 2, overlap, dtype=np.float64)[:, None]
-        a, b = np.cos(t), np.sin(t)
+        t = np.linspace(0, 1, overlap, dtype=np.float64)[:, None]
+        a, b = (1 - t, t) if rhythmic else (np.cos(t * np.pi / 2), np.sin(t * np.pi / 2))
         # Equal-power for unrelated audio; correlated material needs less gain.
         # Negative correlation is not boosted (avoid amplifying cancellation).
         correlation = float(np.sum(head * tail) / max(np.linalg.norm(head) * np.linalg.norm(tail), 1e-12))
-        blend = (tail * a + head * b) / np.sqrt(1 + 2 * max(0, correlation) * a * b)
+        blend = tail * a + head * b
+        if not rhythmic:
+            blend /= np.sqrt(1 + 2 * max(0, correlation) * a * b)
         cycle = np.concatenate((samples[start + overlap:end], blend)).astype(np.float32)
         period = len(cycle) / RATE
         first_seam = (end - start - overlap) / RATE
-        report.update(mode="interior_recurrence_crossfade", loop_start_seconds=start / RATE,
+        report.update(mode="metered_phrase_microfade" if rhythmic else "interior_recurrence_crossfade", loop_start_seconds=start / RATE,
                       loop_end_seconds=end / RATE, crossfade_seconds=overlap / RATE,
-                      period_seconds=period, recurrence_score=score, correlation=correlation,
+                      period_seconds=period, recurrence_score=None if rhythmic else score,
+                      beat_grid_score=score if rhythmic else None, correlation=correlation,
                       seam_seconds=[round(first_seam + i * period, 6)
                                     for i in range(math.ceil(duration / period))
                                     if first_seam + i * period < duration])

@@ -73,3 +73,32 @@ def test_subsecond_source_can_cover_longer_narration(tmp_path):
     report = render_music_bed(source, output, 2.731)
     assert report['period_seconds'] > 0
     assert len(_read(output)) == round(2.731 * RATE)
+
+
+def test_percussive_music_uses_whole_phrases_without_double_beats(tmp_path):
+    source = tmp_path / 'percussive.f32'
+    beat = 0.652
+    t = np.arange(round(30 * RATE)) / RATE
+    phase = np.mod(t, beat)
+    # A sharp downbeat plus decaying tonal material. The repeated grid must
+    # constrain loop length even though many short passages sound similar.
+    signal = 0.35 * np.exp(-phase * 35) * np.sin(2 * np.pi * 110 * t)
+    signal += 0.06 * np.sin(2 * np.pi * 220 * t)
+    np.column_stack((signal, signal)).astype('<f4').tofile(source)
+    report = render_music_bed(source, tmp_path / 'rhythmic.wav', 95)
+    assert report['mode'] == 'metered_phrase_microfade'
+    assert report['crossfade_seconds'] <= 0.01
+    beats = report['period_seconds'] / beat
+    assert min(abs(beats - n) for n in (16, 32)) < 0.025
+
+
+def test_long_track_is_not_limited_by_tempo_analysis_window():
+    from backend.pipeline.music_loop import HOP, _metered_period
+
+    t = np.arange(round(130 * RATE / HOP)) * HOP / RATE
+    power = np.repeat((1 + 9 * np.exp(-np.mod(t, 0.5) * 30))[:, None] ** 2, 3, axis=1)
+    result = _metered_period(power)
+    assert result is not None
+    period, confidence = result
+    assert period / RATE > 100
+    assert confidence > 0.35
