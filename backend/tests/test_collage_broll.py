@@ -817,6 +817,47 @@ def test_agent_selects_beats_from_the_full_timeline():
     assert "assembly_order" not in planner_system
     assert '"art_direction"' in planner_system
     assert '"motion_direction"' in planner_system
+    assert complete.await_args.kwargs["enable_skills"] is False
+    assert complete.await_args.kwargs["disable_thinking"] is True
+    assert complete.await_args.kwargs["max_tokens"] == 16384
+
+
+@pytest.mark.parametrize("response", [
+    '[{"scene_id":"scene-03","accent_colors":["#C9A227"],"final_frame\n[{"final_frame":"continued"}]',
+    '[{"scene_id":"scene-03","elements":[{"what":"clock"}]',
+    '["#C9A227", "#7B2D26"]',
+    '[{"what":"clock"}]',
+    '[]\n[{"scene_id":"scene-03"}]',
+])
+def test_invalid_outer_visual_spec_cannot_become_an_empty_plan(response):
+    with pytest.raises(RuntimeError):
+        collage_broll._json_array(response)
+
+
+def test_visual_spec_parser_keeps_explicit_empty_and_complete_scene_arrays():
+    assert collage_broll._json_array("[]") == []
+    valid = [{"scene_id": "scene-03", "elements": [{"what": "clock"}]}]
+    assert collage_broll._json_array("```json\n" + json.dumps(valid) + "\n```") == valid
+
+
+@pytest.mark.parametrize("response", [
+    '[{"scene_id":"scene-03","accent_colors":["#C9A227"],',
+    '[{"scene_id":"not-a-candidate"}]',
+])
+def test_invalid_plan_preserves_response_and_uses_narration_fallback(tmp_path, response):
+    log = []
+    with (
+        patch("backend.pipeline.digester._resolve_provider",
+              AsyncMock(return_value=("https://example.test", "model", "key"))),
+        patch("backend.pipeline.agent.agent_complete", AsyncMock(return_value=response)),
+    ):
+        specs = asyncio.run(collage_broll.plan_specs(
+            _board(), count=None, force_opening=False, frame=LANDSCAPE,
+            diagnostic_dir=tmp_path, log=log.append,
+        ))
+    assert specs
+    assert (tmp_path / "planning-response.txt").read_text() == response
+    assert any("using narration-derived specs" in item for item in log)
 
 
 def test_agent_chooses_collage_quantity_when_no_count_is_configured():

@@ -29,7 +29,7 @@ SOURCE_COMMIT = "a1a4ee2e2abf7d44e460026b706d0c72c2cf8a91"
 CLIP_FPS = 24
 MOTION_SAMPLE_FPS = 4
 CACHE_CONTRACT_VERSION = 3
-SELECTION_POLICY_VERSION = 5
+SELECTION_POLICY_VERSION = 6
 PLAYBACK_POLICY = "play_once_then_hold_last_frame"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -597,17 +597,23 @@ def _json_array(value: str) -> list[dict[str, Any]]:
     text = value.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char != "[":
-            continue
-        try:
-            parsed, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, list):
-            return [item for item in parsed if isinstance(item, dict)]
-    raise RuntimeError("Collage planning agent did not return a JSON array")
+    # Never scan past a broken outer array: a truncated visual spec contains
+    # nested color/element arrays, which previously became a false empty plan.
+    start = text.find("[")
+    if start < 0:
+        raise RuntimeError("Collage planning agent did not return a JSON array")
+    try:
+        parsed, end = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Collage planning agent returned an incomplete JSON array") from exc
+    if text[start + end:].strip() or not isinstance(parsed, list) or any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("scene_id"), str)
+        or not item["scene_id"].strip()
+        for item in parsed
+    ):
+        raise RuntimeError("Collage planning agent did not return a scene-spec JSON array")
+    return parsed
 
 
 def _candidate_scenes(storyboard: dict) -> list[dict]:
@@ -728,6 +734,7 @@ async def plan_specs(
     ai_endpoint: str | None = None,
     ai_model: str | None = None,
     log: LogCallback | None = None,
+    diagnostic_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Use a dedicated Agent SDK turn to select beats and design metaphors."""
     scenes = _candidate_scenes(storyboard)
@@ -789,12 +796,20 @@ async def plan_specs(
             model=model,
             endpoint=endpoint,
             api_key=api_key,
-            max_tokens=4096,
+            # The complete skill is already in the system prompt. This is a
+            # single JSON response, not a tool/skill discovery session.
+            max_tokens=16384,
+            enable_skills=False,
+            disable_thinking=True,
             log=log,
             label="Collage B-roll agent",
         )
+        if diagnostic_dir is not None:
+            _write_text(diagnostic_dir / "planning-response.txt", answer)
         raw_items = _json_array(answer)
         allowed = {str(scene["id"]): scene for scene in scenes}
+        if any(item["scene_id"] not in allowed for item in raw_items):
+            raise RuntimeError("Collage planning agent returned unknown scene ids")
         raw_by_id: dict[str, dict[str, Any]] = {}
         selected_ids: list[str] = []
         for item in raw_items:
@@ -1572,6 +1587,7 @@ async def generate_collage_broll(
             ai_endpoint=ai_endpoint,
             ai_model=ai_model,
             log=log,
+            diagnostic_dir=root,
         )
     scenes_by_id = {
         str(scene.get("id") or ""): scene for scene in storyboard.get("scenes") or []
