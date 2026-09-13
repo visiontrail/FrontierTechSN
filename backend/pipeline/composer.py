@@ -1207,6 +1207,7 @@ def _review_retry_fingerprint(directory: Path, request: dict) -> str:
     paths.update((directory / "footage").glob("*-render.mp4"))
     paths.update(Path(__file__).parent / name for name in (
         "scene_kit.py", "assembler.py", "storyboard.py", "intros.py", "outros.py",
+        "composer.py", "news_images.py", "collage_broll.py", "visual_plan.py",
     ))
     evidence = {
         "request": request,

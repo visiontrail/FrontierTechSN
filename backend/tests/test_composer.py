@@ -344,11 +344,18 @@ def test_unavailable_visual_review_does_not_replan_scene_content(tmp_path):
     assert composer._pending_visual_repairs(tmp_path, _cache_plans())[1] == []
 
 
-@pytest.mark.parametrize("mutation", [None, "video", "script", "setting", "report_hash", "missing_checkpoint"])
+@pytest.mark.parametrize("mutation", [None, "video", "script", "setting", "report_hash", "missing_checkpoint", "news_images.py", "collage_broll.py", "visual_plan.py", "composer.py"])
 @pytest.mark.parametrize("interrupted", [False, True])
 @pytest.mark.parametrize("accepted", [False, True])
 def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, monkeypatch, mutation, interrupted, accepted):
     from unittest.mock import AsyncMock
+    policy_path = None
+    if mutation and mutation.endswith(".py"):
+        code_dir = tmp_path / "pipeline_source"
+        code_dir.mkdir()
+        monkeypatch.setattr(composer, "__file__", str(code_dir / "composer.py"))
+        policy_path = code_dir / mutation
+        policy_path.write_text("old generation policy")
     script = tmp_path / "script.txt"
     script.write_text("The complete narration")
     candidate = tmp_path / "video.next.mp4"
@@ -377,6 +384,7 @@ def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, 
     if mutation == "script": script.write_text("Changed narration")
     if mutation == "setting": request["captions_enabled"] = True
     if mutation == "missing_checkpoint": (tmp_path / "render_review_checkpoint.json").unlink()
+    if policy_path is not None: policy_path.write_text("corrected generation policy")
     if mutation is None and not accepted:
         with pytest.raises(composer.QualityGateRetry):
             asyncio.run(composer._resume_unavailable_visual_review(tmp_path, request, composer.LANDSCAPE, lambda _: None))
