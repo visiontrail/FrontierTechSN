@@ -1241,6 +1241,28 @@ def test_semantic_subject_positive_controls_pass_both_grounding_gates(
     assert evidence["grounding_distinctive_anchors"] == news_images._identity_tokens(subject)
 
 
+@pytest.mark.parametrize("role", ["CEO", "CFO", "CTO", "COO", "CIO", "CMO", "CHRO", "VP"])
+def test_job_title_acronyms_cannot_ground_unrelated_company_logos(role):
+    scene = {
+        "id": "scene-02",
+        "text": f"Automattic says Matt Mullenweg returned as {role}. The WordPress founder has board support.",
+    }
+    shot = {"scene_id": "scene-02", "expected_subject": role, "kind": "logo"}
+    candidate = {"title": f"Logo {role} GROUP.jpg", "description": f"Official {role} GROUP logo", "categories": "Companies of Vietnam"}
+    assert role not in news_images._entity_candidates(scene)
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is False
+    assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is False
+    assert "WordPress" in news_images._entity_candidates(scene)
+
+
+def test_full_company_identity_containing_a_role_acronym_is_preserved():
+    scene = {"id": "scene-02", "text": "CEO Group announced its latest project in Vietnam."}
+    shot = {"scene_id": "scene-02", "expected_subject": "CEO Group", "kind": "logo"}
+    assert news_images._grounding_evidence(
+        shot, scene, {"title": "Logo CEO Group.jpg", "description": "CEO Group in Vietnam"}
+    )["grounding_passed"] is True
+
+
 @pytest.mark.parametrize(
     ("subject", "scene_text"),
     [

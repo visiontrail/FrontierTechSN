@@ -38,7 +38,7 @@ LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 MANIFEST_VERSION = 17
-QUERY_SEMANTICS_VERSION = 8
+QUERY_SEMANTICS_VERSION = 9
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
 NEWS_IMAGE_MAX_PIXELS = 16_000_000
@@ -178,7 +178,8 @@ GENERIC_ENTITY_TERMS = frozenset(
     "agent agents article august board boards browser business company content department dimension "
     "dimensions employee employees engineer engineers engineering event germany global harness idea ideas innovation "
     "management model office photo product products project projects report research society system systems "
-    "tested testing technology thursday time tools united world english language api max".split()
+    "tested testing technology thursday time tools united world english language api max "
+    "ceo ceos cfo cfos cto ctos coo coos cio cios cmo cmos chro chros vp svp evp".split()
 )
 GENERIC_QUERY_TERMS = GENERIC_ENTITY_TERMS | frozenset(
     "corporate official image photograph portrait logo mark launch".split()
