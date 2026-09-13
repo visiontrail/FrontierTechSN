@@ -7,7 +7,7 @@ import vm from 'node:vm'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { isGenerating, selectChatGPTModel, uploadChatGPTImages, startNewChat, getVisibleMessages } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { isGenerating, getCurrentChatGPTModel, selectChatGPTModel, uploadChatGPTImages, startNewChat, getVisibleMessages } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
 import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
@@ -1857,6 +1857,72 @@ test('ChatGPT model navigates a fresh lease before evaluating the page', async (
   assert.deepEqual(actions[0], ['goto', 'https://chatgpt.com'])
   assert.deepEqual(result, [{ Status: 'Already selected', Model: 'Medium' }])
   assert.equal(chatgptModelCommand.args.find(arg => arg.name === 'timeout').default, 45)
+})
+
+test('ChatGPT reads split version badges and switches Pro through the real selector DOM', async (t) => {
+  const saved = [process.env.OPENCLI_CHATGPT_MODEL_MIN, process.env.OPENCLI_CHATGPT_MODEL_MAX]
+  process.env.OPENCLI_CHATGPT_MODEL_MIN = 'medium'
+  process.env.OPENCLI_CHATGPT_MODEL_MAX = 'xhigh'
+  t.after(() => {
+    for (const [index, key] of ['OPENCLI_CHATGPT_MODEL_MIN', 'OPENCLI_CHATGPT_MODEL_MAX'].entries()) {
+      if (saved[index] === undefined) delete process.env[key]
+      else process.env[key] = saved[index]
+    }
+  })
+  class Element {
+    constructor(text = '', innerText = text) { this.textContent = text; this.innerText = innerText }
+    getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 40 } }
+    getAttribute() { return null }
+    setAttribute() {}
+    scrollIntoView() {}
+    closest() { return form }
+    querySelector() { return null }
+    querySelectorAll(selector) { return selector === 'button' ? [button] : [] }
+  }
+  const button = new Element('6Pro', '6\nPro')
+  const form = new Element()
+  const context = {
+    HTMLElement: Element,
+    window: { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+    document: {
+      querySelector: selector => selector.includes('data-opencli-chatgpt-composer') ? button : null,
+      querySelectorAll: selector => selector === 'form' ? [form] : [],
+    },
+  }
+  let clicks = 0
+  const keys = []
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return 'https://chatgpt.com/'
+      if (script.includes('hasComposer') && script.includes('hasLoginGate')) {
+        return { hasComposer: true, isLoggedIn: true, hasLoginGate: false }
+      }
+      if (script.includes('findEntryForText') || script.includes('menuButtonSelectors')) {
+        return vm.runInNewContext(script, context)
+      }
+      if (script.includes('contentFound')) return { ready: clicks > 0, expanded: clicks > 0 }
+      if (script.includes('keyboardTarget')) return { found: true, current: 4, minimum: 0, maximum: 4 }
+      throw new Error(`Unexpected script: ${script.slice(0, 80)}`)
+    },
+    async nativeClick() { clicks++ },
+    async pressKey(key) {
+      keys.push(key)
+      if (keys.filter(value => value === 'ArrowLeft').length === 3) {
+        button.textContent = '6Medium'
+        button.innerText = '6\nMedium'
+      }
+    },
+    async wait() {},
+  }
+  assert.equal((await getCurrentChatGPTModel(page)).model, 'pro')
+  assert.deepEqual(await selectChatGPTModel(page, 'medium'), { Status: 'Success', Model: 'Medium' })
+  assert.equal(clicks, 1)
+  assert.deepEqual(keys, ['ArrowLeft', 'ArrowLeft', 'ArrowLeft', 'Escape'])
+  for (const [label, expected] of [['High', 'advanced'], ['Extra High', 'very-high'], ['Instant', 'fast']]) {
+    button.textContent = `6${label}`
+    button.innerText = `6\n${label}`
+    assert.equal((await getCurrentChatGPTModel(page)).model, expected)
+  }
 })
 
 test('ChatGPT waits for a delayed slider after one model-trigger click', async () => {

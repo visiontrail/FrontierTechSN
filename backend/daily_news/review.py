@@ -1070,7 +1070,7 @@ async def _web_story_review_in_session(
                     f"before retrying: {exc}"
                 )
             continue
-        except Exception as exc:  # noqa: BLE001 - fail closed after bounded retry
+        except Exception as exc:  # noqa: BLE001 - bounded model preflight recovery
             chatgpt_model_policy_error = exc
             policy_attempt += 1
             raw_attempts.append(
@@ -1106,12 +1106,32 @@ async def _web_story_review_in_session(
             if rate_limit_exhausted
             else f"{chatgpt_model_policy_attempts} attempts"
         )
-        raise RuntimeError(
+        failure_message = (
             "ChatGPT fact-check current model could not be verified within the "
             f"allowed {config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
             f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} range after {failed_after} "
             f"({chatgpt_model_policy_error})"
-        ) from chatgpt_model_policy_error
+        )
+        # Thinking effort is a preference after bounded attempts. Transport,
+        # login, and provider access failures still cannot authorize submission.
+        preference_failure = isinstance(chatgpt_model_policy_error, ValueError) or any(
+            marker in str(chatgpt_model_policy_error).lower()
+            for marker in (
+                "chatgpt model selector", "chatgpt model did not switch",
+                "outside allowed range", "chatgpt did not expose a usable",
+                "could not click the chatgpt",
+            )
+        )
+        if rate_limit_exhausted or not preference_failure:
+            raise RuntimeError(failure_message) from chatgpt_model_policy_error
+        fallback_message = (
+            f"{failure_message}; continuing fact check with the current model "
+            f"(last observed: {observed_chatgpt_model or 'unverified'}). "
+            "Thinking-effort preference was not verified; claim review remains required."
+        )
+        raw_attempts.append(f"[CHATGPT MODEL PREFERENCE FALLBACK]\n{fallback_message}")
+        if log:
+            log(fallback_message)
 
     chatgpt_error: Exception | None = None
     chatgpt_attempts = 2

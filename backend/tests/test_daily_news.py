@@ -1903,8 +1903,8 @@ def test_model_preflight_recovers_stale_page_then_timeout_in_fresh_sessions(term
     assert all(call.kwargs["sites"] == ("chatgpt",) for call in close.await_args_list)
 
 
-@pytest.mark.parametrize("outside_level", ["Instant", "Pro"])
-def test_chatgpt_fact_check_retries_out_of_range_model_without_submitting(
+@pytest.mark.parametrize("outside_level", ["Instant", "Pro", "", "selector_missing", "switch_failed"])
+def test_chatgpt_fact_check_continues_after_model_preference_retries(
     outside_level: str,
 ):
     model_attempts = 0
@@ -1915,6 +1915,10 @@ def test_chatgpt_fact_check_retries_out_of_range_model_without_submitting(
         nonlocal model_attempts, chatgpt_asks
         if args[:2] == ["chatgpt", "model"]:
             model_attempts += 1
+            if outside_level == "selector_missing":
+                raise OpenCLIError("Could not find the ChatGPT model selector in the composer.")
+            if outside_level == "switch_failed":
+                raise OpenCLIError("ChatGPT model did not switch to Medium.")
             return OpenCLIResult(
                 tuple(args),
                 0,
@@ -1925,14 +1929,14 @@ def test_chatgpt_fact_check_retries_out_of_range_model_without_submitting(
             )
         if args[:2] == ["chatgpt", "ask"]:
             chatgpt_asks += 1
+            return OpenCLIResult(tuple(args), 0, '[{"response":"W1P2P"}]', "")
         raise AssertionError(args)
 
     with (
         patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
         patch.object(review.asyncio, "sleep", AsyncMock()) as sleep,
-        pytest.raises(RuntimeError, match="allowed medium..xhigh range after 3 attempts"),
     ):
-        asyncio.run(
+        payload, raw, _, _ = asyncio.run(
             review._web_story_review(
                 "audit",
                 story_numbers=[1, 2],
@@ -1941,9 +1945,32 @@ def test_chatgpt_fact_check_retries_out_of_range_model_without_submitting(
         )
 
     assert model_attempts == 3
-    assert chatgpt_asks == 0
+    assert chatgpt_asks == 1
+    assert payload["approved"] is True
+    assert "[CHATGPT MODEL PREFERENCE FALLBACK]" in raw
+    assert "continuing fact check with the current model" in raw
+    assert f"last observed: {outside_level if outside_level in ('Instant', 'Pro') else 'unverified'}" in raw
     assert sleep.await_count == 2
     assert any("model policy check attempt 2/3 failed" in message for message in messages)
+
+
+def test_model_preference_fallback_preserves_blocking_claim_verdict():
+    async def command(args, **kwargs):
+        if args[:2] == ["chatgpt", "model"]:
+            raise OpenCLIError("ChatGPT model did not switch to Medium.")
+        if args[:2] == ["chatgpt", "ask"]:
+            return OpenCLIResult(tuple(args), 0, '[{"response":"W1P2BF"}]', "")
+        raise AssertionError(args)
+
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review.asyncio, "sleep", AsyncMock()),
+    ):
+        payload, raw, _, _ = asyncio.run(
+            review._web_story_review("audit", story_numbers=[1, 2], log=None)
+        )
+    assert payload["approved"] is False
+    assert "[CHATGPT MODEL PREFERENCE FALLBACK]" in raw
 
 
 def test_chatgpt_fact_check_recovers_target_conversation_after_route_drift():

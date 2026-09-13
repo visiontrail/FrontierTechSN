@@ -67,7 +67,17 @@ ceiling. Failed preflight attempts caused by stale pages, timeouts, or busy
 leases use fresh owned sessions, all cleaned up afterward. This recovery is
 limited to model preflight, before any review prompt has been submitted;
 the successful session is reused for the prompt and its response recovery.
-The observed model must still pass the configured `medium..xhigh` gate.
+Daily-news review first attempts the configured `medium..xhigh` preference.
+After three effort-selection/readback failures it submits with the current model
+and records `CHATGPT MODEL PREFERENCE FALLBACK`, including the last observed
+level or `unverified`. This includes Pro; it does not bypass claim validation.
+Login, browser transport, and exhausted provider access cooldowns still fail.
+The standalone model command continues reporting a failed switch accurately.
+
+The September 13 composer splits the version and effort into adjacent elements
+(for example, `6` and `Pro`). Trigger lookup and readback use rendered `innerText`
+so these labels retain word boundaries instead of becoming `6Pro`. The existing
+five-position slider can then move from Pro to Medium and verify the result.
 
 ## Partial ChatGPT answers and recovery
 

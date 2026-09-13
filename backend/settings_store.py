@@ -736,16 +736,18 @@ SPECS: tuple[SettingSpec, ...] = (
         "DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL", "footage",
         "News review minimum ChatGPT level", "choice",
         options=("medium", "high", "xhigh"),
-        description="Preferred level attempted first and minimum fallback "
-                    "accepted for daily-news Fact check.",
+        description="Preferred level attempted first for daily-news Fact check. "
+                    "After three unsuccessful effort checks, review continues "
+                    "with the current model and records the unmet preference.",
         allow_blank=False,
     ),
     SettingSpec(
         "DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL", "footage",
         "News review maximum ChatGPT level", "choice",
         options=("medium", "high", "xhigh"),
-        description="Maximum fallback accepted after a failed switch. Pro is "
-                    "intentionally unavailable and is rejected.",
+        description="Upper end of the preferred review effort range. After "
+                    "three unsuccessful effort checks, the current level "
+                    "(including Pro or an unverified level) may be used.",
         allow_blank=False,
     ),
     SettingSpec(

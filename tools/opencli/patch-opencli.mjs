@@ -1458,14 +1458,19 @@ const previousThinkingEffortTrigger = `        let button = Array.from(form?.que
 const currentThinkingEffortTrigger = `        let button = Array.from(form?.querySelectorAll('button') || []).find((node) => {
             if (!isVisible(node)) return false;
             const accessibleText = [
-                node.textContent,
+                node.innerText || node.textContent,
                 node.getAttribute('aria-label'),
                 node.getAttribute('title'),
             ].filter(Boolean).join(' ');
             return labels.some((label) => textMatchesLabel(accessibleText, label))
                 || triggerLabels.some((label) => textMatchesLabel(accessibleText, label));
         });`
-const thinkingEffortTriggerSource = chatgptUtils.includes(previousThinkingEffortTrigger)
+const previousAccessibleThinkingEffortTrigger = currentThinkingEffortTrigger.replace(
+  'node.innerText || node.textContent,', 'node.textContent,',
+)
+const thinkingEffortTriggerSource = chatgptUtils.includes(previousAccessibleThinkingEffortTrigger)
+  ? previousAccessibleThinkingEffortTrigger
+  : chatgptUtils.includes(previousThinkingEffortTrigger)
   ? previousThinkingEffortTrigger
   : upstreamThinkingEffortTrigger
 chatgptUtils = replaceWithinFunction(
@@ -1475,6 +1480,22 @@ chatgptUtils = replaceWithinFunction(
   thinkingEffortTriggerSource,
   currentThinkingEffortTrigger,
   'ChatGPT accessible thinking-effort trigger lookup',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  'export async function getCurrentChatGPTModel(',
+  'async function ',
+  `const text = normalize(node.textContent);`,
+  `const text = normalize(node.innerText || node.textContent);`,
+  'ChatGPT split model badge readback matching',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  'export async function getCurrentChatGPTModel(',
+  'async function ',
+  `const label = normalize(button?.textContent || '');`,
+  `const label = normalize(button?.innerText || button?.textContent || '');`,
+  'ChatGPT split model badge readback label',
 )
 chatgptUtils = replaceWithinFunction(
   chatgptUtils,
