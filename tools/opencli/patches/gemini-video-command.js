@@ -655,9 +655,10 @@ async function visibleVideoUrls(page) {
     return Array.isArray(value) ? value : [];
 }
 
-async function waitForVideo(page, before, timeoutSeconds) {
+export async function waitForVideo(page, before, timeoutSeconds) {
     const baseline = new Set(before);
     const deadline = Date.now() + timeoutSeconds * 1000;
+    let emptyHomeSamples = 0;
     while (Date.now() < deadline) {
         await page.wait(5);
         const state = unwrap(await page.evaluate(`(() => {
@@ -666,11 +667,25 @@ async function waitForVideo(page, before, timeoutSeconds) {
             readyState: video.querySelector('button[aria-label="Download video"]') ? 4 : 0,
           }));
           const text = (document.querySelector('main')?.innerText || '').slice(-1800);
-          return { videos, text };
+          return {
+            videos, text,
+            emptyHome: /^\\/(?:app\\/?)?$/.test(window.location.pathname)
+              && !document.querySelector('user-query')
+              && !!document.querySelector('[contenteditable="true"]'),
+          };
         })()`));
         const videos = Array.isArray(state?.videos) ? state.videos : [];
         const ready = videos.find(video => !baseline.has(video.src) && video.readyState >= 2);
         if (ready) return ready;
+        // A failed submission can briefly acquire a conversation URL, then
+        // disappear server-side and return to the hydrated home composer.
+        // Allow transient navigation, but do not wait 30 minutes on that page.
+        emptyHomeSamples = state?.emptyHome === true ? emptyHomeSamples + 1 : 0;
+        if (emptyHomeSamples >= 3) {
+            throw new CommandExecutionError(
+                'Gemini Create Video returned to an empty home composer; the submitted conversation is no longer available'
+            );
+        }
         if (/could not generate|generation failed|try again|unable to create/i.test(String(state?.text || ''))) {
             throw new CommandExecutionError(`Gemini Create Video reported a generation failure: ${String(state.text).slice(-500)}`);
         }

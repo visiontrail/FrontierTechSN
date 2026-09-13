@@ -24,7 +24,36 @@ import {
   uploadFrame,
   uploadFrames,
   submittedVideoPrompt,
+  waitForVideo,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+test('Gemini video stops waiting when its submitted conversation disappears into the home composer', async () => {
+  let reads = 0
+  const page = {
+    async wait() {},
+    async evaluate(script) {
+      new vm.Script(script)
+      reads++
+      return { videos: [], text: '', emptyHome: true }
+    },
+  }
+  await assert.rejects(waitForVideo(page, [], 60), /submitted conversation is no longer available/)
+  assert.equal(reads, 3)
+})
+
+test('Gemini video tolerates transient empty navigation and resets the lost-conversation counter', async () => {
+  const states = [true, true, false, true, true]
+  let reads = 0
+  const page = {
+    async wait() {},
+    async evaluate() {
+      const emptyHome = states[reads++]
+      return { text: '', emptyHome, videos: reads > states.length ? [{ src: 'owned-video', readyState: 4 }] : [] }
+    },
+  }
+  assert.equal((await waitForVideo(page, [], 60)).src, 'owned-video')
+  assert.equal(reads, 6)
+})
 
 test('Gemini generation errors fail explicitly while ordinary review content is preserved', () => {
   for (const text of ['', 'I seem to be encountering an error. Can I try something else for you?',
