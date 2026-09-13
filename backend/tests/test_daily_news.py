@@ -2188,7 +2188,8 @@ def test_chatgpt_fact_check_retries_submission_without_using_gemini():
     assert not any(call.args[0][0] == "gemini" for call in command_mock.await_args_list)
 
 
-def test_review_report_records_chatgpt_only(tmp_path: Path):
+@pytest.mark.parametrize("effort_fallback", [False, True])
+def test_review_report_records_chatgpt_only(tmp_path: Path, effort_fallback: bool):
     articles = [
         research.NewsArticle(
             id=str(index),
@@ -2218,7 +2219,10 @@ def test_review_report_records_chatgpt_only(tmp_path: Path):
         "issues": [],
         "corrected_script": "",
     }
-    web_review = AsyncMock(return_value=(payload, "[CHATGPT 1]\nW1P;2P", "", "chatgpt"))
+    raw = "[CHATGPT 1]\nW1P;2P"
+    if effort_fallback:
+        raw = "[CHATGPT MODEL PREFERENCE FALLBACK]\nunverified\n" + raw
+    web_review = AsyncMock(return_value=(payload, raw, "", "chatgpt"))
     contract = {"passed": True, "failures": []}
 
     with (
@@ -2243,8 +2247,10 @@ def test_review_report_records_chatgpt_only(tmp_path: Path):
         )
 
     assert result.report["fallback_used"] is False
+    assert result.report["model_preference_fallback_used"] is effort_fallback
+    assert result.report["attempts"][0]["model_preference_fallback_used"] is effort_fallback
     assert result.report["reviewer"] == (
-        "ChatGPT Web (current model constrained to medium..xhigh) "
+        "ChatGPT Web (preferred thinking effort medium..xhigh) "
         "via project-local OpenCLI"
     )
     assert result.report["attempts"][0]["providers"] == ["chatgpt"]

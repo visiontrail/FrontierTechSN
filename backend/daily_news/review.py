@@ -1355,6 +1355,9 @@ async def _review_daily_script(
                 "payload": group_payload,
                 "conversation_url": conversation_url,
                 "provider": provider,
+                "model_preference_fallback_used": (
+                    "[CHATGPT MODEL PREFERENCE FALLBACK]" in raw
+                ),
             })
         issues = [
             issue
@@ -1383,7 +1386,7 @@ async def _review_daily_script(
         )
         providers = [result["provider"] for result in group_results]
         reviewer = (
-            "ChatGPT Web (current model constrained to "
+            "ChatGPT Web (preferred thinking effort "
             f"{config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
             f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL}) "
             "via project-local OpenCLI"
@@ -1400,6 +1403,9 @@ async def _review_daily_script(
             "story_numbers": list(review_numbers),
             "reviewer": reviewer,
             "providers": providers,
+            "model_preference_fallback_used": any(
+                result["model_preference_fallback_used"] for result in group_results
+            ),
             "conversation_url": conversation_url,
             "approved": approved,
             "confidence": payload.get("confidence"),
@@ -1429,6 +1435,9 @@ async def _review_daily_script(
                 "reviewed_at": datetime.now(timezone.utc).isoformat(),
                 "reviewer": reviewer,
                 "fallback_used": False,
+                "model_preference_fallback_used": any(
+                    item["model_preference_fallback_used"] for item in attempts
+                ),
                 "attempts": attempts,
                 "final_contract": contract,
                 "correction_count": correction_count,
@@ -1487,12 +1496,15 @@ async def _review_daily_script(
         "passed": False,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "reviewer": (
-            "ChatGPT Web (current model constrained to "
+            "ChatGPT Web (preferred thinking effort "
             f"{config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
             f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL}) "
             "via project-local OpenCLI"
         ),
         "fallback_used": False,
+        "model_preference_fallback_used": any(
+            item["model_preference_fallback_used"] for item in attempts
+        ),
         "attempts": attempts,
         "correction_count": correction_count,
         "manual_review_required": True,
