@@ -1747,10 +1747,10 @@ def _render_news_image_fullscreen(plan: ScenePlan) -> str:
       linear-gradient(90deg, {_rgba(plan.theme.bg, .92)} 0%, {_rgba(plan.theme.bg, .5)} 48%, {_rgba(plan.theme.bg, .08)} 76%),
       linear-gradient(0deg, {_rgba(plan.theme.bg, .94)} 0%, {_rgba(plan.theme.bg, 0)} 62%); }}
   #{plan.id} .news-full-stage {{ justify-content:flex-end; padding:130px 150px 224px; gap:22px; z-index:3; }}
-  #{plan.id} .news-full-headline {{ font-size:{hsize}px; max-width:1240px; color:#F5F2EA;
-      text-shadow:0 8px 42px rgba(0,0,0,.62); }}
+  #{plan.id} .news-full-headline {{ font-size:{hsize}px; max-width:1240px; color:{plan.theme.ink};
+      text-shadow:0 2px 16px {_rgba(plan.theme.bg, .9)}; }}
   #{plan.id} .news-full-body {{ font-size:{body_size(support_copy, base=34)}px; max-width:990px;
-      color:rgba(245,242,234,.82); text-shadow:0 4px 22px rgba(0,0,0,.56); }}
+      color:{plan.theme.ink}; text-shadow:0 2px 12px {_rgba(plan.theme.bg, .9)}; }}
   #{plan.id} .news-full-rule {{ width:220px; height:5px; border-radius:3px; background:{accent}; }}
   #{plan.id} .news-full-credit {{ position:absolute; top:38px; right:44px; max-width:820px; z-index:4;
       font:500 18px {SANS}; line-height:1.3; letter-spacing:.035em; color:#F5F2EA;

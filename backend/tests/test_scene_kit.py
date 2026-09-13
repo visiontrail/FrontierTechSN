@@ -268,6 +268,18 @@ def test_fullscreen_news_image_uses_a_masked_reveal_and_separate_ken_burns_layer
     assert "scale: 1.025" in html
 
 
+@pytest.mark.parametrize("theme", list(sk.THEMES.values()))
+def test_fullscreen_news_image_text_contrasts_with_its_theme_scrim(theme):
+    html = sk.render_scene(plan(
+        archetype="news_image", news_image_src="logo.png", news_image_mode="fullscreen",
+        theme=theme, body="The named source reports the supporting facts.",
+    ))
+    for cls in ("news-full-headline", "news-full-body"):
+        rules = re.search(rf"\.{cls} \{{(.*?)\}}", html, re.S).group(1)
+        assert f"color:{theme.ink}" in rules
+        assert sk._rgba(theme.bg, .9) in rules
+
+
 def test_fullscreen_news_image_can_be_a_copy_free_three_image_collage():
     html = sk.render_scene(
         plan(
