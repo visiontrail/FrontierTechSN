@@ -1051,6 +1051,24 @@ def _render_footage(plan: ScenePlan) -> str:
 """
     if plan.collage_broll:
         caption_headline = plan.headline.strip() or plan.body.strip()
+        # The generated plate carries the metaphor, not the factual copy.
+        # Keep the planned supporting facts when attachment changes the
+        # archetype to footage, including reviewer-requested corrections.
+        details = _editorial_details(plan)
+        if plan.quote.strip():
+            details += f'<blockquote class="collage-quote">{_esc(plan.quote)}</blockquote>\n'
+        if plan.attribution.strip():
+            details += f'<div class="collage-attribution">{_esc(plan.attribution)}</div>\n'
+        if plan.stat.strip() or plan.stat_label.strip():
+            details += (
+                f'<div class="collage-stat">{_esc(plan.stat)}</div>'
+                f'<div class="collage-stat-label">{_esc(plan.stat_label)}</div>\n'
+            )
+        details += comparison_markup
+        details_markup = (
+            f'<aside class="collage-details" id="{plan.id}-collage-details">{details}</aside>\n'
+            if details else ""
+        )
         caption_size = max(
             42,
             headline_size(caption_headline, base=64, floor=42),
@@ -1065,6 +1083,29 @@ def _render_footage(plan: ScenePlan) -> str:
       color:{accent}; line-height:1.2; }}
   #{plan.id} .collage-headline {{ max-width:790px; font:800 {caption_size}px/1.08 {SANS};
       letter-spacing:-.025em; color:#F5F2EA; text-shadow:0 3px 18px rgba(0,0,0,.72); }}
+"""
+        if details:
+            collage_css += f"""
+  #{plan.id} .collage-caption {{ width:760px; }}
+  #{plan.id} .collage-details {{ position:absolute; right:96px; bottom:220px; z-index:3;
+      width:820px; padding:32px 36px; box-sizing:border-box; display:flex; flex-direction:column;
+      gap:20px; color:#F5F2EA; background:rgba(11,13,23,1);
+      border-top:4px solid {accent}; box-shadow:0 22px 70px rgba(0,0,0,.42); }}
+  #{plan.id} .collage-details .body, #{plan.id} .collage-details .editorial-facts {{
+      font:400 30px/1.30 {SANS}; color:#FFFFFF; max-width:100%; }}
+  #{plan.id} .collage-details .editorial-facts {{ gap:14px; padding-left:25px; }}
+  #{plan.id} .collage-quote {{ margin:0; font:500 30px/1.3 {SANS}; }}
+  #{plan.id} .collage-attribution {{ font:500 24px/1.3 {SANS}; color:#F5F2EA; }}
+  #{plan.id} .collage-stat {{ font:800 48px/1.1 {SANS}; font-variant-numeric:tabular-nums; }}
+  #{plan.id} .collage-stat-label {{ font:400 28px/1.3 {SANS}; }}
+  #{plan.id} .collage-details .footage-comparison {{ gap:16px; }}
+  #{plan.id} .collage-details .comparison-side {{ padding:16px; }}
+  #{plan.id} .collage-details .comparison-text {{ font-size:30px; }}
+"""
+            if plan.frame.is_portrait:
+                collage_css += f"""
+  #{plan.id} .collage-caption {{ top:170px; bottom:auto !important; }}
+  #{plan.id} .collage-details {{ left:72px; right:72px; width:auto; bottom:330px; }}
 """
         caption_markup = ""
         if plan.kicker or caption_headline:
@@ -1089,12 +1130,20 @@ def _render_footage(plan: ScenePlan) -> str:
             + media
             + "    </div>\n"
             + caption_markup
+            + details_markup
         )
         timeline = f"""        inAt("#{plan.id}-media", {{ opacity: 0 }}, {{ opacity: 1, duration: .12, ease: "power1.out" }}, 0.1);
         inAt("#{plan.id}-collage-caption", {{ x: -72, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .66, ease: "power4.out" }}, 0.24);
         inAt("#{plan.id}-collage-kicker", {{ y: 14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .46, ease: "power2.out" }}, 0.42);
         inAt("#{plan.id}-collage-headline", {{ y: 26, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .72, ease: "expo.out" }}, 0.5);
 """
+        if details:
+            details_at = min(
+                max(.8, plan.collage_target_duration_seconds),
+                max(.8, plan.duration * .3),
+            )
+            timeline += f'''        inAt("#{plan.id}-collage-details", {{ x: 56, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .7, ease: "power3.out" }}, {details_at:.2f});
+'''
         return _shell(
             plan,
             css=css + collage_css,

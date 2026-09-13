@@ -544,6 +544,42 @@ def test_portrait_scene_uses_portrait_root_contract():
     assert validate_scene_html(html, "scene-01", PORTRAIT) == []
 
 
+@pytest.mark.parametrize("frame", [sk.LANDSCAPE, PORTRAIT])
+def test_collage_preserves_reviewed_facts_and_attribution_in_both_formats(frame):
+    html = sk.render_scene(plan(
+        frame=frame, duration=40, archetype="footage", collage_broll=True,
+        footage_src="verified.mp4", footage_kind="video",
+        collage_hold_src="verified-hold.jpg", collage_target_duration_seconds=8,
+        body="MIT's Codex agent calibrated six qubits.",
+        items=("Measured transition frequencies", "Noise still requires human guidance"),
+        quote="Safety & <timing> matter", attribution="Named source",
+        stat="6", stat_label="Qubits", left_text="Before", right_text="After",
+    ))
+    assert validate_scene_html(html, "scene-01", frame) == []
+    details = re.search(r'<aside class="collage-details"[^>]*>(.*?)</aside>', html, re.S).group(1)
+    for expected in (
+        "MIT&#x27;s Codex agent calibrated six qubits.", "Measured transition frequencies",
+        "Noise still requires human guidance", "Safety &amp; &lt;timing&gt; matter",
+        "Named source", "Qubits", "Before", "After",
+    ):
+        assert expected in details
+    assert 'data-duration="8.00"' in html
+    assert 'data-start="8.00" data-duration="32.00"' in html
+    assert 'inAt("#scene-01-collage-details"' in html
+    assert 'ease: "power3.out" }, 8.00)' in html
+
+
+def test_short_collage_reveals_facts_before_midpoint_without_duplicate_list():
+    html = sk.render_scene(plan(
+        archetype="footage", collage_broll=True, footage_src="verified.mp4",
+        footage_kind="video", collage_target_duration_seconds=8,
+        body="One · Two", items=("One", "Two"),
+    ))
+    assert 'id="scene-01-body"' not in html
+    assert '<li>One</li><li>Two</li>' in html
+    assert 'ease: "power3.out" }, 3.60)' in html
+
+
 @pytest.mark.parametrize("webpage", [False, True])
 def test_fractional_footage_intervals_do_not_overlap_or_exceed_their_sources(webpage):
     from decimal import Decimal
