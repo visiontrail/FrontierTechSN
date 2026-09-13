@@ -335,6 +335,31 @@ def test_quality_feedback_from_another_candidate_is_not_reused(tmp_path):
     assert composer._pending_visual_repairs(tmp_path, _cache_plans()) == ("", [])
 
 
+def test_failed_repair_provider_preserves_plan_and_unconsumed_feedback(tmp_path, monkeypatch):
+    board = {**_cache_board(), "scene_count": 2}
+    _write_cache(tmp_path, board)
+    _failed_visual_candidate(tmp_path)
+    before = (tmp_path / "visual_plan.json").read_bytes()
+
+    async def unavailable(*args, **kwargs):
+        return [{"id": "scene-02", "headline": "First sentence only", "grounding_source": "narration_fallback"}]
+
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", unavailable)
+    with pytest.raises(RuntimeError, match="retaining the previous plan"):
+        asyncio.run(composer._load_or_plan_scene_visuals(
+            tmp_path, board, ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None,
+        ))
+    assert (tmp_path / "visual_plan.json").read_bytes() == before
+    assert composer._pending_visual_repairs(tmp_path, _cache_plans())[1]
+
+
+def test_legacy_fallback_repair_marker_does_not_consume_feedback(tmp_path):
+    digest = _failed_visual_candidate(tmp_path)
+    plans = _cache_plans()
+    plans[1].update(grounding_source="narration_fallback", review_repair_source_sha256=digest)
+    assert [r["id"] for r in composer._pending_visual_repairs(tmp_path, plans)[1]] == ["scene-02"]
+
+
 def test_unavailable_visual_review_does_not_replan_scene_content(tmp_path):
     _failed_visual_candidate(tmp_path)
     path = tmp_path / "quality_retry_state.json"

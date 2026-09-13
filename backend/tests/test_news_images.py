@@ -1263,6 +1263,16 @@ def test_full_company_identity_containing_a_role_acronym_is_preserved():
     )["grounding_passed"] is True
 
 
+def test_ipo_financial_event_cannot_ground_intellectual_property_office_logo():
+    scene = {"id": "scene-06", "text": "Sam Altman may delay OpenAI's IPO for safety reasons."}
+    shot = {"scene_id": "scene-06", "expected_subject": "IPO", "kind": "logo"}
+    assert "IPO" not in news_images._entity_candidates(scene)
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is False
+    assert news_images._grounding_evidence(shot, scene, {
+        "title": "Ipo logo.svg", "description": "Intellectual Property Organization logo",
+    })["grounding_passed"] is False
+
+
 @pytest.mark.parametrize(
     ("subject", "scene_text"),
     [

@@ -377,7 +377,10 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
                 scene_id not in failed
                 or previous is None
                 or review.get("review_available") is not True
-                or previous.get("review_repair_source_sha256") == source_hash
+                or (
+                    previous.get("review_repair_source_sha256") == source_hash
+                    and previous.get("grounding_source") != "narration_fallback"
+                )
             ):
                 continue
             feedback.append({
@@ -422,6 +425,16 @@ async def _load_or_plan_scene_visuals(
             by_id = {plan["id"]: plan for plan in repaired}
             if set(by_id) != failed_ids:
                 raise RuntimeError("Visual review repair did not return every failed scene")
+            unavailable = [
+                plan["id"] for plan in repaired
+                if plan.get("grounding_source") == "narration_fallback"
+            ]
+            if unavailable:
+                raise RuntimeError(
+                    "Visual review repair provider did not supply corrected direction for "
+                    + ", ".join(unavailable)
+                    + "; retaining the previous plan and pending review feedback"
+                )
             unchanged = [
                 row["id"] for row in feedback
                 if all(by_id[row["id"]].get(key) == value
