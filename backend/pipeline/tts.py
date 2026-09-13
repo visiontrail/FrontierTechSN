@@ -87,11 +87,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 24
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 25
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 6
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 7
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -206,6 +206,10 @@ ACOUSTIC_EQUIVALENTS = {
     # spoken form. This matters for the named product "Qwen Office's" while
     # still requiring the audible final /ɪz/ syllable.
     "offices": "office's",
+    # Plural possessive "qubits'" and singular possessive "qubit's" both
+    # end in /ts/. ASR cannot infer the apostrophe position from the audio;
+    # singular "qubit" must retain its distinct, missing /s/ ending.
+    "qubit's": "qubits",
     # Whisper may spell the German surname Brem as the identically pronounced
     # surname Brehm. The silent ``h`` carries no acoustic evidence; other
     # nearby spellings (for example "Bream") remain distinct.

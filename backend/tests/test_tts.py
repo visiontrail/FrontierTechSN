@@ -3147,6 +3147,25 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report("office")["verified"])
         self.assertFalse(report("officers")["verified"])
 
+    def test_orpheus_transcript_normalizes_qubit_possessive_homophone_only(self):
+        expected = "Finding the qubits' transition frequencies completed the measurement."
+
+        def report(qubit_word: str) -> dict:
+            observed = f"Finding the {qubit_word} transition frequencies completed the measurement"
+            words = [
+                {"text": word, "start": index * 0.2, "end": index * 0.2 + 0.1}
+                for index, word in enumerate(observed.split())
+            ]
+            return tts._orpheus_transcript_report(expected, words)
+
+        accepted = report("qubit's")
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["exact_asr_word_coverage"], 1.0)
+        self.assertFalse(report("qubit")["verified"])
+        self.assertFalse(report("cubits")["verified"])
+        self.assertFalse(report("")["verified"])
+        self.assertFalse(report("qubits qubits")["verified"])
+
     def test_orpheus_transcript_normalizes_nikkei_spelling_in_publication_name(self):
         expected = "Nikkei Asia reports that China is restricting exports"
 
