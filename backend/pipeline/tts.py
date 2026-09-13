@@ -91,7 +91,7 @@ ORPHEUS_INTEGRITY_VERIFIER_VERSION = 25
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 7
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 8
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -1890,6 +1890,121 @@ def _validate_pocket_internal_silence(
     return report
 
 
+def _shorten_verified_pocket_silence(
+    path: Path,
+    transcript_words: list[dict],
+    continuity: dict,
+    verification_dir: Path,
+) -> dict | None:
+    """Remove only near-silent centers of excessive, word-free internal gaps.
+
+    Called only after lexical verification. Retain the speech edges and normal
+    cadence; never stretch audio or relax the continuity gate. The caller must
+    transcribe and verify the edited waveform again before it can be accepted.
+    """
+    violations = [run for run in continuity["runs"] if not run["passed"]]
+    if not violations or not transcript_words:
+        return None
+    with wave.open(str(path), "rb") as source:
+        params = source.getparams()
+        if params.sampwidth != 2 or params.comptype != "NONE":
+            return None
+        pcm = source.readframes(source.getnframes())
+    frame_bytes = params.nchannels * params.sampwidth
+    cuts = []
+    for run in violations:
+        # Very long gaps can indicate a synthesis fault, not normal cadence.
+        if run["duration_seconds"] > 3.0:
+            return None
+        keep_seconds = run["maximum_allowed_seconds"] - 0.1
+        remove_frames = math.ceil(
+            (run["duration_seconds"] - keep_seconds) * params.framerate
+        )
+        # Keep 150ms on each waveform edge, then subtract all ASR word spans.
+        # Whisper sometimes assigns a word a long silent lead-in; move the
+        # cut within the remaining word-free interval instead of crossing it.
+        intervals = [(
+            math.ceil((run["start_seconds"] + 0.15) * params.framerate),
+            math.floor((run["end_seconds"] - 0.15) * params.framerate),
+        )]
+        for word in transcript_words:
+            word_start = math.floor(float(word.get("start") or 0) * params.framerate)
+            word_end = math.ceil(float(word.get("end") or 0) * params.framerate)
+            remaining = []
+            for left, right in intervals:
+                if word_start >= right or word_end <= left:
+                    remaining.append((left, right))
+                else:
+                    remaining.extend([(left, min(right, word_start)),
+                                      (max(left, word_end), right)])
+            intervals = [(left, right) for left, right in remaining if right > left]
+        available = [pair for pair in intervals if pair[1] - pair[0] >= remove_frames]
+        if not available:
+            return None
+        left, right = max(available, key=lambda pair: pair[1] - pair[0])
+        center_frame = round(
+            (run["start_seconds"] + run["end_seconds"]) / 2 * params.framerate
+        )
+        start_frame = max(left, min(center_frame - remove_frames // 2, right - remove_frames))
+        end_frame = start_frame + remove_frames
+        removed = array("h")
+        removed.frombytes(pcm[start_frame * frame_bytes : end_frame * frame_bytes])
+        if sys.byteorder != "little":
+            removed.byteswap()
+        if not removed or max(abs(value) for value in removed) > 64:
+            return None
+        window = max(1, round(params.framerate * 0.01)) * params.nchannels
+        rms_values = [
+            math.sqrt(sum(value * value for value in removed[i:i + window])
+                      / len(removed[i:i + window]))
+            for i in range(0, len(removed), window)
+        ]
+        if max(rms_values) > 32767 * 10 ** (-60 / 20):
+            return None
+        cuts.append({
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "removed_seconds": remove_frames / params.framerate,
+            "peak_pcm_amplitude": max(abs(value) for value in removed),
+            "maximum_window_rms_dbfs": round(
+                20 * math.log10(max(max(rms_values), 1e-9) / 32767), 2
+            ),
+        })
+    original_sha = _file_sha256(path)
+    archive = verification_dir / "silence-repair" / original_sha
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / "original.wav").write_bytes(path.read_bytes())
+    cursor = 0
+    retained = []
+    for cut in sorted(cuts, key=lambda item: item["start_frame"]):
+        retained.append(pcm[cursor:cut["start_frame"] * frame_bytes])
+        cursor = cut["end_frame"] * frame_bytes
+    retained.append(pcm[cursor:])
+    staged = path.with_suffix(".silence-repair.tmp.wav")
+    try:
+        with wave.open(str(staged), "wb") as destination:
+            destination.setparams(params)
+            destination.writeframes(b"".join(retained))
+        os.replace(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
+    evidence = {
+        "method": "verified_word_free_near_silence_only",
+        "original_audio_sha256": original_sha,
+        "edited_audio_sha256": _file_sha256(path),
+        "original_audio_path": str(archive / "original.wav"),
+        "sample_rate": params.framerate,
+        "channels": params.nchannels,
+        "speech_playback_rate": 1.0,
+        "cuts": cuts,
+        "removed_seconds": sum(cut["removed_seconds"] for cut in cuts),
+        "original_continuity": continuity,
+        "original_transcript_words": transcript_words,
+    }
+    (archive / "edit.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+    return evidence
+
+
 def _pocket_continuity_report(
     source_text: str,
     chunks: list[str],
@@ -3040,6 +3155,7 @@ async def _verify_orpheus_part(
     adjudicate_asr: bool = False,
     provider_label: str = "Orpheus",
     validate_pocket_continuity: bool = False,
+    repair_pocket_continuity: bool = True,
 ) -> dict:
     from backend.pipeline import av_sync
 
@@ -3279,6 +3395,24 @@ async def _verify_orpheus_part(
             + "; ".join(report["failure_reasons"])
         )
     if validate_pocket_continuity:
+        continuity = _pocket_internal_silence_report(path, words)
+        if not continuity["passed"] and repair_pocket_continuity:
+            edit = _shorten_verified_pocket_silence(
+                path, words, continuity, verification_dir,
+            )
+            if edit is not None:
+                emit(
+                    f"{provider_label} continuity: removed {edit['removed_seconds']:.2f}s "
+                    "of word-free near-silence; re-transcribing the edited waveform "
+                    "at unchanged speech speed"
+                )
+                repaired = await _verify_orpheus_part(
+                    path, text, verification_dir, emit=emit,
+                    adjudicate_asr=adjudicate_asr, provider_label=provider_label,
+                    validate_pocket_continuity=True, repair_pocket_continuity=False,
+                )
+                repaired["silence_repair"] = edit
+                return repaired
         report["internal_silence"] = _validate_pocket_internal_silence(path, words)
     substitutions = report.get("phonetic_substitutions") or []
     if report.get("verification_mode") == "llm_asr_adjudication":

@@ -214,6 +214,118 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             ):
                 tts._validate_pocket_internal_silence(path, words)
 
+    def test_pocket_silence_repair_preserves_every_retained_pcm_frame(self):
+        for channels in (1, 2):
+            with self.subTest(channels=channels), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "pauses.wav"
+                speech = struct.pack("<h", 10_000) * 4_800 * channels
+                quiet = struct.pack("<h", 8) * 38_880 * channels
+                pcm = speech + quiet + speech + quiet + speech
+                with wave.open(str(path), "wb") as destination:
+                    destination.setnchannels(channels)
+                    destination.setsampwidth(2)
+                    destination.setframerate(24_000)
+                    destination.writeframes(pcm)
+                original = path.read_bytes()
+                words = [
+                    {"text": "Done.", "start": 0.0, "end": 0.2},
+                    {"text": "Next.", "start": 1.82, "end": 2.02},
+                    {"text": "Again.", "start": 3.64, "end": 3.84},
+                ]
+                if channels == 2:
+                    # A long ASR lead-in blocks the centered cut, but there
+                    # is enough safe silence earlier in the same gap.
+                    words[2]["start"] = 3.0
+                continuity = tts._pocket_internal_silence_report(path, words)
+                edit = tts._shorten_verified_pocket_silence(
+                    path, words, continuity, Path(temp_dir) / "verification",
+                )
+                self.assertIsNotNone(edit)
+                self.assertEqual(len(edit["cuts"]), 2)
+                self.assertAlmostEqual(edit["removed_seconds"], 1.04, places=3)
+                self.assertEqual(Path(edit["original_audio_path"]).read_bytes(), original)
+                self.assertEqual(edit["speech_playback_rate"], 1.0)
+                for cut in edit["cuts"]:
+                    self.assertFalse(any(
+                        word["start"] < cut["end_frame"] / 24_000
+                        and word["end"] > cut["start_frame"] / 24_000
+                        for word in words
+                    ))
+                keep = bytearray(pcm)
+                for cut in reversed(edit["cuts"]):
+                    del keep[cut["start_frame"] * channels * 2:cut["end_frame"] * channels * 2]
+                with wave.open(str(path), "rb") as result:
+                    self.assertEqual(result.getframerate(), 24_000)
+                    self.assertEqual(result.getnchannels(), channels)
+                    self.assertEqual(result.readframes(result.getnframes()), bytes(keep))
+                for word, shift in zip(words, (0, 0.52, 1.04)):
+                    word["start"] -= shift
+                    word["end"] -= shift
+                self.assertTrue(tts._validate_pocket_internal_silence(path, words)["passed"])
+
+    def test_pocket_silence_repair_refuses_speech_or_non_silent_cut(self):
+        for defect in ("overlapping_word", "audible_center", "missing_transcript", "too_long"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "pause.wav"
+                pause_seconds = 4.0 if defect == "too_long" else 1.62
+                pause = bytearray(struct.pack("<h", 8) * round(24_000 * pause_seconds))
+                if defect == "audible_center":
+                    pause[len(pause)//2:len(pause)//2+2] = struct.pack("<h", 200)
+                with wave.open(str(path), "wb") as destination:
+                    destination.setnchannels(1)
+                    destination.setsampwidth(2)
+                    destination.setframerate(24_000)
+                    destination.writeframes(struct.pack("<h", 10_000) * 4_800
+                                            + pause + struct.pack("<h", 10_000) * 4_800)
+                words = [
+                    {"text": "Done.", "start": 0.0, "end": 0.2},
+                    {"text": "Next.", "start": 0.2 + pause_seconds, "end": 0.4 + pause_seconds},
+                ]
+                continuity = tts._pocket_internal_silence_report(path, words)
+                if defect == "overlapping_word":
+                    words.append({"text": "quiet", "start": 0.4, "end": 1.7})
+                if defect == "missing_transcript":
+                    words = []
+                before = path.read_bytes()
+                self.assertIsNone(tts._shorten_verified_pocket_silence(
+                    path, words, continuity, Path(temp_dir) / "verification",
+                ))
+                self.assertEqual(path.read_bytes(), before)
+
+    async def test_pocket_silence_edit_requires_new_lexical_verification(self):
+        for omit_word in (False, True):
+            with self.subTest(omit_word=omit_word), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "pause.wav"
+                with wave.open(str(path), "wb") as destination:
+                    destination.setnchannels(1)
+                    destination.setsampwidth(2)
+                    destination.setframerate(24_000)
+                    destination.writeframes(struct.pack("<h", 10_000) * 4_800
+                                            + struct.pack("<h", 8) * 38_880
+                                            + struct.pack("<h", 10_000) * 4_800)
+                before = [{"text": "Done.", "start": 0.0, "end": 0.2},
+                          {"text": "Next.", "start": 1.82, "end": 2.02}]
+                after = [{"text": "Done.", "start": 0.0, "end": 0.2},
+                         {"text": "Next.", "start": 1.3, "end": 1.5}]
+                if omit_word:
+                    after.pop()
+                transcriber = AsyncMock(side_effect=[(before, {}), (after, {})])
+                with patch("backend.pipeline.av_sync.ensure_word_transcript", transcriber):
+                    call = tts._verify_orpheus_part(
+                        path, "Done. Next.", Path(temp_dir) / "verification",
+                        emit=lambda _message: None, validate_pocket_continuity=True,
+                    )
+                    if omit_word:
+                        with self.assertRaises(tts.TtsIntegrityError):
+                            await call
+                    else:
+                        report = await call
+                        self.assertTrue(report["verified"])
+                        self.assertTrue(report["internal_silence"]["passed"])
+                        self.assertEqual(report["silence_repair"]["edited_audio_sha256"],
+                                         tts._file_sha256(path))
+                self.assertEqual(transcriber.await_count, 2)
+
     def test_split_tts_text_repeats_dialogue_metadata_without_repeating_words(self):
         text = "Speaker 1: One two three. Four five six.\nSpeaker 2: Seven eight."
 
