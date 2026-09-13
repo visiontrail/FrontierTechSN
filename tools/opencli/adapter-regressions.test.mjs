@@ -806,7 +806,7 @@ function videoUploadPage({
   return page
 }
 
-function vmUploadDomPage({ initialInputs = [], newInputDelays = [0] } = {}) {
+function vmUploadDomPage({ initialInputs = [], newInputDelays = [0], reuseInput = false, sidebarBusy = false } = {}) {
   const actions = []
   const inputs = []
   const pendingInputs = []
@@ -814,6 +814,7 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0] } = {}) {
   let attachmentCount = 0
   let uploadClicks = 0
   let inputSerial = 0
+  const clickListeners = new Set()
 
   const addInput = (name, prefix = 'input') => {
     const attributes = new Map()
@@ -825,6 +826,7 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0] } = {}) {
       disabled: false,
       isConnected: true,
       files: [],
+      matches(selector) { return selector === 'input[type="file"]' },
       getAttribute(key) {
         return attributes.has(key) ? attributes.get(key) : null
       },
@@ -858,6 +860,7 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0] } = {}) {
     if (selector === 'gem-media-attachment') {
       return Array.from({ length: attachmentCount }, () => ({}))
     }
+    if (selector.includes('mat-progress-spinner') && sidebarBusy) return [{}]
     if (selector.includes('progressbar') || selector.includes('mat-progress-spinner')) return []
     return []
   }
@@ -866,6 +869,8 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0] } = {}) {
     querySelectorAll,
   }
   const document = {
+    addEventListener(type, listener) { if (type === 'click') clickListeners.add(listener) },
+    removeEventListener(type, listener) { if (type === 'click') clickListeners.delete(listener) },
     querySelector(selector) {
       if (selector === 'input-container') return inputContainer
       if (selector === 'button[aria-label="File upload"]') return uploadButton
@@ -884,6 +889,7 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0] } = {}) {
   }
   const context = {
     document,
+    window: {},
     getComputedStyle() {
       return { display: 'block', visibility: 'visible' }
     },
@@ -893,9 +899,16 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0] } = {}) {
     actions,
     inputs,
     selectedInputIds,
+    clickListeners,
     async click(selector) {
       actions.push(['click', selector])
       uploadClicks += 1
+      if (reuseInput) {
+        const input = inputs.find(candidate => candidate.name === 'Filedata') || addInput('Filedata', 'reused')
+        const event = { target: input, preventDefault() { actions.push(['preventChooser']) } }
+        for (const listener of clickListeners) listener(event)
+        return
+      }
       const delay = Number(newInputDelays[uploadClicks - 1] ?? 0)
       if (delay <= 0) addInput('Filedata', `new-frame-${uploadClicks}`)
       else pendingInputs.push({ remaining: delay, frame: uploadClicks })
@@ -1029,6 +1042,21 @@ test('Gemini video inner discovery selects distinct new inputs for ordered frame
   assert.match(page.selectedInputIds[0], /^new-frame-1-/)
   assert.match(page.selectedInputIds[1], /^new-frame-2-/)
   assert.notEqual(page.selectedInputIds[0], page.selectedInputIds[1])
+})
+
+test('Gemini video reuses the input activated by its control without leaving native choosers open', async (t) => {
+  const frames = videoFrameFixture(t, ['first-frame.png', 'last-frame.jpg'])
+  const page = vmUploadDomPage({ initialInputs: ['unrelated'], reuseInput: true, sidebarBusy: true })
+  await uploadFrames(page, frames, { attachmentTimeoutMs: 1000 })
+  assert.equal(page.selectedInputIds.length, 2)
+  assert.equal(page.selectedInputIds[0], page.selectedInputIds[1])
+  assert.match(page.selectedInputIds[0], /^reused-/)
+  assert.equal(page.actions.filter(([action]) => action === 'preventChooser').length, 2)
+  assert.equal(page.clickListeners.size, 0)
+  for (const input of page.inputs) {
+    assert.equal(input.getAttribute('data-opencli-video-upload-target'), null)
+    assert.equal(input.getAttribute('data-opencli-video-upload-baseline'), null)
+  }
 })
 
 test('Gemini video fails bounded without re-clicking after a successful initial click', async (t) => {

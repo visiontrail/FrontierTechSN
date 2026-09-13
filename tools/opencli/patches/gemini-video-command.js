@@ -274,6 +274,9 @@ export async function uploadFrame(
     const cleanupUploadMarkers = async () => {
         await page.evaluate(`(() => {
           const marker = ${JSON.stringify(marker)};
+          const listener = window[marker];
+          if (listener) document.removeEventListener('click', listener, true);
+          delete window[marker];
           for (const input of document.querySelectorAll('input[name="Filedata"], input[type="file"]')) {
             if (input.getAttribute('data-opencli-video-upload-baseline') === marker) {
               input.removeAttribute('data-opencli-video-upload-baseline');
@@ -307,6 +310,20 @@ export async function uploadFrame(
               input.setAttribute('data-opencli-video-upload-baseline', marker);
             }
           }
+          // Gemini reuses Filedata after the first keyframe. Bind the input
+          // actually activated by this upload-button click, rather than
+          // requiring a new DOM node or guessing from stale global inputs.
+          const listener = (event) => {
+            const input = event.target;
+            if (!input?.matches?.('input[type="file"]')
+                || input.disabled || !input.isConnected) return;
+            input.setAttribute('data-opencli-video-upload-target', marker);
+            // File injection below owns this chooser. Leaving its native
+            // dialog open blocks later uploads and stacks dialogs on retries.
+            event.preventDefault();
+          };
+          window[marker] = listener;
+          document.addEventListener('click', listener, true);
           return {
             attachments: document.querySelectorAll('gem-media-attachment').length,
             inputs: inputs.map(summarize),
@@ -361,7 +378,10 @@ export async function uploadFrame(
           const freshCandidates = candidates.filter(input =>
             input.getAttribute('data-opencli-video-upload-baseline') !== marker
           );
-          const input = freshCandidates.at(-1);
+          const activatedInput = candidates.find(candidate =>
+            candidate.getAttribute('data-opencli-video-upload-target') === marker
+          );
+          const input = activatedInput || freshCandidates.at(-1);
           const summarize = (candidate, index) => ({
             index,
             name: candidate.name || '',
@@ -377,7 +397,7 @@ export async function uploadFrame(
           const buttonRect = uploadButton?.getBoundingClientRect();
           const buttonStyle = uploadButton ? getComputedStyle(uploadButton) : null;
           const busyNodes = document.querySelectorAll(
-            'uploader-file-preview [role="progressbar"], gem-media-attachment [role="progressbar"], mat-progress-spinner'
+            'uploader-file-preview [role="progressbar"], gem-media-attachment [role="progressbar"]'
           );
           const button = uploadButton ? {
             connected: !!uploadButton.isConnected,
@@ -405,7 +425,7 @@ export async function uploadFrame(
             inputCount: inputs.length,
             baselineInputCount: candidates.length - freshCandidates.length,
             freshInputCount: freshCandidates.length,
-            inputOrigin: 'new_after_click',
+            inputOrigin: activatedInput ? 'activated_by_upload_control' : 'new_after_click',
           };
             })()`));
         } catch (error) {

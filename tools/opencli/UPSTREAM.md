@@ -22,6 +22,11 @@
   to 1.8.8 and fails installation before editing adapters if the package version
   differs; changed upstream anchors also fail installation.
 
+Video keyframe upload follows the file input activated by the upload control,
+including a reused `Filedata` node. Its click is intercepted to avoid leaving
+native chooser dialogs open while the bridge supplies the file. Only attachment
+progress blocks upload readiness; unrelated sidebar loading does not.
+
 The release updates Undici to `7.29.0`, adds `OPENCLI_SITE_SESSION` defaults,
 fixes YouTube search pagination and structured network captures, and updates
 the adapter-author Deep Recon workflow. The project's session namespace,
