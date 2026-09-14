@@ -476,6 +476,24 @@ async def _run_agent(
 ) -> tuple[list[str], str | None]:
     """Run one crew with the same configured-provider retry policy as text stages."""
     ids = list(ids)
+    workspace = task_dir.resolve()
+    assigned_files = "\n".join(
+        f"- {workspace / 'compositions' / (scene_id + '.html')}" for scene_id in ids
+    )
+    prompt = (
+        f"Task workspace: {workspace}\n"
+        f"Read and edit these exact existing files:\n{assigned_files}\n\n"
+        "Use these absolute paths for file tools; paths shown in framework skill "
+        "examples are not this task's workspace. The drafts already reference "
+        "the selected media and local GSAP library. Preserve those asset sources; "
+        "do not scout replacement footage or search review/cache directories. "
+        "Read a referenced still image if needed, but do not read video binaries "
+        "as text. The pipeline creates index.html after your scene edits and owns "
+        "lint, rendering and visual review; do not search for that missing file "
+        "or try to run those commands. Follow the existing draft and scene brief "
+        "for the editable overlay, then write the assigned files.\n\n"
+        + prompt
+    )
     maximum_attempts = max(
         1,
         int(max_attempts) if max_attempts is not None else int(config.AI_MAX_RETRIES) + 1,

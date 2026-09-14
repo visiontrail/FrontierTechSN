@@ -254,6 +254,10 @@ def test_director_retries_selected_provider_until_a_later_attempt_succeeds(
     async def fake_attempt(*args, **kwargs):
         nonlocal attempts
         attempts += 1
+        assert str(tmp_path / "compositions/scene-01.html") in args[1]
+        assert "creates index.html after your scene edits" in args[1]
+        assert "do not scout replacement footage" in args[1]
+        assert args[1].endswith("prompt")
         return (1, "temporary gateway timeout") if attempts < 3 else (2, None)
 
     monkeypatch.setattr(director, "_run_agent_attempt", fake_attempt)

@@ -97,6 +97,12 @@ is reduced.
   screenshot containing an advertisement and byline but omitting the headline;
   the new capture policy invalidates old screenshot caches. This prevents an
   avoidable render/review cycle without weakening the final frame gate.
+- Scene crews receive the exact workspace and absolute assigned-file paths.
+  Their brief explains that media is already selected and that the pipeline
+  creates the root composition after authoring. A live crew spent more than
+  ten minutes searching footage review caches and a not-yet-created root file;
+  the scoped brief directs that effort to the assigned overlays while retaining
+  framework guidance, retry limits and all render/visual checks.
 
 ## Measurement protocol
 
