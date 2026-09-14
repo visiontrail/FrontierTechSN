@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -8,6 +9,51 @@ import pytest
 from PIL import Image
 
 from backend.pipeline import news_webpages
+
+
+@pytest.mark.parametrize("change", ["shift", "offscreen", "outside_crop", "missing"])
+def test_headline_capture_rejects_pixels_not_matching_measured_crop(change):
+    rect = {"x": 100, "y": 100, "width": 500, "height": 120}
+    prepared = {"headline_rect": rect, "focus_rect": {"x": 80, "y": 80, "width": 600, "height": 300}}
+    after = dict(rect)
+    assert news_webpages._headline_capture_is_stable(prepared, after)
+    if change == "shift":
+        after["y"] = 350
+    elif change == "offscreen":
+        prepared["headline_rect"] = after = {**rect, "y": -10}
+    elif change == "outside_crop":
+        prepared["focus_rect"]["x"] = 300
+    else:
+        after = None
+    assert not news_webpages._headline_capture_is_stable(prepared, after)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settles", [True, False])
+async def test_capture_retries_layout_shift_and_never_returns_stale_pixels(monkeypatch, settles):
+    rect = {"x": 100, "y": 100, "width": 500, "height": 120}
+    prepared = {"headline_rect": rect, "focus_rect": {"x": 80, "y": 80, "width": 600, "height": 300}}
+    shots = []
+
+    async def runtime(_socket, _counter, expression):
+        if expression == "prepare":
+            return prepared
+        return rect if settles and len(shots) == 2 else {**rect, "y": 350}
+
+    async def command(_socket, _counter, _method, _params):
+        payload = f"pixels-{len(shots)}".encode()
+        shots.append(payload)
+        return {"data": base64.b64encode(payload).decode()}
+
+    monkeypatch.setattr(news_webpages, "_runtime_value", runtime)
+    monkeypatch.setattr(news_webpages, "_cdp_command", command)
+    if settles:
+        raw, measured = await news_webpages._capture_stable_article(None, [0], "prepare")
+        assert raw == b"pixels-1" and measured == prepared and len(shots) == 2
+    else:
+        with pytest.raises(RuntimeError, match="headline moved"):
+            await news_webpages._capture_stable_article(None, [0], "prepare")
+        assert len(shots) == 3
 
 
 def _board():

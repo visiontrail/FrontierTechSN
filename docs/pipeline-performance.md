@@ -90,6 +90,13 @@ is reduced.
   new preview caches remain reusable, but still require the current visual
   verdict. This prevents a repaired headquarters search being judged against
   the old financing-headline query.
+- Article screenshots wait for fonts and scroll settlement, then verify that
+  the headline remains fully inside both the viewport and the crop before and
+  after capture. Layout shifts trigger bounded recapture, never approval based
+  only on correct DOM metadata. Live pixel inspection caught a TechCrunch
+  screenshot containing an advertisement and byline but omitting the headline;
+  the new capture policy invalidates old screenshot caches. This prevents an
+  avoidable render/review cycle without weakening the final frame gate.
 
 ## Measurement protocol
 

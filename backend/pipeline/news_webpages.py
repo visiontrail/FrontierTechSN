@@ -30,7 +30,7 @@ from PIL import Image, UnidentifiedImageError
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4
 MAX_PAGE_OVERLAYS = 2
 VIEWPORT_WIDTH = 1440
 VIEWPORT_HEIGHT = 900
@@ -438,7 +438,11 @@ _PAGE_INFO_SCRIPT = r"""
 
 
 _PREPARE_CAPTURE_SCRIPT = r"""
-(() => {
+(async () => {
+  await Promise.race([
+    document.fonts?.ready || Promise.resolve(),
+    new Promise((resolve) => setTimeout(resolve, 2000)),
+  ]);
   const expectedHeadline = __EXPECTED_HEADLINE__;
   const expectedTerms = new Set((expectedHeadline.match(/[A-Za-z][A-Za-z0-9'-]{2,}/g) || [])
     .map((word) => word.toLowerCase()));
@@ -494,10 +498,12 @@ _PREPARE_CAPTURE_SCRIPT = r"""
       });
   }
   if (headline) {
-    headline.scrollIntoView({block: 'start', inline: 'nearest'});
-    window.scrollBy(0, -72);
+    headline.scrollIntoView({block: 'start', inline: 'nearest', behavior: 'instant'});
+    window.scrollBy({top: -72, behavior: 'instant'});
   }
   if (!headline) return {headline_found: false, focus_rect: null};
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  window.__frontierNewsCaptureHeadline = headline;
 
   // Capture the exact story block, not an unreadable overview of the entire
   // publication.  Prefer the smallest ancestor that contains the matched
@@ -538,12 +544,60 @@ _PREPARE_CAPTURE_SCRIPT = r"""
   const height = Math.max(0, bottom - top);
   return {
     headline_found: true,
+    headline_rect: headline.getBoundingClientRect().toJSON(),
     focus_rect: width >= 280 && height >= 100
       ? {x: left, y: top, width, height}
       : null,
   };
 })()
 """
+
+
+_CAPTURE_HEADLINE_RECT_SCRIPT = r"""
+(() => {
+  const node = window.__frontierNewsCaptureHeadline;
+  return node?.isConnected ? node.getBoundingClientRect().toJSON() : null;
+})()
+"""
+
+
+def _headline_capture_is_stable(prepared: object, after: object) -> bool:
+    """Require the actual headline to stay inside this screenshot and its crop."""
+    if not isinstance(prepared, dict) or not isinstance(after, dict):
+        return False
+    before = prepared.get("headline_rect")
+    focus = prepared.get("focus_rect")
+    if not isinstance(before, dict) or not isinstance(focus, dict):
+        return False
+    try:
+        if any(abs(float(before[key]) - float(after[key])) > 2 for key in ("x", "y", "width", "height")):
+            return False
+        x, y, width, height = (float(after[key]) for key in ("x", "y", "width", "height"))
+        fx, fy, fw, fh = (float(focus[key]) for key in ("x", "y", "width", "height"))
+        return (
+            width > 40 and height > 20
+            and 0 <= x and 0 <= y
+            and x + width <= VIEWPORT_WIDTH and y + height <= VIEWPORT_HEIGHT
+            and fx <= x and fy <= y
+            and x + width <= fx + fw and y + height <= fy + fh
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+async def _capture_stable_article(socket, counter, prepare_script: str) -> tuple[bytes, dict]:
+    # Late fonts, ads and responsive layout can move the headline after the DOM
+    # passes its language gate. Never crop a later screenshot with stale bounds.
+    for _ in range(3):
+        prepared = await _runtime_value(socket, counter, prepare_script)
+        screenshot = await _cdp_command(
+            socket, counter, "Page.captureScreenshot",
+            {"format": "png", "fromSurface": True, "captureBeyondViewport": False},
+        )
+        after = await _runtime_value(socket, counter, _CAPTURE_HEADLINE_RECT_SCRIPT)
+        if _headline_capture_is_stable(prepared, after):
+            return base64.b64decode(str(screenshot.get("data") or ""), validate=True), prepared
+    raise RuntimeError("Article headline moved or was outside the captured viewport/crop")
 
 
 def _focused_screenshot(raw: bytes, focus_rect: object, destination: Path) -> dict:
@@ -768,22 +822,10 @@ async def _capture_page(
                 f"paragraph_chars={info.get('paragraph_characters') or 0})"
             )
 
-        prepared = await _runtime_value(socket, counter, prepare_capture_script)
-        await asyncio.sleep(0.45)
+        raw, prepared = await _capture_stable_article(socket, counter, prepare_capture_script)
         refreshed = await _runtime_value(socket, counter, page_info_script)
         if isinstance(refreshed, dict) and _page_is_english(refreshed):
             info = refreshed
-        screenshot = await _cdp_command(
-            socket,
-            counter,
-            "Page.captureScreenshot",
-            {
-                "format": "png",
-                "fromSurface": True,
-                "captureBeyondViewport": False,
-            },
-        )
-        raw = base64.b64decode(str(screenshot.get("data") or ""), validate=True)
         focus = prepared.get("focus_rect") if isinstance(prepared, dict) else None
         info.update(_focused_screenshot(raw, focus, destination))
         await _cdp_command(socket, counter, "Page.close")
