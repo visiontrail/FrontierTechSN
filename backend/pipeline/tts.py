@@ -88,11 +88,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 25
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 26
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 8
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 9
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -2932,6 +2932,40 @@ def _medium_asr_verdict_is_corroborated(
     return False
 
 
+def _shared_transcript_omissions(
+    expected_tokens: list[str], normal_transcript: str, slower_transcript: str,
+) -> list[int]:
+    """Find whole source words absent from both decodes despite split spellings.
+
+    Rejoin exact source spellings such as US/U .S. and DeepTech/Deep Tech before
+    checking word deletions. Number representations, phonetic substitutions and
+    partial spelling deltas remain for the existing adjudicator. This never
+    grants an approval.
+    """
+    def missing(transcript: str) -> set[int]:
+        tokens = _lexical_tokens(transcript)
+        observed = []
+        cursor = 0
+        while cursor < len(tokens):
+            stop = cursor + 1
+            for end in range(min(len(tokens), cursor + 4), cursor + 1, -1):
+                parts = tokens[cursor:end]
+                if all(part.isalpha() for part in parts) and "".join(parts) in expected_tokens:
+                    stop = end
+                    break
+            observed.append("".join(tokens[cursor:stop]))
+            cursor = stop
+        indexes = set()
+        for tag, start, end, _left, _right in SequenceMatcher(
+            a=expected_tokens, b=observed, autojunk=False,
+        ).get_opcodes():
+            if tag == "delete":
+                indexes.update(index for index in range(start, end) if expected_tokens[index].isalpha())
+        return indexes
+
+    return sorted(missing(normal_transcript) & missing(slower_transcript))
+
+
 async def _adjudicate_orpheus_asr_mismatch(
     text: str,
     normal_words: list[dict],
@@ -2995,6 +3029,21 @@ async def _adjudicate_orpheus_asr_mismatch(
         evidence["route"] = {"endpoint": endpoint, "model": model}
 
     write_evidence()
+    missing_indexes = _shared_transcript_omissions(
+        expected_tokens,
+        request["normal_speed_transcript"],
+        request["slower_speed_transcript"],
+    )
+    if missing_indexes:
+        evidence["status"] = "rejected"
+        evidence["shared_omitted_source_token_indexes"] = missing_indexes
+        evidence["reason"] = "Both transcripts omit complete source words."
+        write_evidence()
+        emit(
+            f"{provider_label} integrity: both ASR decodes omit source tokens "
+            f"{missing_indexes}; model adjudication cannot waive missing content"
+        )
+        return None
     system_prompt = """You are a fail-closed speech-transcription adjudicator.
 Decide whether the TTS waveform can still contain the complete SOURCE TEXT even
 though automatic speech recognition produced a mismatch. You receive two ASR

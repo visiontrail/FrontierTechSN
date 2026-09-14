@@ -27,6 +27,13 @@ is reduced.
   wall-clock partition. Processing is elapsed work, not a CPU-time claim.
 - `/api/runtime` exposes the commit and backend source digest captured at process
   import; task timing evidence records this identity for each root attempt.
+- Live acceptance exposed an existing ASR judge incorrectly waiving a source
+  word missing from both normal and slow transcripts (`US National Security
+  Agency` became `U .S. Security Agency`). A deterministic shared-omission guard
+  now rejects this before model adjudication. Verifier versions invalidate old
+  audio approvals; existing WAVs must pass acoustic verification again before
+  reuse. Number formatting and corroborated spelling differences retain their
+  existing adjudication path.
 
 ## Measurement protocol
 

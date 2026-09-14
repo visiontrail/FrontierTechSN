@@ -14,6 +14,45 @@ def _words(text: str) -> list[dict]:
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('source', 'transcript'), [
+    ('The US National Security Agency announced the plan.',
+     'The U .S. Security Agency announced the plan.'),
+    ('The company did not approve the transaction.',
+     'The company did approve the transaction.'),
+    ('The outlet describes the complete cable carrier system.',
+     'The outlet describes the cable carrier system.'),
+])
+async def test_shared_omission_cannot_be_overridden_by_model(tmp_path, source, transcript):
+    words = _words(transcript)
+    with patch('backend.pipeline.digester._chat', AsyncMock()) as chat:
+        result = await tts._adjudicate_orpheus_asr_mismatch(
+            source, words, words, tts._orpheus_transcript_report(source, words),
+            tmp_path, emit=lambda _message: None,
+        )
+    assert result is None
+    chat.assert_not_awaited()
+    evidence = json.loads((tmp_path / 'llm_asr_adjudication.json').read_text())
+    assert evidence['status'] == 'rejected'
+    assert evidence['shared_omitted_source_token_indexes']
+
+
+@pytest.mark.parametrize(('source', 'normal', 'slower'), [
+    ('The US National Security Agency announced.',
+     'The U .S. National Security Agency announced.',
+     'The U .S. National Security Agency announced.'),
+    ('The US National Security Agency announced.',
+     'The U .S. Security Agency announced.',
+     'The US National Security Agency announced.'),
+    ('DeepTech reports ByteFront news.',
+     'Deep Tech reports Bitefront news.', 'Deep Tech reports Bitefront news.'),
+    ('The firm raised twenty-four point five million.',
+     'The firm raised 24.5 million.', 'The firm raised $24.5 million.'),
+])
+def test_shared_omission_guard_preserves_corroboration_and_spelling_drift(source, normal, slower):
+    assert tts._shared_transcript_omissions(tts._lexical_tokens(source), normal, slower) == []
+
+
 def test_medium_asr_verdict_requires_identical_close_non_alphanumeric_evidence():
     expected = tts._lexical_tokens(
         "DeepTech China reports that venture firm Andreessen Horowitz announced."
