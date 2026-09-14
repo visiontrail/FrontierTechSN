@@ -48,6 +48,12 @@ is reduced.
   from ASR, with no source-text prompt or interpolation. Original and recovered
   timestamps are retained in `transcript.timing-repairs.json`; old zero-duration
   caches are reprocessed once. Content and final A/V gates remain in place.
+- Exact letter-by-letter ASR spellings of short uppercase source acronyms
+  (for example, `US` / `U .S.`) are collapsed only at an aligned replacement
+  with contiguous acoustic words. Extra letters and adjacent omitted words
+  cannot qualify. Together with the acoustic timestamp repair, the retained
+  original NSA WAV passed 57/57 exact source-token matching without a new
+  synthesis or a model adjudication.
 - Title generation receives only the final narration, preventing rejected or
   unconverted figures in the original brief from re-entering the publication
   title and cover. Source metadata remains in the artifact's audit manifest.

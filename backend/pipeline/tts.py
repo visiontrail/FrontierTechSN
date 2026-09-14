@@ -2357,6 +2357,7 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
         expected,
         observed,
         observed_word_indexes,
+        source_acronyms={value.casefold() for value in re.findall(r"\b[A-Z]{2,4}\b", text)},
     )
     observed, observed_word_indexes = _normalize_qwen_model_number_asr_tokens(
         expected,
@@ -2580,6 +2581,8 @@ def _collapse_expected_name_splits(
     expected: list[str],
     observed: list[str],
     observed_word_indexes: list[int],
+    *,
+    source_acronyms: set[str] | None = None,
 ) -> tuple[list[str], list[int]]:
     """Collapse only proven split spellings aligned to a canonical source name."""
     replacements: dict[int, tuple[int, str]] = {}
@@ -2592,6 +2595,8 @@ def _collapse_expected_name_splits(
         expected_token = expected[expected_start]
         expected_name = _name_recheck_base(expected_token)
         accepted_splits = ORPHEUS_NAME_ACOUSTIC_SPLITS.get(expected_name)
+        if expected_name in (source_acronyms or set()):
+            accepted_splits = tuple(accepted_splits or ()) + (tuple(expected_name),)
         if accepted_splits is None:
             continue
         observed_delta = tuple(observed[observed_start:observed_end])

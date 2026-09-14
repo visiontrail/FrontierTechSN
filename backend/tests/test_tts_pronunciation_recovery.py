@@ -99,3 +99,21 @@ def test_shared_word_omission_gets_only_a_corroborated_local_pause(tmp_path, def
     assert tts._lexical_tokens(repaired) == tts._lexical_tokens(source)
     if defect is None:
         assert tts._shared_transcript_omissions(tts._lexical_tokens(source), observed, observed) == missing
+
+
+@pytest.mark.parametrize('defect', [None, 'missing_word', 'extra_letter', 'lowercase_source'])
+def test_exact_source_acronym_spelling_does_not_require_model_adjudication(defect):
+    source = 'The US National Security Agency announced a restructuring plan today.'
+    observed = source.replace('US', 'U .S.')
+    if defect == 'missing_word':
+        observed = observed.replace('National ', '')
+    elif defect == 'extra_letter':
+        observed = observed.replace('.S.', '.S. A')
+    elif defect == 'lowercase_source':
+        source = source.replace('US', 'us')
+    words = [{'text': text, 'start': i * .3, 'end': i * .3 + .2}
+             for i, text in enumerate(observed.split())]
+    report = tts._orpheus_transcript_report(source, words)
+    assert report['verified'] is (defect is None)
+    if defect is None:
+        assert report['exact_asr_word_coverage'] == 1.0
