@@ -368,7 +368,13 @@ def validate_scene_html(
             problems.append(why)
     if plan and plan.get("archetype") == "outro":
         problems.extend(outros.outro_overlay_problems(text))
-        for key in ("footage_src", "outro_logo_src"):
+        if plan.get("outro_credits"):
+            if outros.credits_markup(plan["outro_credits"]) not in text:
+                problems.append("outro dropped or changed source credits")
+            for marker in ('data-outro-role="sources"', '.outro-credits-roll', 'yPercent: -100'):
+                if marker not in text:
+                    problems.append(f"outro dropped source roll contract: {marker}")
+        for key in ("footage_src", "outro_logo_src", "outro_hold_src"):
             source = str(plan.get(key) or "")
             if source and f'src="{source}"' not in text:
                 problems.append(f"outro dropped locked {key}")

@@ -1168,6 +1168,7 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
             str(plan.get("news_image_src") or ""),
             str(plan.get("intro_logo_src") or ""),
             str(plan.get("outro_logo_src") or ""),
+            str(plan.get("outro_hold_src") or ""),
             *[
                 str(value or "")
                 for value in plan.get("news_image_srcs") or []
@@ -1187,6 +1188,9 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
         except OSError as exc:
             failures.append(f"{scene_id}: unreadable composition ({exc})")
             continue
+        if plan.get("outro_credits"):
+            failures.extend(f"{scene_id}: {problem}" for problem in
+                            director.validate_scene_html(html, scene_id, plan=plan))
         if plan.get("media_shots"):
             try:
                 media_shots.assert_rendered_shots(plan, html)
@@ -1309,16 +1313,17 @@ def _previous_rejection_used_fallback(output_dir: Path) -> bool:
 def _director_scene_plans(plans: list[dict], *, quality_retry: bool) -> list[dict]:
     # Preserve unrelated bookends on retry, but route rejected bookends to the
     # overlay editor: staging their locked media cannot apply layout feedback.
+    # Source rolls retain their measured geometry and complete attribution.
     return [
         plan for plan in plans
-        if (
+        if not plan.get("outro_credits") and ((
             plan.get("archetype") in {"intro", "outro"}
             and (not quality_retry or bool(plan.get("visual_review_feedback")))
         ) or (
             not plan.get("footage_src")
             and not plan.get("news_image")
             and not plan.get("news_webpage")
-        )
+        ))
     ]
 
 
@@ -1762,18 +1767,48 @@ async def compose_video(
             f"{', '.join(failed)}; rendering will continue"
         )
 
+    # Cache the narration timing before the source roll extends the closing.
+    _write_visual_plan_checkpoint(output_dir_path, board, scene_plans)
+    outro_plan = outros.stage_outro(
+        output_dir_path, board, outro_style, media_plans=scene_plans,
+        video_orientation=frame.orientation,
+    )
+    quality_report["outro_credits"] = {
+        "entry_count": len(outro_plan["outro_credits"]),
+        "manifest": str(output_dir_path / "outro_credits.json"),
+        "start": board["outro_start"],
+        "duration": board["outro_duration"],
+        "reading_tail_seconds": board["credits_tail_duration"],
+    }
     program_audio_path = Path(audio_path)
+    if board["credits_tail_duration"] > 0:
+        # Keep narration/caption timestamps intact. Only the credit tail adds
+        # silence to narration, so the normal music mixer can score the tail.
+        program_duration = float(board["audio_duration"]) + board["credits_tail_duration"]
+        program_audio_path = output_dir_path / "audio" / "outro_narration.wav"
+        program_audio_path.parent.mkdir(parents=True, exist_ok=True)
+        returncode, output = await stream_subprocess(
+            name="Outro audio tail", command=[
+                "ffmpeg", "-v", "error", "-y", "-i", str(audio_path),
+                "-af", f"apad=whole_dur={program_duration:.2f}",
+                "-c:a", "pcm_s16le", str(program_audio_path),
+            ], logger=logger, log=log, timeout=300,
+        )
+        if returncode:
+            raise RuntimeError(f"Could not extend outro audio: {output[-500:]}")
+        board["program_audio_duration"] = program_duration
     if background_music_path:
         source_music = Path(background_music_path)
         if not source_music.is_file():
             raise RuntimeError(f"Configured background music is missing: {source_music}")
         program_audio_path = await music.mix_narration_and_music(
-            audio_path,
+            str(program_audio_path),
             source_music,
             output_dir_path,
             bed_db=background_music_bed_db,
             duck_db=background_music_duck_db,
             log=emit,
+            original_narration_path=audio_path if board["credits_tail_duration"] > 0 else None,
         )
         quality_report["background_music"] = {
             "enabled": True,
@@ -1786,7 +1821,6 @@ async def compose_video(
     # Cache only narration-driven direction. Branded bookends are configured
     # render stages, not scenes the visual planner should regenerate on retry.
     plans = scene_plans
-    _write_visual_plan_checkpoint(output_dir_path, board, plans)
     intro_plan = intros.stage_intro(
         output_dir_path,
         board,
@@ -1799,7 +1833,6 @@ async def compose_video(
     scene_plans[intro_index] = _retain_bookend_review_feedback(
         intro_plan, scene_plans[intro_index]
     )
-    outro_plan = outros.stage_outro(output_dir_path, board, outro_style)
     outro_index = next(
         index for index, plan in enumerate(scene_plans) if plan.get("id") == outro_plan["id"]
     )
@@ -1816,8 +1849,9 @@ async def compose_video(
     )
     emit(
         f"Outro: {outro_plan['outro_label']} bound to the "
-        f"{outro_plan['duration']:.2f}s spoken closing with an editable "
-        "HyperFrames agent overlay"
+        f"{outro_plan['duration']:.2f}s closing with an editable "
+        f"HyperFrames overlay; {len(outro_plan['outro_credits'])} source credits, "
+        f"{board['credits_tail_duration']:.2f}s reading tail"
     )
 
     # --- 3. Authoring ------------------------------------------------------
@@ -1841,7 +1875,7 @@ async def compose_video(
         endpoint, model, api_key = None, None, None
 
     # Licensed editorial media stays on the deterministic renderer. The branded
-    # intro/outro are deliberate exceptions: their Gemini videos remain locked
+    # intro/outro without source rolls are exceptions: their videos remain locked
     # while the video-editing agent authors only the editable HyperFrames overlay.
     director_plans = _director_scene_plans(
         scene_plans,

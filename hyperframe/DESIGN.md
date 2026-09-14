@@ -41,3 +41,18 @@ composition variables. The opening scene reads them through
 `window.__hyperframes.getVariables()` so the edition data is set per render
 rather than burned into the reusable video plate. Briefing-label and story-count
 chips are intentionally absent.
+
+## Closing source roll
+
+During the spoken closing, keep the brand and thanks on the left and place
+`SOURCES & CREDITS` in a separate column on the right, in both orientations.
+Use 28px source text with 36px line height, navy on the light presets and white
+on the dark preset. The list scrolls upward within a clipped window; it holds
+briefly at the beginning and end and completes before the closing fade.
+
+Credit every selected news article and the media used in the finished scenes.
+Show publisher, complete headline, publication date when available, and website;
+retain full permalinks in `outro_credits.json` and the editable source markup.
+Extend the picture and music when necessary for reading, preserving the spoken
+closing and caption timestamps. The source roll stays deterministic during
+director edits and retries.

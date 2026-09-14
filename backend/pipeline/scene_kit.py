@@ -424,6 +424,8 @@ class ScenePlan:
     edition_weekday: str = ""
     outro_logo_src: str = ""
     outro_style: str = ""
+    outro_credits: tuple[dict[str, str], ...] = ()
+    outro_hold_src: str = ""
     theme: Theme = DEFAULT_THEME
     frame: FrameSpec = LANDSCAPE
 
@@ -512,6 +514,8 @@ class ScenePlan:
             edition_weekday=str(data.get("edition_weekday") or ""),
             outro_logo_src=str(data.get("outro_logo_src") or ""),
             outro_style=str(data.get("outro_style") or ""),
+            outro_credits=tuple(data.get("outro_credits") or []),
+            outro_hold_src=str(data.get("outro_hold_src") or ""),
             theme=theme,
             frame=frame,
         )
@@ -1397,6 +1401,8 @@ def _render_outro(plan: ScenePlan) -> str:
     if not plan.footage_src or not plan.outro_logo_src:
         plan.archetype = "statement"
         return _render_statement(plan)
+    from backend.pipeline import outros
+
     light = plan.outro_style in {"morning-brief", "signal-shot"}
     foreground = "#10243F" if light else "#F8FAFC"
     quiet = "rgba(16,36,63,.68)" if light else "rgba(248,250,252,.74)"
@@ -1452,11 +1458,54 @@ def _render_outro(plan: ScenePlan) -> str:
       background:linear-gradient(90deg,#C98758,transparent); transform-origin:left center; }}
   #{plan.id} .outro-fade {{ position:absolute; inset:0; background:#071427; opacity:0; pointer-events:none; }}
 """
-    markup = f"""    <video id="{plan.id}-background" class="clip outro-background" data-bookend-layer="background" style="z-index:0" src="{_esc(plan.footage_src)}"
+    credits_html = ""
+    if plan.outro_credits:
+        css += f"""
+  #{plan.id} .outro-body {{ display:grid; grid-template-columns:minmax(0,1.45fr) minmax(0,1fr); gap:36px; align-items:center; padding-bottom:90px; min-height:0; }}
+  #{plan.id} .outro-panel {{ width:100%; min-height:0; padding:38px; }}
+  #{plan.id} .outro-logo-shell {{ width:440px; max-width:100%; }}
+  #{plan.id} .outro-espresso {{ font-size:54px; }}
+  #{plan.id} .outro-headline {{ font-size:76px; }}
+  #{plan.id} .outro-action {{ min-width:0; font-size:16px; padding:0 14px; }}
+  #{plan.id} .outro-sources {{ min-width:0; padding:28px; background:{panel}; border:1px solid {border}; color:{foreground}; }}
+  #{plan.id} .outro-sources h2 {{ margin:0 0 20px; font:700 26px/1.3 {SANS}; letter-spacing:.06em; }}
+  #{plan.id} .outro-credits-window {{ height:600px; overflow:hidden; }}
+  #{plan.id} .outro-credits-roll {{ min-height:100%; will-change:transform; }}
+  #{plan.id} .outro-credit {{ padding:0 0 28px; margin:0 0 16px; border-bottom:1px solid {border}; }}
+  #{plan.id} .outro-credit-kind {{ color:{foreground}; font:700 18px/24px 'Courier New',monospace; }}
+  #{plan.id} .outro-credit-line {{ font:500 28px/36px {SANS}; overflow-wrap:anywhere; }}
+  #{plan.id} .outro-credit-line:nth-child(2) {{ font-weight:800; }}
+"""
+        if portrait:
+            css += f"""
+  #{plan.id} .outro-overlay {{ padding:92px 44px 180px; }}
+  #{plan.id} .outro-body {{ grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:24px; }}
+  #{plan.id} .outro-panel {{ padding:26px; }}
+  #{plan.id} .outro-headline {{ font-size:54px; }}
+  #{plan.id} .outro-espresso {{ font-size:42px; padding-left:14px; }}
+  #{plan.id} .outro-sources {{ padding:20px; }}
+  #{plan.id} .outro-credits-window {{ height:1000px; }}
+  #{plan.id} .outro-topline, #{plan.id} .outro-footer {{ font-size:14px; letter-spacing:.06em; }}
+"""
+        credits_html = (
+            '<aside class="outro-sources" data-outro-role="sources">'
+            '<h2>SOURCES &amp; CREDITS</h2>'
+            '<div class="outro-credits-window" data-layout-allow-overflow data-layout-allow-overlap>'
+            '<div class="outro-credits-roll">'
+            + outros.credits_markup(list(plan.outro_credits)) + '</div></div></aside>'
+        )
+    hold = (
+        f'<img id="{plan.id}-hold" class="clip outro-background" src="{_esc(plan.outro_hold_src)}" '
+        f'data-start="0" data-duration="{plan.duration:.2f}" data-track-index="1" style="z-index:0" alt="">'
+        if plan.outro_hold_src else ""
+    )
+    markup = f"""    {hold}
+    <video id="{plan.id}-background" class="clip outro-background" data-bookend-layer="background" style="z-index:0" src="{_esc(plan.footage_src)}"
       data-start="0" data-duration="{plan.duration:.2f}" data-track-index="0" muted playsinline preload="auto" crossorigin="anonymous"></video>
     <div class="outro-veil" data-bookend-layer="veil" style="z-index:1" data-layout-ignore></div>
     <section class="outro-overlay" data-bookend-layer="overlay" style="z-index:2">
       <header class="outro-topline"><span>Your daily shot of frontier tech</span><span>ByteFront / Outro 06.00</span></header>
+      {'<div class="outro-body">' if plan.outro_credits else ''}
       <article class="outro-panel">
         <div class="outro-brand-row" data-outro-role="brand">
           <div class="outro-logo-shell"><img class="outro-logo" src="{_esc(plan.outro_logo_src)}" alt="ByteFront"></div>
@@ -1474,6 +1523,7 @@ def _render_outro(plan: ScenePlan) -> str:
           <div class="outro-action" data-outro-action="share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 5l5-3v16l-5-3"/><path d="M19 10H9a6 6 0 0 0-6 6v3"/></svg><span>Share</span></div>
         </div>
       </article>
+      {credits_html}{'</div>' if plan.outro_credits else ''}
       <footer class="outro-footer"><div class="outro-footer-rule"></div><span>ByteFront Espresso · Fresh signals, served daily</span></footer>
     </section>
     <div id="{plan.id}-fade" class="outro-fade" data-bookend-layer="fade" style="z-index:3" data-layout-ignore></div>
@@ -1490,6 +1540,14 @@ def _render_outro(plan: ScenePlan) -> str:
         inAt("#{plan.id} .outro-footer span", {{ y: 14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .55, ease: "power2.out" }}, 1.72);
         outAt("#{plan.id}-fade", {{ opacity: 1, duration: .58, ease: "power2.inOut" }}, {max(0.1, plan.duration - 0.58):.2f});
 """
+    if plan.outro_credits:
+        # Percentage translation follows the final font layout. Pixel heights
+        # sampled at timeline creation can clip the last source after fonts load.
+        timeline += f'''        inAt("#{plan.id} .outro-credits-roll", {{ y: 36, yPercent: 0 }}, {{
+          y: {1000 if portrait else 600}, yPercent: -100,
+          duration: {max(.1, plan.duration - 6):.2f}, ease: "none"
+        }}, 2.5);
+'''
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
 
 

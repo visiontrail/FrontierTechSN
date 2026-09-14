@@ -343,7 +343,7 @@ def build_spine(
     """
     total = float(storyboard["total_duration"])
     content_start = float(storyboard["content_start"])
-    audio_duration = float(storyboard["audio_duration"])
+    audio_duration = float(storyboard.get("program_audio_duration", storyboard["audio_duration"]))
 
     mount_tags = _scene_mounts(mounts)
     captions = _caption_clips(storyboard) if captions_enabled else []

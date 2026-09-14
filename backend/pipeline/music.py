@@ -522,9 +522,10 @@ async def _probe_duration(path: Path) -> float:
     return float(stdout.strip())
 
 
-async def _integrated_loudness(path: Path) -> float | None:
+async def _integrated_loudness(path: Path, *, end: float | None = None) -> float | None:
+    filters = f"atrim=end={end:.6f},ebur128" if end is not None else "ebur128"
     _, stderr = await _media_command(
-        ["ffmpeg", "-hide_banner", "-i", str(path), "-af", "ebur128", "-f", "null", "-"],
+        ["ffmpeg", "-hide_banner", "-i", str(path), "-af", filters, "-f", "null", "-"],
         timeout=180,
     )
     matches = re.findall(r"I:\s*(-?[0-9.]+) LUFS", stderr)
@@ -750,6 +751,7 @@ async def mix_narration_and_music(
     bed_db: float,
     duck_db: float,
     log: LogCallback | None = None,
+    original_narration_path: str | Path | None = None,
 ) -> Path:
     narration = Path(narration_path)
     music = Path(music_path)
@@ -775,8 +777,10 @@ async def mix_narration_and_music(
     intro_db = bed_db
     speech_music_db = bed_db + duck_db
     ratio = max(4.0, min(20.0, abs(duck_db) * 1.2))
+    narration_source = Path(original_narration_path) if original_narration_path else narration
+    narration_end = await _probe_duration(narration_source) if original_narration_path else duration
     narration_lufs, music_lufs = await asyncio.gather(
-        _integrated_loudness(narration),
+        _integrated_loudness(narration_source),
         _integrated_loudness(continuous_music),
     )
     if music_lufs is None or not math.isfinite(music_lufs) or music_lufs <= -60.0:
@@ -798,7 +802,8 @@ async def mix_narration_and_music(
         try:
             candidate = json.loads(pacing_path.read_text(encoding="utf-8"))
             paced_path = Path(str(candidate.get("paced_narration_path") or ""))
-            if candidate.get("passed") and paced_path.resolve() == narration.resolve():
+            pacing_source = Path(original_narration_path) if original_narration_path else narration
+            if candidate.get("passed") and paced_path.resolve() == pacing_source.resolve():
                 pacing_report = candidate
         except (json.JSONDecodeError, OSError, RuntimeError, TypeError, ValueError):
             pacing_report = None
@@ -824,6 +829,10 @@ async def mix_narration_and_music(
             }
             for segment in pacing_report.get("segments") or []
         ]
+        if original_narration_path:
+            credits_start = narration_end
+            if duration > credits_start:
+                restored_intervals.append({"kind": "credits", "start": credits_start, "end": duration})
 
     if restored_intervals:
         condition = "+".join(
@@ -901,6 +910,12 @@ async def mix_narration_and_music(
             _integrated_loudness(music_probe),
             _integrated_loudness(output),
         )
+        # A long music-only tail changes integrated LUFS without changing any
+        # spoken samples. Compare the same content interval on both sides.
+        content_mix_lufs = (
+            await _integrated_loudness(output, end=narration_end)
+            if original_narration_path else mix_lufs
+        )
         if restored_intervals:
             measurement_rows: list[tuple[str, dict[str, Any], float, float]] = []
             for group, intervals in (
@@ -931,13 +946,13 @@ async def mix_narration_and_music(
         music_probe.unlink(missing_ok=True)
 
     failure_reasons = []
-    if narration_lufs is None or mix_lufs is None:
+    if narration_lufs is None or mix_lufs is None or content_mix_lufs is None:
         failure_reasons.append("narration/program loudness could not be measured")
     if ducked_music_lufs is None:
         failure_reasons.append("ducked music loudness could not be measured")
     mix_vs_narration = (
-        mix_lufs - narration_lufs
-        if mix_lufs is not None and narration_lufs is not None
+        content_mix_lufs - narration_lufs
+        if content_mix_lufs is not None and narration_lufs is not None
         else None
     )
     music_vs_narration = (
@@ -1005,6 +1020,8 @@ async def mix_narration_and_music(
         "ducked_music_vs_narration_lu": music_vs_narration,
         "minimum_ducked_music_lufs": minimum_ducked_music_lufs,
         "program_mix_integrated_lufs": mix_lufs,
+        "content_mix_integrated_lufs": content_mix_lufs,
+        "narration_comparison_end_seconds": narration_end,
         "program_mix_vs_narration_lu": mix_vs_narration,
         "restored_music_median_volume_db": (
             round(statistics.median(restored_values), 2) if restored_values else None

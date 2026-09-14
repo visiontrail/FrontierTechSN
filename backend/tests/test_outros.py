@@ -10,6 +10,7 @@ def _install_fake_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     library.mkdir()
     monkeypatch.setattr(outros, "OUTRO_LIBRARY_DIR", library)
     monkeypatch.setattr(outros, "_verified_asset", lambda path, *_args: path)
+    monkeypatch.setattr(outros, "_stage_background_hold", lambda _src, dest: dest.write_bytes(b"frame"))
     for preset in outros.OUTRO_PRESETS:
         (library / preset["filename"]).write_bytes(b"video")
     (library / outros.OUTRO_LOGO_FILENAME).write_bytes(b"logo")
@@ -140,3 +141,88 @@ def test_outro_agent_contract_rejects_removed_phrase_and_missing_actions():
     assert "the removed Chinese closing phrase is still present" in problems
     assert "missing editable engagement-actions overlay" in problems
     assert "outro background stacking contract is missing" in problems
+
+
+def _write_json(path, value):
+    import json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding='utf-8')
+
+
+def test_credits_include_selected_and_used_media_only(tmp_path):
+    article = dict(title='A < B', source_name='News & Co', url='https://news.test/a',
+                   published_at='2026-09-14T00:00:00Z', corroborating_sources=['News & Co', 'Second'])
+    _write_json(tmp_path / 'research/dossier.json', dict(selected=[article, article],
+                candidates=[dict(title='Unused', url='https://unused.test')]))
+    _write_json(tmp_path / 'footage/manifest.json', dict(clips=[
+        dict(local_path='footage/used.mp4', creator='Camera', title='Used', source_page_url='https://video.test/1'),
+        dict(local_path='footage/unused.mp4', creator='Wrong', title='Unused'),
+    ]))
+    rows = outros.collect_credits(tmp_path, [dict(footage_sequence=[dict(src='footage/used.mp4')])])
+    assert len(rows) == 2
+    assert rows[0]['detail'] == '2026-09-14 · Second'
+    markup = outros.credits_markup(rows)
+    assert 'A &lt; B' in markup and 'News &amp; Co' in markup
+    assert 'https://news.test/a' in markup and 'Unused' not in markup
+    assert rows[1]['source'] == 'Camera'
+
+
+def test_missing_credits_stays_empty_and_summary_urls_are_fallback(tmp_path):
+    assert outros.collect_credits(tmp_path, []) == []
+    _write_json(tmp_path / 'summary.json', dict(talking_points=[
+        dict(headline='Report', source='Publisher', url='https://news.test/report'),
+        dict(headline='Unsourced model summary'),
+    ]))
+    assert len(outros.collect_credits(tmp_path, [])) == 1
+
+
+def test_corrupt_source_file_fails_instead_of_silently_dropping_credits(tmp_path):
+    import json
+    (tmp_path / 'summary.json').write_text('{broken')
+    with pytest.raises(json.JSONDecodeError):
+        outros.collect_credits(tmp_path, [])
+
+
+def test_credit_tail_preserves_speech_and_is_idempotent(tmp_path, monkeypatch):
+    _install_fake_library(tmp_path, monkeypatch)
+    task = tmp_path / 'task'
+    _write_json(task / 'research/dossier.json', dict(selected=[
+        dict(title=f'A complete headline for news story {i}', source_name='Publisher', url=f'https://news.test/{i}')
+        for i in range(20)
+    ]))
+    board = _storyboard()
+    board['scenes'][0].update(start=100, duration=6, lines=[dict(start=100, duration=6, text='Goodbye')])
+    board['audio_duration'] = 106
+    staged = outros.stage_outro(task, board, 'morning-brief')
+    assert staged['duration'] > 6
+    assert board['total_duration'] == pytest.approx(100 + staged['duration'])
+    assert board['audio_duration'] == 106
+    assert board['scenes'][0]['lines'][0]['duration'] == 6
+    tail = board['credits_tail_duration']
+    outros.stage_outro(task, board, 'morning-brief')
+    assert board['credits_tail_duration'] == tail
+    assert len(staged['outro_credits']) == 20
+    assert (task / staged['outro_hold_src']).read_bytes() == b'frame'
+
+
+def test_source_roll_is_locked_against_director_removal():
+    from backend.pipeline import composer
+    rows = [dict(kind='NEWS', title='Report', source='Publisher', url='https://news.test/a', detail='')]
+    data = dict(id='scene-09', archetype='outro', outro_credits=rows,
+                footage_src='assets/outro/background.mp4', outro_logo_src='assets/outro/logo.png')
+    plan = scene_kit.ScenePlan.from_dict(data, duration=10, scene_id='scene-09')
+    rendered = scene_kit.render_scene(plan)
+    assert director.validate_scene_html(rendered, plan.id, plan=data) == []
+    assert director.validate_scene_html(rendered.replace('Report', 'Changed'), plan.id, plan=data)
+    assert composer._director_scene_plans([data], quality_retry=False) == []
+    assert composer._director_scene_plans([{**data, 'visual_review_feedback': {'issues': ['x']}}], quality_retry=True) == []
+
+
+def test_spine_plays_padded_audio_but_keeps_original_caption_end():
+    from backend.pipeline import assembler
+    board = _storyboard()
+    board.update(content_start=0, audio_duration=6, program_audio_duration=20, total_duration=20)
+    board['scenes'][0]['lines'] = [dict(start=0, duration=6, text='Goodbye')]
+    rendered = assembler.build_spine(board, audio_src='padded.wav', mounts=[])
+    assert 'data-duration="20.0"' in rendered
+    assert 'data-duration="6.0" data-track-index="4"' in rendered

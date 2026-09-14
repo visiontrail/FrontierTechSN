@@ -238,3 +238,32 @@ async def test_program_pacing_inserts_exact_gaps_and_restores_music(
     assert report["ducking_mode"] == "program_timeline_envelope"
     assert report["measured_gap_lift_db"] >= 8.0
     assert len(report["window_measurements"]["restored_music_windows"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_credit_tail_preserves_pacing_envelope_and_compares_speech_interval(tmp_path):
+    import subprocess
+    narration = tmp_path / 'narration.wav'
+    bed = tmp_path / 'bed.wav'
+    _tone(narration, 6.0, 220, amplitude=5000)
+    _tone(bed, 2.0, 440, amplitude=1800)
+    paced, pacing = await music.create_paced_narration(
+        narration, tmp_path,
+        [{'text': 'Opening', 'start': 0, 'duration': 3},
+         {'text': 'Closing', 'start': 3, 'duration': 3}],
+        intro_seconds=2, opening_gap_seconds=3, story_gap_seconds=1.5,
+    )
+    padded = tmp_path / 'padded.wav'
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(paced),
+                    '-af', 'apad=whole_dur=45', str(padded)], check=True)
+    await music.mix_narration_and_music(padded, bed, tmp_path, bed_db=-25, duck_db=-11,
+                                       original_narration_path=paced)
+    report = json.loads((tmp_path / 'audio/music_mix_report.json').read_text())
+    assert report['passed'] is True
+    assert report['ducking_mode'] == 'program_timeline_envelope'
+    assert report['program_mix_duration_seconds'] == pytest.approx(45, abs=.02)
+    assert report['narration_comparison_end_seconds'] == pytest.approx(pacing['paced_duration_seconds'])
+    tail = report['window_measurements']['restored_music_windows'][-1]
+    assert tail['kind'] == 'credits'
+    assert tail['end'] > 44
+    assert report['program_mix_vs_narration_lu'] >= -1.5

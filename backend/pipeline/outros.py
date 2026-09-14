@@ -8,9 +8,15 @@ agent revise copy and layout without regenerating the background video.
 from __future__ import annotations
 
 import hashlib
+import html
+import json
+import math
 import shutil
+import subprocess
+import unicodedata
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from backend import config
 
@@ -113,10 +119,97 @@ def list_outro_presets() -> list[dict[str, Any]]:
     return rows
 
 
+def collect_credits(task_root: Path, media_plans: list[dict]) -> list[dict[str, str]]:
+    """Credit selected reporting and media actually placed, never unused candidates."""
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def read(relative: str) -> dict:
+        path = task_root / relative
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+    def add(kind: str, title: str, source: str, url: str = "", detail: str = "") -> None:
+        key = url or f"{source}:{title}"
+        if key in seen or not (title or source):
+            return
+        seen.add(key)
+        rows.append(dict(kind=kind, title=title, source=source, url=url, detail=detail))
+
+    dossier = read("research/dossier.json")
+    for article in dossier.get("selected", []):
+        source = str(article.get("source_name") or "")
+        others = [s for s in article.get("corroborating_sources", []) if s != source]
+        detail = str(article.get("published_at") or "")[:10]
+        if others:
+            detail += " · " + ", ".join(dict.fromkeys(others))
+        add("NEWS", str(article.get("title") or ""), source,
+            str(article.get("url") or article.get("evidence_url") or ""), detail.strip(" ·"))
+    if not rows:
+        for point in read("summary.json").get("talking_points", []):
+            if isinstance(point, dict) and point.get("url"):
+                add("NEWS", str(point.get("headline") or ""), str(point.get("source") or ""), str(point["url"]))
+
+    used: set[str] = set()
+    for plan in media_plans:
+        shots = plan.get("media_shots") or plan.get("footage_sequence") or []
+        used.update(str(shot.get("src") or "").removeprefix("../") for shot in shots)
+        if not plan.get("media_shots"):
+            used.add(str(plan.get("footage_src") or "").removeprefix("../"))
+    for clip in read("footage/manifest.json").get("clips", []):
+        if clip.get("local_path") in used:
+            add("FOOTAGE", str(clip.get("title") or ""), str(clip.get("creator") or ""),
+                str(clip.get("source_page_url") or ""))
+    for plan in media_plans:
+        if plan.get("news_webpage_src"):
+            add("NEWS", str(plan.get("news_webpage_headline") or ""),
+                str(plan.get("news_webpage_source") or ""), str(plan.get("news_webpage_url") or ""))
+        if plan.get("news_image_src") or plan.get("news_image_srcs"):
+            for credit in plan.get("news_image_credits") or [plan.get("news_image_credit")]:
+                if credit:
+                    add("IMAGE", str(credit), "")
+    return rows
+
+
+def credit_lines(row: dict[str, str]) -> list[str]:
+    """Display concise attribution; the markup and manifest retain full permalinks."""
+    return [s for s in [row.get("source", ""), row.get("title", ""),
+                       row.get("detail", ""), urlsplit(row.get("url", "")).netloc] if s]
+
+
+def credits_duration(rows: list[dict[str, str]], *, portrait: bool = False) -> float:
+    # Conservative wrapping at 28px type, with reading holds at both ends.
+    units, viewport = (24, 1000) if portrait else (40, 600)
+    height = sum(68 + sum(36 * max(1, math.ceil(sum(
+        2 if unicodedata.east_asian_width(c) in "WF" else 1.1 for c in line
+    ) / units)) for line in credit_lines(row)) for row in rows)
+    return round(6 + max(36, height - viewport) / 60, 2) if rows else 0
+
+
+def credits_markup(rows: list[dict[str, str]]) -> str:
+    return "".join(
+        f'<div class="outro-credit" data-credit-index="{i}" data-source-url="{html.escape(row.get("url", ""), quote=True)}">'
+        + f'<div class="outro-credit-kind">{html.escape(row["kind"])} / {i + 1:02d}</div>'
+        + "".join(f'<div class="outro-credit-line">{html.escape(line)}</div>' for line in credit_lines(row))
+        + '</div>' for i, row in enumerate(rows)
+    )
+
+
+def _stage_background_hold(background: Path, destination: Path) -> None:
+    """Keep the original plate's final picture after its finite video ends."""
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-sseof", "-0.08", "-i", str(background),
+        "-frames:v", "1", str(destination),
+    ], check=True, capture_output=True, timeout=60)
+    if not destination.is_file():
+        raise RuntimeError("Outro background did not produce a hold frame")
+
+
 def stage_outro(
     task_dir: str | Path,
     storyboard: dict,
     style: str,
+    media_plans: list[dict] | None = None,
+    video_orientation: str = "landscape",
 ) -> dict[str, Any]:
     """Stage selected media and bind it to the spoken closing scene."""
     preset = resolve_outro_preset(style)
@@ -140,6 +233,18 @@ def stage_outro(
     duration = round(float(closing.get("duration") or 0), 2)
     if duration <= 0:
         raise ValueError("spoken closing scene has no positive duration")
+    credits = collect_credits(task_root, media_plans or [])
+    if credits:
+        _stage_background_hold(background_dest, asset_dir / "hold.png")
+    spoken_duration = float(closing.get("spoken_closing_duration", duration))
+    closing["spoken_closing_duration"] = spoken_duration
+    duration = max(duration, credits_duration(credits, portrait=video_orientation == "portrait"))
+    closing["duration"] = duration
+    storyboard["total_duration"] = round(start + duration, 2)
+    storyboard["credits_tail_duration"] = round(duration - spoken_duration, 2)
+    (task_root / "outro_credits.json").write_text(json.dumps(
+        {"start": start, "duration": duration, "spoken_duration": spoken_duration, "entries": credits},
+        ensure_ascii=False, indent=2), encoding="utf-8")
     closing["scene_kind"] = "outro"
     closing["outro_style"] = style
     storyboard["outro_start"] = start
@@ -170,6 +275,8 @@ def stage_outro(
         "outro_logo_src": "assets/outro/bytefront-logo.png",
         "outro_style": style,
         "outro_label": preset["label"],
+        "outro_credits": credits,
+        "outro_hold_src": "assets/outro/hold.png" if credits else "",
         "grounding_source": "configured_outro",
     }
 
