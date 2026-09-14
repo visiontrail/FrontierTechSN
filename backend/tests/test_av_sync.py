@@ -1,4 +1,7 @@
 import unittest
+import json
+import wave
+import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
@@ -83,3 +86,54 @@ class TranscriptRetryTests(unittest.IsolatedAsyncioTestCase):
             [word["text"] for word in merged],
             ["before", "thanks", "tomorrow"],
         )
+
+
+@pytest.mark.parametrize('defect', [None, 'wrong_word', 'duplicate', 'zero_duration', 'neighbor_echo', 'extra_gap_word'])
+def test_zero_duration_word_requires_a_fresh_acoustic_interval_in_the_gap(tmp_path, defect):
+    audio = tmp_path / 'audio.wav'
+    with wave.open(str(audio), 'wb') as stream:
+        stream.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        stream.writeframes(b'\0\0' * 32000)
+    original = [{'text': 'US', 'start': .2, 'end': .6},
+                {'text': 'National', 'start': 1.2, 'end': 1.2},
+                {'text': 'Security', 'start': 1.2, 'end': 1.7}]
+    observed = {'word': 'National', 'start': .2, 'end': .65}
+    if defect == 'wrong_word':
+        observed['word'] = 'International'
+    elif defect == 'zero_duration':
+        observed['end'] = .2
+    elif defect == 'neighbor_echo':
+        observed['start'] = 0
+        observed['end'] = .25
+    def transcribe(path, **options):
+        assert options == {'language': 'en'}  # No source-word prompt or forced text.
+        with wave.open(path, 'rb') as stream:
+            assert stream.getnframes() < 32000
+        words = [observed] * (2 if defect == 'duplicate' else 1)
+        if defect == 'extra_gap_word':
+            words.append({'word': 'Extra', 'start': .65, 'end': .72})
+        return {'segments': [{'words': words}]}
+    actual, audit = av_sync._repair_zero_duration_words(audio, original, transcribe, {'language': 'en'})
+    assert original[1]['start'] == original[1]['end']
+    if defect is None:
+        assert actual[1] == {'text': 'National', 'start': .65, 'end': 1.1}
+        assert audit[0]['status'] == 'recovered'
+    else:
+        assert actual == original
+        assert audit[0]['status'] == 'unresolved'
+
+
+def test_legacy_zero_duration_cache_is_reprocessed_once(tmp_path):
+    audio = tmp_path / 'audio.wav'
+    audio.write_bytes(b'audio')
+    transcript = tmp_path / av_sync.TRANSCRIPT_NAME
+    transcript.write_text(json.dumps([{'text': 'National', 'start': 1, 'end': 1}]))
+    meta = av_sync._audio_signature(audio)
+    metadata = tmp_path / av_sync.TRANSCRIPT_META_NAME
+    metadata.write_text(json.dumps(meta))
+    assert not av_sync._cache_is_current(tmp_path, audio)
+    meta['timing_repair_version'] = av_sync.TIMING_REPAIR_VERSION
+    metadata.write_text(json.dumps(meta))
+    assert av_sync._cache_is_current(tmp_path, audio)
+    # An unresolved zero-duration word is still excluded from quality approval.
+    assert av_sync._load_words(transcript) == []

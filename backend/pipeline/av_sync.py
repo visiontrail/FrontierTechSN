@@ -22,8 +22,10 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import wave
 from collections.abc import Callable
 from pathlib import Path
@@ -40,6 +42,7 @@ TRANSCRIBE_TIMEOUT = 1800
 TRANSCRIBE_STALL_TIMEOUT = 900
 NON_SPEECH_TOKENS = frozenset({"♪", "♫", "♬", "�"})
 TAIL_RESCAN_SECONDS = 15.0
+TIMING_REPAIR_VERSION = 1
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -103,7 +106,19 @@ def _cache_is_current(task_dir: Path, audio_path: Path) -> bool:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         # Backwards-compatible reuse of a transcript made after the WAV.
-        return transcript_path.stat().st_mtime_ns >= audio_path.stat().st_mtime_ns
+        meta = {}
+        if transcript_path.stat().st_mtime_ns < audio_path.stat().st_mtime_ns:
+            return False
+    if meta.get("timing_repair_version") != TIMING_REPAIR_VERSION:
+        try:
+            raw = json.loads(transcript_path.read_text())
+            if any(word.get("text") and float(word["end"]) == float(word["start"])
+                   for word in raw):
+                return False
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+    if not meta:
+        return True
     return all(meta.get(key) == value for key, value in signature.items())
 
 
@@ -226,6 +241,7 @@ async def ensure_word_transcript(
             "word_count": len(words),
             "model": config.AV_SYNC_MLX_MODEL,
             "attempts": attempt,
+            "timing_repair_version": TIMING_REPAIR_VERSION,
         }
         (directory / TRANSCRIPT_META_NAME).write_text(
             json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -278,6 +294,70 @@ def _replace_tail_window(
     return sorted([*head, *tail_words], key=lambda word: (word["start"], word["end"]))
 
 
+def _repair_zero_duration_words(audio_path: Path, words: list[dict], transcribe, options: dict):
+    """Recover an isolated zero-length word only from a fresh acoustic decode.
+
+    Whisper sometimes gives a recognized word no duration and leaves a gap
+    before it. Never invent an interval or feed the expected word to the model:
+    re-decode that small audio window, require one exact matching word with a
+    positive interval predominantly inside the unclaimed gap, and retain the
+    audit. Minor overlap can reflect the original neighbor's alignment error;
+    a word recognized only in neighboring speech cannot recover the gap.
+    """
+    repaired = [dict(word) for word in words]
+    attempts = []
+    with wave.open(str(audio_path), "rb") as source, tempfile.TemporaryDirectory() as temporary:
+        rate = source.getframerate()
+        duration = source.getnframes() / max(1, rate)
+        for index in range(1, len(words) - 1):
+            previous, word, following = words[index - 1:index + 2]
+            if (word["end"] != word["start"] or previous["end"] <= previous["start"]
+                    or following["end"] <= following["start"]):
+                continue
+            left, right = float(previous["end"]), float(following["start"])
+            if not (0 <= left < right <= duration and left <= word["start"] <= right
+                    and 0.08 <= right - left <= 2.5):
+                continue
+            start_frame = int(max(0, left - 0.15) * rate)
+            end_frame = min(source.getnframes(), int((right + 0.15) * rate))
+            start = start_frame / rate
+            clip = Path(temporary) / f"word-{index}.wav"
+            source.setpos(start_frame)
+            with wave.open(str(clip), "wb") as output:
+                output.setparams(source.getparams())
+                output.writeframes(source.readframes(end_frame - start_frame))
+            audit = {"index": index, "original": word,
+                     "window": [start, end_frame / rate], "status": "unresolved"}
+            attempts.append(audit)
+            try:
+                observed = _result_words(transcribe(str(clip), **options))
+                audit["observed"] = observed
+                normalize = lambda text: re.sub(r"[^\w]", "", text.casefold())
+                target = normalize(word["text"])
+                matching = [item for item in observed if target and normalize(item["text"]) == target]
+                if len(matching) != 1:
+                    continue
+                match = matching[0]
+                begin, end = round(start + match["start"], 3), round(start + match["end"], 3)
+                overlap = max(0.0, min(end, right) - max(begin, left))
+                if not (start <= begin < end <= end_frame / rate
+                        and previous["start"] <= begin and end <= following["end"]
+                        and end - begin >= 0.04 and overlap / (end - begin) > 0.5):
+                    continue
+                if any(
+                    item is not match and item["end"] > item["start"]
+                    and max(0.0, min(start + item["end"], right) - max(start + item["start"], left))
+                    / (item["end"] - item["start"]) > 0.5
+                    for item in observed
+                ):
+                    continue
+                repaired[index] = {**word, "start": begin, "end": end}
+                audit.update(status="recovered", recovered=repaired[index])
+            except Exception as exc:
+                audit["error"] = str(exc)
+    return repaired, attempts
+
+
 def _write_mlx_transcript(audio_path: Path, output_path: Path, model: str, language: str) -> None:
     """Subprocess entry point so model memory is released before rendering.
 
@@ -311,6 +391,11 @@ def _write_mlx_transcript(audio_path: Path, output_path: Path, model: str, langu
             str(audio_path), clip_timestamps=[tail_start], **options
         )
         words = _replace_tail_window(words, _result_words(tail_result), tail_start)
+
+    words, repairs = _repair_zero_duration_words(audio_path, words, mlx_whisper.transcribe, options)
+    output_path.with_suffix(".timing-repairs.json").write_text(json.dumps({
+        **_audio_signature(audio_path), "version": TIMING_REPAIR_VERSION, "attempts": repairs,
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
 
     temporary = output_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(words, indent=2, ensure_ascii=False), encoding="utf-8")

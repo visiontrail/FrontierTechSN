@@ -27,8 +27,8 @@ is reduced.
   wall-clock partition. Processing is elapsed work, not a CPU-time claim.
 - `/api/runtime` exposes the commit and backend source digest captured at process
   import; task timing evidence records this identity for each root attempt.
-- Live acceptance exposed an existing ASR judge incorrectly waiving a source
-  word missing from both normal and slow transcripts (`US National Security
+- Live acceptance exposed an existing ASR judge waiving a source
+  word missing from both filtered normal and slow transcripts (`US National Security
   Agency` became `U .S. Security Agency`). A deterministic shared-omission guard
   now rejects this before model adjudication. Verifier versions invalidate old
   audio approvals; existing WAVs must pass acoustic verification again before
@@ -39,6 +39,15 @@ is reduced.
   matching omission check, a unique text boundary, and unchanged canonical
   tokens. The new waveform must pass the full acoustic checks; the pause itself
   grants no approval. This addresses an observed repeated loss of `National`.
+- Raw ASR evidence subsequently showed `National` present with a zero-duration
+  timestamp, which the timestamp loader discarded. A focused acoustic rescan
+  can recover an isolated zero-duration word only when it independently yields
+  that exact word at a positive interval predominantly inside the unclaimed
+  timing gap, without another word occupying that gap. Neighbor-only echoes,
+  ambiguous matches and failed rescans remain unresolved. All boundaries come
+  from ASR, with no source-text prompt or interpolation. Original and recovered
+  timestamps are retained in `transcript.timing-repairs.json`; old zero-duration
+  caches are reprocessed once. Content and final A/V gates remain in place.
 - Title generation receives only the final narration, preventing rejected or
   unconverted figures in the original brief from re-entering the publication
   title and cover. Source metadata remains in the artifact's audit manifest.
