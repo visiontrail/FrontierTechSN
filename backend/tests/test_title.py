@@ -36,8 +36,8 @@ class TitleAgentTests(unittest.IsolatedAsyncioTestCase):
                 artifact = await title.generate_title(
                     task_id="title-test",
                     task_dir=task_dir,
-                    source_title="Urban Mobility Lecture",
-                    summary={"thesis": "Streets can be redesigned around people."},
+                    source_title="Unreviewed source says 235 billion",
+                    summary={"thesis": "Unreviewed brief contains a rejected claim."},
                     script="Cities inherited car-first streets, but residents are changing them.",
                 )
 
@@ -51,6 +51,11 @@ class TitleAgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(complete.await_args.kwargs["max_tokens"], 1024)
             self.assertFalse(complete.await_args.kwargs["enable_skills"])
             self.assertTrue(complete.await_args.kwargs["disable_thinking"])
+            payload = json.loads(complete.await_args.args[1])
+            self.assertEqual(payload, {
+                "final_audio_script": "Cities inherited car-first streets, but residents are changing them.",
+            })
+            self.assertNotIn("Unreviewed", complete.await_args.args[1])
 
     async def test_falls_back_to_http_when_the_title_cli_exits(self):
         with tempfile.TemporaryDirectory() as directory:

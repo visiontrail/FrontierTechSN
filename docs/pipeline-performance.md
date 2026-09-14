@@ -34,6 +34,9 @@ is reduced.
   audio approvals; existing WAVs must pass acoustic verification again before
   reuse. Number formatting and corroborated spelling differences retain their
   existing adjudication path.
+- Title generation receives only the final narration, preventing rejected or
+  unconverted figures in the original brief from re-entering the publication
+  title and cover. Source metadata remains in the artifact's audit manifest.
 
 ## Measurement protocol
 

@@ -102,10 +102,10 @@ async def generate_title(
             ai_model,
         )
         system_prompt = (config.PROMPTS_DIR / "title.txt").read_text(encoding="utf-8")
+        if not script.strip():
+            raise RuntimeError("Title generation requires the final narration script")
         payload = json.dumps(
             {
-                "source_title": source_title,
-                "content_brief": summary or {},
                 "final_audio_script": script,
             },
             indent=2,
