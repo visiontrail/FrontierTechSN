@@ -884,7 +884,7 @@ def test_agent_chooses_collage_quantity_when_no_count_is_configured():
     assert "Select exactly" not in planner_system
 
 
-def test_agent_reserves_abstract_scene_for_collage_instead_of_grounded_scene():
+def test_agent_choices_are_not_overridden_by_a_fixed_abstract_scene_rule():
     board = {
         "thesis": "Named systems produce an uncertain future",
         "scenes": [
@@ -933,7 +933,7 @@ def test_agent_reserves_abstract_scene_for_collage_instead_of_grounded_scene():
             )
         )
 
-    assert [spec["scene_id"] for spec in specs] == ["scene-02", "scene-03"]
+    assert [spec["scene_id"] for spec in specs] == ["scene-01", "scene-03"]
     assert specs[0]["planner"] == "claude_agent_sdk"
 
 
@@ -1012,7 +1012,7 @@ def test_attach_collage_keeps_fallback_when_a_required_hold_frame_is_missing(
     }
 
 
-def test_attach_collage_rehomes_a_clip_instead_of_overwriting_public_footage(
+def test_attach_collage_shares_the_exact_story_without_overwriting_public_footage(
     tmp_path: Path,
 ):
     clip = tmp_path / "collage_broll" / "clip.mp4"
@@ -1043,8 +1043,10 @@ def test_attach_collage_rehomes_a_clip_instead_of_overwriting_public_footage(
 
     assert collage_broll.attach_collage(plans, manifest, tmp_path) == 1
     assert plans[0]["footage_src"] == "footage/public.mp4"
-    assert plans[1]["collage_broll"] is True
-    assert manifest["items"][0]["placed_scene_id"] == "scene-02"
+    assert plans[0]["collage_broll"] is True
+    assert plans[0]["collage_src"] == "../collage_broll/clip.mp4"
+    assert "collage_broll" not in plans[1]
+    assert manifest["items"][0]["placed_scene_id"] == "scene-01"
 
 
 def test_generate_rejects_procedural_imitation_when_web_video_fails(tmp_path: Path):

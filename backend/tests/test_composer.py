@@ -65,12 +65,12 @@ def test_collage_planning_respects_existing_media_and_explicit_quantity():
     plans = [{'id': 'story-one', 'archetype': 'footage', 'footage_src': 'actual.mp4'}]
     original = copy.deepcopy(board)
     available = composer._available_collage_storyboard(board, plans, None)
-    assert [scene['id'] for scene in available['scenes']] == ['story-two']
+    assert [scene['id'] for scene in available['scenes']] == ['story-one', 'story-two']
     assert board == original
-    with pytest.raises(RuntimeError, match='2 clips requested but only 1'):
-        composer._available_collage_storyboard(board, plans, 2)
+    with pytest.raises(RuntimeError, match='3 clips requested but only 2'):
+        composer._available_collage_storyboard(board, plans, 3)
     plans.append({'id': 'story-two', 'archetype': 'footage', 'footage_src': 'other.mp4'})
-    assert composer._available_collage_storyboard(board, plans, None)['scenes'] == []
+    assert len(composer._available_collage_storyboard(board, plans, None)['scenes']) == 2
 
 
 def test_verified_orpheus_chunks_define_exact_program_segments(tmp_path: Path):

@@ -36,6 +36,7 @@ from backend.pipeline import (
     footage,
     intros,
     music,
+    media_shots,
     multimodal_review,
     news_images,
     news_webpages,
@@ -347,7 +348,7 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
                 if key.startswith("news_image"):
                     plan.pop(key, None)
         for key in tuple(plan):
-            if key.startswith("news_webpage"):
+            if key.startswith("news_webpage") or key == "media_shots":
                 plan.pop(key, None)
         recovered.append(plan)
     return recovered
@@ -1112,6 +1113,7 @@ def _finalize_quality_report(
         alignment.get("passed") is True
         and visual_grounding.get("passed") is True
         and multimodal_passed
+        and report.get("visual_coverage", {}).get("passed", True) is True
     )
     warnings = _quality_warnings(
         alignment,
@@ -1161,6 +1163,7 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
         scene_id = str(plan.get("id") or "")
         required = [
             str(plan.get("footage_src") or ""),
+            str(plan.get("collage_src") or ""),
             str(plan.get("news_webpage_src") or ""),
             str(plan.get("news_image_src") or ""),
             str(plan.get("intro_logo_src") or ""),
@@ -1184,6 +1187,13 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
         except OSError as exc:
             failures.append(f"{scene_id}: unreadable composition ({exc})")
             continue
+        if plan.get("media_shots"):
+            try:
+                media_shots.assert_rendered_shots(plan, html)
+            except (ValueError, TypeError, KeyError) as exc:
+                failures.append(f"{scene_id}: {exc}")
+            # The shot renderer canonicalizes project-relative asset paths.
+            required = [value if value.startswith("../") else "../" + value for value in required]
         missing = [source for source in required if f'src="{source}"' not in html]
         if missing:
             failures.append(f"{scene_id}: missing {', '.join(missing)}")
@@ -1195,16 +1205,15 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
 
 
 def _available_collage_storyboard(board: dict, plans: list[dict], count: int | None) -> dict:
-    """Plan generated media only where it can actually be placed."""
-    occupied = {str(plan.get("id")) for plan in plans
-                if plan.get("archetype") == "footage" and plan.get("footage_src")}
-    scenes = [scene for scene in board.get("scenes", [])
-              if str(scene.get("id")) not in occupied
-              and scene.get("program_segment_kind") not in {"opening", "closing"}]
+    """Expose same-story footage to the collage editor without reserving scenes."""
+    by_id = {str(plan.get("id")): plan for plan in plans}
+    scenes = [{**scene, "available_public_footage": by_id.get(str(scene.get("id")), {}).get("footage_sequence", [])}
+              for scene in board.get("scenes", [])
+              if scene.get("program_segment_kind") not in {"opening", "closing"}]
     if count is not None and count > len(scenes):
         raise RuntimeError(
             f"Collage B-roll placement unavailable: {count} clips requested but only "
-            f"{len(scenes)} narration scenes remain after public footage and program bookends"
+            f"{len(scenes)} narration scenes remain after program bookends"
         )
     return {**board, "scenes": scenes}
 
@@ -1221,7 +1230,9 @@ def _review_retry_fingerprint(directory: Path, request: dict) -> str:
     paths.update(Path(__file__).parent / name for name in (
         "scene_kit.py", "assembler.py", "storyboard.py", "intros.py", "outros.py",
         "composer.py", "news_images.py", "collage_broll.py", "visual_plan.py",
+        "media_shots.py",
     ))
+    paths.add(config.PROMPTS_DIR / "media_shots.txt")
     evidence = {
         "request": request,
         "render": [config.RENDER_FPS, config.RENDER_QUALITY, config.RENDER_WORKERS],
@@ -1566,9 +1577,9 @@ async def compose_video(
         )
 
     final_public_footage = sum(
-        max(1, len(plan.get("footage_sequence") or []))
+        len(plan.get("footage_sequence") or []) or (0 if plan.get("collage_broll") else 1)
         for plan in plans
-        if plan.get("archetype") == "footage" and not plan.get("collage_broll")
+        if plan.get("archetype") == "footage"
     )
     final_collages = sum(1 for plan in plans if plan.get("collage_broll"))
     if requested_footage and final_public_footage != requested_footage:
@@ -1579,11 +1590,13 @@ async def compose_video(
             "An enabled Public Footage request may not silently fall back to template visuals."
         )
     if collage_broll_enabled or force_collage_opening:
-        if final_collages != planned_collages:
+        if final_collages != planned_collages and (requested_collages is not None or force_collage_opening):
             raise RuntimeError(
                 "Collage B-roll placement incomplete: "
                 f"{final_collages}/{planned_collages} planned clips reached final scenes"
             )
+        if final_collages != planned_collages:
+            emit(f"Collage: {final_collages}/{planned_collages} available; AI shot editor will replan from actual assets")
 
     news_image_inventory = {"attached": 0, "placement_modes": {"inline": 0, "fullscreen": 0}}
     news_image_quality = {
@@ -1699,6 +1712,10 @@ async def compose_video(
     )
 
     _enforce_program_opening_copy(plans, board)
+    shot_report = await media_shots.plan_media_shots(
+        plans, board, output_dir_path, provider_id=provider_id,
+        ai_endpoint=ai_endpoint, ai_model=ai_model, log=emit,
+    )
     scene_plans = list(plans)
     visual_grounding = visual_plan.visual_grounding_report(scene_plans, board)
     quality_report = {
@@ -1726,6 +1743,7 @@ async def compose_video(
         "multimodal": {"status": "pending", "passed": False},
         "background_music": {"enabled": bool(background_music_path), "passed": None},
         "news_images": news_image_quality,
+        "visual_coverage": shot_report,
     }
     quality_report_path = output_dir_path / "av_sync_report.next.json"
     quality_report_path.unlink(missing_ok=True)

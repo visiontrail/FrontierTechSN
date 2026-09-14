@@ -402,6 +402,7 @@ class ScenePlan:
     footage_kind: str = ""
     footage_credit: str = ""
     footage_sequence: tuple[dict, ...] = ()
+    media_shots: tuple[dict, ...] = ()
     collage_broll: bool = False
     collage_hold_src: str = ""
     collage_target_duration_seconds: float = 0.0
@@ -475,6 +476,7 @@ class ScenePlan:
                 for item in data.get("footage_sequence") or []
                 if isinstance(item, dict) and str(item.get("src") or "").strip()
             ),
+            media_shots=tuple(dict(item) for item in data.get("media_shots") or []),
             collage_broll=bool(data.get("collage_broll")),
             collage_hold_src=str(data.get("collage_hold_src") or ""),
             collage_target_duration_seconds=float(
@@ -1841,8 +1843,126 @@ _RENDERERS = {
 }
 
 
+def _render_media_shots(plan: ScenePlan) -> str:
+    """Render AI-ordered shots, never a video overlay left on an empty plate."""
+    accent = accent_hex(plan.accent, plan.theme)
+    ink, bg = plan.theme.ink, plan.theme.bg
+    light = plan.theme.name in {"swiss", "shanshui"}
+    label_ink = ink if light else accent
+    card = _rgba(ink, .065 if light else .09)
+    sid = plan.id
+    css = f"""
+  #{sid} .shot-media {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+  #{sid} .shot-media.article {{ object-fit:contain; background:{bg}; padding:48px 100px 160px; box-sizing:border-box; }}
+  #{sid} .shot-panel {{ position:absolute; inset:0; padding:76px 110px 180px; box-sizing:border-box; font-family:{SANS}; }}
+  #{sid} .shot-panel.editorial {{ background:{bg}; color:{ink}; display:flex; flex-direction:column; justify-content:center; }}
+  #{sid} .shot-panel.visual {{ color:#F5F2EA; background:linear-gradient(0deg,rgba(9,11,19,.92),rgba(9,11,19,0) 76%); display:flex; flex-direction:column; justify-content:flex-end; }}
+  #{sid} .shot-kicker {{ font-size:25px; text-transform:uppercase; letter-spacing:.18em; font-weight:700; margin-bottom:22px; color:{label_ink}; }}
+  #{sid} .visual .shot-kicker {{ color:#F5F2EA; }}
+  #{sid} .shot-title {{ font-size:{headline_size(plan.headline, base=86, floor=54)}px; line-height:1.08; font-weight:800; letter-spacing:-.025em; max-width:1530px; margin:0 0 35px; }}
+  #{sid} .visual .shot-title {{ max-width:1400px; margin-bottom:24px; font-size:66px; }}
+  #{sid} .shot-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px; }}
+  #{sid} .shot-grid.cards .shot-card:last-child:nth-child(odd) {{ grid-column:1 / -1; }}
+  #{sid} .shot-card {{ position:relative; background:{card}; border-left:5px solid {accent}; padding:30px 34px; min-height:126px; display:flex; align-items:center; gap:24px; }}
+  #{sid} .shot-number {{ color:{label_ink}; font-family:Georgia,serif; font-size:54px; font-variant-numeric:tabular-nums; flex-shrink:0; }}
+  #{sid} .shot-copy {{ font-size:34px; line-height:1.3; overflow-wrap:anywhere; }}
+  #{sid} .shot-card.dense .shot-copy {{ font-size:28px; }}
+  #{sid} .shot-grid.focus {{ grid-template-columns:1fr; }}
+  #{sid} .focus .shot-card {{ padding:42px; min-height:180px; }}
+  #{sid} .focus .shot-copy {{ font-size:46px; max-width:1400px; }}
+  #{sid} .focus .dense .shot-copy {{ font-size:34px; }}
+  #{sid} .shot-grid.split {{ grid-template-columns:1.25fr 1fr; }}
+  #{sid} .visual .shot-grid {{ display:block; max-width:1370px; }}
+  #{sid} .visual .shot-card {{ padding:0; margin-top:16px; border:0; min-height:0; background:none; }}
+  #{sid} .visual .shot-number {{ display:none; }}
+  #{sid} .shot-credit {{ position:absolute; top:34px; right:48px; max-width:1100px; border-radius:16px; padding:9px 18px; background:rgba(9,11,19,.82); color:#F5F2EA; font-size:20px; }}
+  #{sid} .shot-rule {{ height:5px; width:140px; background:{accent}; margin-bottom:24px; transform-origin:left; }}
+  #{sid} .shot-orbit {{ position:absolute; width:820px; height:820px; right:-280px; top:-340px; border:95px solid {_rgba(accent,.17)}; border-radius:50%; pointer-events:none; }}
+  #{sid} .shot-wipe {{ position:absolute; inset:0; background:{accent}; pointer-events:none; }}
+"""
+    if plan.frame.orientation == "portrait":
+        css += f"""
+  #{sid} .shot-panel {{ padding:130px 64px 300px; }}
+  #{sid} .shot-title, #{sid} .visual .shot-title {{ font-size:66px; }}
+  #{sid} .shot-grid, #{sid} .shot-grid.split {{ grid-template-columns:1fr; }}
+  #{sid} .shot-credit {{ max-width:860px; right:35px; top:65px; }}
+"""
+    markup = []
+    timeline = []
+    for index, shot in enumerate(plan.media_shots):
+        prefix = f"{sid}-shot-{index + 1}"
+        start, duration = float(shot["start"]), float(shot["duration"])
+        kind = shot["kind"]
+        editorial = kind == "editorial"
+        # Adjacent shots use alternating lanes. This keeps exact centisecond
+        # cuts intact even when the CLI adds decimal times as binary floats.
+        media_track = 2 * (index % 2)
+        panel_track = media_track + 1
+        timing = f'data-start="{start:.2f}" data-duration="{duration:.2f}"'
+        if not editorial:
+            video = kind in {"public_footage", "paper_collage"}
+            tag = "video" if video else "img"
+            extra = (f'muted playsinline data-media-start="{float(shot.get("source_start", 0)):.2f}"'
+                     if video else 'alt=""')
+            markup.append(f'<{tag} id="{prefix}-media" class="clip shot-media {kind}" '
+                          f'src="{_esc(shot["src"])}" {timing} data-track-index="{media_track}" '
+                          f'{extra} crossorigin="anonymous">' + ("</video>" if video else ""))
+            if not video:
+                timeline.append(f'inAt("#{prefix}-media", {{scale:1}}, {{scale:1.035, duration:{duration:.2f}, ease:"none"}}, {start:.2f});')
+        texts = [text for text in shot["copy"] if text != plan.headline]
+        if not texts and editorial:
+            texts = list(shot["copy"])
+        title = plan.headline if editorial else shot["copy"][0]
+        if not editorial:
+            texts = shot["copy"][1:]
+        cards = "".join(
+            f'<div class="shot-card {"dense" if len(text) > 135 else ""}" id="{prefix}-card-{i}">'
+            f'<span class="shot-number">{i + 1:02d}</span><div class="shot-copy">{_esc(text)}</div></div>'
+            for i, text in enumerate(texts)
+        )
+        layout = shot.get("layout", "cards") if len(texts) > 1 else "focus"
+        markup.append(
+            f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}" '
+            f'{timing} data-track-index="{panel_track}">'
+            + (f'<div class="shot-orbit" id="{prefix}-orbit" data-layout-ignore></div>' if editorial else "")
+            + f'<div class="shot-kicker" id="{prefix}-kicker">{_esc(plan.kicker)}</div>'
+            + f'<div class="shot-rule" id="{prefix}-rule"></div>'
+            + f'<div class="shot-title" id="{prefix}-title">{_esc(title)}</div>'
+            + f'<div class="shot-grid {layout}">{cards}</div>'
+            + (f'<div class="shot-credit">{_esc(shot["credit"])}</div>' if shot.get("credit") else "")
+            + '</div>'
+        )
+        # Clip visibility is owned by HyperFrames. Animate inner content only;
+        # no timed parent wraps a video and no video seeks beyond its source.
+        entrance = min(.55, duration * .3)
+        timeline += [
+            f'inAt("#{prefix}-rule", {{scaleX:.15}}, {{scaleX:1,duration:{entrance:.2f},ease:"power3.out"}}, {start + .08:.2f});',
+            f'inAt("#{prefix}-kicker", {{x:-20}}, {{x:0,duration:{entrance:.2f},ease:"sine.out"}}, {start + .1:.2f});',
+            f'inAt("#{prefix}-title", {{y:24}}, {{y:0,duration:{entrance:.2f},ease:"expo.out"}}, {start + .1:.2f});',
+        ]
+        for i in range(len(texts)):
+            timeline.append(f'inAt("#{prefix}-card-{i}", {{x:35,opacity:.35}}, {{x:0,opacity:1,duration:{entrance:.2f},ease:"power2.out"}}, {start + .12 + i * .06:.2f});')
+        if editorial:
+            timeline.append(f'inAt("#{prefix}-orbit", {{scale:.85}}, {{scale:1.08,duration:{duration:.2f},ease:"none"}}, {start:.2f});')
+        if index:
+            # A cover transition spans the cut; outgoing content remains intact
+            # until the source ends, so even the boundary frame has content.
+            half = min(.18, float(plan.media_shots[index - 1]["duration"]) / 3, duration / 3)
+            at = max(0, start - half)
+            markup.append(f'<div id="{prefix}-wipe" class="clip shot-wipe" data-start="{at:.3f}" data-duration="{half * 2:.3f}" data-track-index="4" data-layout-ignore></div>')
+            if shot.get("transition") == "iris":
+                timeline.append(f'inAt("#{prefix}-wipe", {{clipPath:"circle(0% at 50% 50%)"}}, {{clipPath:"circle(80% at 50% 50%)",duration:{half:.3f},ease:"power2.in"}}, {at:.3f});')
+                timeline.append(f'outAt("#{prefix}-wipe", {{clipPath:"circle(0% at 50% 50%)",duration:{half:.3f},ease:"power2.out"}}, {start:.2f});')
+            else:
+                timeline.append(f'inAt("#{prefix}-wipe", {{xPercent:-100}}, {{xPercent:0,duration:{half:.3f},ease:"power2.in"}}, {at:.3f});')
+                timeline.append(f'outAt("#{prefix}-wipe", {{xPercent:100,duration:{half:.3f},ease:"power2.out"}}, {start:.2f});')
+    return _shell(plan, css=css, markup="\n".join(markup), timeline="\n".join(timeline), wash=(60, 40))
+
+
 def render_scene(plan: ScenePlan) -> str:
     """Full sub-composition HTML for one scene."""
+    if plan.media_shots:
+        return _render_media_shots(plan)
     if plan.news_webpage_src and (plan.footage_src or plan.news_image_src):
         return _render_news_webpage_overlay(plan)
     if plan.news_image_src and plan.news_image_mode == "inline":

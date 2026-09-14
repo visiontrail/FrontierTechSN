@@ -826,6 +826,16 @@ def visual_grounding_report(plans: list[dict], storyboard: dict) -> dict:
                 else "footage lacked two distinctive narration matches"
             )
         for item in plan.get("footage_sequence") or []:
+            # Mixed scenes must satisfy BOTH collage QA and public-footage
+            # grounding; the collage branch must not bypass the latter.
+            if plan.get("collage_broll") and (
+                len(plan.get("footage_match_terms") or []) < 2
+                or float(plan.get("footage_confidence") or 0) < 0.65
+                or (plan.get("footage_script_match_terms") is not None
+                    and len(plan["footage_script_match_terms"]) < 2)
+            ):
+                grounded = False
+                reason = "mixed scene public footage lacked its grounding proof"
             excerpt = " ".join(str(item.get("script_excerpt") or "").casefold().split())
             owners = {
                 other["id"] for other in storyboard.get("scenes", [])

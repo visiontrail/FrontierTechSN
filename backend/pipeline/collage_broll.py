@@ -31,7 +31,7 @@ SOURCE_COMMIT = "a1a4ee2e2abf7d44e460026b706d0c72c2cf8a91"
 CLIP_FPS = 24
 MOTION_SAMPLE_FPS = 4
 CACHE_CONTRACT_VERSION = 3
-SELECTION_POLICY_VERSION = 6
+SELECTION_POLICY_VERSION = 7
 PLAYBACK_POLICY = "play_once_then_hold_last_frame"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -280,6 +280,7 @@ def _planning_fingerprint(
                     "scene_id": str(scene.get("id") or ""),
                     "start": _seconds(scene.get("start")),
                     "duration": _seconds(scene.get("duration")),
+                    "available_public_footage": scene.get("available_public_footage", []),
                     # Keep the complete narration here even though the planner
                     # prompt is bounded. A semantic change anywhere in a scene
                     # must invalidate the selection/design cache.
@@ -760,7 +761,8 @@ async def plan_specs(
         + (
             "Choose only the beats that genuinely benefit from a generated collage. Decide the "
             "quantity from the content; there is no target count or quota. Return fewer or more "
-            "items as the story requires, and leave concrete footage/photo beats unselected. "
+            "items as the story requires. Public footage and collage can share the SAME news "
+            "scene: choose complementary visual beats even when footage is available. "
             if automatic
             else f"Select exactly {target_count} visually rich beats from the supplied candidate scenes, "
         )
@@ -777,7 +779,8 @@ async def plan_specs(
                 "scene_id": scene["id"],
                 "start": scene.get("start"),
                 "duration": scene.get("duration"),
-                "narration": str(scene.get("text") or "")[:700],
+                "narration": str(scene.get("text") or ""),
+                "available_public_footage": scene.get("available_public_footage", []),
                 "keywords": scene.get("keywords") or [],
             }
             for scene in scenes
@@ -830,47 +833,7 @@ async def plan_specs(
                     selected_ids.append(scene_id)
             selected_ids = selected_ids[:target_count]
 
-        # Collage is the correct treatment for abstract narration that cannot
-        # support a strictly grounded licensed still.  If the agent selected a
-        # concrete named scene while leaving such an abstract scene outside,
-        # swap the most image-rich selected scene out.  This preserves the
-        # configured visual inventory without forcing the image scout to
-        # invent or weakly match a subject.
-        from backend.pipeline import news_images
-
-        grounded_counts = {
-            str(scene["id"]): news_images.grounded_visual_subject_count(scene)
-            for scene in scenes
-        }
-        protected = {str(scenes[0]["id"])} if force_opening else set()
-        missing_abstract = [
-            str(scene["id"])
-            for scene in scenes
-            if not grounded_counts[str(scene["id"])]
-            and str(scene["id"]) not in selected_ids
-        ]
-        for abstract_id in missing_abstract:
-            replaceable = [
-                scene_id
-                for scene_id in selected_ids
-                if scene_id not in protected and grounded_counts.get(scene_id, 0) > 0
-            ]
-            if not replaceable:
-                break
-            victim = max(
-                replaceable,
-                key=lambda scene_id: (
-                    grounded_counts.get(scene_id, 0),
-                    -selected_ids.index(scene_id),
-                ),
-            )
-            selected_ids[selected_ids.index(victim)] = abstract_id
-            _log(
-                log,
-                "Collage B-roll agent: reserved "
-                f"{abstract_id} for metaphor treatment and left {victim} "
-                "available for a strictly grounded licensed still",
-            )
+        # Preserve AI choices; existing footage does not reserve a whole story.
         choices = sorted(
             (allowed[scene_id] for scene_id in selected_ids),
             key=lambda scene: float(scene.get("start") or 0),
@@ -1857,12 +1820,6 @@ async def generate_collage_broll(
 def attach_collage(plans: list[dict], manifest: dict | None, task_dir: Path) -> int:
     """Promote successful generated items to clean, full-bleed scene plates."""
     by_id = {plan.get("id"): plan for plan in plans}
-    plan_positions = {plan.get("id"): index for index, plan in enumerate(plans)}
-    occupied = {
-        str(plan.get("id"))
-        for plan in plans
-        if plan.get("archetype") == "footage" and plan.get("footage_src")
-    }
     attached = 0
     for item in (manifest or {}).get("items") or []:
         if item.get("status") != "ready":
@@ -1873,26 +1830,10 @@ def attach_collage(plans: list[dict], manifest: dict | None, task_dir: Path) -> 
         path = task_dir / raw
         if not plan or not raw or not path.is_file():
             continue
-        already_attached = bool(
-            plan.get("collage_broll")
-            and str(plan.get("collage_source_scene_id") or "") == preferred_id
-        )
-        if preferred_id in occupied and not already_attached:
-            preferred_position = plan_positions.get(preferred_id, 0)
-            candidates = [
-                candidate
-                for candidate in plans
-                if str(candidate.get("id") or "") not in occupied
-            ]
-            if not candidates:
-                continue
-            plan = min(
-                candidates,
-                key=lambda candidate: abs(
-                    plan_positions.get(str(candidate.get("id") or ""), 0)
-                    - preferred_position
-                ),
-            )
+        public_footage = bool(plan.get("footage_sequence") or (
+            plan.get("footage_src") and (not plan.get("collage_broll")
+                                         or plan.get("footage_src") != plan.get("collage_src"))
+        ))
         placed_scene_id = str(plan.get("id") or "")
         hold_raw = str(item.get("still_path") or "")
         hold_path = task_dir / hold_raw
@@ -1911,9 +1852,10 @@ def attach_collage(plans: list[dict], manifest: dict | None, task_dir: Path) -> 
                 "archetype": "footage",
                 # Scene files live in compositions/, so media stored relative
                 # to the render-project root needs one parent hop.
-                "footage_src": f"../{raw}",
+                "footage_src": plan["footage_src"] if public_footage else f"../{raw}",
+                "collage_src": f"../{raw}",
                 "footage_kind": "video",
-                "footage_credit": "",
+                "footage_credit": plan.get("footage_credit", "") if public_footage else "",
                 "collage_broll": True,
                 "collage_source_scene_id": preferred_id,
                 "collage_placed_scene_id": placed_scene_id,
@@ -1928,7 +1870,6 @@ def attach_collage(plans: list[dict], manifest: dict | None, task_dir: Path) -> 
             }
         )
         item["placed_scene_id"] = placed_scene_id
-        occupied.add(placed_scene_id)
         attached += 1
     if manifest is not None:
         manifest["placed_count"] = attached
