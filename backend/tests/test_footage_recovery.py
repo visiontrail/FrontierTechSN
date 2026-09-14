@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -646,4 +647,32 @@ def test_cancelling_preview_batch_drains_downloads_before_returning(tmp_path):
                 await job
         assert not active
         ask.assert_not_awaited()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('stop', ['cancel', 'timeout'])
+def test_stopped_footage_command_reaps_its_process(stop):
+    async def run():
+        created = []
+        ready = asyncio.Event()
+        spawn = asyncio.create_subprocess_exec
+
+        async def track(*args, **kwargs):
+            process = await spawn(*args, **kwargs)
+            created.append(process)
+            ready.set()
+            return process
+
+        with patch.object(web_footage.asyncio, 'create_subprocess_exec', side_effect=track):
+            job = asyncio.create_task(web_footage._run_command(
+                [sys.executable, '-c', 'import time; time.sleep(30)'],
+                timeout=0.05 if stop == 'timeout' else 30,
+            ))
+            await asyncio.wait_for(ready.wait(), timeout=2)
+            if stop == 'cancel':
+                job.cancel()
+            with pytest.raises(asyncio.CancelledError if stop == 'cancel' else web_footage.WebFootageError):
+                await job
+        assert created[0].returncode is not None
+        assert created[0].returncode != 0
     asyncio.run(run())

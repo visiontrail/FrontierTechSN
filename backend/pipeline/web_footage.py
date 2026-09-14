@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -97,14 +98,23 @@ async def _run_command(
         env=_tool_environment(),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             process.communicate(), timeout=timeout
         )
-    except TimeoutError as exc:
-        process.kill()
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        try:
+            if os.name == 'posix':
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
         await process.communicate()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         raise WebFootageError(
             f"Command timed out after {timeout}s: {Path(command[0]).name}"
         ) from exc
