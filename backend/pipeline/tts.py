@@ -4198,12 +4198,14 @@ def _pocket_synthesis_text(text: str) -> str:
 def _pocket_pronunciation_retry_text(
     synthesis_text: str, source_text: str, verification_dir: Path,
 ) -> str:
-    """Separate a lost plural ending from a following s-sound on resynthesis.
+    """Add a local pause for a corroborated pronunciation failure.
 
     Two failed decodes of the same utterance must agree on exactly one lost
     final s (for example, signals shaping -> signal shaping). This is only a
     provider punctuation hint: the original words and all acoustic gates are
-    unchanged, and the new waveform must pass independent verification.
+    unchanged, and the new waveform must pass independent verification. A
+    single whole word rejected by the shared-omission guard can likewise get
+    a pause before it; the saved omission must match a fresh transcript check.
     """
     try:
         evidence = json.loads((verification_dir / "llm_asr_adjudication.json").read_text())
@@ -4211,6 +4213,22 @@ def _pocket_pronunciation_retry_text(
         if evidence.get("status") != "rejected" or request["source_text"] != source_text:
             return synthesis_text
         expected = _lexical_tokens(source_text)
+        missing = evidence.get("shared_omitted_source_token_indexes")
+        if (isinstance(missing, list) and len(missing) == 1
+                and type(missing[0]) is int and 0 < missing[0] < len(expected) - 1
+                and missing == _shared_transcript_omissions(
+                    expected, request["normal_speed_transcript"], request["slower_speed_transcript"],
+                )):
+            index = missing[0]
+            boundary = re.compile(
+                rf"\b({re.escape(expected[index - 1])})\s+"
+                rf"({re.escape(expected[index])})\s+(?={re.escape(expected[index + 1])}\b)",
+                re.I,
+            )
+            if len(list(boundary.finditer(synthesis_text))) == 1:
+                repaired = boundary.sub(r"\1, \2 ", synthesis_text)
+                if _lexical_tokens(repaired) == expected:
+                    return repaired
         observed = _lexical_tokens(request["normal_speed_transcript"])
         slower = _lexical_tokens(request["slower_speed_transcript"])
         if len(expected) != len(observed) or observed != slower:
@@ -4309,7 +4327,7 @@ async def _generate_pocket_tts(
                 synthesis_text, chunk, output_dir_path / "verification" / input_path.stem,
             )
             if retry_text != synthesis_text:
-                emit(f"{name}: separating a previously lost plural ending for resynthesis; canonical words unchanged")
+                emit(f"{name}: adding an evidence-based pronunciation pause for resynthesis; canonical words unchanged")
                 synthesis_text = retry_text
             if _lexical_tokens(synthesis_text) != _lexical_tokens(chunk):
                 raise TtsIntegrityError("Pocket TTS pronunciation changed source tokens")

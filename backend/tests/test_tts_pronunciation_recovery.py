@@ -72,3 +72,30 @@ def test_retry_hint_preserves_existing_number_pronunciation(tmp_path):
     repaired = tts._pocket_pronunciation_retry_text(synthesis, source, tmp_path)
     assert "forty-four signals, shaping" in repaired
     assert tts._lexical_tokens(repaired) == tts._lexical_tokens(source)
+
+
+@pytest.mark.parametrize('defect', [None, 'no_omission_marker', 'wrong_index', 'recovered_decode',
+                                  'wrong_source', 'multiple_omissions', 'ambiguous_boundary'])
+def test_shared_word_omission_gets_only_a_corroborated_local_pause(tmp_path, defect):
+    source = 'The Post reports a plan at the US National Security Agency.'
+    observed = source.replace('US National', 'U .S.')
+    missing = [tts._lexical_tokens(source).index('national')]
+    if defect == 'ambiguous_boundary':
+        source += ' The US National Security Agency issued a statement.'
+        observed = source.replace('US National', 'U .S.', 1)
+    elif defect == 'multiple_omissions':
+        observed = observed.replace('Post ', '')
+        missing = [1, missing[0]]
+    evidence(tmp_path, source, observed, source if defect == 'recovered_decode' else observed)
+    path = tmp_path / 'llm_asr_adjudication.json'
+    record = json.loads(path.read_text())
+    if defect != 'no_omission_marker':
+        record['shared_omitted_source_token_indexes'] = [1] if defect == 'wrong_index' else missing
+    if defect == 'wrong_source':
+        record['request']['source_text'] = 'An older narration.'
+    path.write_text(json.dumps(record))
+    repaired = tts._pocket_pronunciation_retry_text(source, source, tmp_path)
+    assert repaired == (source.replace('US National', 'US, National') if defect is None else source)
+    assert tts._lexical_tokens(repaired) == tts._lexical_tokens(source)
+    if defect is None:
+        assert tts._shared_transcript_omissions(tts._lexical_tokens(source), observed, observed) == missing
