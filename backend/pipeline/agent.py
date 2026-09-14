@@ -26,6 +26,7 @@ from collections.abc import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from backend import config, skills_admin
+from backend.pipeline.timing import span, timed
 from backend.provider_credentials import redact_api_keys
 
 logger = logging.getLogger(__name__)
