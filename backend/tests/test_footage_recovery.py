@@ -561,3 +561,89 @@ def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_
     result = json.loads((tmp_path / 'footage/manifest.json').read_text())
     assert result['status'] == 'review_unavailable'
     assert not any(error.get('source_page_url') for error in result['errors'])
+
+
+def test_preview_preparation_overlaps_two_sources_and_isolates_failures(tmp_path):
+    async def run():
+        active = set()
+        peak = 0
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def prepare(candidate, excerpt, task_dir):
+            nonlocal peak
+            url = candidate['source_page_url']
+            assert url not in active
+            active.add(url)
+            peak = max(peak, len(active))
+            if len(active) == 2:
+                started.set()
+            try:
+                await release.wait()
+                if url == 'failed':
+                    raise web_footage.WebFootageError('download failed')
+                folder = task_dir / url
+                folder.mkdir(exist_ok=True)
+                sheet = folder / 'sheet.jpg'
+                Image.new('RGB', (160, 90), 'blue').save(sheet)
+                return {'folder': folder, 'sheet': sheet,
+                        'intervals': [{'start_seconds': 5, 'end_seconds': 20}]}
+            finally:
+                active.remove(url)
+
+        async def review(prompt, sheet, prepared, **kwargs):
+            assert not active
+            assert list(prepared) == [0, 2, 3]
+            return {'results': [
+                {'candidate_id': i, 'image_received': True, 'suitable': True,
+                 'confidence': .9, 'selected_window': 0,
+                 'visible_content': f'Actual content {i}', 'reason': 'Relevant'}
+                for i in prepared
+            ]}
+
+        requests = [({'source_page_url': url}, f'narration {i}')
+                    for i, url in enumerate(['same', 'failed', 'same', 'last'])]
+        with (patch.object(web_footage, '_prepare_candidate_preview', side_effect=prepare),
+              patch.object(web_footage, '_request_preview_review', side_effect=review) as ask):
+            job = asyncio.create_task(web_footage._analyze_preview_batch(requests, tmp_path))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                assert peak == 2
+            finally:
+                release.set()
+            results = await job
+        assert peak == 2
+        assert ask.await_count == 1
+        assert str(results[1]) == 'download failed'
+        assert [results[i]['visible_content'] for i in (0, 2, 3)] == [
+            'Actual content 0', 'Actual content 2', 'Actual content 3',
+        ]
+    asyncio.run(run())
+
+
+def test_cancelling_preview_batch_drains_downloads_before_returning(tmp_path):
+    async def run():
+        active = set()
+        started = asyncio.Event()
+
+        async def prepare(candidate, *args):
+            url = candidate['source_page_url']
+            active.add(url)
+            if len(active) == 2:
+                started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                active.remove(url)
+
+        with (patch.object(web_footage, '_prepare_candidate_preview', side_effect=prepare),
+              patch.object(web_footage, '_request_preview_review', AsyncMock()) as ask):
+            job = asyncio.create_task(web_footage._analyze_preview_batch(
+                [({'source_page_url': str(i)}, 'narration') for i in range(4)], tmp_path))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            job.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await job
+        assert not active
+        ask.assert_not_awaited()
+    asyncio.run(run())

@@ -45,6 +45,11 @@ is reduced.
   Explicit single-route probes bypass this ephemeral health observation, and
   content failures or partially committed output cannot create it. Provider
   pacing and downstream quality checks are unchanged.
+- Public-footage batches prepare up to two independent source previews at once.
+  Duplicate source URLs remain serial to protect their shared cache files.
+  Failed downloads retain their own candidate index; successful candidates still
+  require the same explicit pixel-based verdict. Cancellation drains every
+  preparation job before returning, and browser requests remain serial and paced.
 
 ## Measurement protocol
 

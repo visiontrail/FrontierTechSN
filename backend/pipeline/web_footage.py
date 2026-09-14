@@ -973,18 +973,33 @@ async def _analyze_preview_batch(
     """Review up to four separately labelled candidates in one paced request."""
     from PIL import Image, ImageDraw, ImageFont
 
-    prepared = []
     results: list[dict | Exception] = [
         WebFootageReviewUnavailable("Missing or ambiguous batch verdict", failure_kind="response_contract")
         for _ in requests
     ]
-    for index, (candidate, excerpt) in enumerate(requests):
+    slots = asyncio.Semaphore(2)
+    source_locks = {candidate['source_page_url']: asyncio.Lock() for candidate, _ in requests}
+
+    async def prepare(index, candidate, excerpt):
         try:
-            _emit(log, f"Web footage preview {index + 1}/{len(requests)}: sampling {candidate.get('title') or candidate['source_page_url']}")
-            item = await _prepare_candidate_preview(candidate, excerpt, task_dir)
-            prepared.append((index, item))
+            # Candidates have separate cache directories. Serialize duplicate
+            # URLs so two narration bindings never write the same preview.
+            async with source_locks[candidate['source_page_url']], slots:
+                _emit(log, f"Web footage preview {index + 1}/{len(requests)}: sampling {candidate.get('title') or candidate['source_page_url']}")
+                return index, await _prepare_candidate_preview(candidate, excerpt, task_dir)
         except Exception as exc:
             results[index] = exc
+            return None
+
+    jobs = [asyncio.create_task(prepare(index, candidate, excerpt))
+            for index, (candidate, excerpt) in enumerate(requests)]
+    try:
+        prepared = [item for item in await asyncio.gather(*jobs) if item is not None]
+    except BaseException:
+        for job in jobs:
+            job.cancel()
+        await asyncio.gather(*jobs, return_exceptions=True)
+        raise
     if not prepared:
         return results
     key = hashlib.sha256(json.dumps(requests, sort_keys=True).encode()).hexdigest()[:16]
