@@ -566,9 +566,14 @@ def test_legacy_normalized_clip_metadata_uses_the_saved_render_file(tmp_path):
     assert path.read_bytes() == b"render-video"
 
 
-def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_path):
+@pytest.mark.parametrize('repaired, legacy_cache', [(False, True), (True, True), (True, False)])
+def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_path, repaired, legacy_cache):
     candidates = [{'source_page_url': f'https://youtu.be/port-{i}', 'title': 'Los Angeles port containers', 'duration_seconds': 90} for i in range(3)]
-    retained = {**candidates[2], 'visual_query': 'Los Angeles port containers', 'visual_purpose': ''}
+    original_query = 'Los Angeles port containers'
+    current_query = 'Los Angeles container loading' if repaired else original_query
+    retained = {**candidates[2], 'visual_query': original_query, 'visual_purpose': ''}
+    if not legacy_cache:
+        retained.update(visual_query='Los Angeles dockside cranes', visual_plan_query=original_query)
     cache_path = tmp_path / 'footage/evidence/previews/retained/preview-cache.json'
     cache_path.parent.mkdir(parents=True)
     cache_path.write_text(json.dumps({'candidate': retained}))
@@ -579,12 +584,16 @@ def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_
           pytest.raises(web_footage.WebFootageReviewUnavailable, match='Review offline')):
         asyncio.run(web_footage.supplement_web_footage(
             task_dir=tmp_path, manifest={'provider_id': 'youtube-web', 'clips': [], 'errors': [], 'url_inspection_unavailable': True},
-            query_plan=[{'query': 'Los Angeles port containers', 'script_excerpt': 'A Southern California port.'}],
+            query_plan=[{'query': current_query, 'plan_query': original_query,
+                         'script_excerpt': 'A Southern California port.'}],
             target_total=1, orientation='landscape', script='A Southern California port.',
         ))
     search.assert_awaited_once()
     assert len(review.await_args.args[0]) == 1
     assert review.await_args.args[0][0][0]['source_page_url'] == candidates[2]['source_page_url']
+    assert review.await_args.args[0][0][0]['visual_query'] == current_query
+    assert review.await_args.args[0][0][0]['visual_plan_query'] == original_query
+    assert review.await_args.args[0][0][1] == 'A Southern California port.'
     result = json.loads((tmp_path / 'footage/manifest.json').read_text())
     assert result['status'] == 'review_unavailable'
     assert not any(error.get('source_page_url') for error in result['errors'])

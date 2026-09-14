@@ -74,6 +74,12 @@ is reduced.
   are rejected before download and visual review, with a metadata rejection
   recorded in the manifest. A podcast mention or an audio-related topic alone
   does not bypass the ordinary pixel-review path.
+- After rejection-informed search repair, the actual-frame reviewer receives
+  the new visual search subject. The original query remains the stable shot
+  identity for recovery, with unchanged narration and purpose. Both legacy and
+  new preview caches remain reusable, but still require the current visual
+  verdict. This prevents a repaired headquarters search being judged against
+  the old financing-headline query.
 
 ## Measurement protocol
 

@@ -1235,7 +1235,7 @@ async def supplement_web_footage(
             try:
                 cached = json.loads(cache_path.read_text()).get("candidate")
                 if (isinstance(cached, dict)
-                        and cached.get("visual_query") == shot["plan_query"]
+                        and cached.get("visual_plan_query", cached.get("visual_query")) == shot["plan_query"]
                         and str(cached.get("visual_purpose") or "") == str(shot.get("purpose") or "")
                         and _load_prepared_preview(cached, cache_path.parent, task_dir) is not None):
                     cached_candidates.append(cached)
@@ -1256,7 +1256,11 @@ async def supplement_web_footage(
                 if record not in manifest.setdefault("errors", []):
                     manifest["errors"].append(record)
                 continue
-            eligible.append({**candidate, "visual_query": shot["plan_query"],
+            # A repaired search changes the proposed visible subject, while
+            # plan_query remains the stable shot identity used for recovery.
+            # Reviewing the old discovery phrase defeats that repair.
+            eligible.append({**candidate, "visual_query": shot["query"],
+                             "visual_plan_query": shot["plan_query"],
                              "visual_purpose": shot.get("purpose", "")})
         failed = {
             error.get("source_page_url") for error in manifest.get("errors", [])
