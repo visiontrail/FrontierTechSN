@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -6,6 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from backend import config
+from backend.pipeline.timing import timed
 from backend.database import update_task
 from backend.models import SourceType, TaskResponse, TaskStatus, ScriptFormat
 from backend.pipeline.extractors.youtube import extract_youtube
@@ -87,6 +89,7 @@ def task_output_dir(task: TaskResponse) -> Path:
     return Path(task.output_dir) if task.output_dir else config.OUTPUTS_DIR / task.id
 
 
+@timed("footage")
 async def _acquire_task_footage(
     task: TaskResponse,
     task_dir: Path,
@@ -128,6 +131,7 @@ async def _acquire_task_footage(
     return manifest
 
 
+@timed("thumbnail")
 async def _generate_task_thumbnail(
     task: TaskResponse,
     task_dir: Path,
@@ -151,6 +155,7 @@ async def _generate_task_thumbnail(
     return artifact
 
 
+@timed("title")
 async def _generate_task_title(
     task: TaskResponse,
     task_dir: Path,
@@ -225,6 +230,7 @@ async def _after_audio(
     await run_compose(task, log=log)
 
 
+@timed("pipeline", task_entry=True)
 async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
     task_dir = task_output_dir(task)
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -370,50 +376,46 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
     )
     publication_title = title_artifact.title
 
-    # Stage 4: use the final narration (the exact TTS input) to derive one
-    # cover-art prompt, then generate/download the image through the signed-in
-    # ChatGPT web session. Cover art is an enhancement, so a web/provider
-    # outage is recorded in thumbnail/manifest.json but never discards a valid
-    # script or forces a costly TTS retry.
-    if task.config.thumbnail_enabled:
-        task_log("Stage 4: Generating script-driven viral thumbnail")
-        try:
-            await _generate_task_thumbnail(
-                task,
-                task_dir,
-                task_log,
-                title=publication_title,
-            )
-        except Exception as exc:
-            task_log(f"Thumbnail generation could not complete; continuing without cover art: {exc}")
+    # Freeze narration before independent media branches. Browser-backed work
+    # remains serial in one branch; TTS uses the audio service and can overlap
+    # browser cooldowns without competing for its session.
+    async def prepare_media():
+        if task.config.thumbnail_enabled:
+            task_log("Stage 4: Generating script-driven viral thumbnail")
+            try:
+                await _generate_task_thumbnail(task, task_dir, task_log, title=publication_title)
+            except Exception as exc:
+                task_log(f"Thumbnail generation could not complete; continuing without cover art: {exc}")
+        if task.config.footage_enabled:
+            task_log("Stage 5: Scouting open-license public footage")
+            await _acquire_task_footage(task, task_dir, task_log, title=publication_title)
 
-    # Enabled footage is a delivery requirement. Fail before expensive TTS
-    # when scouting cannot fulfill the plan; saved scripts remain resumable.
-    if task.config.footage_enabled:
-        task_log("Stage 5: Scouting open-license public footage")
-        await update_task(task.id, status=TaskStatus.SOURCING.value)
-        try:
-            await _acquire_task_footage(
-                task,
-                task_dir,
-                task_log,
-                title=publication_title,
-            )
-        except Exception as exc:
-            task_log(f"Public footage scout blocked delivery: {exc}")
-            raise
+    async def prepare_audio():
+        task_log(f"Stage 6: Generating TTS audio with {task.config.tts_model}")
+        await update_task(task.id, status=TaskStatus.TTS.value)
+        voices = [task.config.voice_1]
+        if task.config.script_format == ScriptFormat.DIALOGUE:
+            voices.append(task.config.voice_2)
+        path = await generate_tts(script_path, str(task_dir / "audio"), voices,
+                                  task.config.tts_model, log=task_log)
+        await update_task(task.id, audio_path=path)
+        task.audio_path = path
+        return path
 
-    # Stage 6: TTS
-    task_log(f"Stage 6: Generating TTS audio with {task.config.tts_model}")
-    await update_task(task.id, status=TaskStatus.TTS.value)
-
-    voices = [task.config.voice_1]
-    if task.config.script_format == ScriptFormat.DIALOGUE:
-        voices.append(task.config.voice_2)
-
-    audio_dir = str(task_dir / "audio")
-    audio_path = await generate_tts(script_path, audio_dir, voices, task.config.tts_model, log=task_log)
-    await update_task(task.id, audio_path=audio_path)
+    branches = [asyncio.create_task(prepare_media()), asyncio.create_task(prepare_audio())]
+    try:
+        # Drain independent work even when its sibling fails, preserving every
+        # verified segment. No orphan task may outlive this pipeline attempt.
+        results = await asyncio.gather(*branches, return_exceptions=True)
+    except BaseException:
+        for branch in branches:
+            branch.cancel()
+        await asyncio.gather(*branches, return_exceptions=True)
+        raise
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    audio_path = results[1]
 
     # Pause for audio review before the (expensive) video composition. The user
     # previews the audio and triggers the compose stage via the render endpoint,
@@ -427,6 +429,7 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
     )
 
 
+@timed("regenerate", task_entry=True)
 async def run_regenerate(task: TaskResponse, log: LogCallback | None = None):
     """Re-run only the TTS and compose stages from an existing (possibly
     edited) script, skipping extraction and digestion."""
@@ -494,6 +497,7 @@ async def run_regenerate(task: TaskResponse, log: LogCallback | None = None):
     )
 
 
+@timed("tts_resume", task_entry=True)
 async def run_tts_resume(task: TaskResponse, log: LogCallback | None = None):
     """Resume only TTS and its normal post-audio path from a saved script.
 
@@ -536,6 +540,7 @@ async def run_tts_resume(task: TaskResponse, log: LogCallback | None = None):
     )
 
 
+@timed("review_resume", task_entry=True)
 async def run_daily_review_resume(task: TaskResponse, log: LogCallback | None = None):
     """Resume a failed daily edition from its persisted dossier and draft.
 
@@ -589,6 +594,7 @@ async def run_daily_review_resume(task: TaskResponse, log: LogCallback | None = 
     await run_regenerate(task, log=log)
 
 
+@timed("footage_resume", task_entry=True)
 async def run_footage_acquisition(
     task: TaskResponse,
     *,
@@ -618,6 +624,7 @@ async def run_footage_acquisition(
         await update_task(task.id, status=resume_status)
 
 
+@timed("compose", task_entry=True)
 async def run_compose(task: TaskResponse, log: LogCallback | None = None):
     """Resume from the compose stage using an already-generated script and
     audio. Triggered after the user has reviewed the audio preview."""

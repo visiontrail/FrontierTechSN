@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 
 from backend import config
+from backend.pipeline.timing import span, timed
 from backend.pipeline.process_logging import stream_subprocess
 
 logger = logging.getLogger(__name__)
@@ -2696,6 +2697,7 @@ def _has_only_name_transcript_mismatches(text: str, words: list[dict]) -> bool:
     return saw_name_delta
 
 
+@timed("asr", "processing")
 async def _transcribe_orpheus_at_speed(
     path: Path,
     verification_dir: Path,
@@ -3146,6 +3148,7 @@ only with exactly these fields:
         return None
 
 
+@timed("audio_integrity", "processing")
 async def _verify_orpheus_part(
     path: Path,
     text: str,
@@ -4179,6 +4182,7 @@ def _pocket_pronunciation_retry_text(
         return synthesis_text
 
 
+@timed("tts_chunks")
 async def _generate_pocket_tts(
     script_path: str,
     output_dir: str,
@@ -4265,10 +4269,11 @@ async def _generate_pocket_tts(
             last_error: Exception | None = None
             for request_attempt in range(1, 4):
                 try:
-                    response = await client.post(
-                        f"{base_url}/tts",
-                        data={"text": synthesis_text, "voice_url": voice},
-                    )
+                    with span("tts_provider_response", "external_response"):
+                        response = await client.post(
+                            f"{base_url}/tts",
+                            data={"text": synthesis_text, "voice_url": voice},
+                        )
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "").casefold()
                     if "audio/wav" not in content_type and "audio/x-wav" not in content_type:
@@ -4294,7 +4299,8 @@ async def _generate_pocket_tts(
                         f"{name}: transient Pocket TTS request error "
                         f"({_orpheus_http_error_text(exc)}); retrying in {delay}s"
                     )
-                    await asyncio.sleep(delay)
+                    with span("retry_backoff", "retry_wait"):
+                        await asyncio.sleep(delay)
             if last_error is not None and not staged_part.is_file():
                 raise RuntimeError(f"{name} Pocket TTS produced no WAV") from last_error
 
@@ -4400,6 +4406,7 @@ async def _generate_pocket_tts(
     return str(expected)
 
 
+@timed("tts")
 async def generate_tts(
     script_path: str,
     output_dir: str,

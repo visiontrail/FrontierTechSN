@@ -27,6 +27,7 @@ from backend.routers import (
 )
 from backend import config
 from backend import prompts_registry
+from backend.runtime import RUNTIME_IDENTITY
 from backend.pipeline.voice_previews import preload_remote_voice_previews
 
 # Not logging.basicConfig: log writes must never block the event loop that is
@@ -111,6 +112,11 @@ app.mount("/outputs", StaticFiles(directory=str(config.OUTPUTS_DIR)), name="outp
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/runtime")
+async def runtime_identity():
+    return RUNTIME_IDENTITY
 
 
 @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)

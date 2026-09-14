@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -109,9 +110,10 @@ class ThumbnailGenerationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ThumbnailPipelineOrderTests(unittest.IsolatedAsyncioTestCase):
-    async def test_title_and_thumbnail_run_after_script_and_before_tts(self):
+    async def test_frozen_script_media_overlaps_tts_and_drains_before_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
             events = []
+            audio_ready = asyncio.Event()
             task = TaskResponse(
                 id="pipeline-thumbnail-order",
                 created_at="2026-08-04T00:00:00+00:00",
@@ -139,6 +141,8 @@ class ThumbnailPipelineOrderTests(unittest.IsolatedAsyncioTestCase):
             async def fake_thumbnail(*args, **kwargs):
                 events.append("thumbnail")
                 self.assertEqual(kwargs["title"], "A Better Video Title")
+                await asyncio.wait_for(audio_ready.wait(), 1)
+                events.append("thumbnail-finished")
 
             async def fake_title(*args, **kwargs):
                 events.append("title")
@@ -146,6 +150,7 @@ class ThumbnailPipelineOrderTests(unittest.IsolatedAsyncioTestCase):
 
             async def fake_tts(*args, **kwargs):
                 events.append("tts")
+                audio_ready.set()
                 return str(Path(directory) / "audio.wav")
 
             with (
@@ -160,7 +165,7 @@ class ThumbnailPipelineOrderTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await orchestrator.run_pipeline(task)
 
-            self.assertEqual(events, ["script", "title", "thumbnail", "tts"])
+            self.assertEqual(events, ["script", "title", "thumbnail", "tts", "thumbnail-finished"])
 
 
 if __name__ == "__main__":

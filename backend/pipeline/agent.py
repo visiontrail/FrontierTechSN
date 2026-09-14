@@ -15,6 +15,7 @@ retry-on-empty and CJK repair logic stays in ``digester.py`` unchanged.
 
 from __future__ import annotations
 
+
 import asyncio
 import contextlib
 import logging
@@ -167,6 +168,7 @@ def build_agent_env(
     return env
 
 
+@timed("model_response", "external_response")
 async def _agent_complete_single(
     system_prompt: str,
     user_content: str,
@@ -506,7 +508,8 @@ async def _agent_complete_single(
                 f"{label}: retrying same provider turn in {delay:.0f}s "
                 f"({attempt + 2}/{retry_limit + 1})",
             )
-            await asyncio.sleep(delay)
+            with span("retry_backoff", "retry_wait"):
+                await asyncio.sleep(delay)
         attempt += 1
         tried_key_ids = {current_route.api_key_id}
 

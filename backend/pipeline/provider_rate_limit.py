@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from backend import config
+from backend.pipeline.timing import timed
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -56,6 +57,7 @@ def _proactive_limit_active(now: datetime | None = None) -> bool:
     return local_now.weekday() < 5 and start <= local_now.hour < end
 
 
+@timed("model_request_pacing", "provider_wait")
 async def wait_for_request_slot(
     endpoint: str,
     *,

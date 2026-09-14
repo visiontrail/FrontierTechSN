@@ -10,6 +10,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, urlunsplit
 from backend.spoken_numbers import SPOKEN_NUMBER_RULES, normalize_spoken_quantities
 from backend import config
+from backend.pipeline.timing import span
 from backend.pipeline.extractors.base import ExtractedContent
 from backend.provider_credentials import redact_api_keys
 
@@ -461,7 +462,8 @@ async def _chat_http(
                     f"{label}: retrying same provider call in {delay:.0f}s "
                     f"({attempt + 2}/{retry_limit + 1})",
                 )
-                await asyncio.sleep(delay)
+                with span("retry_backoff", "retry_wait"):
+                    await asyncio.sleep(delay)
             attempt += 1
             tried_key_ids = {current_route.api_key_id}
 

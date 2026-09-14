@@ -2740,3 +2740,39 @@ def test_rate_limit_recovers_the_owned_turn_without_resubmitting():
     assert url == target
     assert len([args for args in calls if args[:2] == ['chatgpt', 'ask']]) == 1
     assert any('shared cooldown' in line for line in logs)
+
+
+def test_story_evidence_reuses_only_unchanged_approved_claims(tmp_path):
+    articles = [research.NewsArticle(
+        id=str(n), source_id=str(n), source_name=f'Source {n}', language='en',
+        title=f'Story {n}', url=f'https://example.com/{n}',
+        published_at='2026-09-14T00:00:00+00:00', summary=f'Evidence {n}',
+        evidence_text=f'Evidence {n}',
+    ) for n in (1, 2)]
+    dossier = research.ResearchDossier('2026-09-14', 'now', 36, articles, articles, [])
+    original = 'Opening.\nStory one.\nStory two.\nClosing.'
+    fixed = 'Opening.\nStory one.\nCorrected story two.\nClosing.'
+    day = date(2026, 9, 14)
+    with patch.object(review, '_matched_script_claims', side_effect=lambda script, _: dict(enumerate(script.splitlines()[1:-1], 1))):
+        review._save_story_evidence(tmp_path, original, dossier, day, [1, 2],
+                                   '[CHATGPT 1]\nW1P;2D@2.1\n[CHATGPT CONVERSATION]\nhttps://chatgpt.com/c/test')
+        assert review._load_story_evidence(tmp_path, fixed, dossier, day, 1)
+        assert review._load_story_evidence(tmp_path, original, dossier, day, 2) is None
+        assert review._load_story_evidence(tmp_path, fixed, dossier, day, 2) is None
+        review._save_story_evidence(tmp_path, fixed, dossier, day, [2], '[CHATGPT 1]\nW2P')
+        assert all(review._load_story_evidence(tmp_path, fixed, dossier, day, n) for n in (1, 2))
+        assert review._load_story_evidence(tmp_path, fixed, dossier, date(2026, 9, 15), 1) is None
+        with patch.object(review, '_mandatory_web_review_rules', return_value='new stricter rules'):
+            assert review._load_story_evidence(tmp_path, fixed, dossier, day, 1) is None
+        articles[0].evidence_text = 'Changed source evidence'
+        assert review._load_story_evidence(tmp_path, fixed, dossier, day, 1) is None
+
+
+def test_story_evidence_rejects_non_web_or_malformed_verdict(tmp_path):
+    articles = [research.NewsArticle(id='1', source_id='1', source_name='Source', language='en',
+        title='Story', url='https://example.com/1', published_at='2026-09-14', summary='Evidence', evidence_text='Evidence')]
+    dossier = research.ResearchDossier('2026-09-14', 'now', 36, articles, articles, [])
+    day = date(2026, 9, 14)
+    for raw in ['[GEMINI 1]\nW1P', '[CHATGPT 1]\nN', '[CHATGPT 1]\nW1D@', '[CHATGPT 1]\nW1P;2P']:
+        review._save_story_evidence(tmp_path, 'Story.', dossier, day, [1], raw)
+        assert review._load_story_evidence(tmp_path, 'Story.', dossier, day, 1) is None

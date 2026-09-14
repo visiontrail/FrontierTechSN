@@ -4381,3 +4381,33 @@ async def test_acquisition_remains_partial_after_all_reserves_are_exhausted(
         contract,
         requested_count=2,
     ) == manifest
+
+
+@pytest.mark.asyncio
+async def test_automatic_picture_plan_reuses_exact_dependencies_before_asset_cache(tmp_path, monkeypatch):
+    data = board()
+    planned = news_images._normalise_plan({'images': _primary_plan()},
+                                         eligible_scene_ids=['scene-01', 'scene-02'], count=None)
+    planner = AsyncMock(return_value=(planned, 'opencli:chatgpt-picture-editor', 'https://chatgpt.com/c/test'))
+    monkeypatch.setattr(news_images, 'plan_news_images', planner)
+    # This test isolates planning; the existing asset suite covers byte hashes,
+    # grounding and license verification through the real _cached_manifest.
+    monkeypatch.setattr(news_images, '_cached_manifest', lambda *args, **kwargs: {'images': [{'id': 'verified'}]})
+    await news_images.acquire_news_images(data, tmp_path, count=None)
+    await news_images.acquire_news_images(data, tmp_path, count=None)
+    assert planner.await_count == 1
+    await news_images.acquire_news_images(data, tmp_path, count=None,
+                                          scene_hints={'scene-01': {'visual': 'a corrected product identity'}})
+    assert planner.await_count == 2
+    monkeypatch.setattr(news_images, 'QUERY_SEMANTICS_VERSION', news_images.QUERY_SEMANTICS_VERSION + 1)
+    await news_images.acquire_news_images(data, tmp_path, count=None)
+    assert planner.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_automatic_picture_plan_does_not_cache_provider_fallback(tmp_path, monkeypatch):
+    planner = AsyncMock(return_value=([], 'deterministic-fallback', ''))
+    monkeypatch.setattr(news_images, 'plan_news_images', planner)
+    await news_images.acquire_news_images(board(), tmp_path, count=None)
+    await news_images.acquire_news_images(board(), tmp_path, count=None)
+    assert planner.await_count == 2

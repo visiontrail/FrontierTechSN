@@ -21,6 +21,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from backend import config
+from backend.pipeline.timing import timed
 from backend.daily_news.source_catalog import NewsSource, enabled_sources
 from backend.daily_news.http import get_public_page
 
@@ -778,6 +779,7 @@ def dossier_markdown(dossier: ResearchDossier) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+@timed("research")
 async def run_research(
     edition_date: date,
     output_dir: Path,

@@ -1,4 +1,5 @@
 import asyncio
+
 import contextlib
 import logging
 import os
@@ -9,6 +10,8 @@ import subprocess
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
+
+from backend.pipeline.timing import timed
 
 
 ProcessLogCallback = Callable[[str], None]
@@ -182,6 +185,7 @@ async def _terminate_process_tree(proc: asyncio.subprocess.Process):
             await asyncio.wait_for(proc.wait(), timeout=TERMINATE_GRACE)
 
 
+@timed("subprocess", "processing")
 async def stream_subprocess(
     *,
     name: str,

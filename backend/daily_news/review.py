@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -13,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend import config
+from backend.pipeline.timing import timed
 from backend.daily_news.editorial import ATTRIBUTION_REVIEW_RULES, source_language_guidance
 from backend.daily_news.research import ResearchDossier
 from backend.daily_news.scriptwriter import (
@@ -656,6 +658,76 @@ def _cached_batch_review(
             return None
         return payload, raw, "", "chatgpt"
     return None
+
+
+def _story_evidence_key(script, dossier, edition_date, number):
+    # The prompt binds claims, story position, original evidence, edition date,
+    # attribution policy and live-web rules. Reviewer routing is also a dependency.
+    prompt = _batch_review_prompt(script, dossier, edition_date, [number])
+    policy = [config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL,
+              config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL]
+    key = hashlib.sha256(json.dumps(["story-evidence-v1", prompt, policy]).encode()).hexdigest()
+    return key, prompt
+
+
+def _saved_verdict(raw, numbers, claims):
+    for line in reversed(raw.splitlines()):
+        try:
+            return _batch_payload(line.strip(), numbers,
+                                  claim_catalog={n: claims[n] for n in numbers}, require_web=True)
+        except ValueError:
+            continue
+    raise ValueError("No complete saved Web verdict")
+
+
+def _save_story_evidence(review_dir, candidate, dossier, edition_date, numbers, raw):
+    if not re.search(r"\[CHATGPT (?:\d+|FALLBACK|RECOVERY)\]", raw, re.I):
+        return
+    claims = _claim_catalog(candidate, dossier)
+    try:
+        payload = _saved_verdict(raw, numbers, claims)
+    except ValueError:
+        return
+    failed = {n for issue in payload["issues"] for n in issue["evidence_story_numbers"]}
+    directory = review_dir / "approved-evidence"
+    directory.mkdir(exist_ok=True)
+    for number in numbers:
+        key, prompt = _story_evidence_key(candidate, dossier, edition_date, number)
+        path = directory / f"{key}.json"
+        if number in failed:
+            path.unlink(missing_ok=True)
+            continue
+        record = {"prompt": prompt, "candidate": candidate, "numbers": numbers,
+                  "raw": raw, "story_number": number}
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+
+
+def _load_story_evidence(review_dir, candidate, dossier, edition_date, number):
+    key, prompt = _story_evidence_key(candidate, dossier, edition_date, number)
+    path = review_dir / "approved-evidence" / f"{key}.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record["prompt"] != prompt or record["story_number"] != number:
+            return None
+        # Reconstruct dependencies and reparse the actual group verdict, rather
+        # than trusting a persisted boolean or synthesizing a new web verdict.
+        _, original = _story_evidence_key(record["candidate"], dossier, edition_date, number)
+        if original != prompt or number not in record["numbers"]:
+            return None
+        raw = record["raw"]
+        if not re.search(r"\[CHATGPT (?:\d+|FALLBACK|RECOVERY)\]", raw, re.I):
+            return None
+        claims = _claim_catalog(record["candidate"], dossier)
+        payload = _saved_verdict(raw, record["numbers"], claims)
+        if any(number in issue["evidence_story_numbers"] for issue in payload["issues"]):
+            return None
+        return {"payload": {"approved": True, "issues": []}, "provider": "chatgpt",
+                "conversation_url": "", "evidence_path": str(path),
+                "model_preference_fallback_used": "[CHATGPT MODEL PREFERENCE FALLBACK]" in raw}
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return None
 
 
 def _saved_full_review_candidate(
@@ -1315,8 +1387,19 @@ async def _review_daily_script(
             )
         claims = _claim_catalog(candidate, dossier)
         group_results: list[dict[str, Any]] = []
-        for group_index, start in enumerate(range(0, len(review_numbers), 2), 1):
-            story_numbers = review_numbers[start : start + 2]
+        pending_numbers = []
+        reused_numbers = []
+        for number in review_numbers:
+            evidence = _load_story_evidence(review_dir, candidate, dossier, edition_date, number)
+            if evidence is None:
+                pending_numbers.append(number)
+            else:
+                group_results.append(evidence)
+                reused_numbers.append(number)
+        if reused_numbers and log:
+            log(f"Full claim coverage: reusing unchanged approved Web evidence for stories {reused_numbers}")
+        for group_index, start in enumerate(range(0, len(pending_numbers), 2), 1):
+            story_numbers = pending_numbers[start : start + 2]
             prompt = _batch_review_prompt(candidate, dossier, edition_date, story_numbers)
             prompt_path = review_dir / f"story-review-prompt-{audit_round}-group-{group_index}.txt"
             response_path = review_dir / f"story-review-response-{audit_round}-group-{group_index}.txt"
@@ -1351,6 +1434,7 @@ async def _review_daily_script(
                     failure_path.write_text(exc.attempt_log, encoding="utf-8")
                     raise
                 response_path.write_text(raw, encoding="utf-8")
+            _save_story_evidence(review_dir, candidate, dossier, edition_date, story_numbers, raw)
             group_results.append({
                 "payload": group_payload,
                 "conversation_url": conversation_url,
@@ -1401,6 +1485,9 @@ async def _review_daily_script(
             "cycle": audit_round,
             "scope": "full" if review_numbers == all_numbers else "targeted",
             "story_numbers": list(review_numbers),
+            "reused_story_numbers": reused_numbers,
+            "web_review_story_numbers": pending_numbers,
+            "reused_evidence_paths": [r["evidence_path"] for r in group_results if "evidence_path" in r],
             "reviewer": reviewer,
             "providers": providers,
             "model_preference_fallback_used": any(
@@ -1425,8 +1512,8 @@ async def _review_daily_script(
             if review_numbers != all_numbers:
                 if log:
                     log(
-                        "Targeted correction review passed; running one final full-story "
-                        "web review before approval"
+                        "Targeted correction review passed; checking final full-story "
+                        "coverage with dependency-matched Web evidence before approval"
                     )
                 review_numbers = list(all_numbers)
                 continue
@@ -1519,6 +1606,7 @@ async def _review_daily_script(
     )
 
 
+@timed("fact_review")
 async def review_daily_script(
     script: str,
     dossier: ResearchDossier,

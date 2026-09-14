@@ -13,6 +13,7 @@ blank one.
 
 from __future__ import annotations
 
+
 import json
 import logging
 import math
@@ -22,6 +23,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from backend import config
+from backend.pipeline.timing import timed
 from backend.pipeline import news_images, scene_kit
 
 logger = logging.getLogger(__name__)
@@ -453,6 +455,7 @@ def _batch_prompt_payload(storyboard: dict, scenes: list[dict]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+@timed("visual_plan", "processing")
 async def plan_scene_visuals(
     storyboard: dict,
     *,

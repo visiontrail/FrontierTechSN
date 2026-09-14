@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import json
 import math
 import re
@@ -10,6 +11,7 @@ from backend.spoken_numbers import normalize_spoken_quantities
 from backend.daily_news.editorial import DAILY_NEWS_EDITORIAL_RULES, requires_chinese_media_label
 from backend.daily_news.research import ResearchDossier, dossier_markdown
 from backend.pipeline.digester import _chat, _resolve_provider
+from backend.pipeline.timing import timed
 
 LogCallback = Callable[[str], None]
 NON_ENGLISH_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]")
@@ -768,6 +770,7 @@ Exact closing: {closing_remarks}
     return repaired, repaired_report
 
 
+@timed("script_generation")
 async def generate_daily_script(
     dossier: ResearchDossier,
     edition_date: date,
@@ -978,6 +981,7 @@ Return only a JSON object shaped exactly like {shape}, with one complete spoken 
     return script
 
 
+@timed("script_correction")
 async def revise_daily_script(
     script: str,
     dossier: ResearchDossier,

@@ -9,6 +9,8 @@ ever receives a local path, so capture remains deterministic and offline.
 
 from __future__ import annotations
 
+from backend.pipeline.timing import timed
+
 import asyncio
 import hashlib
 import html
@@ -3328,6 +3330,7 @@ def _next_asset_destination(image_dir: Path, start: int, extension: str) -> tupl
     return serial, image_dir / f"image-{serial:02d}{extension}"
 
 
+@timed("news_images")
 async def acquire_news_images(
     storyboard: dict,
     task_dir: Path,
@@ -3355,13 +3358,43 @@ async def acquire_news_images(
     planner = ""
     conversation_url = ""
     if automatic:
-        preplanned, planner, conversation_url = await plan_news_images(
-            storyboard,
-            eligible_scene_ids=eligible,
-            count=None,
-            scene_hints=scene_hints,
-            log=log,
-        )
+        # Determine the AI quantity from the same frozen plan on recovery.
+        # Previously this web request ran before the asset cache check, changing
+        # its own target count and discarding otherwise valid downloaded images.
+        scenes = {str(s.get("id") or ""): s for s in storyboard.get("scenes") or []}
+        planning_prompt = _planner_prompt([scenes[s] for s in eligible], None, scene_hints)
+        plan_key = hashlib.sha256(json.dumps(
+            [MANIFEST_VERSION, QUERY_SEMANTICS_VERSION, planning_prompt],
+            ensure_ascii=False,
+        ).encode()).hexdigest()
+        plan_path = image_dir / f"picture-plan-{plan_key}.json"
+        if plan_path.is_symlink():
+            raise ValueError("News image plan cache must not be a symbolic link")
+        try:
+            saved = json.loads(plan_path.read_text(encoding="utf-8"))
+            if saved["prompt"] == planning_prompt and saved["planner"] == "opencli:chatgpt-picture-editor":
+                preplanned = _normalise_plan({"images": saved["images"]},
+                                             eligible_scene_ids=eligible, count=None)
+                if preplanned != saved["images"]:
+                    preplanned = None
+                else:
+                    planner, conversation_url = saved["planner"], saved["conversation_url"]
+                    _emit(log, "News images: reusing exact prompt-matched picture-editor plan")
+        except (OSError, ValueError, KeyError, TypeError):
+            preplanned = None
+        if preplanned is None:
+            preplanned, planner, conversation_url = await plan_news_images(
+                storyboard,
+                eligible_scene_ids=eligible,
+                count=None,
+                scene_hints=scene_hints,
+                log=log,
+            )
+            if planner == "opencli:chatgpt-picture-editor":
+                # A provider fallback is never frozen as an authoritative plan.
+                plan_path.write_text(json.dumps({"prompt": planning_prompt,
+                    "images": preplanned, "planner": planner,
+                    "conversation_url": conversation_url}, ensure_ascii=False), encoding="utf-8")
         target = len(preplanned)
     else:
         target = min(max(0, count), len(eligible))

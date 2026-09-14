@@ -15,6 +15,7 @@ available for diagnosis but is never promoted as the task's completed cut.
 
 from __future__ import annotations
 
+
 import asyncio
 import json
 import hashlib
@@ -29,6 +30,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from backend import config
+from backend.pipeline.timing import timed
 from backend.pipeline.opencli import OpenCLIError, run_opencli
 from backend.pipeline.review_response import ReviewResponseError, parse_review_response
 
@@ -746,6 +748,7 @@ def _batch_audit(
     }
 
 
+@timed("final_visual_review")
 async def review_video(
     video_path: str | Path,
     storyboard: dict,

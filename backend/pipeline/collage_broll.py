@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import asyncio
 import hashlib
 import json
@@ -18,6 +19,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFilter
 
 from backend import config
+from backend.pipeline.timing import timed
 from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
 from backend.pipeline.video_format import FrameSpec
 
@@ -1466,6 +1468,7 @@ async def _contact_sheet(
     return sheet
 
 
+@timed("collage")
 async def generate_collage_broll(
     storyboard: dict,
     task_dir: Path,

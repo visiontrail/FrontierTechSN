@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from backend import config
+from backend.pipeline.timing import span, timed
 from backend.pipeline.desktop_browser import (
     DesktopBrowserLockedError,
     foreground_browser_session,
@@ -55,6 +56,7 @@ class OpenCLIRateLimitError(OpenCLIError):
     """Provider UI explicitly blocked access; all project calls must cool down."""
 
 
+@timed("browser_access_cooldown", "provider_wait")
 async def _wait_for_provider_cooldown(site: str) -> None:
     reported = False
     while remaining := opencli_cooldown_remaining(site):
@@ -154,51 +156,53 @@ async def run_opencli(
                 env["OPENCLI_ISOLATED_RUNTIME_READY"] = "1"
             site = str(args[0]).lower() if args else ""
             await _wait_for_provider_cooldown(site)
-            if is_rate_limited_command(args):
-                # Pace before starting the subprocess so the provider-command timeout
-                # measures the web operation, not time intentionally spent in queue.
-                await asyncio.to_thread(
-                    wait_for_opencli_web_slot,
-                    str(args[0]).lower(),
-                    interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
-                )
-                env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
-            elif needs_generation_quiet_period(args):
-                # A model-policy check is not a generation request and therefore does
-                # not reserve the next slot. It still waits behind the prior prompt so
-                # ChatGPT does not receive a model-page access immediately after an
-                # audit response. Recovery reads deliberately remain unpaced here.
-                await asyncio.to_thread(
-                    wait_for_opencli_generation_quiet_period,
-                    site,
-                    interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
-                )
-                env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
+            with span("browser_request_pacing", "provider_wait"):
+                if is_rate_limited_command(args):
+                    # Pace before starting the subprocess so the provider-command timeout
+                    # measures the web operation, not time intentionally spent in queue.
+                    await asyncio.to_thread(
+                        wait_for_opencli_web_slot,
+                        str(args[0]).lower(),
+                        interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
+                    )
+                    env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
+                elif needs_generation_quiet_period(args):
+                    # A model-policy check is not a generation request and therefore does
+                    # not reserve the next slot. It still waits behind the prior prompt so
+                    # ChatGPT does not receive a model-page access immediately after an
+                    # audit response. Recovery reads deliberately remain unpaced here.
+                    await asyncio.to_thread(
+                        wait_for_opencli_generation_quiet_period,
+                        site,
+                        interval=config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS,
+                    )
+                    env["OPENCLI_WEB_REQUEST_SLOT_RESERVED"] = "1"
             # Another process may have opened the breaker while this generation waited
             # for its normal start slot. Recheck immediately before launching the CLI.
             await _wait_for_provider_cooldown(site)
             await check_browser()
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(config.PROJECT_ROOT),
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    process.communicate(), timeout=timeout or config.OPENCLI_TIMEOUT
+            with span("browser_response", "external_response"):
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=str(config.PROJECT_ROOT),
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
-            except TimeoutError as exc:
-                await _stop_command(process)
-                raise OpenCLIError(
-                    f"OpenCLI command timed out after {timeout or config.OPENCLI_TIMEOUT}s: "
-                    f"{' '.join(args[:3])}"
-                ) from exc
-            except asyncio.CancelledError:
-                await _stop_command(process)
-                raise
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        process.communicate(), timeout=timeout or config.OPENCLI_TIMEOUT
+                    )
+                except TimeoutError as exc:
+                    await _stop_command(process)
+                    raise OpenCLIError(
+                        f"OpenCLI command timed out after {timeout or config.OPENCLI_TIMEOUT}s: "
+                        f"{' '.join(args[:3])}"
+                    ) from exc
+                except asyncio.CancelledError:
+                    await _stop_command(process)
+                    raise
 
             result = OpenCLIResult(
                 args=tuple(args),
@@ -266,7 +270,8 @@ async def run_opencli_with_retries(
                 logger.warning(message)
             if attempt < total:
                 delay = min(45.0, config.OPENCLI_RETRY_BASE_SECONDS * 2 ** (attempt - 1))
-                await asyncio.sleep(delay)
+                with span("retry_backoff", "retry_wait"):
+                    await asyncio.sleep(delay)
     raise OpenCLIError(f"{label} failed after {total} attempts: {last_error}") from last_error
 
 
