@@ -70,6 +70,10 @@ is reduced.
   Failed downloads retain their own candidate index; successful candidates still
   require the same explicit pixel-based verdict. Cancellation drains every
   preparation job before returning, and browser requests remain serial and paced.
+- Explicit bracketed or pipe-separated `Audio Only` labels in source titles
+  are rejected before download and visual review, with a metadata rejection
+  recorded in the manifest. A podcast mention or an audio-related topic alone
+  does not bypass the ordinary pixel-review path.
 
 ## Measurement protocol
 

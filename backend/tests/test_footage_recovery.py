@@ -434,6 +434,32 @@ def test_search_metadata_rejects_single_generic_anchor_before_visual_review():
     )
 
 
+@pytest.mark.parametrize('label', ['(Audio Only)', '| Audio Only', '[audio-only]'])
+def test_explicit_audio_only_source_never_downloads_or_consumes_a_visual_review(tmp_path, label):
+    candidate = {'title': f'SpaceX IPO {label}', 'source_page_url': 'https://youtu.be/audio',
+                 'query_relevance_score': 300}
+    async def run():
+        with (patch.object(web_footage, 'search_youtube', AsyncMock(return_value=[candidate])),
+              patch.object(web_footage, '_analyze_preview_batch', AsyncMock()) as review,
+              patch.object(web_footage, '_prepare_candidate_preview', AsyncMock()) as prepare):
+            result = await web_footage.supplement_web_footage(
+                task_dir=tmp_path, manifest={'clips': [], 'errors': [], 'url_inspection_unavailable': True},
+                query_plan=[{'query': 'SpaceX IPO', 'purpose': 'SpaceX public debut',
+                             'script_excerpt': 'SpaceX made its public debut.'}],
+                target_total=1, orientation='landscape', script='SpaceX made its public debut.',
+            )
+        assert not result['clips']
+        assert any('Audio Only' in error['message'] for error in result['errors'])
+        prepare.assert_not_awaited()
+        review.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_podcast_or_audio_topic_alone_still_requires_pixel_review():
+    for title in ['SpaceX IPO podcast interview', 'SpaceX IPO audio only workflow demo']:
+        assert web_footage._metadata_rejection({'title': title}, 'SpaceX IPO') is None
+
+
 @pytest.mark.parametrize('failure_stage', ['web-download-edit', 'web-selection', 'web-review'])
 def test_retry_refreshes_failed_alternatives_but_preserves_pending_review(tmp_path, failure_stage):
     shot = {'query': 'students classroom lesson', 'purpose': 'Students learning basic skills',

@@ -228,6 +228,15 @@ def _metadata_matches_query(candidate: dict, query: str) -> bool:
     return len(terms & metadata) >= min(2, len(terms))
 
 
+def _metadata_rejection(candidate: dict, query: str) -> str | None:
+    if re.search(r"(?:\(|\[|\|)\s*audio[\s-]+only\s*(?:\)|\]|\||$)",
+                 str(candidate.get("title") or ""), re.I):
+        return "Source title explicitly labels the recording Audio Only; no B-roll candidate"
+    if not _metadata_matches_query(candidate, query):
+        return "Search metadata lacks two concrete query anchors"
+    return None
+
+
 async def search_youtube(query: str, *, limit: int = 8) -> list[dict]:
     command = [
         _yt_dlp_bin(),
@@ -1238,11 +1247,12 @@ async def supplement_web_footage(
         results = [*cached_candidates, *await search_youtube(shot["query"])]
         eligible = []
         for candidate in results:
-            if not _metadata_matches_query(candidate, shot["query"]):
+            reason = _metadata_rejection(candidate, shot["query"])
+            if reason:
                 record = {"query": shot["query"], "plan_query": shot["plan_query"],
                           "script_excerpt": shot.get("script_excerpt", ""),
                           "stage": "web-metadata", "source_page_url": candidate["source_page_url"],
-                          "message": "Search metadata lacks two concrete query anchors"}
+                          "message": reason}
                 if record not in manifest.setdefault("errors", []):
                     manifest["errors"].append(record)
                 continue
