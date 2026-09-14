@@ -38,7 +38,8 @@ is reduced.
   local pause before that word. This requires the saved rejection and a fresh
   matching omission check, a unique text boundary, and unchanged canonical
   tokens. The new waveform must pass the full acoustic checks; the pause itself
-  grants no approval. This addresses an observed repeated loss of `National`.
+  grants no approval. This is a recovery for genuine synthesis omissions; the
+  observed NSA case was subsequently resolved by the acoustic repair below.
 - Raw ASR evidence subsequently showed `National` present with a zero-duration
   timestamp, which the timestamp loader discarded. A focused acoustic rescan
   can recover an isolated zero-duration word only when it independently yields
@@ -57,6 +58,12 @@ is reduced.
 - Title generation receives only the final narration, preventing rejected or
   unconverted figures in the original brief from re-entering the publication
   title and cover. Source metadata remains in the artifact's audit manifest.
+- Cover art direction preserves the final narration's tense and uncertainty
+  in both hook copy and depicted actions. Live acceptance caught a prompt
+  turning planned software self-training into an achieved self-replicating
+  machine. Funding and roadmap hooks must identify the investment or ambition,
+  and conceptual training imagery must not invent physical product capabilities.
+  The generated image still requires actual visual inspection.
 - After a primary SDK route exhausts its configured attempts with a transient
   outage and the configured backup succeeds, calls for the same endpoint, model
   and credential pool try that backup first for five minutes. Backup failure

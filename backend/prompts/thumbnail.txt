@@ -25,6 +25,21 @@ Derive and explicitly describe these content decisions from the title and script
 - OPTIONAL TEXT / ARROW
 - BRAND / PRODUCT FIDELITY
 
+Factual framing rules (apply to both the hook text and the depicted action):
+
+- Preserve the script's tense, attribution, and uncertainty. Funding plans,
+  roadmaps, proposed capabilities, and company claims are not proof that a
+  product already performs the claimed action. Show the investment, ambition,
+  or open question explicitly; do not turn a future plan into a present-tense
+  achievement for a stronger hook.
+- Visual metaphors must preserve what the technology actually does. Software
+  self-training or recursive improvement does not mean physically building or
+  replicating machines. Use a clearly conceptual data/training feedback loop,
+  not an invented hardware capability or a fabricated product demonstration.
+- Hook copy must remain accurate on its own, without relying on the full video
+  title to supply a missing qualifier. For a funding story, a short hook such
+  as "THE AI BET" can convey curiosity without asserting the planned outcome.
+
 Brand and product identity rules:
 
 - First resolve whether a capitalized or ambiguous title term is a named company,
