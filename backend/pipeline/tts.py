@@ -2943,7 +2943,11 @@ def _shared_transcript_omissions(
     grants an approval.
     """
     def missing(transcript: str) -> set[int]:
-        tokens = _lexical_tokens(transcript)
+        # Preserve the existing acoustic handling of HK $ amounts, percent
+        # signs and split decimals before looking for absent source words.
+        tokens, _ = _transcript_tokens(
+            [{"text": word} for word in transcript.split()]
+        )
         observed = []
         cursor = 0
         while cursor < len(tokens):

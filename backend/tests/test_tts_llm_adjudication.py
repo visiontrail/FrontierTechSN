@@ -48,6 +48,10 @@ async def test_shared_omission_cannot_be_overridden_by_model(tmp_path, source, t
      'Deep Tech reports Bitefront news.', 'Deep Tech reports Bitefront news.'),
     ('The firm raised twenty-four point five million.',
      'The firm raised 24.5 million.', 'The firm raised $24.5 million.'),
+    ('The loan was twenty-three point five billion Hong Kong dollars.',
+     'The loan was HK $23.5 billion.', 'The loan was HK $23 .5 billion.'),
+    ('The allocation is sixty percent of the total.',
+     'The allocation is 60% of the total.', 'The allocation is 60 % of the total.'),
 ])
 def test_shared_omission_guard_preserves_corroboration_and_spelling_drift(source, normal, slower):
     assert tts._shared_transcript_omissions(tts._lexical_tokens(source), normal, slower) == []
