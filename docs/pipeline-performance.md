@@ -37,6 +37,14 @@ is reduced.
 - Title generation receives only the final narration, preventing rejected or
   unconverted figures in the original brief from re-entering the publication
   title and cover. Source metadata remains in the artifact's audit manifest.
+- After a primary SDK route exhausts its configured attempts with a transient
+  outage and the configured backup succeeds, calls for the same endpoint, model
+  and credential pool try that backup first for five minutes. Backup failure
+  still tries the primary with its full retry allowance. Backup successes do
+  not extend the window; expiry or primary success restores normal order.
+  Explicit single-route probes bypass this ephemeral health observation, and
+  content failures or partially committed output cannot create it. Provider
+  pacing and downstream quality checks are unchanged.
 
 ## Measurement protocol
 

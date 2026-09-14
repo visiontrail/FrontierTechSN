@@ -24,10 +24,11 @@ import time
 from collections import deque
 from collections.abc import Callable
 from urllib.parse import urlsplit, urlunsplit
+from weakref import WeakKeyDictionary
 
 from backend import config, skills_admin
 from backend.pipeline.timing import span, timed
-from backend.provider_credentials import redact_api_keys
+from backend.provider_credentials import key_identifier, redact_api_keys
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -39,6 +40,29 @@ LogCallback = Callable[[str], None]
 # therefore always requested, and the routine chatter filtered back out.
 DIAGNOSTIC_STDERR_LINES = 20
 _NOISE_LEVELS = ("[DEBUG]", "[INFO]")
+PROVIDER_RECOVERY_SECONDS = 300
+# Loop-local ephemeral state also keeps isolated request/probe test loops from
+# retaining another loop's health observations. Never store raw credentials.
+_provider_recovery = WeakKeyDictionary()
+
+
+def _recovery_key(route):
+    from backend.pipeline.model_router import endpoint_identity
+    return (endpoint_identity(route.endpoint), route.model,
+            tuple(key_identifier(key) for key in route.api_keys))
+
+
+def _recovery_state():
+    return _provider_recovery.setdefault(asyncio.get_running_loop(), {})
+
+
+def _provider_outage(error: Exception) -> bool:
+    detail = str(error).casefold()
+    return any(marker in detail for marker in (
+        "too many requests", "rate limit", "request queue is full",
+        "gateway time-out", "gateway timeout", "service unavailable",
+        "temporarily unavailable", "agent_turn_timeout",
+    ))
 
 
 def _log(log: LogCallback | None, message: str) -> None:
@@ -556,7 +580,17 @@ async def agent_complete(
             allow_failover=allow_provider_failover,
         )
     )
-    if len(routes) > 1:
+    recovery_remaining = 0.0
+    if len(routes) > 1 and routes[0].slot == "primary" and routes[1].slot == "backup":
+        recovery_remaining = max(
+            0.0, _recovery_state().get(_recovery_key(routes[0]), 0) - time.monotonic(),
+        )
+        if recovery_remaining:
+            routes = (routes[1], routes[0], *routes[2:])
+            _log(log, f"{label}: recent primary outage with successful backup; "
+                 f"trying configured backup first for {recovery_remaining:.0f}s more; "
+                 "primary remains available if backup fails")
+    if len(routes) > 1 and not recovery_remaining:
         primary_retry_limit = (
             max(0, int(max_retries))
             if max_retries is not None
@@ -569,6 +603,7 @@ async def agent_complete(
         )
 
     last_error: Exception | None = None
+    failed_primaries = []
     for index, route in enumerate(routes):
         route_retry_limit = (
             max(0, int(max_retries))
@@ -590,6 +625,13 @@ async def agent_complete(
                 max_retries=route_retry_limit,
                 route=route,
             )
+            if route.slot == "primary":
+                _recovery_state().pop(_recovery_key(route), None)
+            elif route.slot == "backup":
+                for failed_route in failed_primaries:
+                    _recovery_state()[_recovery_key(failed_route)] = (
+                        time.monotonic() + PROVIDER_RECOVERY_SECONDS
+                    )
             if len(routes) > 1:
                 _log(
                     log,
@@ -603,6 +645,8 @@ async def agent_complete(
             raise
         except Exception as exc:  # noqa: BLE001 - route exhaustion boundary
             last_error = exc
+            if route.slot == "primary" and _provider_outage(exc):
+                failed_primaries.append(route)
             next_index = index + 1
             if next_index < len(routes):
                 next_route = routes[next_index]
