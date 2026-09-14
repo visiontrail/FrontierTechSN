@@ -93,14 +93,19 @@ async def _chat(
     HTTP client based on ``config.AI_BACKEND``. OneAPI receives the full
     bounded retry ladder before the call moves to the configured DeepSeek
     backup. Partial output is never exposed between routes."""
-    from backend.pipeline import model_router
+    from backend.pipeline import agent, model_router
 
     routes = await model_router.resolve_model_routes(
         endpoint=endpoint or config.AI_ENDPOINT,
         model=model or config.AI_MODEL,
         api_key=api_key if api_key is not None else config.AI_API_KEY,
     )
-    if len(routes) > 1:
+    routes, recovery_remaining = agent._recovering_routes(routes)
+    if recovery_remaining:
+        _dlog(log, f"{label}: recent primary outage with successful backup; "
+              f"trying configured backup first for {recovery_remaining:.0f}s more; "
+              "primary remains available if backup fails")
+    elif len(routes) > 1:
         _dlog(
             log,
             f"{label}: model route {routes[0].audit_label} -> {routes[1].audit_label}; "
@@ -109,6 +114,7 @@ async def _chat(
         )
 
     last_error: Exception | None = None
+    failed_primaries = []
     for index, route in enumerate(routes):
         selected_api_key = route.api_key
 
@@ -118,8 +124,6 @@ async def _chat(
 
         try:
             if config.AI_BACKEND == "agent_sdk":
-                from backend.pipeline import agent
-
                 try:
                     content = await agent.agent_complete(
                         system_prompt,
@@ -139,6 +143,7 @@ async def _chat(
                         route=route,
                         credential_selected=remember_credential,
                     )
+                    agent._record_route_completion(route, failed_primaries)
                     if len(routes) > 1:
                         _dlog(log, f"{label}: completed via {route.audit_label}")
                     if route_selected is not None:
@@ -172,6 +177,7 @@ async def _chat(
                 route=route,
                 credential_selected=remember_credential,
             )
+            agent._record_route_completion(route, failed_primaries)
             if len(routes) > 1:
                 _dlog(log, f"{label}: completed via {route.audit_label}")
             if route_selected is not None:
@@ -181,6 +187,8 @@ async def _chat(
             raise
         except Exception as exc:  # noqa: BLE001 - provider route boundary
             last_error = exc
+            if route.slot == "primary" and agent._provider_outage(exc):
+                failed_primaries.append(route)
             next_index = index + 1
             if next_index < len(routes):
                 next_route = routes[next_index]

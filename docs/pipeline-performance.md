@@ -65,6 +65,9 @@ is reduced.
   Explicit single-route probes bypass this ephemeral health observation, and
   content failures or partially committed output cannot create it. Provider
   pacing and downstream quality checks are unchanged.
+  The shared observation also covers the digestion/script/footage dispatcher,
+  which owns its own SDK/HTTP failover and otherwise bypassed the direct SDK
+  ordering optimization. Both entry points retain the configured retry budgets.
 - Public-footage batches prepare up to two independent source previews at once.
   Duplicate source URLs remain serial to protect their shared cache files.
   Failed downloads retain their own candidate index; successful candidates still

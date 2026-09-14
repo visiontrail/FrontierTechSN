@@ -65,6 +65,28 @@ def _provider_outage(error: Exception) -> bool:
     ))
 
 
+def _recovering_routes(routes):
+    """Share route ordering with dispatchers that own SDK/HTTP failover."""
+    remaining = 0.0
+    if len(routes) > 1 and routes[0].slot == "primary" and routes[1].slot == "backup":
+        remaining = max(
+            0.0, _recovery_state().get(_recovery_key(routes[0]), 0) - time.monotonic(),
+        )
+        if remaining:
+            routes = (routes[1], routes[0], *routes[2:])
+    return routes, remaining
+
+
+def _record_route_completion(route, failed_primaries):
+    if route.slot == "primary":
+        _recovery_state().pop(_recovery_key(route), None)
+    elif route.slot == "backup":
+        for failed_route in failed_primaries:
+            _recovery_state()[_recovery_key(failed_route)] = (
+                time.monotonic() + PROVIDER_RECOVERY_SECONDS
+            )
+
+
 def _log(log: LogCallback | None, message: str) -> None:
     if log is not None:
         log(message)
@@ -580,16 +602,11 @@ async def agent_complete(
             allow_failover=allow_provider_failover,
         )
     )
-    recovery_remaining = 0.0
-    if len(routes) > 1 and routes[0].slot == "primary" and routes[1].slot == "backup":
-        recovery_remaining = max(
-            0.0, _recovery_state().get(_recovery_key(routes[0]), 0) - time.monotonic(),
-        )
-        if recovery_remaining:
-            routes = (routes[1], routes[0], *routes[2:])
-            _log(log, f"{label}: recent primary outage with successful backup; "
-                 f"trying configured backup first for {recovery_remaining:.0f}s more; "
-                 "primary remains available if backup fails")
+    routes, recovery_remaining = _recovering_routes(routes)
+    if recovery_remaining:
+        _log(log, f"{label}: recent primary outage with successful backup; "
+             f"trying configured backup first for {recovery_remaining:.0f}s more; "
+             "primary remains available if backup fails")
     if len(routes) > 1 and not recovery_remaining:
         primary_retry_limit = (
             max(0, int(max_retries))
@@ -625,13 +642,7 @@ async def agent_complete(
                 max_retries=route_retry_limit,
                 route=route,
             )
-            if route.slot == "primary":
-                _recovery_state().pop(_recovery_key(route), None)
-            elif route.slot == "backup":
-                for failed_route in failed_primaries:
-                    _recovery_state()[_recovery_key(failed_route)] = (
-                        time.monotonic() + PROVIDER_RECOVERY_SECONDS
-                    )
+            _record_route_completion(route, failed_primaries)
             if len(routes) > 1:
                 _log(
                     log,
