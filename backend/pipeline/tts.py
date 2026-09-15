@@ -88,11 +88,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 26
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 27
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 9
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 10
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -610,26 +610,28 @@ def _canonicalize_number_tokens_with_indexes(
     result_indexes: list[int] = []
     index = 0
     while index < len(tokens):
-        # Canonicalize standard compound quantities such as "two hundred
-        # fifty thousand" before the simpler scale handling below can split
-        # them into 200 + 50,000. Whisper may render the same speech as the
-        # comma-grouped pair "250" + ",000"; both must resolve to the exact
-        # numeric value, while a different value or missing unit still fails.
+        # Combine the remainder of a spoken hundred before applying a larger
+        # scale. Without this, "two hundred seventy-eight" became [200, 78]
+        # while Whisper's equivalent "278" stayed a single token.
+        remainder_index = index + 2
+        if remainder_index < len(tokens) and tokens[remainder_index] == "and":
+            remainder_index += 1
         if (
             tokens[index].isdigit()
             and 1 <= int(tokens[index]) <= 9
-            and index + 3 < len(tokens)
+            and remainder_index < len(tokens)
             and tokens[index + 1] == "hundred"
-            and tokens[index + 2].isdigit()
-            and 1 <= int(tokens[index + 2]) <= 99
-            and tokens[index + 3] in {"thousand", "million"}
+            and tokens[remainder_index].isdigit()
+            and 1 <= int(tokens[remainder_index]) <= 99
         ):
-            value = (
-                int(tokens[index]) * 100 + int(tokens[index + 2])
-            ) * NUMBER_SCALES[tokens[index + 3]]
+            value = int(tokens[index]) * 100 + int(tokens[remainder_index])
+            end = remainder_index + 1
+            if end < len(tokens) and tokens[end] in {"thousand", "million", "billion"}:
+                value *= NUMBER_SCALES[tokens[end]]
+                end += 1
             result.append(str(value))
             result_indexes.append(word_indexes[index])
-            index += 4
+            index = end
             continue
         if (
             tokens[index].isdigit()
@@ -1567,21 +1569,54 @@ def _write_pocket_chunk_inputs(
     output_dir: Path,
     *,
     max_words: int,
+    retry_failed_paragraphs: bool = False,
 ) -> tuple[list[Path], list[str]]:
     chunks = _split_pocket_tts_text(text, max_words)
     if not chunks:
         raise ValueError("Pocket TTS input is empty after paragraph-aware splitting")
-    if len(chunks) == 1:
-        return [output_dir / "tts_input.txt"], chunks
     for stale in output_dir.glob("tts_input_part_*.txt"):
         stale.unlink(missing_ok=True)
-    input_paths = [
+    input_paths = [output_dir / "tts_input.txt"] if len(chunks) == 1 else [
         output_dir / f"tts_input_part_{index:03d}.txt"
         for index in range(1, len(chunks) + 1)
     ]
+    expanded_paths: list[Path] = []
+    expanded_chunks: list[str] = []
     for input_path, chunk in zip(input_paths, chunks):
         input_path.write_text(chunk, encoding="utf-8")
-    return input_paths, chunks
+        sentences = [chunk]
+        if retry_failed_paragraphs:
+            verification_dir = output_dir / "verification" / input_path.stem
+            rejected = False
+            try:
+                failure = json.loads((verification_dir / "integrity_failure.json").read_text(encoding="utf-8"))
+                rejected = failure.get("text_sha256") == hashlib.sha256(chunk.encode("utf-8")).hexdigest()
+            except (OSError, ValueError, AttributeError):
+                pass
+            # Older versions deleted rejected WAVs without writing a retry
+            # marker. Their source-bound adjudication can recover that plan,
+            # but must never displace an existing, potentially verified WAV.
+            if not rejected and not (output_dir / f"{input_path.stem}_generated.wav").exists():
+                try:
+                    evidence = json.loads((verification_dir / "llm_asr_adjudication.json").read_text(encoding="utf-8"))
+                    rejected = (evidence.get("status") == "rejected"
+                                and evidence.get("request", {}).get("source_text") == chunk)
+                except (OSError, ValueError, AttributeError):
+                    pass
+            if rejected:
+                sentences = _split_pocket_tts_text(chunk, max_words=1)
+        if len(sentences) == 1:
+            expanded_paths.append(input_path)
+            expanded_chunks.append(chunk)
+            continue
+        # Keep other paragraph identities stable so their verified WAVs remain
+        # reusable. The source-bound failure marker also survives app restarts.
+        for index, sentence in enumerate(sentences, start=1):
+            sentence_path = input_path.with_name(f"{input_path.stem}_sentence_{index:03d}.txt")
+            sentence_path.write_text(sentence, encoding="utf-8")
+            expanded_paths.append(sentence_path)
+            expanded_chunks.append(sentence)
+    return expanded_paths, expanded_chunks
 
 
 def _read_pcm_wav(path: Path) -> WavInfo:
@@ -2353,6 +2388,9 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     """
     expected = _lexical_tokens(text)
     observed, observed_word_indexes = _transcript_tokens(words)
+    observed, observed_word_indexes = _expand_joined_source_acronyms(
+        text, expected, observed, observed_word_indexes,
+    )
     observed, observed_word_indexes = _collapse_expected_name_splits(
         expected,
         observed,
@@ -2475,7 +2513,40 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
             round(repeat_start_seconds, 3) if repeat_start_seconds is not None else None
         ),
         "failure_reasons": failures,
+        "token_differences": [
+            {"kind": tag, "source": expected[start:end], "asr": observed[left:right]}
+            for tag, start, end, left, right in matcher.get_opcodes()
+            if tag != "equal"
+        ],
     }
+
+
+def _expand_joined_source_acronyms(
+    text: str, expected: list[str], observed: list[str], word_indexes: list[int],
+) -> tuple[list[str], list[int]]:
+    """Recover only exact, source-aligned initialism boundaries (US AI/USAI).
+
+    Case in the source supplies the evidence. Ordinary words, changed letters,
+    reordered acronyms and model numbers cannot gain equivalence this way.
+    """
+    phrases = {
+        tuple(match.group().casefold().split())
+        for match in re.finditer(r"\b[A-Z]{2,4}(?:\s+[A-Z]{2,4})+\b", text)
+    }
+    result: list[str] = []
+    indexes: list[int] = []
+    for tag, start, end, left, right in SequenceMatcher(
+        a=expected, b=observed, autojunk=False,
+    ).get_opcodes():
+        source = expected[start:end]
+        if (tag == "replace" and right - left == 1
+                and tuple(source) in phrases and "".join(source) == observed[left]):
+            result.extend(source)
+            indexes.extend([word_indexes[left]] * len(source))
+        else:
+            result.extend(observed[left:right])
+            indexes.extend(word_indexes[left:right])
+    return result, indexes
 
 
 def _english_phonetic_key(token: str) -> str:
@@ -3182,6 +3253,17 @@ only with exactly these fields:
             and str((evidence.get("route") or {}).get("model") or "").strip()
         )
         evidence["status"] = "approved" if approved else "rejected"
+        if not approved:
+            evidence["rejection_reasons"] = [
+                reason for rejected, reason in (
+                    (not verdict, "missing or invalid verdict"),
+                    ((verdict or {}).get("decision") != "approve_asr_error", "judge rejected audio"),
+                    (not confidence_accepted, f"{confidence or 'missing'} confidence lacks corroboration"),
+                    ((verdict or {}).get("all_source_tokens_accounted_for") is not True
+                     or (verdict or {}).get("accounted_source_token_indexes") != expected_indexes,
+                     "source token accounting is incomplete"),
+                ) if rejected
+            ]
         write_evidence()
         if not approved:
             return None
@@ -3451,9 +3533,18 @@ async def _verify_orpheus_part(
                     "high-confidence evidence; preserving strict failure"
                 )
     if not report["verified"]:
+        verification_dir.mkdir(parents=True, exist_ok=True)
+        (verification_dir / "integrity_report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
+        differences = "; ".join(
+            f"source {' '.join(item['source'])!r} -> ASR {' '.join(item['asr'])!r}"
+            for item in report.get("token_differences", [])[:6]
+        )
         raise TtsIntegrityError(
             f"{provider_label} narration does not match its input utterance: "
             + "; ".join(report["failure_reasons"])
+            + (f"; {differences}" if differences else "")
         )
     if validate_pocket_continuity:
         continuity = _pocket_internal_silence_report(path, words)
@@ -4281,13 +4372,20 @@ async def _generate_pocket_tts(
         cleaned,
         output_dir_path,
         max_words=config.POCKET_TTS_CHUNK_WORDS,
+        retry_failed_paragraphs=verify_text,
     )
     emit(f"TTS input: stripped speaker labels -> {output_dir_path / 'tts_input.txt'}")
     emit(
         "TTS input: Pocket continuity split into "
-        f"{len(input_paths)} physical paragraph/story request(s); only complete "
-        f"sentences may split above {config.POCKET_TTS_CHUNK_WORDS} words"
+        f"{len(input_paths)} request(s); normal paragraphs split only at complete "
+        f"sentences above {config.POCKET_TTS_CHUNK_WORDS} words; rejected paragraphs retry by sentence"
     )
+    sentence_parts = sum("_sentence_" in path.stem for path in input_paths)
+    if sentence_parts:
+        emit(
+            f"Pocket TTS recovery: using {sentence_parts} complete-sentence requests "
+            "for previously rejected paragraphs; other paragraph caches are unchanged"
+        )
 
     base_url = config.POCKET_TTS_URL.rstrip("/")
     timeout_seconds = max(5, config.POCKET_TTS_REQUEST_TIMEOUT)
@@ -4406,11 +4504,25 @@ async def _generate_pocket_tts(
                         "internal_silence": internal_silence,
                     }
             except TtsIntegrityError as exc:
-                # A known rejected sample must be regenerated on the next outer
-                # integrity attempt; only crash-orphaned WAVs are recoverable.
-                expected_part.unlink(missing_ok=True)
+                # Preserve the latest rejected sample outside the reusable WAV
+                # path. A source-bound marker switches only this paragraph to
+                # complete sentences on the next attempt (including resumes).
+                verification_dir = output_dir_path / "verification" / input_path.stem
+                verification_dir.mkdir(parents=True, exist_ok=True)
+                if expected_part.is_file():
+                    os.replace(expected_part, verification_dir / "rejected.wav")
+                failure_path = verification_dir / "integrity_failure.json"
+                temporary = failure_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps({
+                    "text_sha256": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
+                    "reason": str(exc),
+                    "verifier_version": POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
+                }, indent=2), encoding="utf-8")
+                os.replace(temporary, failure_path)
                 _part_metadata_path(expected_part).unlink(missing_ok=True)
-                raise TtsIntegrityError(str(exc), part_key=input_path.name) from exc
+                raise TtsIntegrityError(
+                    f"{input_path.name}: {exc}", part_key=input_path.name,
+                ) from exc
             metadata = _write_pocket_part_metadata(
                 expected_part,
                 chunk,

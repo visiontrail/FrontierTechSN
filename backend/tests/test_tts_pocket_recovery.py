@@ -1,0 +1,164 @@
+"""Regressions from the 2026-09-16 physicist paragraph integrity failure."""
+
+import hashlib
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs
+
+import httpx
+import pytest
+
+from backend import config
+from backend.pipeline import tts
+from backend.tests.test_tts import pocket_streaming_wav_bytes
+
+
+def words(text):
+    return [{"text": token, "start": i * .3, "end": i * .3 + .2}
+            for i, token in enumerate(text.split())]
+
+
+@pytest.mark.parametrize(("spoken", "digits"), [
+    ("two hundred seventy-eight", "278"),
+    ("two hundred and seventy-eight", "278"),
+    ("one hundred one", "101"),
+    ("nine hundred ninety-nine", "999"),
+    ("two hundred fifty thousand", "250,000"),
+    ("two hundred seventy-eight million", "278 million"),
+])
+def test_compound_hundreds_preserve_the_exact_value_and_word_indexes(spoken, digits):
+    source = f"The program selected {spoken} projects this past July."
+    transcript = words(source.replace(spoken, digits))
+    assert tts._orpheus_transcript_report(source, transcript)["verified"]
+    assert tts._orpheus_transcript_report(source.replace(spoken, digits), words(source))["verified"]
+    normalized, indexes = tts._transcript_tokens(words(source))
+    assert normalized == tts._lexical_tokens(source)
+    assert indexes[normalized.index("projects")] == source.split().index("projects")
+
+
+@pytest.mark.parametrize("wrong", ["78", "200", "277", "287", "278 million", "two seventy-eight"])
+def test_compound_hundreds_do_not_accept_changed_values(wrong):
+    source = "The program selected two hundred seventy-eight projects this past July."
+    assert not tts._orpheus_transcript_report(
+        source, words(f"The program selected {wrong} projects this past July."),
+    )["verified"]
+
+
+@pytest.mark.parametrize(("source_acronyms", "observed", "accepted"), [
+    ("US AI", "USAI", True), ("EU AI", "EUAI", True),
+    ("US AI", "USA", False), ("US AI", "USAGI", False),
+    ("US AI", "AIUS", False), ("us AI", "USAI", False),
+    ("US A1", "USA1", False), ("US AI", "USAI AI", False),
+])
+def test_acronym_boundary_normalization_requires_exact_source_letters(source_acronyms, observed, accepted):
+    source = f"One physicist on a {source_acronyms}-for-science program offers a split verdict."
+    report = tts._orpheus_transcript_report(source, words(source.replace(source_acronyms, observed)))
+    assert report["verified"] is accepted
+
+
+@pytest.mark.parametrize("marker", ["valid", "stale", "malformed", "absent"])
+def test_sentence_recovery_is_source_bound_and_preserves_other_part_names(tmp_path, marker):
+    paragraph = "Dr. Earley studies E. coli. The apparatus stays in place."
+    source = f"Opening stays here.\n{paragraph}\nClosing stays here."
+    directory = tmp_path / "verification" / "tts_input_part_002"
+    directory.mkdir(parents=True)
+    failure = directory / "integrity_failure.json"
+    if marker != "absent":
+        failure.write_text("[]" if marker == "malformed" else json.dumps({
+            "text_sha256": hashlib.sha256((paragraph if marker == "valid" else "older text").encode()).hexdigest(),
+        }))
+    paths, chunks = tts._write_pocket_chunk_inputs(source, tmp_path, max_words=240, retry_failed_paragraphs=True)
+    assert paths[0].name == "tts_input_part_001.txt"
+    assert paths[-1].name == "tts_input_part_003.txt"
+    assert " ".join(chunks) == " ".join(source.splitlines())
+    assert len(chunks) == (4 if marker == "valid" else 3)
+    if marker == "valid":
+        assert chunks[1:3] == ["Dr. Earley studies E. coli.", "The apparatus stays in place."]
+        assert paths[1].name == "tts_input_part_002_sentence_001.txt"
+    # Voice previews do not inherit a production integrity retry plan.
+    assert len(tts._write_pocket_chunk_inputs(source, tmp_path, max_words=240)[1]) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sentence_fails", [False, True])
+async def test_failed_paragraph_recovers_by_sentence_with_cache_and_bounded_retries(tmp_path, sentence_fails):
+    opening = "Opening context stays here."
+    first = "The apparatus runs near the magnet."
+    second = "Its targets stay in the laboratory."
+    closing = "Closing context stays here."
+    paragraph = f"{first} {second}"
+    script = tmp_path / "script.txt"
+    script.write_text("\n".join([opening, paragraph, closing]))
+    output_dir = tmp_path / "audio"
+    requests = []
+
+    def respond(request):
+        requests.append(parse_qs(request.content.decode())["text"][0])
+        return httpx.Response(200, headers={"Content-Type": "audio/wav"},
+                              content=pocket_streaming_wav_bytes(frames=96_000))
+
+    async def verify(_path, text, _directory, **_kwargs):
+        if text == paragraph or (sentence_fails and text == second):
+            raise tts.TtsIntegrityError("source 'magnet' -> ASR 'market'")
+        return tts._orpheus_transcript_report(text, words(text))
+
+    original_client = httpx.AsyncClient
+    def client_factory(**kwargs):
+        return original_client(transport=httpx.MockTransport(respond), **kwargs)
+
+    with (patch.object(tts.httpx, "AsyncClient", client_factory),
+          patch.object(tts, "_verify_orpheus_part", AsyncMock(side_effect=verify)),
+          patch.object(config, "POCKET_TTS_CHUNK_WORDS", 240)):
+        if sentence_fails:
+            with pytest.raises(tts.TtsIntegrityError, match="sentence_002"):
+                await tts.generate_tts(str(script), str(output_dir), ["alba"], "pocket-tts-en")
+            assert requests == [opening, paragraph, first, second, second, second]
+            assert not (output_dir / "tts_manifest.json").exists()
+        else:
+            result = await tts.generate_tts(str(script), str(output_dir), ["alba"], "pocket-tts-en")
+            assert requests == [opening, paragraph, first, second, closing]
+            manifest = json.loads((output_dir / "tts_manifest.json").read_text())
+            assert manifest["integrity"]["verified_source_coverage"] == 1.0
+            assert manifest["chunk_count"] == 4
+            assert manifest["continuity"]["intra_line_application_join_count"] == 1
+            assert tts._read_pcm_wav(Path(result)).frame_count == 4 * 96_000
+            # A fresh call reconstructs the same plan and reuses every verified sentence.
+            await tts.generate_tts(str(script), str(output_dir), ["alba"], "pocket-tts-en")
+            assert len(requests) == 5
+    failure_dir = output_dir / "verification" / "tts_input_part_002"
+    assert (failure_dir / "rejected.wav").is_file()
+    assert "magnet" in json.loads((failure_dir / "integrity_failure.json").read_text())["reason"]
+    assert not (output_dir / "tts_input_part_002_generated.wav").exists()
+
+
+@pytest.mark.asyncio
+async def test_integrity_failure_reports_actual_token_differences(tmp_path):
+    from backend.pipeline import av_sync
+
+    source = "The program selected two hundred seventy-eight projects this past July."
+    with patch.object(av_sync, "ensure_word_transcript", AsyncMock(return_value=(
+        words(source.replace("two hundred seventy-eight", "277")), {},
+    ))):
+        with pytest.raises(tts.TtsIntegrityError, match="source '278' -> ASR '277'"):
+            await tts._verify_orpheus_part(tmp_path / "sample.wav", source, tmp_path, emit=lambda _: None)
+    report = json.loads((tmp_path / "integrity_report.json").read_text())
+    assert report["token_differences"] == [{"kind": "replace", "source": ["278"], "asr": ["277"]}]
+
+
+@pytest.mark.parametrize("defect", [None, "wrong_source", "approved", "existing_wav", "malformed"])
+def test_recovers_legacy_rejected_paragraph_without_replacing_an_existing_wav(tmp_path, defect):
+    source = "First complete sentence. Second complete sentence."
+    directory = tmp_path / "verification" / "tts_input"
+    directory.mkdir(parents=True)
+    evidence = {"status": "approved" if defect == "approved" else "rejected", "request": {
+        "source_text": "An older source." if defect == "wrong_source" else source,
+    }}
+    (directory / "llm_asr_adjudication.json").write_text(
+        "[]" if defect == "malformed" else json.dumps(evidence),
+    )
+    if defect == "existing_wav":
+        (tmp_path / "tts_input_generated.wav").write_bytes(b"existing audio")
+    paths, chunks = tts._write_pocket_chunk_inputs(source, tmp_path, max_words=240, retry_failed_paragraphs=True)
+    assert len(paths) == (2 if defect is None else 1)
+    assert " ".join(chunks) == source
