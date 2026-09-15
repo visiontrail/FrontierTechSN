@@ -30,12 +30,13 @@ from PIL import Image, UnidentifiedImageError
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5
 MAX_PAGE_OVERLAYS = 2
 VIEWPORT_WIDTH = 1440
 VIEWPORT_HEIGHT = 900
 PAGE_LOAD_TIMEOUT_SECONDS = 24.0
 PAGE_CAPTURE_TIMEOUT_SECONDS = 75.0
+CDP_COMMAND_TIMEOUT_SECONDS = 12.0
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
     "about",
@@ -271,21 +272,31 @@ def _chrome_binary() -> Path:
     raise RuntimeError("No Chrome/Chromium binary is available for news-page capture")
 
 
+class CaptureCommandTimeout(RuntimeError):
+    """A browser command stalled before page-level polling could proceed."""
+
+
 async def _cdp_command(socket, counter: list[int], method: str, params: dict | None = None) -> dict:
     counter[0] += 1
     command_id = counter[0]
-    await socket.send(
-        json.dumps({"id": command_id, "method": method, "params": params or {}})
-    )
-    while True:
-        payload = json.loads(await socket.recv())
-        if payload.get("id") != command_id:
-            continue
-        if payload.get("error"):
-            raise RuntimeError(
-                f"Chrome DevTools {method} failed: {payload['error'].get('message') or payload['error']}"
+    try:
+        async with asyncio.timeout(CDP_COMMAND_TIMEOUT_SECONDS):
+            await socket.send(
+                json.dumps({"id": command_id, "method": method, "params": params or {}})
             )
-        return payload.get("result") or {}
+            while True:
+                payload = json.loads(await socket.recv())
+                if payload.get("id") != command_id:
+                    continue
+                if payload.get("error"):
+                    raise RuntimeError(
+                        f"Chrome DevTools {method} failed: {payload['error'].get('message') or payload['error']}"
+                    )
+                return payload.get("result") or {}
+    except TimeoutError as exc:
+        raise CaptureCommandTimeout(
+            f"Chrome DevTools {method} exceeded {CDP_COMMAND_TIMEOUT_SECONDS:g}s deadline"
+        ) from exc
 
 
 async def _runtime_value(socket, counter: list[int], expression: str) -> object:
@@ -381,11 +392,19 @@ _PAGE_INFO_SCRIPT = r"""
     const rightSize = parseFloat(getComputedStyle(right).fontSize) || 0;
     return rightSize - leftSize;
   })[0] || null;
-  const root = (headline && headline.closest('article')) || document.querySelector('article') ||
+  // Techmeme's prose is a text node following the headline in the same .ii
+  // block. Scope evidence to that matched story, excluding its headline and
+  // all neighbouring stories, related links and archive/sidebar boilerplate.
+  const techmemeStory = /^(www\.)?techmeme\.com$/i.test(location.hostname)
+    ? headline?.closest('.ii') : null;
+  const root = techmemeStory || (headline && headline.closest('article')) || document.querySelector('article') ||
     document.querySelector('main') || document.body || document.documentElement;
-  const paragraphs = root ? [...root.querySelectorAll('p')]
+  const paragraphs = root ? (techmemeStory ? [techmemeStory] : [...root.querySelectorAll('p')])
     .filter(visible)
     .map((node) => (node.innerText || '').replace(/\s+/g, ' ').trim())
+    .map((text) => techmemeStory
+      ? text.replace((headline.innerText || '').replace(/\s+/g, ' ').trim(), '').replace(/^[\s—–-]+/, '')
+      : text)
     .filter((text) => text.length >= 45) : [];
   const sample = `${headline ? headline.innerText : ''} ${paragraphs.slice(0, 6).join(' ')}`;
   const headlineTerms = new Set(((headline ? headline.innerText : '').match(/[A-Za-z][A-Za-z0-9'-]{2,}/g) || [])
@@ -422,6 +441,7 @@ _PAGE_INFO_SCRIPT = r"""
     document_language: (document.documentElement.lang || '').trim().toLowerCase(),
     page_title: document.title || '',
     publisher_name: document.querySelector('meta[property="og:site_name"]')?.content || '',
+    content_kind: techmemeStory ? 'aggregator_excerpt' : 'article',
     headline: headline ? (headline.innerText || '').replace(/\s+/g, ' ').trim() : '',
     headline_href: headline
       ? (headline.closest('a[href]')?.href || headline.querySelector('a[href]')?.href || '')
@@ -480,7 +500,9 @@ _PREPARE_CAPTURE_SCRIPT = r"""
       node.style.setProperty('display', 'none', 'important');
     }
   });
-  const articleRoot = (headline && headline.closest('article')) ||
+  const techmemeStory = /^(www\.)?techmeme\.com$/i.test(location.hostname)
+    ? headline?.closest('.ii') : null;
+  const articleRoot = techmemeStory || (headline && headline.closest('article')) ||
     document.querySelector('article') || document.querySelector('main') || document.body;
   const storyParagraph = articleRoot ? [...articleRoot.querySelectorAll('p')]
     .find((node) => visible(node) && (node.innerText || '').trim().length >= 80) : null;
@@ -720,10 +742,24 @@ async def _capture_page(
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.put(
             f"{origin}/json/new",
-            params={"url": str(assignment["source_url"])},
+            params={"url": "about:blank"},
         )
         response.raise_for_status()
         target = response.json()
+    # Close failed and cancelled targets too; a stalled publisher must not keep
+    # running while the next candidate is captured in the same browser.
+    try:
+        return await _capture_target(target, assignment, destination)
+    finally:
+        if target.get("id"):
+            try:
+                async with httpx.AsyncClient(timeout=3) as client:
+                    await client.get(f"{origin}/json/close/{target['id']}")
+            except (httpx.HTTPError, OSError):
+                logger.debug("Could not close news capture target", exc_info=True)
+
+
+async def _capture_target(target: dict, assignment: dict, destination: Path) -> dict:
     socket_url = str(target.get("webSocketDebuggerUrl") or "")
     if not socket_url:
         raise RuntimeError("Chrome did not expose the article page target")
@@ -766,6 +802,8 @@ async def _capture_page(
         while loop.time() < deadline:
             try:
                 value = await _runtime_value(socket, counter, page_info_script)
+            except CaptureCommandTimeout:
+                raise
             except RuntimeError:
                 await asyncio.sleep(0.35)
                 continue
@@ -776,7 +814,9 @@ async def _capture_page(
             ):
                 break
             await asyncio.sleep(0.6)
-        if relay_url:
+        # A verified selected source is already usable. Follow its publisher
+        # only when it does not itself expose enough grounded English prose.
+        if relay_url and not _page_is_english(info):
             relay_source_host = (
                 urlsplit(str(info.get("page_url") or "")).hostname or ""
             ).casefold().removeprefix("www.")
@@ -791,6 +831,8 @@ async def _capture_page(
             while loop.time() < deadline:
                 try:
                     value = await _runtime_value(socket, counter, page_info_script)
+                except CaptureCommandTimeout:
+                    raise
                 except RuntimeError:
                     await asyncio.sleep(0.35)
                     continue
@@ -824,11 +866,11 @@ async def _capture_page(
 
         raw, prepared = await _capture_stable_article(socket, counter, prepare_capture_script)
         refreshed = await _runtime_value(socket, counter, page_info_script)
-        if isinstance(refreshed, dict) and _page_is_english(refreshed):
-            info = refreshed
+        if not isinstance(refreshed, dict) or not _page_is_english(refreshed):
+            raise RuntimeError("Article content failed validation after screenshot capture")
+        info = refreshed
         focus = prepared.get("focus_rect") if isinstance(prepared, dict) else None
         info.update(_focused_screenshot(raw, focus, destination))
-        await _cdp_command(socket, counter, "Page.close")
 
     with Image.open(destination) as image:
         image.load()
@@ -937,6 +979,7 @@ async def acquire_news_webpages(
                 "captured_source_name": str(
                     info.get("publisher_name") or assignment["source_name"]
                 ),
+                "content_kind": str(info.get("content_kind") or "article"),
                 "document_language": str(info.get("document_language") or ""),
                 "page_title": str(info.get("page_title") or ""),
                 "captured_headline": str(info.get("headline") or ""),

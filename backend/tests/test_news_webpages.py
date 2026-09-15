@@ -3,12 +3,121 @@ import base64
 import hashlib
 import io
 import json
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import pytest
 
 from PIL import Image
 
 from backend.pipeline import news_webpages
+
+
+@pytest.mark.asyncio
+async def test_cdp_deadline_names_the_stalled_command(monkeypatch):
+    async def stalled_recv():
+        await asyncio.Event().wait()
+
+    socket = AsyncMock()
+    socket.recv.side_effect = stalled_recv
+    monkeypatch.setattr(news_webpages, "CDP_COMMAND_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(news_webpages.CaptureCommandTimeout, match="Page.navigate exceeded"):
+        await news_webpages._cdp_command(socket, [0], "Page.navigate")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_capture_closes_failed_targets_and_starts_with_blank_page(monkeypatch, tmp_path, cancelled):
+    client = AsyncMock()
+    response = client.put.return_value
+    response.raise_for_status = lambda: None
+    response.json = lambda: {"id": "owned-target"}
+    client.__aenter__.return_value = client
+    monkeypatch.setattr(news_webpages.httpx, "AsyncClient", lambda **_: client)
+    error = asyncio.CancelledError if cancelled else RuntimeError
+    monkeypatch.setattr(news_webpages, "_capture_target", AsyncMock(side_effect=error))
+    with pytest.raises(error):
+        await news_webpages._capture_page(
+            "ws://127.0.0.1:1234/devtools/browser/test", {}, tmp_path / "page.png"
+        )
+    assert client.put.call_args.kwargs["params"] == {"url": "about:blank"}
+    client.get.assert_awaited_once_with("http://127.0.0.1:1234/json/close/owned-target")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_has_prose,changed_after_capture", [(True, False), (False, False), (True, True)])
+async def test_capture_keeps_valid_source_and_only_relays_missing_prose(
+    monkeypatch, tmp_path, source_has_prose, changed_after_capture
+):
+    source = {
+        "ready_state": "complete", "page_url": "https://www.techmeme.com/story",
+        "headline_href": "https://publisher.example/story", "document_language": "en",
+        "headline": "Grounded English news headline", "headline_match_words": 4,
+        "paragraph_characters": 120, "english_word_count": 45,
+    }
+    publisher = {**source, "page_url": source["headline_href"]}
+    final = source if source_has_prose else publisher
+    values = [source] if source_has_prose else [{**source, "paragraph_characters": 0}, publisher]
+    values.append({**final, "blocking_reason": "human verification challenge"} if changed_after_capture else final)
+    command = AsyncMock(return_value={})
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        yield object()
+
+    def save_image(raw, focus, destination):
+        Image.new("RGB", (1440, 900)).save(destination)
+        return {}
+
+    monkeypatch.setattr(news_webpages.websockets, "connect", connect)
+    monkeypatch.setattr(news_webpages, "_cdp_command", command)
+    monkeypatch.setattr(news_webpages, "_runtime_value", AsyncMock(side_effect=values))
+    monkeypatch.setattr(news_webpages, "_capture_stable_article", AsyncMock(return_value=(b"pixels", {})))
+    monkeypatch.setattr(news_webpages, "_focused_screenshot", save_image)
+    capture = news_webpages._capture_target(
+        {"webSocketDebuggerUrl": "ws://test"},
+        {"source_url": source["page_url"]}, tmp_path / "page.png",
+    )
+    if changed_after_capture:
+        with pytest.raises(RuntimeError, match="failed validation after screenshot"):
+            await capture
+    else:
+        assert (await capture)["page_url"] == final["page_url"]
+    navigations = [call.args[3]["url"] for call in command.call_args_list if call.args[2] == "Page.navigate"]
+    assert navigations == ([source["page_url"]] if source_has_prose else [source["page_url"], publisher["page_url"]])
+
+
+@pytest.mark.asyncio
+async def test_techmeme_dom_counts_only_matched_story_prose():
+    """Exercise the actual DOM script without any network or publisher dependency."""
+    try:
+        news_webpages._chrome_binary()
+    except RuntimeError:
+        pytest.skip("Local Chromium is required for DOM integration coverage")
+    process, browser_url, profile = await news_webpages._start_chrome()
+    try:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(browser_url)
+        async with news_webpages.httpx.AsyncClient() as client:
+            target = (await client.put(f"http://{parsed.hostname}:{parsed.port}/json/new", params={"url": "about:blank"})).json()
+        async with news_webpages.websockets.connect(target["webSocketDebuggerUrl"]) as socket:
+            counter = [0]
+            tree = await news_webpages._cdp_command(socket, counter, "Page.getFrameTree")
+            headline = "Cybersecurity stocks outperform chip stocks amid escalating artificial intelligence fears"
+            prose = "The software sector outperformed the chip sector to a historic degree as investors responded to escalating risks from artificial intelligence systems, lifting several major cybersecurity companies during Monday trading."
+            script = news_webpages._PAGE_INFO_SCRIPT.replace("__EXPECTED_HEADLINE__", json.dumps(headline)).replace("location.hostname", "'www.techmeme.com'")
+            for summary in [prose, ""]:
+                await news_webpages._cdp_command(socket, counter, "Page.setDocumentContent", {
+                    "frameId": tree["frameTree"]["frame"]["id"],
+                    "html": f'<style>.ii {{width:650px;font-size:22px}} strong {{display:block}}</style><div class="ii"><strong>{headline}</strong> — {summary}</div><div class="ii"><strong>Unrelated headline</strong>{prose}</div><aside><p>{prose * 5}</p></aside>',
+                })
+                info = await news_webpages._runtime_value(socket, counter, script)
+                assert info["paragraph_characters"] == len(summary)
+                assert info["content_kind"] == "aggregator_excerpt"
+                assert news_webpages._page_is_english(info) is bool(summary)
+    finally:
+        await news_webpages._stop_chrome(process, profile)
 
 
 @pytest.mark.parametrize("change", ["shift", "offscreen", "outside_crop", "missing"])
