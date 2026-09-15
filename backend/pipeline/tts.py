@@ -88,11 +88,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 27
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 28
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 10
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 11
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -520,26 +520,7 @@ def _canonicalize_acoustic_phrase_tokens(tokens: list[str]) -> list[str]:
 
 def _canonicalize_decimal_tokens(tokens: list[str]) -> list[str]:
     """Collapse a spoken point and its fractional digits into one exact token."""
-    result: list[str] = []
-    index = 0
-    while index < len(tokens):
-        if (
-            tokens[index].isdigit()
-            and index + 2 < len(tokens)
-            and tokens[index + 1] == "point"
-            and tokens[index + 2].isdigit()
-        ):
-            fraction_end = index + 3
-            while fraction_end < len(tokens) and tokens[fraction_end].isdigit():
-                fraction_end += 1
-            result.append(
-                "decimalnumber"
-                f"{tokens[index]}point{''.join(tokens[index + 2:fraction_end])}"
-            )
-            index = fraction_end
-            continue
-        result.append(tokens[index])
-        index += 1
+    result, _ = _canonicalize_decimal_transcript_tokens(tokens, list(range(len(tokens))))
     return result
 
 
@@ -551,18 +532,27 @@ def _canonicalize_decimal_transcript_tokens(
     result_indexes: list[int] = []
     index = 0
     while index < len(tokens):
-        if (
-            tokens[index].isdigit()
-            and index + 2 < len(tokens)
-            and tokens[index + 1] == "point"
-            and tokens[index + 2].isdigit()
+        # Normalize the whole integer prefix first: splitting 20 + 3.5 would
+        # make "twenty-three point five" disagree with Whisper's "23.5".
+        integer_end = index
+        while integer_end < len(tokens) and (
+            tokens[integer_end].isdigit() or tokens[integer_end] in NUMBER_SCALES
+            or tokens[integer_end] == "and"
         ):
-            fraction_end = index + 3
+            integer_end += 1
+        integer = _canonicalize_number_tokens(tokens[index:integer_end])
+        if (
+            len(integer) == 1 and integer[0].isdigit()
+            and integer_end + 1 < len(tokens)
+            and tokens[integer_end] == "point"
+            and tokens[integer_end + 1].isdigit()
+        ):
+            fraction_end = integer_end + 2
             while fraction_end < len(tokens) and tokens[fraction_end].isdigit():
                 fraction_end += 1
             result.append(
                 "decimalnumber"
-                f"{tokens[index]}point{''.join(tokens[index + 2:fraction_end])}"
+                f"{integer[0]}point{''.join(tokens[integer_end + 1:fraction_end])}"
             )
             result_indexes.append(word_indexes[index])
             index = fraction_end
@@ -718,7 +708,7 @@ def _canonicalize_numeric_range_tokens_with_indexes(
     tokens: list[str],
     word_indexes: list[int],
 ) -> tuple[list[str], list[int]]:
-    """Collapse an exact integer ``from/to`` range without losing its values."""
+    """Collapse integer ranges while retaining the spoken connector and values."""
     if len(tokens) != len(word_indexes):
         raise ValueError("Range tokens and word indexes must have equal length")
     result: list[str] = []
@@ -728,11 +718,11 @@ def _canonicalize_numeric_range_tokens_with_indexes(
         if (
             tokens[index].isdigit()
             and index + 2 < len(tokens)
-            and tokens[index + 1] == "to"
+            and tokens[index + 1] in {"to", "through"}
             and tokens[index + 2].isdigit()
         ):
             result.append(
-                f"numberrange{tokens[index]}to{tokens[index + 2]}"
+                f"numberrange{tokens[index]}{tokens[index + 1]}{tokens[index + 2]}"
             )
             result_indexes.append(word_indexes[index])
             index += 3
@@ -2388,6 +2378,7 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
     """
     expected = _lexical_tokens(text)
     observed, observed_word_indexes = _transcript_tokens(words)
+    observed = _normalize_written_range_tokens(expected, observed, observed_word_indexes, words)
     observed, observed_word_indexes = _expand_joined_source_acronyms(
         text, expected, observed, observed_word_indexes,
     )
@@ -2519,6 +2510,34 @@ def _orpheus_transcript_report(text: str, words: list[dict]) -> dict:
             if tag != "equal"
         ],
     }
+
+
+def _normalize_written_range_tokens(
+    expected: list[str], observed: list[str], word_indexes: list[int], words: list[dict],
+) -> list[str]:
+    """Map ASR's 13-15 shorthand to an aligned spoken '13 through 15'.
+
+    Explicit 'to' remains distinct from 'through'. Only a literal dash in the
+    contributing ASR words can supply the written-range equivalence.
+    """
+    result = list(observed)
+    for tag, start, end, left, right in SequenceMatcher(
+        a=expected, b=observed, autojunk=False,
+    ).get_opcodes():
+        if tag != "replace" or end - start != right - left:
+            continue
+        for source_index, observed_index in zip(range(start, end), range(left, right)):
+            source = expected[source_index]
+            match = re.fullmatch(r"numberrange(\d+)through(\d+)", source)
+            if match is None or observed[observed_index] != f"numberrange{match[1]}to{match[2]}":
+                continue
+            word_index = word_indexes[observed_index]
+            pattern = rf"\s*{match[1]}\s*[-–—−]\s*{match[2]}[,.;:!?]?\s*"
+            if any(re.fullmatch(pattern, " ".join(
+                str(word.get("text") or "") for word in words[word_index:word_index + width]
+            )) for width in (1, 2)):
+                result[observed_index] = source
+    return result
 
 
 def _expand_joined_source_acronyms(
@@ -2894,19 +2913,36 @@ def _medium_asr_verdict_is_corroborated(
     This handles Whisper artifacts such as duplicate words sharing an end time
     without accepting an extra word heard at the same position by both decodes.
 
-    The source must not contain a mixed letter/digit token such as ``a16z``;
-    that guard prevents an alphanumeric brand or model number from being
-    silently changed into another entity.
+    Mixed letter/digit brands such as ``a16z`` remain excluded. Internal
+    decimal/date/range tokens are formatting, not brands, and may pass only
+    when their exact numeric values agree in both decodes.
     """
-    normal_tokens = re.findall(r"[a-z0-9]+", normal_transcript.casefold())
-    slower_tokens = re.findall(r"[a-z0-9]+", slower_transcript.casefold())
+    def normalized(transcript: str) -> list[str]:
+        raw_words = [{"text": word} for word in transcript.split()]
+        tokens, indexes = _transcript_tokens(raw_words)
+        return _normalize_written_range_tokens(expected_tokens, tokens, indexes, raw_words)
+
+    normal_tokens = normalized(normal_transcript)
+    slower_tokens = normalized(slower_transcript)
     if not normal_tokens or not slower_tokens:
         return False
     if any(
         any(character.isalpha() for character in token)
         and any(character.isdigit() for character in token)
+        and not re.fullmatch(
+            r"calendar-day-\d+|decimalnumber\d+point\d+|numberrange\d+(?:to|through)\d+|\d+(?:st|nd|rd|th)",
+            token,
+        )
         for token in expected_tokens
     ):
+        return False
+    # Whole-paragraph spelling similarity must never hide a changed, missing,
+    # or added numeric value even when only one character differs.
+    def numeric_tokens(tokens: list[str]) -> list[str]:
+        return [token for token in tokens if any(character.isdigit() for character in token)]
+
+    if not (numeric_tokens(expected_tokens) == numeric_tokens(normal_tokens)
+            == numeric_tokens(slower_tokens)):
         return False
     expected_text = " ".join(expected_tokens)
     if not expected_text:
@@ -3073,6 +3109,8 @@ async def _adjudicate_orpheus_asr_mismatch(
     request = {
         "source_text": text,
         "normalized_source_tokens": expected_tokens,
+        "indexed_source_tokens": dict(enumerate(expected_tokens)),
+        "source_token_count": len(expected_tokens),
         "normal_speed_transcript": _raw_transcript(normal_words),
         "slower_speed_transcript": _raw_transcript(slower_words),
         "normal_speed_overlapping_tokens": _asr_overlapping_tokens(normal_words),
@@ -3145,7 +3183,9 @@ evidence, reject. Word timestamps can overlap when Whisper emits a duplicate or
 hallucinated token. Treat an overlapping token as an ASR artifact only when the
 other transcript does not contain it at the same content position; do not treat
 the deterministic word count alone as proof of repeated speech. Return JSON
-only with exactly these fields:
+only with exactly these fields. Token indexes refer to indexed_source_tokens,
+not whitespace words in SOURCE TEXT or either transcript. Account for each
+index independently; never claim coverage merely to fill the index list:
 {
   "decision": "approve_asr_error" | "reject_audio_mismatch",
   "all_source_tokens_accounted_for": true | false,
@@ -3176,6 +3216,8 @@ only with exactly these fields:
         # room for that accounting plus the explanation even on full paragraphs;
         # 700 tokens caused SDK continuation fragments and max_output_tokens.
         output_budget = min(4096, max(2048, 512 + 4 * len(expected_tokens)))
+        expected_indexes = list(range(len(expected_tokens)))
+        retry_accounting = False
         for attempt in range(2):
             retry_instruction = (
                 "\nYour previous response was not valid JSON or was truncated. Re-evaluate the "
@@ -3183,6 +3225,14 @@ only with exactly these fields:
                 "Do not include analysis, prose, or Markdown fences."
                 if attempt else ""
             )
+            if retry_accounting:
+                retry_instruction = (
+                    "\nYour previous approval claimed complete coverage but its token indexes "
+                    "did not match indexed_source_tokens. Re-evaluate the same acoustic "
+                    "evidence using those explicit indexes. Approve only if you can "
+                    "independently account for every source index; otherwise reject. "
+                    "Do not fill missing indexes without transcript evidence."
+                )
             try:
                 raw = await _chat(
                     system_prompt + retry_instruction,
@@ -3222,6 +3272,15 @@ only with exactly these fields:
             })
             write_evidence()
             if verdict is not None:
+                if (attempt == 0 and verdict.get("decision") == "approve_asr_error"
+                        and verdict.get("all_source_tokens_accounted_for") is True
+                        and verdict.get("accounted_source_token_indexes") != expected_indexes):
+                    retry_accounting = True
+                    emit(
+                        f"{provider_label} ASR adjudication: inconsistent token accounting; "
+                        "rechecking the same evidence once without regenerating audio"
+                    )
+                    continue
                 break
             if attempt == 0:
                 emit(
@@ -3229,7 +3288,6 @@ only with exactly these fields:
                     "once against the same transcripts without regenerating audio"
                 )
         evidence["verdict"] = verdict
-        expected_indexes = list(range(len(expected_tokens)))
         confidence = str((verdict or {}).get("confidence") or "").strip()
         normal_transcript = request["normal_speed_transcript"]
         slower_transcript = request["slower_speed_transcript"]

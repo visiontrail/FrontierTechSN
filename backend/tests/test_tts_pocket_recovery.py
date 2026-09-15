@@ -162,3 +162,45 @@ def test_recovers_legacy_rejected_paragraph_without_replacing_an_existing_wav(tm
     paths, chunks = tts._write_pocket_chunk_inputs(source, tmp_path, max_words=240, retry_failed_paragraphs=True)
     assert len(paths) == (2 if defect is None else 1)
     assert " ".join(chunks) == source
+
+
+@pytest.mark.parametrize(("observed", "accepted"), [
+    ("13–15", True), ("13 -15", True), ("13 through 15", True),
+    ("13 to 15", False), ("13–16", False), ("12–15", False),
+    ("15–13", False), ("13 and 15", False), ("13 15", False),
+])
+def test_through_range_accepts_only_exact_written_shorthand(observed, accepted):
+    source = "The conference runs this October 13 through 15 in San Francisco."
+    assert tts._orpheus_transcript_report(
+        source, words(source.replace("13 through 15", observed)),
+    )["verified"] is accepted
+
+
+@pytest.mark.parametrize(("source_number", "transcript_number"), [
+    ("two hundred seventy-eight", "278"),
+    ("September 25", "September 25"),
+    ("October 13 through 15", "October 13 -15"),
+    ("twenty-three point five", "23.5"),
+])
+def test_medium_name_verdict_handles_numeric_formatting_without_treating_dates_as_brands(source_number, transcript_number):
+    source = f"DeepTech China reports that venture firm Andreessen Horowitz announced {source_number} today."
+    transcript = source.replace("DeepTech", "Deep Tech").replace("Andreessen", "Andreasen").replace(source_number, transcript_number)
+    assert tts._medium_asr_verdict_is_corroborated(tts._lexical_tokens(source), transcript, transcript)
+    # Keep the remainder of this otherwise close paragraph identical.
+    for wrong in [transcript.replace(transcript_number, "999"), transcript + " 999"]:
+        assert not tts._medium_asr_verdict_is_corroborated(tts._lexical_tokens(source), wrong, wrong)
+
+
+@pytest.mark.parametrize(("spoken", "digits"), [
+    ("twenty-three point five", "23.5"),
+    ("two hundred seventy-eight point zero five", "278.05"),
+    ("ninety-nine point nine", "99.9"),
+])
+def test_spoken_decimal_normalizes_its_entire_integer_prefix(spoken, digits):
+    source = f"The reported amount is {spoken} million dollars today."
+    observed = source.replace(spoken, digits)
+    assert tts._orpheus_transcript_report(source, words(observed))["verified"]
+    assert tts._orpheus_transcript_report(observed, words(source))["verified"]
+    assert not tts._orpheus_transcript_report(source, words(observed.replace(digits, "33.5")))["verified"]
+    tokens, indexes = tts._transcript_tokens(words(source))
+    assert indexes[tokens.index("dollars")] == source.split().index("dollars")

@@ -481,8 +481,8 @@ async def test_orpheus_verifier_keeps_mismatch_strict_without_adjudication(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("second_response", ["approve", "reject", "malformed", "incomplete"])
-@pytest.mark.parametrize("first_failure", ["malformed", "max_output_tokens"])
-async def test_adjudication_retries_only_invalid_json_on_unchanged_evidence(
+@pytest.mark.parametrize("first_failure", ["malformed", "max_output_tokens", "incomplete_accounting"])
+async def test_adjudication_retries_invalid_output_on_unchanged_evidence(
     tmp_path, second_response, first_failure,
 ):
     source = "Bloomberg reports that Shenzhen Longsys Electronics is trading today."
@@ -496,8 +496,16 @@ async def test_adjudication_retries_only_invalid_json_on_unchanged_evidence(
         "reason": "Both acoustic transcripts agree on the proper-name spelling.",
     }
     malformed = '```json\n{"decision": "approve_asr_error", "indexes": [0,1,```json\n' + json.dumps(verdict)
+    first_response = {
+        "malformed": malformed,
+        "max_output_tokens": RuntimeError("assistant error: max_output_tokens"),
+        "incomplete_accounting": json.dumps({
+            **verdict, "decision": "approve_asr_error",
+            "accounted_source_token_indexes": indexes[:-1],
+        }),
+    }[first_failure]
     responses = iter([
-        malformed if first_failure == "malformed" else RuntimeError("assistant error: max_output_tokens"),
+        first_response,
         malformed if second_response == "malformed" else json.dumps(verdict),
     ])
     requests = []
@@ -531,13 +539,21 @@ async def test_adjudication_retries_only_invalid_json_on_unchanged_evidence(
     assert requests[0][1] == requests[1][1]
     assert requests[0][2] >= 2048
     assert requests[1][2] == requests[0][2] * 2
-    assert "previous response was not valid JSON" in requests[1][0]
+    if first_failure == "incomplete_accounting":
+        assert "token indexes did not match" in requests[1][0]
+    else:
+        assert "previous response was not valid JSON" in requests[1][0]
+    payload = json.loads(requests[0][1])
+    assert payload["source_token_count"] == len(indexes)
+    assert payload["indexed_source_tokens"] == dict(
+        (str(index), token) for index, token in enumerate(tts._lexical_tokens(source))
+    )
     assert (result is not None) == (second_response == "approve")
     evidence = json.loads((tmp_path / "llm_asr_adjudication.json").read_text())
     assert len(evidence["attempts"]) == 2
     if first_failure == "malformed":
         assert evidence["attempts"][0]["raw_response"] == malformed
         assert evidence["attempts"][0]["verdict"] is None
-    else:
+    elif first_failure == "max_output_tokens":
         assert "max_output_tokens" in evidence["attempts"][0]["error"]
     assert "secret" not in json.dumps(evidence)
