@@ -28,6 +28,7 @@ import httpx
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 from backend import config
+from backend.pipeline.image_layout import image_layout
 from backend.pipeline.opencli import (
     OpenCLIError,
     first_json,
@@ -40,7 +41,7 @@ LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 MANIFEST_VERSION = 17
-QUERY_SEMANTICS_VERSION = 10
+QUERY_SEMANTICS_VERSION = 11
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
 NEWS_IMAGE_MAX_PIXELS = 16_000_000
@@ -925,7 +926,10 @@ def _subject_semantic_role(subject: object, scene: dict) -> tuple[str, str]:
             after = scene_text[match.end() : match.end() + 24].casefold()
             if after.startswith(("'s", "’s")):
                 continue
-            if re.match(r"\s+(?:investment\s+)?(?:bank|company|firm|university)\b", after):
+            if re.match(
+                r"\s+(?:investment\s+)?(?:bank|company|firm|university|military|army|navy|"
+                r"air force|space force|government|embassy|ministry|department)\b", after,
+            ):
                 continue
             contextual_matches.append(match)
         if not contextual_matches:
@@ -3702,7 +3706,7 @@ async def acquire_news_images(
                             "bytes": byte_size,
                             "sha256": sha256,
                             "local_path": destination.relative_to(task_dir).as_posix(),
-                            "fit": "contain" if candidate["kind"] == "logo" else "cover",
+                            **image_layout(destination, kind=candidate["kind"]),
                             "status": "downloaded",
                         }
                     )
@@ -3897,11 +3901,7 @@ async def acquire_news_images(
                                 "local_path": destination.relative_to(
                                     task_dir
                                 ).as_posix(),
-                                "fit": (
-                                    "contain"
-                                    if candidate.get("kind") == "logo"
-                                    else "cover"
-                                ),
+                                **image_layout(destination, kind=candidate.get("kind", "")),
                                 "status": "downloaded",
                                 "collage_role": "supporting",
                             }
@@ -4236,7 +4236,10 @@ def attach_news_images(
                 "news_image_src": f"../{image['local_path']}",
                 "news_image_mode": mode,
                 "news_image_kind": image.get("kind") or "event",
-                "news_image_fit": image.get("fit") or "cover",
+                "news_image_fit": image_layout(
+                    task_dir / image["local_path"], fit=image.get("fit", "cover"),
+                    kind=image.get("kind", ""),
+                )["fit"],
                 "news_image_credit": _credit(image),
                 "news_image_caption": image.get("expected_subject") or "",
                 "news_image_query": image.get("search_query") or "",
@@ -4273,6 +4276,13 @@ def attach_news_images(
             plan["news_image_credits"] = [
                 _credit(image),
                 *[_credit(asset) for asset in supporting],
+            ]
+            plan["news_image_fits"] = [
+                image_layout(
+                    task_dir / asset["local_path"], fit=asset.get("fit", "cover"),
+                    kind=asset.get("kind", ""),
+                )["fit"]
+                for asset in [image, *supporting]
             ]
             plan["news_image_collage"] = True
             plan["news_image_collage_asset_count"] = 3

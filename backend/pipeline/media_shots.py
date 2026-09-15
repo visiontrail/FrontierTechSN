@@ -14,8 +14,9 @@ from pathlib import Path
 from PIL import Image
 
 from backend import config
+from backend.pipeline.image_layout import image_layout
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 
 
 class _Elements(HTMLParser):
@@ -54,6 +55,14 @@ def assert_rendered_shots(plan: dict, source: str) -> None:
                 raise ValueError(f"rendered shot timing changed: {element_id}")
             if tag in {"video", "img"} and (attrs.get("src") != shot["src"] or "loop" in attrs):
                 raise ValueError(f"rendered source changed or looped: {element_id}")
+            if tag == "img" and shot.get("fit") == "contain" and shot["kind"] == "image":
+                style = dict(
+                    (key.strip(), value.strip())
+                    for declaration in attrs.get("style", "").split(";") if ":" in declaration
+                    for key, value in [declaration.split(":", 1)]
+                )
+                if style.get("object-fit") != "contain":
+                    raise ValueError(f"rendered image containment changed: {element_id}")
             if tag == "video":
                 if ticks(attrs.get("data-media-start", 0)) != ticks(shot.get("source_start", 0)):
                     raise ValueError(f"rendered source in-point changed: {element_id}")
@@ -118,6 +127,7 @@ def _asset(task_dir: Path, raw: str, kind: str, **metadata) -> dict:
     else:
         with Image.open(path) as image:
             image.verify()
+        result.update(image_layout(path, fit=metadata.get("fit", "cover")))
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -141,8 +151,13 @@ def inventory(plan: dict, task_dir: Path) -> list[dict]:
         assets.append(_asset(task_dir, collage_src, "paper_collage", credit="Illustration · Paper-Collage"))
     images = plan.get("news_image_srcs") or ([plan["news_image_src"]] if plan.get("news_image_src") else [])
     credits = plan.get("news_image_credits") or []
+    fits = plan.get("news_image_fits") or []
     for i, src in enumerate(images):
-        assets.append(_asset(task_dir, src, "image", credit=credits[i] if i < len(credits) else plan.get("news_image_credit", "")))
+        assets.append(_asset(
+            task_dir, src, "image",
+            credit=credits[i] if i < len(credits) else plan.get("news_image_credit", ""),
+            fit=fits[i] if i < len(fits) else plan.get("news_image_fit", "cover"),
+        ))
     if plan.get("news_webpage_src"):
         assets.append(_asset(task_dir, plan["news_webpage_src"], "article", credit=plan.get("news_webpage_source", "")))
     return [{"id": f"asset-{i + 1}", **asset} for i, asset in enumerate(assets)]

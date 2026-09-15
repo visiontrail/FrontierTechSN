@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from backend.pipeline.digester import summarize, generate_script
 from backend.pipeline.tts import generate_tts
 from backend.pipeline.composer import compose_video
 from backend.pipeline.footage import acquire_footage
+from backend.pipeline import footage
 from backend.pipeline.thumbnail import generate_thumbnail
 from backend.pipeline.title import generate_title
 from backend.pipeline.music import _probe_duration, generate_background_music
@@ -89,6 +91,34 @@ def task_output_dir(task: TaskResponse) -> Path:
     return Path(task.output_dir) if task.output_dir else config.OUTPUTS_DIR / task.id
 
 
+def _footage_request_sha256(task: TaskResponse, script: str) -> str:
+    return hashlib.sha256(json.dumps([
+        script, task.config.footage_provider, task.config.footage_clip_count,
+        task.config.video_orientation, task.config.footage_license_policy,
+        config.WEB_FOOTAGE_ENABLED,
+    ], ensure_ascii=False).encode()).hexdigest()
+
+
+async def _ensure_task_footage(task: TaskResponse, task_dir: Path, task_log: LogCallback):
+    """Every compose entry point must complete the enabled media prerequisite."""
+    if not task.config.footage_enabled:
+        return
+    script = Path(task.script_path or task_dir / "script.txt").read_text(encoding="utf-8")
+    try:
+        manifest = footage.read_manifest(task_dir)
+    except (OSError, ValueError):
+        manifest = None
+    if (
+        footage.acquisition_is_complete(task_dir, manifest, script)
+        and manifest.get("task_request_sha256") == _footage_request_sha256(task, script)
+    ):
+        task_log(f"Public footage prerequisite: reusing {len(manifest['clips'])} verified clip(s)")
+        return
+    task_log("Public footage prerequisite: acquiring missing, incomplete or outdated footage before composition")
+    await update_task(task.id, status=TaskStatus.SOURCING.value, error_message=None)
+    await _acquire_task_footage(task, task_dir, task_log)
+
+
 @timed("footage")
 async def _acquire_task_footage(
     task: TaskResponse,
@@ -127,6 +157,15 @@ async def _acquire_task_footage(
             f"{detail}"
             "review footage/manifest.json for rejected candidates and search failures. "
             "Retry footage acquisition to resume verified clips before rendering."
+        )
+    script = script_path.read_text(encoding="utf-8")
+    manifest["script_sha256"] = hashlib.sha256(script.encode()).hexdigest()
+    manifest["task_request_sha256"] = _footage_request_sha256(task, script)
+    footage._write_manifest(task_dir, manifest)
+    if not footage.acquisition_is_complete(task_dir, manifest, script):
+        raise RuntimeError(
+            "Public-footage acquisition incomplete: the returned manifest or local clips "
+            "failed validation; composition is blocked."
         )
     return manifest
 
@@ -638,6 +677,8 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
 
     title = task.generated_title or task.source_title or task.id
 
+    await _ensure_task_footage(task, task_dir, task_log)
+
     background_music_path = None
     if task.config.background_music_enabled:
         music_path = task_dir / "music" / "background.wav"
@@ -691,6 +732,7 @@ async def run_compose(task: TaskResponse, log: LogCallback | None = None):
         collage_broll_count=task.config.collage_broll_count,
         news_images_enabled=task.config.news_images_enabled,
         news_image_count=task.config.news_image_count,
+        footage_enabled=task.config.footage_enabled,
         is_monologue=task.config.script_format == ScriptFormat.MONOLOGUE,
         # The compose stage now runs its own AI calls (art direction, then the
         # Claude Agent SDK authoring crews), so it needs the same provider the

@@ -1364,10 +1364,19 @@ async def compose_video(
     program_music_opening_gap_seconds: float = 3.0,
     program_music_story_gap_seconds: float = 1.5,
     log: LogCallback | None = None,
+    footage_enabled: bool = False,
 ) -> str:
     review_request = {key: value for key, value in locals().items() if key != "log"}
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
+    if footage_enabled and not footage.acquisition_is_complete(
+        output_dir_path, footage.read_manifest(output_dir_path),
+        Path(script_path).read_text(encoding="utf-8"),
+    ):
+        raise RuntimeError(
+            "Public-footage delivery blocked: enabled footage acquisition has no "
+            "complete, current manifest. Acquire footage before composing."
+        )
     prefer_previous_reviewer = _previous_rejection_used_fallback(output_dir_path)
     quality_retry_source, _ = _pending_visual_repairs(output_dir_path, [])
     frame = resolve_frame_spec(video_orientation)

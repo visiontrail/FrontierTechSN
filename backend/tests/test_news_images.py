@@ -1290,6 +1290,18 @@ def test_exact_place_subjects_survive_normal_prepositions(subject, scene_text):
     assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is True
 
 
+@pytest.mark.parametrize("institution", ["military", "army", "navy", "space force", "government", "embassy"])
+def test_country_modifier_cannot_select_unrelated_location_photos(institution):
+    scene = {"text": f"The Financial Times reports that the United States {institution} has revealed weapons in space."}
+    shot = {"expected_subject": "United States", "kind": "place"}
+    candidate = {
+        "title": "My Son's A Queer event at the United Kingdom Embassy in the United States on 2024-01-24 - 12.jpg",
+        "description": "Guests at an embassy event", "creator": "UKinUSA",
+    }
+    assert news_images._shot_is_grounded_to_scene(shot, scene) is False
+    assert news_images._grounding_evidence(shot, scene, candidate)["grounding_passed"] is False
+
+
 @pytest.mark.parametrize("subject", ["August 19", "August 20"])
 def test_calendar_fragments_cannot_become_logo_subjects(subject):
     shot = {"expected_subject": subject, "kind": "logo"}

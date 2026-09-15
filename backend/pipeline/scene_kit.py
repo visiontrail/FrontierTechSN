@@ -411,6 +411,7 @@ class ScenePlan:
     news_image_mode: str = ""
     news_image_kind: str = ""
     news_image_fit: str = "cover"
+    news_image_fits: tuple[str, ...] = ()
     news_image_credit: str = ""
     news_image_credits: tuple[str, ...] = ()
     news_image_caption: str = ""
@@ -498,6 +499,10 @@ class ScenePlan:
                 else "cover"
             ),
             news_image_credit=str(data.get("news_image_credit") or ""),
+            news_image_fits=tuple(
+                "contain" if value == "contain" else "cover"
+                for value in data.get("news_image_fits") or []
+            ),
             news_image_credits=tuple(
                 str(item)
                 for item in data.get("news_image_credits") or []
@@ -1685,7 +1690,7 @@ def _render_news_image_inline(plan: ScenePlan) -> str:
         inAt("#{plan.id}-stat", {{ y: 22, opacity: 0, scale: .97 }}, {{ y: 0, opacity: 1, scale: 1, duration: .62, ease: "circ.out", transformOrigin: "0 50%" }}, 0.72);
         inAt("#{plan.id}-items .news-inline-item", {{ x: -24, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .52, ease: "power2.out", stagger: .1 }}, 0.76);
         inAt("#{plan.id}-image-frame", {{ x: {direction * 220}, opacity: 0, rotationY: {direction * -11}, scale: .94 }}, {{ x: 0, opacity: 1, rotationY: 0, scale: 1, duration: .92, ease: "power4.out", transformPerspective: 1400, transformOrigin: "50% 50%" }}, 0.24);
-        inAt("#{plan.id}-image", {{ scale: 1.08, x: {direction * -12} }}, {{ scale: 1.02, x: {direction * 12}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.18);
+        inAt("#{plan.id}-image", {{ scale: {1 if contain else 1.08}, x: {0 if contain else direction * -12} }}, {{ scale: {1 if contain else 1.02}, x: {0 if contain else direction * 12}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.18);
         inAt("#{plan.id}-corner", {{ scale: .5, opacity: 0, transformOrigin: "0 100%" }}, {{ scale: 1, opacity: .78, duration: .7, ease: "circ.out" }}, 0.66);
         inAt("#{plan.id}-credit", {{ y: 14, opacity: 0 }}, {{ y: 0, opacity: 1, duration: .5, ease: "power1.out" }}, 0.92);
 """
@@ -1730,13 +1735,15 @@ def _render_news_image_collage(plan: ScenePlan) -> str:
         zip(placements, sources, strict=True), start=1
     ):
         credit = credits[index - 1] if index - 1 < len(credits) else ""
+        fit = plan.news_image_fits[index - 1] if index <= len(plan.news_image_fits) else plan.news_image_fit
+        contain = fit == "contain"
         panel_markup.append(
             f'    <div class="news-collage-panel news-collage-{name}" '
             f'id="{plan.id}-collage-panel-{index}" style="{placement} transform:rotate({rotation}deg)" '
             'data-layout-allow-overflow>\n'
             f'      <div class="news-collage-crop"><img class="news-collage-image" '
             f'id="{plan.id}-collage-image-{index}" src="{_esc(source)}" alt="" '
-            'crossorigin="anonymous"></div>\n'
+            f'style="object-fit:{fit}" crossorigin="anonymous"></div>\n'
             + (
                 f'      <div class="news-collage-credit" id="{plan.id}-collage-credit-{index}">'
                 f'{_esc(credit)}</div>\n'
@@ -1756,8 +1763,8 @@ def _render_news_image_collage(plan: ScenePlan) -> str:
         )
         timeline_rows.append(
             f'        inAt("#{plan.id}-collage-image-{index}", '
-            f'{{ scale: 1.08, x: {direction * -12} }}, '
-            f'{{ scale: 1.02, x: {direction * 12}, duration: {max(2.4, plan.duration - starts[index - 1]):.2f}, '
+            f'{{ scale: {1 if contain else 1.08}, x: {0 if contain else direction * -12} }}, '
+            f'{{ scale: {1 if contain else 1.02}, x: {0 if contain else direction * 12}, duration: {max(2.4, plan.duration - starts[index - 1]):.2f}, '
             'ease: "none", transformOrigin: "50% 50%" }, '
             f'{starts[index - 1]:.2f});'
         )
@@ -1844,7 +1851,7 @@ def _render_news_image_fullscreen(plan: ScenePlan) -> str:
     drift = max(2.4, plan.duration - 0.3)
     direction = -1 if _seed_from(plan.id) % 2 else 1
     timeline = f"""        inAt("#{plan.id}-image-frame", {{ clipPath: "inset(0 {100 if direction > 0 else 0}% 0 {0 if direction > 0 else 100}%)", x: {direction * 120}, rotationY: {direction * -6} }}, {{ clipPath: "inset(0 0% 0 0%)", x: 0, rotationY: 0, duration: .96, ease: "power3.inOut", transformPerspective: 1600, transformOrigin: "50% 50%" }}, 0.12);
-        inAt("#{plan.id}-image", {{ scale: 1.08, x: {direction * -16} }}, {{ scale: 1.025, x: {direction * 16}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.15);
+        inAt("#{plan.id}-image", {{ scale: {1 if contain else 1.08}, x: {0 if contain else direction * -16} }}, {{ scale: {1 if contain else 1.025}, x: {0 if contain else direction * 16}, duration: {drift:.2f}, ease: "none", transformOrigin: "50% 50%" }}, 0.15);
         inAt("#{plan.id}-rail", {{ scaleY: 0, transformOrigin: "50% 0" }}, {{ scaleY: 1, duration: .62, ease: "expo.out" }}, 0.18);
         inAt("#{plan.id}-marker", {{ x: -32, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .5, ease: "power2.out" }}, 0.48);
         inAt("#{plan.id}-kicker", {{ x: -38, opacity: 0 }}, {{ x: 0, opacity: 1, duration: .54, ease: "power3.out" }}, 0.42);
@@ -1912,9 +1919,13 @@ def _render_media_shots(plan: ScenePlan) -> str:
     css = f"""
   #{sid} .shot-media {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
   #{sid} .shot-media.article {{ object-fit:contain; background:{bg}; padding:48px 100px 160px; box-sizing:border-box; }}
+  #{sid} .shot-media.contained {{ object-fit:contain; background:{bg}; padding:56px 100px 110px; box-sizing:border-box; }}
+  #{sid} .shot-media.contained-photo {{ width:46%; padding:56px 32px 100px 64px; }}
   #{sid} .shot-panel {{ position:absolute; inset:0; padding:76px 110px 180px; box-sizing:border-box; font-family:{SANS}; }}
   #{sid} .shot-panel.editorial {{ background:{bg}; color:{ink}; display:flex; flex-direction:column; justify-content:center; }}
   #{sid} .shot-panel.visual {{ color:#F5F2EA; background:linear-gradient(0deg,rgba(9,11,19,.92),rgba(9,11,19,0) 76%); display:flex; flex-direction:column; justify-content:flex-end; }}
+  #{sid} .shot-panel.contained-photo {{ left:46%; padding:100px 80px 160px 40px; justify-content:center; background:{bg}; color:{ink}; }}
+  #{sid} .contained-photo .shot-credit {{ top:34px; right:32px; max-width:calc(100% - 64px); box-sizing:border-box; }}
   #{sid} .shot-kicker {{ font-size:25px; text-transform:uppercase; letter-spacing:.18em; font-weight:700; margin-bottom:22px; color:{label_ink}; }}
   #{sid} .visual .shot-kicker {{ color:#F5F2EA; }}
   #{sid} .shot-title {{ font-size:{headline_size(plan.headline, base=86, floor=54)}px; line-height:1.08; font-weight:800; letter-spacing:-.025em; max-width:1530px; margin:0 0 35px; }}
@@ -1933,6 +1944,9 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .visual .shot-grid {{ display:block; max-width:1370px; }}
   #{sid} .visual .shot-card {{ padding:0; margin-top:16px; border:0; min-height:0; background:none; }}
   #{sid} .visual .shot-number {{ display:none; }}
+  #{sid} .contained-photo .shot-kicker {{ color:{label_ink}; }}
+  #{sid} .contained-photo .shot-title {{ font-size:54px; }}
+  #{sid} .contained-photo .shot-copy {{ font-size:30px; }}
   #{sid} .shot-credit {{ position:absolute; top:34px; right:48px; max-width:1100px; border-radius:16px; padding:9px 18px; background:rgba(9,11,19,.82); color:#F5F2EA; font-size:20px; }}
   #{sid} .shot-rule {{ height:5px; width:140px; background:{accent}; margin-bottom:24px; transform-origin:left; }}
   #{sid} .shot-orbit {{ position:absolute; width:820px; height:820px; right:-280px; top:-340px; border:95px solid {_rgba(accent,.17)}; border-radius:50%; pointer-events:none; }}
@@ -1944,6 +1958,10 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .shot-title, #{sid} .visual .shot-title {{ font-size:66px; }}
   #{sid} .shot-grid, #{sid} .shot-grid.split {{ grid-template-columns:1fr; }}
   #{sid} .shot-credit {{ max-width:860px; right:35px; top:65px; }}
+  #{sid} .shot-media.contained-photo {{ width:100%; height:58%; padding:70px 64px 28px; }}
+  #{sid} .shot-panel.contained-photo {{ left:0; top:58%; padding:35px 64px 160px; justify-content:flex-start; }}
+  #{sid} .contained-photo .shot-title {{ font-size:46px; }}
+  #{sid} .contained-photo .shot-credit {{ position:static; order:10; margin-top:18px; max-width:100%; }}
 """
     markup = []
     timeline = []
@@ -1952,6 +1970,11 @@ def _render_media_shots(plan: ScenePlan) -> str:
         start, duration = float(shot["start"]), float(shot["duration"])
         kind = shot["kind"]
         editorial = kind == "editorial"
+        contain = kind == "image" and shot.get("fit") == "contain"
+        portrait_photo = contain and float(shot.get("height", 0)) > float(shot.get("width", 0))
+        media_class = " contained" if contain else ""
+        if portrait_photo:
+            media_class += " contained-photo"
         # Adjacent shots use alternating lanes. This keeps exact centisecond
         # cuts intact even when the CLI adds decimal times as binary floats.
         media_track = 2 * (index % 2)
@@ -1962,11 +1985,15 @@ def _render_media_shots(plan: ScenePlan) -> str:
             tag = "video" if video else "img"
             extra = (f'muted playsinline data-media-start="{float(shot.get("source_start", 0)):.2f}"'
                      if video else 'alt=""')
-            markup.append(f'<{tag} id="{prefix}-media" class="clip shot-media {kind}" '
+            if contain:
+                extra += ' style="object-fit:contain"'
+            markup.append(f'<{tag} id="{prefix}-media" class="clip shot-media {kind}{media_class}" '
                           f'src="{_esc(shot["src"])}" {timing} data-track-index="{media_track}" '
                           f'{extra} crossorigin="anonymous">' + ("</video>" if video else ""))
-            if not video:
+            if not video and not contain:
                 timeline.append(f'inAt("#{prefix}-media", {{scale:1}}, {{scale:1.035, duration:{duration:.2f}, ease:"none"}}, {start:.2f});')
+            elif contain:
+                timeline.append(f'inAt("#{prefix}-media", {{opacity:0}}, {{opacity:1, duration:{min(.4, duration):.2f}, ease:"sine.out"}}, {start:.2f});')
         texts = [text for text in shot["copy"] if text != plan.headline]
         if not texts and editorial:
             texts = list(shot["copy"])
@@ -1980,7 +2007,7 @@ def _render_media_shots(plan: ScenePlan) -> str:
         )
         layout = shot.get("layout", "cards") if len(texts) > 1 else "focus"
         markup.append(
-            f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}" '
+            f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}{" contained-photo" if portrait_photo else ""}" '
             f'{timing} data-track-index="{panel_track}">'
             + (f'<div class="shot-orbit" id="{prefix}-orbit" data-layout-ignore></div>' if editorial else "")
             + f'<div class="shot-kicker" id="{prefix}-kicker">{_esc(plan.kicker)}</div>'

@@ -268,6 +268,31 @@ def test_fullscreen_news_image_uses_a_masked_reveal_and_separate_ken_burns_layer
     assert "scale: 1.025" in html
 
 
+@pytest.mark.parametrize("mode", ["inline", "fullscreen"])
+def test_contained_photo_is_not_zoomed_or_panned_out_of_its_frame(mode):
+    html = sk.render_scene(plan(
+        news_image_src="portrait.jpg", news_image_mode=mode,
+        news_image_kind="person", news_image_fit="contain",
+    ))
+    tween = next(line for line in html.splitlines() if 'inAt("#scene-01-image",' in line)
+    assert "scale: 1, x: 0" in tween
+    assert "scale: 1.0" not in tween
+    assert "object-fit:contain" in html
+
+
+def test_collage_preserves_each_images_fit_without_zooming_portrait():
+    html = sk.render_scene(plan(
+        news_image_src="portrait.jpg", news_image_mode="fullscreen",
+        news_image_srcs=("portrait.jpg", "landscape.jpg", "logo.png"),
+        news_image_fits=("contain", "cover", "contain"),
+    ))
+    for index, expected in [(1, "contain"), (2, "cover"), (3, "contain")]:
+        tag = re.search(rf'<img[^>]+id="scene-01-collage-image-{index}"[^>]*>', html).group()
+        assert f"object-fit:{expected}" in tag
+        tween = next(line for line in html.splitlines() if f'inAt("#scene-01-collage-image-{index}"' in line)
+        assert ("scale: 1, x: 0" in tween) == (expected == "contain")
+
+
 @pytest.mark.parametrize("theme", list(sk.THEMES.values()))
 def test_fullscreen_news_image_text_contrasts_with_its_theme_scrim(theme):
     html = sk.render_scene(plan(

@@ -847,6 +847,33 @@ def read_manifest(task_dir: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def acquisition_is_complete(task_dir: Path, manifest: dict | None, script: str) -> bool:
+    """An absent ledger is not an AI decision to request zero clips."""
+    if not isinstance(manifest, dict):
+        return False
+    requested = manifest.get("requested_clip_count")
+    clips = manifest.get("clips")
+    if (
+        type(requested) is not int or requested < 0
+        or not isinstance(clips, list) or len(clips) != requested
+        or manifest.get("script_sha256") != hashlib.sha256(script.encode()).hexdigest()
+        or manifest.get("status") not in {"ready", "no_results"}
+        or (requested > 0 and manifest.get("status") != "ready")
+        or (requested == 0 and manifest.get("selection_mode") != "ai")
+    ):
+        return False
+    root = task_dir.resolve()
+    for clip in clips:
+        if not isinstance(clip, dict) or not clip.get("local_path") or not clip.get("sha256"):
+            return False
+        path = (root / clip["local_path"]).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            return False
+        if _file_sha256(path) != clip["sha256"]:
+            return False
+    return True
+
+
 def _write_manifest(task_dir: Path, manifest: dict) -> None:
     path = manifest_path(task_dir)
     path.parent.mkdir(parents=True, exist_ok=True)

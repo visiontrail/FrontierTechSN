@@ -6,6 +6,42 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.pipeline import media_shots as ms, scene_kit, composer
+from PIL import Image
+
+
+@pytest.mark.parametrize("size,orientation,expected", [
+    ((1821, 3221), 1, "contain"), ((3221, 1821), 6, "contain"),
+    ((1920, 1080), 1, "cover"),
+])
+def test_image_inventory_measures_pixels_and_preserves_portrait_fit(tmp_path, size, orientation, expected):
+    exif = Image.Exif()
+    exif[274] = orientation
+    Image.new("RGB", size).save(tmp_path / "photo.jpg", exif=exif)
+    assets = ms.inventory({"news_image_src": "photo.jpg", "news_image_fit": "cover"}, tmp_path)
+    assert assets[0]["fit"] == expected
+    assert (assets[0]["height"] > assets[0]["width"]) == (expected == "contain")
+    scene = {"id": "scene-02", "text": "An event photo.", "duration": 8}
+    shots = ms.validate({"shots": [{"asset_id": "asset-1", "duration": 8,
+        "copy_ids": ["copy-1"], "script_excerpt": scene["text"], "fit": "cover"}]},
+        scene, assets, [{"id": "copy-1", "text": "An event photo"}])
+    assert shots[0]["fit"] == expected  # The model cannot override measured layout.
+    plan = {"id": scene["id"], "media_shots": shots}
+    html = scene_kit.render_scene(scene_kit.ScenePlan.from_dict(plan, duration=8, scene_id=scene["id"]))
+    ms.assert_rendered_shots(plan, html)
+    media_tween = next(line for line in html.splitlines() if 'inAt("#scene-02-shot-1-media"' in line)
+    if expected == "contain":
+        assert 'class="clip shot-media image contained contained-photo"' in html
+        assert 'class="clip shot-panel visual contained-photo"' in html
+        assert "scale" not in media_tween
+        with pytest.raises(ValueError, match="containment changed"):
+            ms.assert_rendered_shots(plan, html.replace('style="object-fit:contain"', 'style="object-fit:cover"'))
+    else:
+        assert 'class="clip shot-media image"' in html
+
+
+def test_logo_fit_survives_mixed_shot_inventory(tmp_path):
+    Image.new("RGB", (432, 212)).save(tmp_path / "logo.png")
+    assert ms.inventory({"news_image_src": "logo.png", "news_image_fit": "contain"}, tmp_path)[0]["fit"] == "contain"
 
 
 def test_editorial_copy_preserves_initials_titles_and_decimals():
