@@ -404,17 +404,14 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
 
     branches = [asyncio.create_task(prepare_media()), asyncio.create_task(prepare_audio())]
     try:
-        # Drain independent work even when its sibling fails, preserving every
-        # verified segment. No orphan task may outlive this pipeline attempt.
-        results = await asyncio.gather(*branches, return_exceptions=True)
+        # Propagate the first failure without waiting for a sibling's provider
+        # cooldowns/retries. Completed artifacts are already persisted on disk.
+        results = await asyncio.gather(*branches)
     except BaseException:
         for branch in branches:
             branch.cancel()
         await asyncio.gather(*branches, return_exceptions=True)
         raise
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result
     audio_path = results[1]
 
     # Pause for audio review before the (expensive) video composition. The user
