@@ -179,6 +179,45 @@ def test_cnbc_section_name_accepts_broadcast_publication_but_not_unrelated_names
     assert not contract(data, "CNBCOther reports a trial.")["passed"]
 
 
+@pytest.mark.parametrize("name", ["BBC", "BBC Technology"])
+def test_bbc_technology_accepts_its_spoken_publication_name(name):
+    data = dossier(("bbc_technology", "BBC Technology", "en"))
+    report = contract(data, f"The {name} reports that pubs can accept digital ID apps.")
+    assert report["passed"]
+    assert report["story_source_mentions"]["0"] == (["BBC Technology", "BBC"] if name == "BBC Technology" else ["BBC"])
+    assert scriptwriter._preferred_spoken_source(data.selected[0]) == "BBC"
+
+
+@pytest.mark.parametrize("name", ["CNBC", "BBCOther", "OtherBBC", "the government"])
+def test_bbc_technology_rejects_unrelated_or_missing_publication(name):
+    assert not contract(
+        dossier(("bbc_technology", "BBC Technology", "en")),
+        f"According to {name}, pubs can accept digital ID apps.",
+    )["passed"]
+
+
+def test_generation_accepts_bbc_attribution_in_story_six_without_retries():
+    data = dossier(*[("bloomberg", "Bloomberg", "en")] * 5, ("bbc_technology", "BBC Technology", "en"))
+    stories = ["Bloomberg reports that a company started a trial."] * 5 + [
+        "The BBC reports that new rules let pubs and shops in England and Wales "
+        "accept digital ID apps on phones to prove a customer's age."
+    ]
+    chat = AsyncMock(return_value="\n\n".join(stories))
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", chat),
+    ):
+        result = asyncio.run(scriptwriter.generate_daily_script(
+            data, EDITION, target_duration_minutes=None, language="en",
+            closing_remarks=CLOSING, ai_endpoint=None, ai_model=None, provider_id=None,
+        ))
+    assert chat.await_count == 1
+    assert result.splitlines()[1:-1] == stories
+    assert scriptwriter.script_contract_report(
+        result, data, EDITION, language="en", closing_remarks=CLOSING,
+    )["passed"]
+
+
 @pytest.mark.parametrize("bad_repair", ["not JSON", json.dumps({"1": "Changed passing story", "2": "BBC reports a trial."})])
 def test_generation_repairs_all_failures_without_rewriting_passing_stories(bad_repair):
     data = dossier(("cnbc_technology", "CNBC Technology", "en"), ("bbc", "BBC", "en"))

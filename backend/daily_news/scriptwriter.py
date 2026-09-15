@@ -34,6 +34,7 @@ DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS = 3
 DAILY_NEWS_AUTOMATIC_STORY_MAX_WORDS = 180
 DAILY_NEWS_EDIT_MODEL_ALIASES: dict[str, str] = {}
 SOURCE_SPOKEN_ALIASES = {
+    "BBC Technology": ("BBC",),
     "CNBC Technology": ("CNBC",),
     "a16z": ("Andreessen Horowitz", "A sixteen Z"),
     "机器之心 AI Daily": ("Machine Heart", "Jiqizhixin"),
