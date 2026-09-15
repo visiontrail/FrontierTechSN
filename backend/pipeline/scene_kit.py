@@ -1478,7 +1478,7 @@ def _render_outro(plan: ScenePlan) -> str:
 """
         if portrait:
             css += f"""
-  #{plan.id} .outro-overlay {{ padding:92px 44px 180px; }}
+  #{plan.id} .outro-overlay {{ padding:92px 44px 70px; }}
   #{plan.id} .outro-body {{ grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:24px; }}
   #{plan.id} .outro-panel {{ padding:26px; }}
   #{plan.id} .outro-headline {{ font-size:54px; }}

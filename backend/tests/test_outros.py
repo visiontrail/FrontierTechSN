@@ -194,7 +194,7 @@ def test_credit_tail_preserves_speech_and_is_idempotent(tmp_path, monkeypatch):
     board['scenes'][0].update(start=100, duration=6, lines=[dict(start=100, duration=6, text='Goodbye')])
     board['audio_duration'] = 106
     staged = outros.stage_outro(task, board, 'morning-brief')
-    assert staged['duration'] > 6
+    assert 6 < staged['duration'] <= 29.9
     assert board['total_duration'] == pytest.approx(100 + staged['duration'])
     assert board['audio_duration'] == 106
     assert board['scenes'][0]['lines'][0]['duration'] == 6
@@ -203,6 +203,33 @@ def test_credit_tail_preserves_speech_and_is_idempotent(tmp_path, monkeypatch):
     assert board['credits_tail_duration'] == tail
     assert len(staged['outro_credits']) == 20
     assert (task / staged['outro_hold_src']).read_bytes() == b'frame'
+
+
+@pytest.mark.parametrize('orientation', ['landscape', 'portrait'])
+def test_source_roll_caps_duration_and_replaces_old_long_tail(tmp_path, monkeypatch, orientation):
+    _install_fake_library(tmp_path, monkeypatch)
+    task = tmp_path / 'task'
+    _write_json(task / 'research/dossier.json', dict(selected=[
+        dict(title=f'完整新闻标题 {i} ' * 8, source_name='Publisher', url=f'https://news.test/{i}')
+        for i in range(40)
+    ]))
+    board = _storyboard()
+    board['scenes'][0].update(start=100, duration=80, spoken_closing_duration=6)
+    staged = outros.stage_outro(task, board, 'morning-brief', video_orientation=orientation)
+    assert staged['duration'] == 29.9
+    assert len(staged['outro_credits']) == 40
+    assert board['total_duration'] == 129.9
+    assert board['credits_tail_duration'] == 23.9
+
+
+def test_overlong_closing_is_rejected_without_cutting_speech(tmp_path, monkeypatch):
+    _install_fake_library(tmp_path, monkeypatch)
+    task = tmp_path / 'task'
+    _write_json(task / 'summary.json', dict(talking_points=[dict(headline='News', url='https://news.test')]))
+    board = _storyboard()
+    with pytest.raises(ValueError, match='shorten the closing narration'):
+        outros.stage_outro(task, board, 'morning-brief')
+    assert board['scenes'][0]['duration'] == 42.5
 
 
 def test_source_roll_is_locked_against_director_removal():
