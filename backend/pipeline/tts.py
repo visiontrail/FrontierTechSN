@@ -89,11 +89,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 30
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 31
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 13
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 14
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -3013,6 +3013,29 @@ def _medium_asr_verdict_is_corroborated(
         and has_only_replacement_differences(slower_tokens)
     ):
         return True
+
+    # One decode can duplicate a word over the same acoustic time span while
+    # the other remains complete. Require an adjacent identical word, material
+    # timestamp overlap, and complete close evidence from the other decode.
+    # Shared repetitions, non-overlapping repeats and source omissions fail.
+    for clean_tokens, artifact_words in (
+        (normal_tokens, slower_words), (slower_tokens, normal_words),
+    ):
+        if not (close_to_source(clean_tokens) and has_only_replacement_differences(clean_tokens)):
+            continue
+        for overlap in _asr_overlapping_tokens(artifact_words):
+            index = overlap["index"]
+            duplicate = _lexical_tokens(str(artifact_words[index].get("text") or ""))
+            previous = _lexical_tokens(str(artifact_words[index - 1].get("text") or ""))
+            if not duplicate or duplicate != previous:
+                continue
+            corrected = normalized(_raw_transcript([
+                word for position, word in enumerate(artifact_words) if position != index
+            ]))
+            if (numeric_tokens(corrected) == numeric_tokens(expected_tokens)
+                    and close_to_source(corrected)
+                    and has_only_replacement_differences(corrected)):
+                return True
 
     def compact_words(words: list[dict], removed_index: int) -> str:
         return "".join(

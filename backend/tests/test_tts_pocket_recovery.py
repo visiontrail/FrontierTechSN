@@ -255,3 +255,27 @@ async def test_dictionary_homophone_requires_same_waveform_corroboration_without
             with pytest.raises(tts.TtsIntegrityError, match="not corroborated"):
                 await tts._verify_orpheus_part(tmp_path / "audio.wav", source, tmp_path, emit=lambda _: None)
     judge.assert_not_awaited()
+
+
+@pytest.mark.parametrize("defect", [None, "both_decodes", "no_overlap", "different_word", "omission", "changed_number"])
+def test_medium_verdict_requires_one_sided_timestamp_overlapped_identical_duplicate(defect):
+    source = "DeepTech reports that the chief executive Andreessen announced the T6 model today."
+    clean = words(source.replace("DeepTech", "Deep Tech").replace("Andreessen", "Andreasen"))
+    duplicated = words(tts._raw_transcript(clean).replace("chief", "chief Chief"))
+    index = next(i for i, word in enumerate(duplicated) if word["text"] == "Chief")
+    duplicated[index]["start"] = duplicated[index - 1]["start"] + .04
+    duplicated[index]["end"] = duplicated[index - 1]["end"] + .04
+    if defect == "both_decodes":
+        clean = duplicated
+    elif defect == "no_overlap":
+        duplicated = words(tts._raw_transcript(duplicated))
+    elif defect == "different_word":
+        duplicated[index]["text"] = "senior"
+    elif defect == "omission":
+        clean = [w for w in clean if w["text"] != "executive"]
+        duplicated = [w for w in duplicated if w["text"] != "executive"]
+    elif defect == "changed_number":
+        duplicated = [dict(w, text="T7") if w["text"] == "T6" else w for w in duplicated]
+    assert tts._medium_asr_verdict_is_corroborated(
+        tts._lexical_tokens(source), tts._raw_transcript(clean), tts._raw_transcript(duplicated), clean, duplicated,
+    ) is (defect is None)
