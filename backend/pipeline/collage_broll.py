@@ -1442,6 +1442,7 @@ async def generate_collage_broll(
     provider_id: int | None = None,
     ai_endpoint: str | None = None,
     ai_model: str | None = None,
+    reuse_failed: bool = False,
     log: LogCallback | None = None,
 ) -> dict[str, Any]:
     """Run the former three-gate workflow automatically, one web job at a time."""
@@ -1450,10 +1451,18 @@ async def generate_collage_broll(
     root = task_dir / "collage_broll"
     _ensure_owned_directory(root, parent=task_dir)
     manifest_path = root / "manifest.json"
+    completed_path = root / "completed-manifest.json"
     specs_path = root / "visual-spec.json"
-    for cache_file in (manifest_path, specs_path, root / "visual-spec.json.tmp"):
+    for cache_file in (manifest_path, completed_path, specs_path, root / "visual-spec.json.tmp"):
         if cache_file.is_symlink():
             raise RuntimeError(f"Collage cache file cannot be a symlink: {cache_file}")
+    previous = _read_contract(manifest_path) or {}
+    if previous.get("status") in ("ready", "partial", "failed") and previous.get("completed_at"):
+        # Keep the last finished acquisition separate from an in-flight retry.
+        # Otherwise a cancelled quality cycle erases its unavailable-asset proof.
+        _write_json(completed_path, previous)
+    else:
+        previous = _read_contract(completed_path) or {}
     planning_fingerprint = _planning_fingerprint(
         storyboard,
         count=count,
@@ -1577,6 +1586,24 @@ async def generate_collage_broll(
     manifest["planned_count"] = len(specs)
     specs_sha256 = _fingerprint(specs)
     manifest["specs_sha256"] = specs_sha256
+    failed_items = {}
+    if (
+        reuse_failed
+        and previous.get("status") in ("ready", "partial", "failed")
+        and previous.get("completed_at")
+        and previous.get("cache_contract_version") == CACHE_CONTRACT_VERSION
+        and previous.get("planning_fingerprint") == planning_fingerprint
+        and previous.get("specs_sha256") == specs_sha256
+        and isinstance(previous.get("items"), list)
+        and all(isinstance(item, dict) and isinstance(item.get("scene_id"), str)
+                for item in previous["items"])
+        and len({item.get("scene_id") for item in previous["items"]}) == len(previous["items"])
+    ):
+        failed_items = {
+            item["scene_id"]: item for item in previous["items"]
+            if item.get("status") == "failed" and isinstance(item.get("error"), str)
+            and item["error"].strip()
+        }
     _write_json(
         specs_path,
         {
@@ -1640,6 +1667,21 @@ async def generate_collage_broll(
             "error": None,
         }
         manifest["items"].append(item)
+        previous_failure = failed_items.get(scene_id, {})
+        if previous_failure.get("final_fingerprint") == final_bindings["fingerprint"]:
+            item.update({
+                "status": "failed",
+                "error": previous_failure["error"],
+                "previous_failure_completed_at": (
+                    previous_failure.get("previous_failure_completed_at") or previous["completed_at"]
+                ),
+            })
+            item["cache_reuse"]["failed"] = True
+            manifest["errors"].append({"scene_id": scene_id, "message": item["error"]})
+            _log(log, f"Collage B-roll {index}/{len(specs)}: reusing completed failed "
+                 f"acquisition for unchanged {scene_id} during quality repair")
+            _write_json(manifest_path, manifest)
+            continue
         _write_json(manifest_path, manifest)
         try:
             expected_final = _final_clip_path(item_dir, target_duration)
@@ -1813,6 +1855,7 @@ async def generate_collage_broll(
     manifest["status"] = "ready" if ready == len(specs) else ("partial" if ready else "failed")
     manifest["ready_count"] = ready
     manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _write_json(completed_path, manifest)
     _write_json(manifest_path, manifest)
     return manifest
 

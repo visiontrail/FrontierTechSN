@@ -1579,6 +1579,7 @@ async def compose_video(
             provider_id=provider_id,
             ai_endpoint=ai_endpoint,
             ai_model=ai_model,
+            reuse_failed=bool(quality_retry_source),
             log=emit,
         )
         collage_attached = collage_broll.attach_collage(

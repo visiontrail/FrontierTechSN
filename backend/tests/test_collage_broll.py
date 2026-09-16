@@ -114,7 +114,7 @@ class _CollageCacheHarness:
         sheet.write_bytes(b"sheet")
         return sheet
 
-    def run(self, storyboard: dict, *, count: int | None = None) -> dict:
+    def run(self, storyboard: dict, *, count: int | None = None, reuse_failed: bool = False) -> dict:
         return asyncio.run(
             collage_broll.generate_collage_broll(
                 storyboard,
@@ -122,8 +122,80 @@ class _CollageCacheHarness:
                 count=count if count is not None else len(storyboard["scenes"]),
                 force_opening=False,
                 frame=LANDSCAPE,
+                reuse_failed=reuse_failed,
             )
         )
+
+
+def test_quality_repair_reuses_failed_acquisition_but_normal_retry_recovers(tmp_path: Path):
+    storyboard = _board(1)
+    with _CollageCacheHarness(tmp_path) as harness:
+        with patch.object(collage_broll, "_generate_video", AsyncMock(side_effect=RuntimeError("provider unavailable"))) as failed:
+            original = harness.run(storyboard)
+            resumed = harness.run(storyboard, reuse_failed=True)
+            # An interrupted compose must not erase the last completed outcome.
+            (tmp_path / "collage_broll" / "manifest.json").write_text('{"status":"generating"}')
+            interrupted = harness.run(storyboard, reuse_failed=True)
+            assert failed.await_count == 1
+        recovered = harness.run(storyboard)
+
+    assert original["status"] == resumed["status"] == interrupted["status"] == "failed"
+    assert resumed["items"][0]["cache_reuse"]["failed"] is True
+    assert resumed["items"][0]["error"] == original["items"][0]["error"]
+    assert resumed["items"][0]["video_path"] == ""
+    assert recovered["status"] == "ready"
+    assert harness.calls["still"] == 1
+    assert harness.calls["video"] == 1
+
+
+@pytest.mark.parametrize("change", ["narration", "prompt", "fingerprint", "duplicate", "missing_error", "incomplete"])
+def test_quality_repair_does_not_reuse_changed_or_unproven_failure(tmp_path: Path, change: str):
+    storyboard = _board(1)
+    with _CollageCacheHarness(tmp_path) as harness:
+        with patch.object(collage_broll, "_generate_video", AsyncMock(side_effect=RuntimeError("provider unavailable"))):
+            failed = harness.run(storyboard)
+        if change == "narration":
+            storyboard["scenes"][0]["text"] = "A different narrated subject changes the visual meaning."
+        elif change == "fingerprint":
+            failed["items"][0]["final_fingerprint"] = "changed"
+        elif change == "duplicate":
+            failed["items"].append(dict(failed["items"][0]))
+        elif change == "missing_error":
+            failed["items"][0]["error"] = None
+        elif change == "incomplete":
+            failed["status"] = "generating"
+            failed["completed_at"] = None
+        for filename in ("manifest.json", "completed-manifest.json"):
+            (tmp_path / "collage_broll" / filename).write_text(json.dumps(failed))
+        with ExitStack() as stack:
+            if change == "prompt":
+                original = collage_broll.video_prompt
+                stack.enter_context(patch.object(collage_broll, "video_prompt", side_effect=lambda *args: original(*args) + " New direction."))
+            recovered = harness.run(storyboard, reuse_failed=True)
+
+    assert recovered["status"] == "ready"
+    assert harness.calls["video"] == 1
+
+
+def test_quality_repair_preserves_ready_clip_and_reuses_only_failed_item(tmp_path: Path):
+    storyboard = _board(2)
+    with _CollageCacheHarness(tmp_path) as harness:
+        async def partial(prompt, first, last, item_dir, frame):
+            if item_dir.name.endswith("scene-02"):
+                raise RuntimeError("provider unavailable")
+            return await harness.generate_video(prompt, first, last, item_dir, frame)
+
+        with patch.object(collage_broll, "_generate_video", side_effect=partial):
+            original = harness.run(storyboard)
+        original_file = tmp_path / original["items"][0]["video_path"]
+        original_bytes = original_file.read_bytes()
+        resumed = harness.run(storyboard, reuse_failed=True)
+
+    assert resumed["status"] == "partial"
+    assert resumed["items"][0]["cache_reuse"]["final"] is True
+    assert resumed["items"][1]["cache_reuse"]["failed"] is True
+    assert original_file.read_bytes() == original_bytes
+    assert harness.calls["video"] == 1
 
 
 def test_scene_selection_forces_opening_and_spreads_the_rest():
