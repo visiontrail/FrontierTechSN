@@ -890,3 +890,22 @@ def test_failed_repair_gets_one_fresh_round_with_exhausted_queries_excluded(tmp_
     assert result['missing_queries'] == [shot]
     assert len(result['query_replan_history']) == 1
     assert next(iter(result['query_replans'].values()))['repair_round'] == 2
+
+
+def test_preview_generation_timeout_expands_only_the_bounded_retry_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_footage.config, 'WEB_FOOTAGE_GEMINI_TIMEOUT', 120)
+    sheet = tmp_path / 'sheet.jpg'
+    Image.new('RGB', (160, 90), 'blue').save(sheet)
+    timeout = OpenCLIResult((), 1, '', 'Gemini generation returned no response within 120s')
+    with (patch.object(web_footage, 'run_opencli', AsyncMock(return_value=timeout)) as request,
+          pytest.raises(web_footage.WebFootageReviewUnavailable) as caught):
+        asyncio.run(web_footage._request_preview_review(
+            'Review actual frames', sheet, {0: {'intervals': [{}]}},
+            batch=False, log=None, max_attempts=4,
+        ))
+    assert caught.value.failure_kind == 'generation_timeout'
+    assert [int(call.args[0][call.args[0].index('--timeout') + 1])
+            for call in request.await_args_list] == [120, 240, 360, 360]
+    assert [call.kwargs['timeout'] for call in request.await_args_list] == [180, 300, 420, 420]
+    records = sorted(tmp_path.glob('review-attempts/*/attempt-*.json'))
+    assert [json.loads(path.read_text())['timeout_seconds'] for path in records] == [120, 240, 360, 360]

@@ -961,6 +961,7 @@ async def _request_preview_review(
     attempts = _preview_attempt_budget() if max_attempts is None else max_attempts
     last_error: Exception | None = None
     failure_kind = "transport"
+    generation_timeout = config.WEB_FOOTAGE_GEMINI_TIMEOUT
     for attempt in range(1, attempts + 1):
         result = None
         request_prompt = prompt
@@ -970,11 +971,12 @@ async def _request_preview_review(
                 "image and return only the complete JSON object specified above, with actual "
                 "booleans and numeric row indices. Do not omit candidates or invent visible content."
             )
-        record = {"provider": "gemini", "attempt": attempt, "prompt": request_prompt}
+        record = {"provider": "gemini", "attempt": attempt, "prompt": request_prompt,
+                  "timeout_seconds": generation_timeout}
         try:
             result = await run_opencli(
-                _review_command("gemini", request_prompt, sheet, config.WEB_FOOTAGE_GEMINI_TIMEOUT),
-                timeout=config.WEB_FOOTAGE_GEMINI_TIMEOUT + 60,
+                _review_command("gemini", request_prompt, sheet, generation_timeout),
+                timeout=generation_timeout + 60,
                 check=False,
             )
             record.update(stdout=result.stdout, stderr=result.stderr, returncode=result.returncode)
@@ -991,12 +993,20 @@ async def _request_preview_review(
             last_error = exc
             failure_kind = (
                 "response_contract" if isinstance(exc, ReviewResponseError)
+                else "generation_timeout" if re.search(r"returned no response within|command timed out", str(exc), re.I)
                 else "provider_generation" if "Gemini generation failed:" in str(exc)
                 else "transport"
             )
             record.update(status="unavailable", failure_kind=failure_kind, error=str(exc))
             _emit(log, f"Web footage: Gemini preview attempt {attempt}/{attempts} "
                   f"unavailable ({failure_kind}): {exc}")
+            if failure_kind == "generation_timeout":
+                # Pro may still be generating at the first deadline. Keep the
+                # configured initial budget, but do not truncate every retry
+                # at that same boundary. Request pacing remains unchanged.
+                generation_timeout = min(
+                    generation_timeout * 2, config.WEB_FOOTAGE_GEMINI_TIMEOUT * 3,
+                )
         finally:
             _write_manifest(evidence / f"attempt-{attempt:02d}.json", record)
     raise WebFootageReviewUnavailable(
