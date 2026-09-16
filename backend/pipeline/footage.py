@@ -57,6 +57,8 @@ FALLBACK_QUERY_STOPWORDS = PURPOSE_MATCH_STOPWORDS | frozenset(
     good morning concise briefing frontier tech daily journal magazine outlet
     according thanks subscribe
     documentary footage video scene
+    january february march april may june july august september october november december
+    those chinese-language
     """.split()
 )
 
@@ -275,6 +277,63 @@ def _is_program_bookend(text: str) -> bool:
     )
 
 
+def _search_subject_text(text: str) -> str:
+    """Remove attribution without turning the publisher/date into the subject."""
+    text = re.sub(
+        r"^.{0,120}?\b(?:reports?|reported|says?|writes?|profiles?|revisits?)\b"
+        r"(?:\s+on\s+[A-Za-z]+\s+\d{1,2})?(?:\s+(?:that|how))?[,;:\s-]*",
+        "", text, count=1, flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"^.{0,140}?\b(?:interview|conversation)\s+with\s+",
+        "", text, count=1, flags=re.IGNORECASE,
+    )
+
+
+def _fallback_search_queries(shot: dict, *, excluded: set[str]) -> list[str]:
+    """Propose intact narrated entity phrases, never a bag of paragraph leads.
+
+    The sentence binding takes priority over the longer editorial purpose.
+    This only proposes searches; metadata and real-frame review still decide
+    whether a candidate is usable.
+    """
+    boundaries = FALLBACK_QUERY_STOPWORDS | frozenset(
+        "one two three four five six seven eight nine ten hundred thousand million billion "
+        "run runs cost costs roughly each like built backed participant relays "
+        "filed confidentially offers example firm citing alleges described build builds".split()
+    )
+    phrases: list[tuple[int, str]] = []
+    seen = {query.casefold() for query in excluded}
+    for text in dict.fromkeys([shot.get("script_excerpt") or "", shot.get("purpose") or ""]):
+        words: list[str] = []
+
+        def flush() -> None:
+            if len(words) >= 2:
+                query = _sanitize_query(" ".join(words))
+                key = query.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    # Product identifiers are stronger than introductory names.
+                    priority = 2 * int(any(any(c.isdigit() for c in word) for word in words))
+                    priority += int(any(word[:1].isupper() for word in words))
+                    phrases.append((priority, query))
+            words.clear()
+
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9'-]*|[.!?;—]", _search_subject_text(str(text))):
+            word = token.removesuffix("'s").strip("'-")
+            if word.casefold() in {"a", "an", "the"}:
+                continue
+            if not word or word.casefold() in boundaries or token in ".!?;—":
+                flush()
+            else:
+                words.append(word)
+        flush()
+        # Prefer the exact bound sentence before reaching into story context.
+        if len(phrases) >= 2:
+            break
+    return [query for _, query in sorted(phrases, key=lambda item: -item[0])][:2]
+
+
 def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str, str]]:
     """Build story-specific queries when the model plan cannot be decoded.
 
@@ -325,14 +384,7 @@ def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str,
             continue
         # Strip a source-attribution lead ("QbitAI reports that ...") so the
         # fallback searches for the depicted subject instead of the publisher.
-        subject_text = re.sub(
-            r"^.{0,100}?\b(?:reports?|says?|writes?|profiles?|revisits?)\b"
-            r"(?:\s+(?:that|how))?[,;:\s-]*",
-            "",
-            paragraph,
-            count=1,
-            flags=re.IGNORECASE,
-        )
+        subject_text = _search_subject_text(paragraph)
         words = useful_words(subject_text)
         if len(words) >= 2:
             candidates.append((paragraph, words))

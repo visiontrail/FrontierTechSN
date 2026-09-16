@@ -1139,7 +1139,7 @@ async def supplement_web_footage(
         """Change discovery direction using rejection evidence, not a suffix."""
         nonlocal repair_provider_unavailable
         from backend.pipeline.footage import (
-            FALLBACK_QUERY_STOPWORDS, _chat, _resolve_provider, _sanitize_query,
+            _chat, _fallback_search_queries, _resolve_provider, _sanitize_query,
         )
 
         original = str(shot.get("plan_query") or shot["query"])
@@ -1165,6 +1165,9 @@ async def supplement_web_footage(
                 manifest.setdefault("query_replan_history", []).append({"key": key, **previous})
             previous_queries = {q.casefold() for entry in manifest.get("query_replan_history", [])
                                 if entry.get("key") == key for q in entry.get("queries", [])}
+            previous_queries.update(str(error.get("query") or "").casefold() for error in failures
+                                    if error.get("stage") in {"web-download-edit", "web-selection"})
+            previous_queries.discard(original.casefold())
             try:
                 if repair_provider_unavailable:
                     raise WebFootageError("Search repair provider unavailable during this scout")
@@ -1201,13 +1204,9 @@ async def supplement_web_footage(
                 # Search is an optional proposal, never approval of footage.
                 # The already-grounded purpose supplies concrete entity terms
                 # while actual frames must still pass the same visual review.
-                words = [word.removesuffix("'s").strip("'") for word in re.findall(r"[A-Za-z][A-Za-z0-9'-]*",
-                    str(shot.get("purpose") or shot.get("script_excerpt") or "")
-                ) if word.casefold() not in FALLBACK_QUERY_STOPWORDS]
-                fallback = [" ".join(words[:6])]
-                if len(words) > 3:
-                    fallback.append(" ".join(words[:3]))
-                alternatives = [q for q in dict.fromkeys(fallback) if len(q.split()) >= 2 and q.casefold() != original.casefold()]
+                alternatives = _fallback_search_queries(
+                    shot, excluded=previous_queries | {original.casefold()},
+                )
                 ledger[key] = {"plan_query": original, "queries": alternatives,
                                "error": str(exc) or type(exc).__name__, "fallback": "grounded-purpose"}
                 _emit(log, f"Footage search repair unavailable; using {len(alternatives)} grounded purpose queries")
@@ -1215,9 +1214,12 @@ async def supplement_web_footage(
         return [{**shot, "query": query, "plan_query": original, "_candidate_attempt": 1,
                  "_replanned": True} for query in ledger[key]["queries"]]
 
+    fulfilled = {str(clip.get("plan_query") or clip.get("query") or "") for clip in manifest.get("clips", [])}
     pending_shots = []
     for shot in query_plan:
         shot = {**shot, "plan_query": shot.get("plan_query") or shot["query"]}
+        if shot["plan_query"] in fulfilled:
+            continue
         prior = [error for error in manifest.get("errors", []) if
                  error.get("plan_query", str(error.get("query", "")).removesuffix(" stock footage")) == shot["plan_query"]
                  and (not error.get("script_excerpt") or error["script_excerpt"] == shot.get("script_excerpt"))
@@ -1228,7 +1230,6 @@ async def supplement_web_footage(
             pending_shots.extend(await replan(shot))
         else:
             pending_shots.append({**shot, "_candidate_attempt": len(prior) + 1})
-    fulfilled = {str(clip.get("plan_query") or clip.get("query") or "") for clip in manifest.get("clips", [])}
     async def choose_candidate(shot: dict, reserved: set[str] | None = None) -> dict | None:
         cached_candidates = []
         for cache_path in (task_dir / "footage" / "evidence" / "previews").glob("*/preview-cache.json"):

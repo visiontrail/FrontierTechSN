@@ -434,6 +434,57 @@ def test_search_metadata_rejects_single_generic_anchor_before_visual_review():
     )
 
 
+@pytest.mark.parametrize('excerpt,expected', [
+    ('Bloomberg reported on September 15 that Altera, a chipmaker backed by Silver Lake and Intel, '
+     'has filed confidentially for an initial public offering.', 'Altera chipmaker'),
+    ("The Chinese-language outlet Machine Heart relays a Quanta Magazine interview with Sarah Demers, "
+     "Yale's physics chair and a participant in the Mu2e experiment at Fermi National Accelerator Laboratory.",
+     'Mu2e experiment'),
+    ("For example, the firm says Tomahawk cruise missiles run roughly two to four million dollars each, "
+     "while commercially built alternatives like Anduril's Barracuda family cost about one-fifth to one-tenth as much.",
+     'Tomahawk cruise missiles'),
+])
+def test_outage_queries_keep_narrated_entities_without_publisher_or_date(excerpt, expected):
+    shot = {'script_excerpt': excerpt, 'purpose': 'One physicist or a September essay is in the news.'}
+    queries = footage._fallback_search_queries(shot, excluded=set())
+    assert expected in queries
+    assert all(2 <= len(query.split()) <= 6 for query in queries)
+    assert not any(word in ' '.join(queries) for word in ['Bloomberg', 'September', 'Machine Heart', 'Quanta'])
+    next_queries = footage._fallback_search_queries(shot, excluded={q.casefold() for q in queries})
+    assert not set(queries) & set(next_queries)
+
+
+def test_outage_retry_excludes_failed_fallbacks_and_skips_fulfilled_plans(tmp_path):
+    shot = {'query': 'defense essay', 'purpose': 'September essay venture firm Andreessen Horowitz',
+            'script_excerpt': "Tomahawk cruise missiles cost millions while Anduril's Barracuda family costs less."}
+    key = hashlib.sha256((shot['query'] + '\n' + shot['script_excerpt']).encode()).hexdigest()[:16]
+    errors = [{'query': shot['query'], 'plan_query': shot['query'], 'stage': 'web-download-edit',
+               'source_page_url': f'https://youtu.be/old{i}'} for i in range(3)]
+    previous = {'plan_query': shot['query'], 'queries': ['September essay venture'],
+                'error': 'TimeoutError', 'fallback': 'grounded-purpose'}
+    errors.append({'query': 'September essay venture', 'plan_query': shot['query'], 'stage': 'web-selection'})
+    # Even exhausted discovery on an already fulfilled story must not call a provider.
+    errors.extend({**error, 'query': 'verified shot', 'plan_query': 'verified shot'} for error in errors[:3])
+    retained = {'id': 'clip-01', 'plan_query': 'verified shot'}
+    manifest = {'clips': [retained], 'errors': errors, 'query_replans': {key: previous}}
+
+    async def run():
+        with (patch.object(footage, '_chat', AsyncMock(side_effect=TimeoutError)) as chat,
+              patch.object(web_footage, 'search_youtube', AsyncMock(return_value=[])) as search):
+            result = await web_footage.supplement_web_footage(
+                task_dir=tmp_path, manifest=manifest, query_plan=[{'query': 'verified shot'}, shot],
+                target_total=2, orientation='landscape', script=shot['script_excerpt'],
+            )
+        assert chat.await_count == 1
+        assert result['clips'] == [retained]
+        assert result['query_replan_history'] == [{'key': key, **previous}]
+        searched = {call.args[0] for call in search.await_args_list}
+        assert 'Tomahawk cruise missiles' in searched
+        assert 'September essay venture' not in searched
+        assert 'verified shot' not in searched
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('label', ['(Audio Only)', '| Audio Only', '[audio-only]'])
 def test_explicit_audio_only_source_never_downloads_or_consumes_a_visual_review(tmp_path, label):
     candidate = {'title': f'SpaceX IPO {label}', 'source_page_url': 'https://youtu.be/audio',
