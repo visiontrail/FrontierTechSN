@@ -24,17 +24,20 @@ class FakeToolUseBlock:
 
 
 class FakeAssistantMessage:
-    def __init__(self, content, *, error=None):
+    def __init__(self, content, *, error=None, message_id=None, stop_reason=None):
         self.content = content
         self.error = error
+        self.message_id = message_id
+        self.stop_reason = stop_reason
 
 
 class FakeResultMessage:
-    def __init__(self, result: str = "", *, is_error: bool = False):
+    def __init__(self, result: str = "", *, is_error: bool = False, stop_reason=None):
         self.result = result
         self.is_error = is_error
         self.errors = []
         self.usage = {}
+        self.stop_reason = stop_reason
 
 
 class FakeClaudeAgentOptions:
@@ -603,6 +606,7 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
             captured["options"].allowed_tools,
             ["Skill(hyperframes)", "Skill(animejs)"],
         )
+
         self.assertEqual(
             captured["options"].disallowed_tools,
             ["Skill(openspec-archive-change)"],
@@ -618,6 +622,67 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
             "yinhe-thinking",
         )
         self.assertEqual(captured["options"].env["CLAUDE_CODE_MAX_RETRIES"], "0")
+
+    async def test_internal_token_limit_restart_does_not_corrupt_final_json(self):
+        from backend.pipeline.footage import _parse_plan
+
+        complete = '{"queries":[{"query":"particle accelerator tunnel","purpose":"Experiment apparatus"}]}'
+
+        async def query(*, prompt, options):
+            yield FakeAssistantMessage([FakeThinkingBlock('planning')], message_id='first', stop_reason='max_tokens')
+            yield FakeAssistantMessage([FakeTextBlock('{"queries":[{"query":"')],
+                                       message_id='first', stop_reason='max_tokens')
+            yield FakeAssistantMessage([FakeThinkingBlock('restarting')], message_id='second')
+            yield FakeAssistantMessage([FakeTextBlock(complete)], message_id='second', stop_reason='end_turn')
+            yield FakeResultMessage(complete, stop_reason='end_turn')
+
+        with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}):
+            result, _ = await agent._agent_complete_single(
+                'Return JSON.', 'Plan shots.', endpoint='https://example.test', model='test',
+                enable_skills=False, max_retries=0,
+            )
+        self.assertEqual(result, complete)
+        self.assertEqual(_parse_plan(result, 1)[0]['query'], 'particle accelerator tunnel')
+
+    async def test_terminal_result_overrides_intermediate_text_without_message_ids(self):
+        async def query(*, prompt, options):
+            yield FakeAssistantMessage([FakeTextBlock('Earlier draft')])
+            yield FakeAssistantMessage([FakeTextBlock('Final answer')])
+            yield FakeResultMessage('Final answer')
+
+        with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}):
+            result, _ = await agent._agent_complete_single(
+                'Return text.', 'content', endpoint='https://example.test', model='test',
+                enable_skills=False, max_retries=0,
+            )
+        self.assertEqual(result, 'Final answer')
+
+    async def test_blocks_share_one_message_but_not_an_abandoned_answer(self):
+        async def query(*, prompt, options):
+            yield FakeAssistantMessage([FakeTextBlock('abandoned')], message_id='first', stop_reason='max_tokens')
+            yield FakeAssistantMessage([FakeTextBlock('hello ')], message_id='second')
+            yield FakeAssistantMessage([FakeTextBlock('world')], message_id='second', stop_reason='end_turn')
+
+        with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}):
+            result, _ = await agent._agent_complete_single(
+                'Return text.', 'content', endpoint='https://example.test', model='test',
+                enable_skills=False, max_retries=0,
+            )
+        self.assertEqual(result, 'hello world')
+
+    async def test_nonempty_partial_output_cannot_hide_a_failed_terminal_result(self):
+        for is_error, stop_reason in [(True, 'end_turn'), (False, 'max_tokens')]:
+            with self.subTest(is_error=is_error, stop_reason=stop_reason):
+                async def query(*, prompt, options):
+                    yield FakeAssistantMessage([FakeTextBlock('partial')], message_id='first')
+                    yield FakeResultMessage('partial', is_error=is_error, stop_reason=stop_reason)
+
+                with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}):
+                    with self.assertRaises(RuntimeError):
+                        await agent._agent_complete_single(
+                            'Return text.', 'content', endpoint='https://example.test', model='test',
+                            enable_skills=False, max_retries=0,
+                        )
 
     async def test_transport_stderr_is_returned_to_the_caller(self):
         async def query(*, prompt, options):

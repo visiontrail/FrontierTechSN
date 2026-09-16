@@ -36,7 +36,6 @@ GEMINI_RECOVERY_TIMEOUT_SECONDS = 60.0
 GEMINI_RECOVERY_POLL_SECONDS = 5.0
 MAX_CANDIDATE_ATTEMPTS_PER_QUERY = 3
 MAX_PREVIEW_REVIEW_ATTEMPTS = 3
-SEARCH_REPAIR_TIMEOUT_SECONDS = 60
 SEARCH_STOPWORDS = frozenset(
     "a an and are as at be by for from how in into is it of on or the this to use with".split()
 )
@@ -1172,7 +1171,10 @@ async def supplement_web_footage(
                 if repair_provider_unavailable:
                     raise WebFootageError("Search repair provider unavailable during this scout")
                 endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
-                answer = await asyncio.wait_for(_chat(
+                # The model router owns request deadlines, pacing, retries and
+                # failover. A shorter stage deadline cancelled that recovery
+                # before the configured backup could ever be reached.
+                answer = await _chat(
                     "Repair a failed editorial B-roll search. Return JSON only: "
                     '{"queries":["specific search phrase", "different specific search phrase"]}. '
                     "Return at most two 2-6 word queries. Keep the SAME narrated story and visual purpose. "
@@ -1189,7 +1191,7 @@ async def supplement_web_footage(
                                 "previous_queries_to_avoid": sorted(previous_queries)}, ensure_ascii=False),
                     endpoint, model, api_key, log, "Footage search repair", max_tokens=500,
                     enable_skills=False, disable_thinking=True,
-                ), timeout=SEARCH_REPAIR_TIMEOUT_SECONDS)
+                )
                 values = first_json(answer).get("queries", [])
                 if not isinstance(values, list):
                     raise WebFootageError("Search repair did not return a queries array")

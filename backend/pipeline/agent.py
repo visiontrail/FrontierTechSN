@@ -346,6 +346,8 @@ async def _agent_complete_single(
             )
 
         text_parts: list[str] = []
+        assistant_message_id: str | None = None
+        assistant_stop_reason: str | None = None
         result: ResultMessage | None = None
         diagnostics: deque[str] = deque(maxlen=DIAGNOSTIC_STDERR_LINES)
         assistant_errors: set[str] = set()
@@ -395,6 +397,22 @@ async def _agent_complete_single(
                                 # safe to retry through the Galaxy rate gate.
                                 assistant_errors.add(str(message_error))
                                 continue
+                            message_id = getattr(message, "message_id", None)
+                            if message_id and message_id != assistant_message_id:
+                                # The CLI can restart a max_tokens response in
+                                # the same SDK turn. Assistant messages are
+                                # separate answers, not cumulative text deltas.
+                                # Keep blocks of one message together, but never
+                                # prepend an abandoned answer to its replacement.
+                                if text_parts:
+                                    _log(log, f"{label}: superseded an earlier assistant response "
+                                         f"({assistant_stop_reason or 'unknown stop reason'})")
+                                text_parts.clear()
+                                assistant_message_id = message_id
+                                assistant_stop_reason = None
+                            assistant_stop_reason = (
+                                getattr(message, "stop_reason", None) or assistant_stop_reason
+                            )
                             for block in message.content:
                                 if isinstance(block, TextBlock):
                                     if block.text:
@@ -422,14 +440,20 @@ async def _agent_complete_single(
                         await stream.aclose()
 
             content = "".join(text_parts).strip()
-            if (
-                not content
-                and result is not None
-                and result.result
-                and not result.is_error
-                and not assistant_errors
-            ):
-                content = result.result.strip()
+            # ResultMessage is the SDK's terminal answer after internal
+            # recovery/tool turns. It takes precedence over intermediate text.
+            # Failed or truncated terminal turns must never look successful
+            # just because they emitted a nonempty prefix.
+            if result is not None:
+                if result.is_error or assistant_errors:
+                    content = ""
+                elif result.result:
+                    content = result.result.strip()
+                assistant_stop_reason = getattr(result, "stop_reason", None) or (
+                    "end_turn" if result.result and not result.is_error else assistant_stop_reason
+                )
+            if assistant_stop_reason == "max_tokens":
+                content = ""
 
             elapsed_ms = (time.perf_counter() - start) * 1000
             if content:
@@ -445,6 +469,8 @@ async def _agent_complete_single(
                 f"empty content from Claude Agent SDK (model={resolved_model or 'default'}"
                 f", is_error={getattr(result, 'is_error', 'n/a')})"
             )
+            if assistant_stop_reason == "max_tokens":
+                detail = "Claude Agent SDK response truncated at max_tokens"
             if result is not None and result.is_error:
                 errs = result.errors or [result.result or "unknown SDK error"]
                 detail = f"Claude Agent SDK error: {'; '.join(str(e) for e in errs)}"
