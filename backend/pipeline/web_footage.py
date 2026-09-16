@@ -35,6 +35,7 @@ YOUTUBE_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch|youtu\.be
 GEMINI_RECOVERY_TIMEOUT_SECONDS = 60.0
 GEMINI_RECOVERY_POLL_SECONDS = 5.0
 MAX_CANDIDATE_ATTEMPTS_PER_QUERY = 3
+MAX_QUERY_REPAIR_ROUNDS = 2
 YOUTUBE_SEARCH_ATTEMPTS = 3
 YOUTUBE_SEARCH_TIMEOUT_SECONDS = 45
 SEARCH_STOPWORDS = frozenset(
@@ -1196,9 +1197,10 @@ async def supplement_web_footage(
     _write_manifest(manifest_file, manifest)
 
     replanned_this_run: set[str] = set()
+    repair_rounds: dict[str, int] = {}
     repair_provider_unavailable = False
 
-    async def replan(shot: dict) -> list[dict]:
+    async def replan(shot: dict, *, refresh: bool = False) -> list[dict]:
         """Change discovery direction using rejection evidence, not a suffix."""
         nonlocal repair_provider_unavailable
         from backend.pipeline.footage import (
@@ -1207,6 +1209,9 @@ async def supplement_web_footage(
 
         original = str(shot.get("plan_query") or shot["query"])
         key = hashlib.sha256((original + "\n" + str(shot.get("script_excerpt"))).encode()).hexdigest()[:16]
+        if repair_rounds.get(key, 0) >= MAX_QUERY_REPAIR_ROUNDS:
+            return []
+        repair_rounds[key] = repair_rounds.get(key, 0) + 1
         ledger = manifest.setdefault("query_replans", {})
         failures = [error for error in manifest.get("errors", []) if
                     error.get("plan_query", str(error.get("query", "")).removesuffix(" stock footage")) == original
@@ -1220,7 +1225,7 @@ async def supplement_web_footage(
                         and error not in previous.get("failures", [])
                         and error.get("query") in previous.get("queries", [])
                         and error.get("stage") in {"web-download-edit", "web-selection"}]
-        if key not in ledger or (key not in replanned_this_run and (
+        if refresh or key not in ledger or (key not in replanned_this_run and (
             previous.get("error") or new_failures
         )):
             replanned_this_run.add(key)
@@ -1268,7 +1273,8 @@ async def supplement_web_footage(
                     and _sanitize_query(value).casefold() != original.casefold()
                     and _sanitize_query(value).casefold() not in previous_queries
                 ))[:2]
-                ledger[key] = {"plan_query": original, "queries": [q for q in alternatives if q], "failures": failures[-6:]}
+                ledger[key] = {"plan_query": original, "queries": [q for q in alternatives if q],
+                               "failures": failures[-6:], "repair_round": repair_rounds[key]}
             except Exception as exc:
                 repair_provider_unavailable = True
                 # Search is an optional proposal, never approval of footage.
@@ -1303,6 +1309,14 @@ async def supplement_web_footage(
     # A scout may choose several candidates for one query. Cache both results
     # and outages so batch probing cannot silently multiply network retries.
     search_results: dict[str, list[dict] | Exception] = {}
+
+    async def repair_exhausted_shot(shot: dict, shot_index: int) -> list[dict]:
+        # Finish all queued alternatives before asking for a second repair.
+        # This lets one acquisition learn from failed repairs without either
+        # requiring a manual rerun or opening an unlimited search loop.
+        if any(item["plan_query"] == shot["plan_query"] for item in pending_shots[shot_index + 1:]):
+            return []
+        return await replan(shot, refresh=bool(shot.get("_replanned")))
 
     async def choose_candidate(shot: dict, reserved: set[str] | None = None) -> dict | None:
         cached_candidates = []
@@ -1472,8 +1486,8 @@ async def supplement_web_footage(
                 shorter = " ".join(words[:3])
                 pending_shots.append({**shot, "query": shorter, "_short_query": True})
                 _emit(log, f"Web footage: no results; retrying subject query '{shorter}'")
-            elif not shot.get("_replanned"):
-                pending_shots.extend(await replan(shot))
+            else:
+                pending_shots.extend(await repair_exhausted_shot(shot, shot_index))
             continue
 
         excerpt = str(shot.get("script_excerpt") or "").strip()
@@ -1606,20 +1620,13 @@ async def supplement_web_footage(
                     f"'{query}': {str(exc)[-520:]}",
                 )
             else:
-                if not shot.get("_replanned"):
-                    alternatives = await replan(shot)
-                    pending_shots.extend(alternatives)
-                    _emit(
-                        log,
-                        f"Web footage exhausted {candidate_attempt} candidates for '{query}'; "
-                        f"queued {len(alternatives)} rejection-informed search directions",
-                    )
-                else:
-                    _emit(
-                        log,
-                        f"Web footage exhausted {candidate_attempt} candidates for '{query}': "
-                        f"{str(exc)[-520:]}",
-                    )
+                alternatives = await repair_exhausted_shot(shot, shot_index)
+                pending_shots.extend(alternatives)
+                _emit(
+                    log,
+                    f"Web footage exhausted {candidate_attempt} candidates for '{query}'; "
+                    f"queued {len(alternatives)} rejection-informed search directions",
+                )
             continue
 
         # Keep failed downloads for diagnosis. Remove the exact raw file only

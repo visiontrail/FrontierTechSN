@@ -498,7 +498,8 @@ def test_outage_queries_keep_narrated_entities_without_publisher_or_date(excerpt
     assert not set(queries) & set(next_queries)
 
 
-def test_outage_retry_excludes_failed_fallbacks_and_skips_fulfilled_plans(tmp_path):
+def test_outage_retry_excludes_failed_fallbacks_and_skips_fulfilled_plans(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_footage, 'MAX_QUERY_REPAIR_ROUNDS', 1)
     shot = {'query': 'defense essay', 'purpose': 'September essay venture firm Andreessen Horowitz',
             'script_excerpt': "Tomahawk cruise missiles cost millions while Anduril's Barracuda family costs less."}
     key = hashlib.sha256((shot['query'] + '\n' + shot['script_excerpt']).encode()).hexdigest()[:16]
@@ -556,7 +557,9 @@ def test_podcast_or_audio_topic_alone_still_requires_pixel_review():
 
 
 @pytest.mark.parametrize('failure_stage', ['web-download-edit', 'web-selection', 'web-review'])
-def test_retry_refreshes_failed_alternatives_but_preserves_pending_review(tmp_path, failure_stage):
+def test_retry_refreshes_failed_alternatives_but_preserves_pending_review(tmp_path, failure_stage, monkeypatch):
+    # Isolate initial resume behavior from the subsequent in-run repair round.
+    monkeypatch.setattr(web_footage, 'MAX_QUERY_REPAIR_ROUNDS', 1)
     shot = {'query': 'students classroom lesson', 'purpose': 'Students learning basic skills',
             'script_excerpt': 'Technology affects students learning basic skills.'}
     key = hashlib.sha256((shot['query'] + '\n' + shot['script_excerpt']).encode()).hexdigest()[:16]
@@ -861,3 +864,29 @@ def test_youtube_search_does_not_retry_permanent_failure_or_cancellation(error):
         asyncio.run(web_footage.search_youtube('QbitAI awards'))
     command.assert_awaited_once()
     sleep.assert_not_awaited()
+
+
+def test_failed_repair_gets_one_fresh_round_with_exhausted_queries_excluded(tmp_path):
+    shot = {'query': 'awards ceremony trophy', 'purpose': 'QbitAI annual awards registration',
+            'script_excerpt': 'QbitAI has opened registration for its annual awards.'}
+    retained = {'id': 'clip-01', 'plan_query': 'verified scene'}
+    replies = [json.dumps({'queries': ['AI awards ceremony', 'tech awards gala']}),
+               json.dumps({'queries': ['AI awards ceremony', 'unbranded trophy closeup']})]
+    with (patch.object(footage, '_chat', AsyncMock(side_effect=replies)) as repair,
+          patch.object(web_footage, 'search_youtube', AsyncMock(return_value=[])) as search):
+        result = asyncio.run(web_footage.supplement_web_footage(
+            task_dir=tmp_path, manifest={'clips': [retained], 'errors': []},
+            query_plan=[shot], target_total=2, orientation='landscape', script=shot['script_excerpt'],
+        ))
+    assert repair.await_count == 2
+    assert [call.args[0] for call in search.await_args_list] == [
+        'awards ceremony trophy', 'AI awards ceremony', 'tech awards gala', 'unbranded trophy closeup',
+    ]
+    second_prompt = json.loads(repair.await_args_list[1].args[1])
+    assert second_prompt['previous_queries_to_avoid'] == ['ai awards ceremony', 'tech awards gala']
+    assert second_prompt['narration'] == shot['script_excerpt']
+    assert result['clips'] == [retained]
+    assert result['status'] == 'partial'
+    assert result['missing_queries'] == [shot]
+    assert len(result['query_replan_history']) == 1
+    assert next(iter(result['query_replans'].values()))['repair_round'] == 2
