@@ -690,6 +690,17 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._sdk_completion_text([malformed], malformed), malformed)
         self.assertEqual(agent._sdk_completion_text(['{"old":1}'], 'Done'), 'Done')
 
+    def test_json_continuations_work_at_every_character_boundary(self):
+        examples = [
+            '{"items":[{"text":"escaped \\\"quote\\\" and } bracket","value":null}],"ok":true}',
+            '```json\n[{"id":"任意场景","values":[1,2.5,false,{"nested":[]}]}]\n```',
+        ]
+        for complete in examples:
+            for split in range(len(complete) + 1):
+                with self.subTest(split=split, complete=complete):
+                    responses = [complete[:split], complete[split:]]
+                    self.assertEqual(agent._sdk_completion_text(responses, responses[-1]), complete)
+
     async def test_reasoning_only_token_exhaustion_expands_budget_within_retry_limit(self):
         budgets = []
 
