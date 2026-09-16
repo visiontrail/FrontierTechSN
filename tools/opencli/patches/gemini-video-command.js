@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { cli, Strategy } from '@jackwener/opencli/registry';
-import { ArgumentError, CommandExecutionError, EmptyResultError } from '@jackwener/opencli/errors';
+import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
 import { sendGeminiMessage } from './utils.js';
 
 const GEMINI_DOMAIN = 'gemini.google.com';
@@ -655,20 +655,25 @@ async function visibleVideoUrls(page) {
     return Array.isArray(value) ? value : [];
 }
 
-export async function waitForVideo(page, before, timeoutSeconds) {
+export async function waitForVideo(page, before, timeoutSeconds, {
+    stallTimeoutSeconds = 600, checkpoint = {}, save = () => {}, now = Date.now,
+} = {}) {
     const baseline = new Set(before);
-    const deadline = Date.now() + timeoutSeconds * 1000;
+    const deadline = Math.min(now() + timeoutSeconds * 1000, checkpoint.deadline || Infinity);
+    let lastProgressAt = checkpoint.lastProgressAt || now();
+    let signature = checkpoint.progressSignature || '';
     let emptyHomeSamples = 0;
-    while (Date.now() < deadline) {
+    while (now() < deadline) {
         await page.wait(5);
         const state = unwrap(await page.evaluate(`(() => {
           const videos = Array.from(document.querySelectorAll('generated-video')).map((video, index) => ({
             src: video.id || video.closest('model-response')?.id || 'generated-video-' + index,
             readyState: video.querySelector('button[aria-label="Download video"]') ? 4 : 0,
           }));
-          const text = (document.querySelector('main')?.innerText || '').slice(-1800);
+          const responses = document.querySelectorAll('model-response');
+          const text = (responses[responses.length - 1]?.innerText || '').slice(-1800);
           return {
-            videos, text,
+            videos, text, url: window.location.href,
             emptyHome: /^\\/(?:app\\/?)?$/.test(window.location.pathname)
               && !document.querySelector('user-query')
               && !!document.querySelector('[contenteditable="true"]'),
@@ -677,20 +682,40 @@ export async function waitForVideo(page, before, timeoutSeconds) {
         const videos = Array.isArray(state?.videos) ? state.videos : [];
         const ready = videos.find(video => !baseline.has(video.src) && video.readyState >= 2);
         if (ready) return ready;
+        // Spinner frames, sidebar changes and the submitted prompt are not
+        // generation progress. Only the current response and video state count.
+        const nextSignature = JSON.stringify({
+            text: String(state?.text || '').replace(/\s+/g, ' ').trim(),
+            videos: videos.filter(video => !baseline.has(video.src)),
+        });
+        if (nextSignature !== signature) {
+            signature = nextSignature;
+            lastProgressAt = now();
+        }
+        Object.assign(checkpoint, { lastProgressAt, progressSignature: signature });
+        if (/^https:\/\/gemini\.google\.com\/app\/[a-z0-9]+$/i.test(String(state?.url || ''))) {
+            checkpoint.url = state.url;
+        }
+        save();
         // A failed submission can briefly acquire a conversation URL, then
         // disappear server-side and return to the hydrated home composer.
         // Allow transient navigation, but do not wait 30 minutes on that page.
         emptyHomeSamples = state?.emptyHome === true ? emptyHomeSamples + 1 : 0;
         if (emptyHomeSamples >= 3) {
             throw new CommandExecutionError(
-                'Gemini Create Video returned to an empty home composer; the submitted conversation is no longer available'
+                'GEMINI_VIDEO_GENERATION_FAILED: Gemini Create Video returned to an empty home composer; the submitted conversation is no longer available'
             );
         }
         if (/could not generate|generation failed|try again|unable to create/i.test(String(state?.text || ''))) {
-            throw new CommandExecutionError(`Gemini Create Video reported a generation failure: ${String(state.text).slice(-500)}`);
+            throw new CommandExecutionError(`GEMINI_VIDEO_GENERATION_FAILED: Gemini Create Video reported a generation failure: ${String(state.text).slice(-500)}`);
+        }
+        if (now() - lastProgressAt >= stallTimeoutSeconds * 1000) {
+            throw new CommandExecutionError(
+                `GEMINI_VIDEO_GENERATION_STALLED: no response progress for ${stallTimeoutSeconds}s; conversation=${checkpoint.url || 'unknown'}; response=${String(state?.text || '').slice(-300)}`
+            );
         }
     }
-    throw new EmptyResultError('gemini video', `No completed video appeared within ${timeoutSeconds} seconds`);
+    throw new CommandExecutionError(`GEMINI_VIDEO_GENERATION_TIMEOUT: no completed video within the original generation deadline; conversation=${checkpoint.url || 'unknown'}`);
 }
 
 function downloadedPath(result) {
@@ -818,12 +843,15 @@ export const videoCommand = cli({
         { name: 'aspect', default: '16:9', choices: ['16:9', '9:16'], help: 'Final aspect ratio' },
         { name: 'output', required: true, help: 'Local MP4 output path' },
         { name: 'timeout', type: 'int', default: 1800, help: 'Total generation and download timeout in seconds' },
+        { name: 'stall-timeout', type: 'int', default: 600, help: 'Maximum seconds without response progress' },
+        { name: 'state-file', help: 'Owned local generation checkpoint' },
+        { name: 'request-id', help: 'Input fingerprint for the owned checkpoint' },
     ],
     columns: ['status', 'file', 'aspect', 'link'],
     func: async (page, kwargs) => {
         const prompt = String(kwargs.prompt || '').trim();
         const resume = String(kwargs.resume || '').trim();
-        if (resume && !/^https:\/\/gemini\.google\.com\/app\/[a-z0-9]+/i.test(resume)) {
+        if (resume && !/^https:\/\/gemini\.google\.com\/app\/[a-z0-9]+$/i.test(resume)) {
             throw new ArgumentError('--resume must be a Gemini conversation URL');
         }
         if (!resume && !prompt) throw new ArgumentError('video prompt is required unless --resume is used');
@@ -834,21 +862,73 @@ export const videoCommand = cli({
         if (!['16:9', '9:16'].includes(aspect)) throw new ArgumentError('--aspect must be 16:9 or 9:16');
         const timeout = Number(kwargs.timeout || 1800);
         if (!Number.isInteger(timeout) || timeout < 60) throw new ArgumentError('--timeout must be at least 60 seconds');
-
-        await page.goto(resume || GEMINI_VIDEOS_URL, { waitUntil: 'load', settleMs: 8000 });
-        if (resume) {
-            await waitForVideo(page, [], timeout);
-        } else {
-            await clickLabel(page, ['create with omni']);
-            await page.wait(1.5);
-            await selectAspectRatio(page, aspect);
-            const before = await visibleVideoUrls(page);
-            await uploadFrames(page, [first, last]);
-            await submitVideoPrompt(page, prompt);
-            await waitForVideo(page, before, Math.max(60, timeout - 180));
+        const stallTimeoutSeconds = Number(kwargs['stall-timeout'] || 600);
+        if (!Number.isInteger(stallTimeoutSeconds) || stallTimeoutSeconds < 60) {
+            throw new ArgumentError('--stall-timeout must be at least 60 seconds');
         }
-        await downloadVideo(page, output, Math.min(timeout, 180));
-        const link = String(unwrap(await page.evaluate('window.location.href')) || GEMINI_VIDEOS_URL);
-        return [{ status: 'saved', file: output, aspect, link }];
+        const stateFile = kwargs['state-file'] ? path.resolve(String(kwargs['state-file'])) : '';
+        const requestId = String(kwargs['request-id'] || '');
+        if (stateFile && !/^[a-f0-9]{64}$/.test(requestId)) throw new ArgumentError('--state-file requires a SHA-256 --request-id');
+        const checkStatePaths = () => {
+            for (const name of [stateFile, stateFile + '.tmp']) {
+                if (stateFile && fs.existsSync(name) && fs.lstatSync(name).isSymbolicLink()) {
+                    throw new ArgumentError('Generation checkpoint cannot be a symlink');
+                }
+            }
+        };
+        checkStatePaths();
+        const previous = stateFile && fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : {};
+        if (resume && stateFile && (previous.request_id !== requestId || previous.url !== resume)) {
+            throw new ArgumentError('Resume conversation does not match its owned generation checkpoint');
+        }
+        const checkpoint = resume ? previous : { request_id: requestId, status: 'new' };
+        const save = () => {
+            if (!stateFile) return;
+            checkStatePaths();
+            fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+            fs.writeFileSync(stateFile + '.tmp', JSON.stringify(checkpoint, null, 2));
+            fs.renameSync(stateFile + '.tmp', stateFile);
+        };
+        try {
+            if (checkpoint.deadline && Date.now() >= checkpoint.deadline) {
+                throw new CommandExecutionError('GEMINI_VIDEO_GENERATION_TIMEOUT: original generation deadline has elapsed');
+            }
+            await page.goto(resume || GEMINI_VIDEOS_URL, { waitUntil: 'load', settleMs: 8000 });
+            if (!resume) {
+                await clickLabel(page, ['create with omni']);
+                await page.wait(1.5);
+                await selectAspectRatio(page, aspect);
+                checkpoint.before = await visibleVideoUrls(page);
+                await uploadFrames(page, [first, last]);
+                // Persist before the send: a killed command must not resubmit
+                // blindly when the provider may already have accepted it.
+                Object.assign(checkpoint, { status: 'submitting', deadline: Date.now() + timeout * 1000 });
+                save();
+                await submitVideoPrompt(page, prompt);
+                checkpoint.status = 'submitted';
+                const url = String(unwrap(await page.evaluate('window.location.href')) || '');
+                if (/^https:\/\/gemini\.google\.com\/app\/[a-z0-9]+$/i.test(url)) checkpoint.url = url;
+                save();
+            }
+            await waitForVideo(page, checkpoint.before || [], timeout, { stallTimeoutSeconds, checkpoint, save });
+            checkpoint.status = 'downloading';
+            save();
+            await downloadVideo(page, output, Math.min(timeout, 180));
+            const link = String(unwrap(await page.evaluate('window.location.href')) || GEMINI_VIDEOS_URL);
+            Object.assign(checkpoint, { status: 'saved', url: link });
+            save();
+            return [{ status: 'saved', file: output, aspect, link }];
+        } catch (error) {
+            const message = String(error?.message || error);
+            for (const [code, status] of [
+                ['GEMINI_VIDEO_GENERATION_STALLED', 'stalled'],
+                ['GEMINI_VIDEO_GENERATION_TIMEOUT', 'timeout'],
+                ['GEMINI_VIDEO_GENERATION_FAILED', 'failed'],
+            ]) {
+                if (message.includes(code)) Object.assign(checkpoint, { status, error: message });
+            }
+            save();
+            throw error;
+        }
     },
 });

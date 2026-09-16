@@ -799,6 +799,11 @@ SPECS: tuple[SettingSpec, ...] = (
         description="Maximum wait per collage animation generated through Gemini Web Create Video.",
     ),
     SettingSpec(
+        "COLLAGE_GEMINI_STALL_TIMEOUT", "collage", "Collage video no-progress timeout", "int",
+        unit="seconds", minimum=60, maximum=1800,
+        description="Stop an unchanged Gemini generation response after this interval; a spinner is not progress.",
+    ),
+    SettingSpec(
         "COLLAGE_GEMINI_MAX_SECONDS", "collage", "Gemini max clip length", "int",
         unit="seconds", minimum=4, maximum=60,
         description=(

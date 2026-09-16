@@ -217,6 +217,7 @@ THUMBNAIL_CHATGPT_TIMEOUT = int(os.getenv("THUMBNAIL_CHATGPT_TIMEOUT", "360"))
 # Video. These are browser waits, not API-key-backed provider timeouts.
 COLLAGE_CHATGPT_TIMEOUT = int(os.getenv("COLLAGE_CHATGPT_TIMEOUT", "420"))
 COLLAGE_GEMINI_TIMEOUT = int(os.getenv("COLLAGE_GEMINI_TIMEOUT", "1800"))
+COLLAGE_GEMINI_STALL_TIMEOUT = int(os.getenv("COLLAGE_GEMINI_STALL_TIMEOUT", "600"))
 # Veo 3.1 returns one eight-second clip per generation. Keep the provider
 # ceiling configurable so future duration changes do not require a code change.
 COLLAGE_GEMINI_MAX_SECONDS = int(os.getenv("COLLAGE_GEMINI_MAX_SECONDS", "8"))

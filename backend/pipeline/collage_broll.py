@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from backend import config
 from backend.pipeline.timing import timed
 from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
+from backend.pipeline.opencli_session import owned_media_session, recover_media_sessions
 from backend.pipeline.video_format import FrameSpec
 
 logger = logging.getLogger(__name__)
@@ -943,7 +944,12 @@ async def _media_command(args: Sequence[str], *, timeout: int) -> None:
         raise RuntimeError(f"Media command failed ({process.returncode}): {detail}")
 
 
-async def _run_opencli_retry(
+async def _run_opencli_retry(args: list[str], *, session_owner: Path | None = None, **kwargs):
+    async with owned_media_session(session_owner, args[0]) as namespace:
+        return await _retry_opencli_in_session(args, site_session_namespace=namespace, **kwargs)
+
+
+async def _retry_opencli_in_session(
     args: list[str],
     *,
     timeout: int,
@@ -952,6 +958,8 @@ async def _run_opencli_retry(
     repeated_failure_signature: Callable[[Exception], str | None] | None = None,
     repeated_failure_threshold: int = 2,
     repeated_failure_error_code: str | None = None,
+    site_session_namespace: str | None = None,
+    prepare_args: Callable[[], list[str]] | None = None,
 ):
     """Retry transient browser failures, stopping on a proven capability gap."""
     last_error: Exception | None = None
@@ -959,9 +967,10 @@ async def _run_opencli_retry(
     repeated_failure_hits = 0
     maximum_attempts = max(1, int(config.OPENCLI_MAX_ATTEMPTS))
     for attempt in range(1, maximum_attempts + 1):
+        command_args = prepare_args() if prepare_args else args
         try:
             logger.info("%s attempt %s/%s", label, attempt, maximum_attempts)
-            return await run_opencli(args, timeout=timeout)
+            return await run_opencli(command_args, timeout=timeout, site_session_namespace=site_session_namespace)
         except Exception as exc:  # noqa: BLE001 - bounded browser retry
             last_error = exc
             logger.warning(
@@ -971,6 +980,11 @@ async def _run_opencli_retry(
                 maximum_attempts,
                 exc,
             )
+            if any(code in str(exc) for code in (
+                "GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT",
+                "GEMINI_VIDEO_SUBMISSION_UNCERTAIN", "GEMINI_VIDEO_GENERATION_FAILED",
+            )):
+                raise
             if non_retryable and non_retryable(exc):
                 raise GeminiVideoUploadCapabilityError(
                     f"{label} cannot run in this browser session "
@@ -1077,10 +1091,11 @@ async def _generate_still(prompt: str, item_dir: Path) -> tuple[Path, str]:
             "--timeout", str(timeout),
             "--window", "background",
             "--site-session", "persistent",
-            "--keep-tab", "false",
+            "--keep-tab", "true",
             "-f", "json",
         ],
         timeout=timeout + 60,
+        session_owner=item_dir,
         label="ChatGPT collage still",
         repeated_failure_signature=_chatgpt_image_composer_not_ready_signature,
         repeated_failure_threshold=2,
@@ -1255,23 +1270,64 @@ async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, 
     video_dir.mkdir(parents=True, exist_ok=True)
     raw = video_dir / "gemini-web-original.mp4"
     timeout = config.COLLAGE_GEMINI_TIMEOUT
+    checkpoint = video_dir / "generation-state.json"
+    if checkpoint.is_symlink():
+        raise OpenCLIError("Gemini generation checkpoint cannot be a symlink")
+    request_id = hashlib.sha256(json.dumps({
+        "prompt": prompt, "aspect": frame.aspect_ratio,
+        "first": _file_sha256(first), "last": _file_sha256(last),
+    }, sort_keys=True).encode()).hexdigest()
+    # An explicit new acquisition may retry a terminal failure; an interrupted
+    # matching request instead retains its conversation and original deadline.
+    first_attempt = True
+    args = [
+        "gemini", "video", prompt,
+        "--first", str(first.resolve()),
+        "--last", str(last.resolve()),
+        "--aspect", frame.aspect_ratio,
+        "--output", str(raw.resolve()),
+        "--timeout", str(timeout),
+        "--stall-timeout", str(config.COLLAGE_GEMINI_STALL_TIMEOUT),
+        "--state-file", str(checkpoint.resolve()),
+        "--request-id", request_id,
+        # Foreground is required to hydrate Gemini's local-file keyframes.
+        "--window", "foreground",
+        "--site-session", "persistent",
+        "--keep-tab", "true",
+        "-f", "json",
+    ]
+
+    def prepare_args() -> list[str]:
+        nonlocal first_attempt
+        state = _read_contract(checkpoint)
+        if checkpoint.exists() and state is None:
+            raise OpenCLIError("Gemini generation checkpoint is unreadable; submission outcome is unknown")
+        state = state or {}
+        if first_attempt:
+            first_attempt = False
+            if state.get("request_id") != request_id or state.get("status") in ("failed", "stalled", "timeout", "uncertain", "saved"):
+                state = {"request_id": request_id, "status": "new"}
+                _write_json(checkpoint, state)
+        if state.get("request_id") != request_id:
+            raise OpenCLIError("Gemini generation checkpoint does not match its inputs")
+        if state.get("status") not in ("new", "submitting", "submitted", "downloading", "saved", "stalled", "timeout", "failed", "uncertain"):
+            raise OpenCLIError("Gemini generation checkpoint has an unknown submission state")
+        if state.get("status") in ("stalled", "timeout", "failed", "uncertain"):
+            raise OpenCLIError(f"Gemini generation ended: {state.get('status')}; {state.get('error', '')}")
+        if state.get("status") in ("submitting", "submitted", "downloading"):
+            url = str(state.get("url") or "")
+            if not re.fullmatch(r"https://gemini\.google\.com/app/[a-zA-Z0-9]+", url):
+                state.update(status="uncertain", error="No recoverable conversation URL after submission")
+                _write_json(checkpoint, state)
+                raise OpenCLIError("GEMINI_VIDEO_SUBMISSION_UNCERTAIN: refusing to submit the same generation twice")
+            return [*args, "--resume", url]
+        return args
+
     result = await _run_opencli_retry(
-        [
-            "gemini", "video", prompt,
-            "--first", str(first.resolve()),
-            "--last", str(last.resolve()),
-            "--aspect", frame.aspect_ratio,
-            "--output", str(raw.resolve()),
-            "--timeout", str(timeout),
-            # Gemini's local-file picker does not reliably hydrate in a
-            # background Chrome tab. Foreground is required to retain both
-            # keyframes, matching the rendered-frame review path.
-            "--window", "foreground",
-            "--site-session", "persistent",
-            "--keep-tab", "false",
-            "-f", "json",
-        ],
+        args,
         timeout=timeout + 120,
+        session_owner=item_dir,
+        prepare_args=prepare_args,
         label="Gemini collage video",
         non_retryable=_is_gemini_video_upload_capability_failure,
         repeated_failure_signature=_gemini_video_input_hydration_stuck_signature,
@@ -1450,6 +1506,7 @@ async def generate_collage_broll(
     _ensure_owned_directory(task_dir)
     root = task_dir / "collage_broll"
     _ensure_owned_directory(root, parent=task_dir)
+    await recover_media_sessions(root)
     manifest_path = root / "manifest.json"
     completed_path = root / "completed-manifest.json"
     specs_path = root / "visual-spec.json"

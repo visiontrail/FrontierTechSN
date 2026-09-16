@@ -9,6 +9,12 @@ from PIL import Image
 
 from backend.pipeline import collage_broll
 from backend.pipeline.video_format import FrameSpec, LANDSCAPE, PORTRAIT
+from backend.pipeline import opencli_session
+
+
+@pytest.fixture(autouse=True)
+def isolate_browser_cleanup(monkeypatch):
+    monkeypatch.setattr(opencli_session, "close_opencli_site_sessions", AsyncMock())
 
 
 def _board(count: int = 6) -> dict:
@@ -604,6 +610,64 @@ def test_opencli_collage_operation_retries_until_success(monkeypatch):
 
     assert result == "ready"
     assert calls == 3
+
+
+@pytest.mark.parametrize("with_url", [True, False])
+def test_video_transport_retry_resumes_owned_request_or_stops_uncertain_submission(tmp_path, monkeypatch, with_url):
+    first, last = tmp_path / "first.png", tmp_path / "last.png"
+    first.write_bytes(b"first")
+    last.write_bytes(b"last")
+    calls = []
+
+    async def run(args, **kwargs):
+        calls.append((args, kwargs))
+        checkpoint = Path(args[args.index("--state-file") + 1])
+        if len(calls) == 1:
+            state = json.loads(checkpoint.read_text())
+            state.update(status="submitted", deadline=123456789)
+            if with_url:
+                state["url"] = "https://gemini.google.com/app/abc123"
+            checkpoint.write_text(json.dumps(state))
+            raise collage_broll.OpenCLIError("transport lost after submission")
+        assert args[-2:] == ["--resume", "https://gemini.google.com/app/abc123"]
+        assert json.loads(checkpoint.read_text())["deadline"] == 123456789
+        Path(args[args.index("--output") + 1]).write_bytes(b"x" * 2048)
+        from backend.pipeline.opencli import OpenCLIResult
+        return OpenCLIResult(tuple(args), 0, '[{"link":"https://gemini.google.com/app/abc123"}]', '')
+
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", AsyncMock())
+    if with_url:
+        raw, url = asyncio.run(collage_broll._generate_video("animate", first, last, tmp_path, LANDSCAPE))
+        assert raw.stat().st_size == 2048
+        assert url.endswith("abc123")
+        assert len(calls) == 2
+    else:
+        with pytest.raises(collage_broll.OpenCLIError, match="SUBMISSION_UNCERTAIN"):
+            asyncio.run(collage_broll._generate_video("animate", first, last, tmp_path, LANDSCAPE))
+        assert len(calls) == 1
+    assert all(call[1]["site_session_namespace"].startswith("ftsn-media-") for call in calls)
+    opencli_session.close_opencli_site_sessions.assert_awaited_once()
+
+
+@pytest.mark.parametrize("code", ["GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT", "GEMINI_VIDEO_GENERATION_FAILED"])
+def test_video_terminal_generation_does_not_start_ten_more_generations(monkeypatch, code):
+    run = AsyncMock(side_effect=collage_broll.OpenCLIError(code))
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    with pytest.raises(collage_broll.OpenCLIError, match=code):
+        asyncio.run(collage_broll._run_opencli_retry(["gemini", "video", "prompt"], timeout=1800, label="video"))
+    assert run.await_count == 1
+
+
+def test_cached_failure_recovery_closes_interrupted_session_before_skipping_generation(tmp_path):
+    with _CollageCacheHarness(tmp_path) as harness:
+        with patch.object(collage_broll, "_generate_video", AsyncMock(side_effect=RuntimeError("provider unavailable"))):
+            harness.run(_board(1))
+        owner = tmp_path / "collage_broll" / "01-scene-01"
+        (owner / "browser-session-gemini.json").write_text('{"status":"active"}')
+        resumed = harness.run(_board(1), reuse_failed=True)
+    assert resumed["items"][0]["cache_reuse"]["failed"]
+    opencli_session.close_opencli_site_sessions.assert_awaited_once_with(opencli_session._namespace(owner, "gemini"), sites=("gemini",))
 
 
 def _blocked_gemini_video_upload_error() -> collage_broll.OpenCLIError:

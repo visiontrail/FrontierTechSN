@@ -29,6 +29,7 @@ from backend import config
 from backend import prompts_registry
 from backend.runtime import RUNTIME_IDENTITY
 from backend.pipeline.voice_previews import preload_remote_voice_previews
+from backend.pipeline.opencli_session import recover_orphaned_media_sessions
 
 # Not logging.basicConfig: log writes must never block the event loop that is
 # streaming subprocess output. See backend/logging_setup.py.
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI):
         logging.getLogger("backend.main").warning(
             "Reset %d interrupted account-operation run(s) to FAILED", account_reset
         )
+    await recover_orphaned_media_sessions(config.OUTPUTS_DIR)
     start_worker()
     start_daily_scheduler()
     preview_preload_task = asyncio.create_task(

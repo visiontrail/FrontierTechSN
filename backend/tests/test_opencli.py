@@ -141,6 +141,15 @@ class OpenCLISessionIsolationTests(unittest.TestCase):
 
 
 class OpenCLISessionCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_zero_exit_without_verified_report_is_not_success(self):
+        for stdout in (b"", b"{}", b'{"closed":[],"errors":[]}', b'{"closed":["site:test:gemini"],"errors":["still open"]}'):
+            process = AsyncMock()
+            process.returncode = 0
+            process.communicate.return_value = (stdout, b"")
+            with patch.object(opencli_module.asyncio, "create_subprocess_exec", AsyncMock(return_value=process)):
+                with self.assertRaisesRegex(OpenCLIError, "no verified closure"):
+                    await opencli_module.close_opencli_site_sessions("test", sites=("gemini",))
+
     def test_site_session_name_matches_patched_opencli_namespace(self):
         self.assertEqual(
             opencli_module._site_session_name(
@@ -162,7 +171,7 @@ class OpenCLISessionCleanupTests(unittest.IsolatedAsyncioTestCase):
             returncode = 0
 
             async def communicate(self):
-                return b'{"closed":["gemini","chatgpt"],"errors":[]}', b""
+                return b'{"closed":["site:frontiertechsn-review-request:gemini","site:frontiertechsn-review-request:chatgpt"],"errors":[]}', b""
 
         with (
             patch.object(opencli_module.shutil, "which", return_value="/usr/bin/node"),
@@ -205,6 +214,9 @@ class OpenCLIRateLimitTests(unittest.TestCase):
         self.assertFalse(is_rate_limited_command(["chatgpt", "status"]))
         self.assertFalse(is_rate_limited_command(["doctor"]))
         self.assertFalse(is_rate_limited_command(["youtube", "search", "query"]))
+        self.assertTrue(is_rate_limited_command(["gemini", "video", "prompt"]))
+        self.assertFalse(is_rate_limited_command(["gemini", "video", "--resume", "https://gemini.google.com/app/123"]))
+        self.assertFalse(is_rate_limited_command(["gemini", "video", "--resume=https://gemini.google.com/app/123"]))
 
     def test_model_checks_wait_without_becoming_generation_requests(self):
         self.assertTrue(needs_generation_quiet_period(["chatgpt", "model", "medium"]))

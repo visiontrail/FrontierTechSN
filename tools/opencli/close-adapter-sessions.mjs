@@ -11,12 +11,17 @@ if (sessions.length === 0) {
 
   for (const session of sessions) {
     try {
-      await sendCommand('close-window', {
+      const options = {
         session,
         surface: 'adapter',
         siteSession: 'persistent',
         windowMode: 'background',
-      })
+      }
+      await sendCommand('close-window', options)
+      const remaining = await sendCommand('tabs', { ...options, op: 'list' })
+      if (!Array.isArray(remaining) || remaining.length !== 0) {
+        throw new Error('Adapter session still has tabs, or closure could not be verified')
+      }
       closed.push(session)
     } catch (error) {
       errors.push({

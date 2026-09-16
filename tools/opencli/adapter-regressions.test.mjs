@@ -25,7 +25,70 @@ import {
   uploadFrames,
   submittedVideoPrompt,
   waitForVideo,
+  videoCommand,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+test('Gemini video spinner without changing response stops early and records progress', async () => {
+  let clock = 1000
+  const checkpoint = {}
+  const page = {
+    async wait(seconds) { clock += seconds * 1000 },
+    async evaluate(script) {
+      new vm.Script(script)
+      return { videos: [], text: 'Defining the Parameters', url: 'https://gemini.google.com/app/abc123' }
+    },
+  }
+  await assert.rejects(waitForVideo(page, [], 1800, {
+    now: () => clock, stallTimeoutSeconds: 60, checkpoint,
+  }), /GEMINI_VIDEO_GENERATION_STALLED/)
+  assert.equal(clock, 66000)
+  assert.equal(checkpoint.url, 'https://gemini.google.com/app/abc123')
+})
+
+test('Gemini response progress resets the stall timer and a completed video wins', async () => {
+  let clock = 1000
+  let reads = 0
+  const page = {
+    async wait(seconds) { clock += seconds * 1000 },
+    async evaluate() {
+      reads++
+      return { text: reads < 10 ? 'Defining' : 'Rendering', videos: reads === 20 ? [{ src: 'new', readyState: 4 }] : [] }
+    },
+  }
+  assert.equal((await waitForVideo(page, [], 1800, { now: () => clock, stallTimeoutSeconds: 60 })).src, 'new')
+})
+
+test('Gemini resume preserves the original total and no-progress deadlines', async () => {
+  let clock = 60000
+  const checkpoint = { deadline: 70000, lastProgressAt: 1000,
+    progressSignature: JSON.stringify({ text: 'Defining', videos: [] }) }
+  const page = {
+    async wait(seconds) { clock += seconds * 1000 },
+    async evaluate() { return { text: 'Defining', videos: [] } },
+  }
+  await assert.rejects(waitForVideo(page, [], 1800, {
+    now: () => clock, stallTimeoutSeconds: 60, checkpoint,
+  }), /GENERATION_STALLED/)
+  clock = 70000
+  await assert.rejects(waitForVideo(page, [], 1800, {
+    now: () => clock, checkpoint,
+  }), /GENERATION_TIMEOUT/)
+})
+
+test('Gemini checkpoint rejects wrong resume ownership and expired generation before browser operations', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-resume-'))
+  try {
+    const stateFile = path.join(directory, 'state.json')
+    const requestId = 'a'.repeat(64)
+    const kwargs = { resume: 'https://gemini.google.com/app/abc123', output: path.join(directory, 'video.mp4'),
+      'state-file': stateFile, 'request-id': requestId }
+    fs.writeFileSync(stateFile, JSON.stringify({ request_id: requestId, url: 'https://gemini.google.com/app/other' }))
+    await assert.rejects(videoCommand.func({}, kwargs), /does not match/)
+    fs.writeFileSync(stateFile, JSON.stringify({ request_id: requestId, url: kwargs.resume, deadline: Date.now() - 1 }))
+    await assert.rejects(videoCommand.func({}, kwargs), /GENERATION_TIMEOUT/)
+    assert.equal(JSON.parse(fs.readFileSync(stateFile)).status, 'timeout')
+  } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+})
 
 test('Gemini video stops waiting when its submitted conversation disappears into the home composer', async () => {
   let reads = 0

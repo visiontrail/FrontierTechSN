@@ -111,7 +111,14 @@ def is_rate_limited_command(args: list[str] | tuple[str, ...]) -> bool:
     return (
         len(args) >= 2
         and str(args[0]).strip().lower() in RATE_LIMITED_SITES
-        and str(args[1]).strip().lower() in RATE_LIMITED_ACTIONS
+        and (
+            str(args[1]).strip().lower() in RATE_LIMITED_ACTIONS
+            or (
+                str(args[0]).strip().lower() == "gemini"
+                and str(args[1]).strip().lower() == "video"
+                and not any(str(arg) == "--resume" or str(arg).startswith("--resume=") for arg in args[2:])
+            )
+        )
     )
 
 

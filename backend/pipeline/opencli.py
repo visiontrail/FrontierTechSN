@@ -322,12 +322,25 @@ async def close_opencli_site_sessions(
         raise OpenCLIError(
             f"OpenCLI adapter-session cleanup timed out after {timeout}s"
         ) from exc
+    except asyncio.CancelledError:
+        process.kill()
+        await process.communicate()
+        raise
 
     stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
     stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
     if process.returncode:
         detail = (stderr or stdout or "unknown cleanup failure")[-1200:]
         raise OpenCLIError(f"OpenCLI adapter-session cleanup failed: {detail}")
+    try:
+        report = json.loads(stdout)
+        verified = isinstance(report, dict) and not report.get("errors") and (
+            report.get("closed") == list(sessions)
+        )
+    except (ValueError, TypeError):
+        verified = False
+    if not verified:
+        raise OpenCLIError("OpenCLI adapter-session cleanup returned no verified closure report")
     return sessions
 
 
