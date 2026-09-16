@@ -222,3 +222,36 @@ def test_sentence_recovery_keeps_uppercase_model_abbreviation_with_its_name():
     assert tts._split_pocket_tts_text(source, max_words=1) == [
         "The chip will go into the ID. AURA T6.", "The next shipment leaves tomorrow.",
     ]
+
+
+@pytest.mark.parametrize(("source", "observed", "accepted"), [
+    ("Kernel", "Colonel", True), ("scent", "sent", True),
+    ("read", "rid", False), ("read", "reed", False),
+    ("Quanta", "Quantum", False), ("kernel", "kernels", False),
+])
+def test_dictionary_homophones_require_one_unambiguous_identical_pronunciation(source, observed, accepted):
+    substitutions = tts._aligned_phonetic_substitutions([source.lower()], [observed.lower()])
+    assert bool(substitutions) is accepted
+    if accepted:
+        assert substitutions[0]["phonetic_key"].startswith("evidenced:cmudict:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corroborates", [True, False])
+async def test_dictionary_homophone_requires_same_waveform_corroboration_without_model(tmp_path, corroborates):
+    from backend.pipeline import av_sync
+
+    source = "The chief executive of Kernel has announced his departure today."
+    normal = words(source.replace("Kernel", "Colonel"))
+    slower = normal if corroborates else words(source.replace("Kernel", "Kernels"))
+    with (patch.object(av_sync, "ensure_word_transcript", AsyncMock(return_value=(normal, {}))),
+          patch.object(tts, "_transcribe_orpheus_at_speed", AsyncMock(return_value=(slower, {}))),
+          patch.object(tts, "_adjudicate_orpheus_asr_mismatch", AsyncMock()) as judge):
+        if corroborates:
+            report = await tts._verify_orpheus_part(tmp_path / "audio.wav", source, tmp_path, emit=lambda _: None)
+            assert report["verified"]
+            assert report["verification_mode"] == "corroborated_phonetic_substitution"
+        else:
+            with pytest.raises(tts.TtsIntegrityError, match="not corroborated"):
+                await tts._verify_orpheus_part(tmp_path / "audio.wav", source, tmp_path, emit=lambda _: None)
+    judge.assert_not_awaited()

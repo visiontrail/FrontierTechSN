@@ -16,6 +16,8 @@ Pillow>=10.0.0
 numpy>=1.26.0
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
+# Offline exact-homophone evidence for the corroborated TTS integrity gate.
+cmudict==1.1.3
 
 # Fast word-level timestamps for post-TTS alignment on Apple Silicon.
 # Microsoft VibeVoice remains the narration generator; MLX Whisper only reads

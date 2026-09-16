@@ -51,6 +51,14 @@ One blocked or changed website cannot abort an edition. Its failure is preserved
 
 Requirements: macOS, Python 3.11, Node.js/npm, Chrome with the OpenCLI Browser Bridge, FFmpeg/FFprobe, and the original local TTS model paths configured in `.env`.
 
+TTS integrity uses the pinned `cmudict` package from `requirements.txt` as offline
+evidence for exact English homophones. Only words with a single identical
+pronunciation qualify, and the same waveform must corroborate the substitution
+in a second ASR decode. Existing brand-specific rules take precedence. Rejected
+Pocket paragraphs retry at complete sentence boundaries while retaining verified
+parts; failed WAVs and token differences remain in the task's audio verification
+directory for diagnosis.
+
 For YouTube/X media upload, open `chrome://extensions`, select **Details** for the ChatGPT browser extension, and enable **Allow access to file URLs**. The publication adapter detects this missing permission before it can create a remote post and returns an actionable error instead of silently waiting through retry delays.
 
 ```bash

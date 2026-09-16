@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 
 import httpx
@@ -88,11 +89,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 29
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 30
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 12
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 13
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -2598,6 +2599,29 @@ def _english_phonetic_key(token: str) -> str:
     return value
 
 
+@lru_cache(maxsize=1)
+def _unambiguous_english_pronunciations() -> dict[str, tuple[str, ...]]:
+    """Load pinned CMU pronunciations once; missing data remains fail-closed."""
+    try:
+        import cmudict
+    except ImportError:
+        logger.warning("CMU pronunciation dictionary unavailable; retaining spelling-only verification")
+        return {}
+    # Project vocabulary may intentionally override a dictionary's surname
+    # reading (for example Shein), or require a complete attribution phrase.
+    # Generic dictionary evidence must not bypass those narrower rules.
+    protected = set(ACOUSTIC_EQUIVALENTS) | set(ACOUSTIC_EQUIVALENTS.values())
+    protected.update(ORPHEUS_NAME_RECHECK_TOKENS)
+    protected.update(word for pair in ORPHEUS_EVIDENCED_PHONETIC_PAIRS for word in pair)
+    protected.update(word for phrase in ACOUSTIC_PHRASE_EQUIVALENTS for word in phrase)
+    result = {}
+    for word, variants in cmudict.dict().items():
+        pronunciations = {tuple(variant) for variant in variants}
+        if len(pronunciations) == 1 and word not in protected:
+            result[word] = next(iter(pronunciations))
+    return result
+
+
 def _aligned_phonetic_substitutions(
     expected: list[str],
     observed: list[str],
@@ -2631,8 +2655,13 @@ def _aligned_phonetic_substitutions(
             frozenset({expected_token, observed_token})
             in ORPHEUS_EVIDENCED_PHONETIC_PAIRS
         )
+        pronunciations = _unambiguous_english_pronunciations()
+        pronunciation = pronunciations.get(expected_token)
+        dictionary_match = bool(
+            pronunciation and pronunciation == pronunciations.get(observed_token)
+        )
         if (
-            not evidenced_pair
+            not (evidenced_pair or dictionary_match)
             and (
                 not expected_key
                 or expected_key != observed_key
@@ -2646,7 +2675,9 @@ def _aligned_phonetic_substitutions(
                 "expected": expected_token,
                 "observed": observed_token,
                 "phonetic_key": (
-                    f"evidenced:{expected_token}-{observed_token}"
+                    "evidenced:cmudict:" + " ".join(pronunciation)
+                    if dictionary_match
+                    else f"evidenced:{expected_token}-{observed_token}"
                     if evidenced_pair
                     else expected_key
                 ),
