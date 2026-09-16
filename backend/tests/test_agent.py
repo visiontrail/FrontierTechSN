@@ -657,6 +657,39 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result, 'Final answer')
 
+    async def test_json_continuation_preserves_the_truncated_prefix(self):
+        prefix = '```json\n[{"id":"scene-02","shots":[{"layout":'
+        continuation = '"focus","duration":4.5}]}]\n```'
+
+        async def query(*, prompt, options):
+            # Streaming delivery can omit the stop reason even though the
+            # persisted CLI transcript later records max_tokens on this block.
+            yield FakeAssistantMessage([FakeTextBlock(prefix)], message_id='first')
+            yield FakeAssistantMessage([FakeTextBlock(continuation)], message_id='second', stop_reason='end_turn')
+            yield FakeResultMessage(continuation, stop_reason='end_turn')
+
+        with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}):
+            result, _ = await agent._agent_complete_single(
+                'Return JSON.', 'Plan shots.', endpoint='https://example.test', model='test',
+                enable_skills=False, max_retries=0,
+            )
+        self.assertEqual(result, prefix + continuation)
+
+    def test_structured_recovery_handles_restarts_followed_by_continuations(self):
+        abandoned = '{"queries":[{"query":"'
+        prefix = '{"queries":[{"query":"particle accelerator",'
+        continuation = '"purpose":"laboratory"}]}'
+        self.assertEqual(
+            agent._sdk_completion_text([abandoned, prefix, continuation], continuation),
+            prefix + continuation,
+        )
+        # Independent valid answers are never concatenated.
+        self.assertEqual(agent._sdk_completion_text(['{"old":1}', '{"new":2}'], '{"new":2}'), '{"new":2}')
+        # Do not invent missing brackets or choose a nested valid container.
+        malformed = '{"id":"scene-02","shots":[]}]'
+        self.assertEqual(agent._sdk_completion_text([malformed], malformed), malformed)
+        self.assertEqual(agent._sdk_completion_text(['{"old":1}'], 'Done'), 'Done')
+
     async def test_reasoning_only_token_exhaustion_expands_budget_within_retry_limit(self):
         budgets = []
 

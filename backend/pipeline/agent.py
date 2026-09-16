@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
@@ -216,6 +217,42 @@ def build_agent_env(
     return env
 
 
+def _sdk_completion_text(responses: list[str], terminal: str | None) -> str:
+    """Resolve SDK restarts versus continuations without repairing model data.
+
+    A token-limit recovery can restart a JSON answer or continue mid-string.
+    ResultMessage contains only the last response in both cases. Prefer an
+    independently valid terminal answer; otherwise accept only an exact suffix
+    of complete response blocks that decodes as a whole JSON container. Never
+    invent delimiters or scan into nested objects to salvage a partial answer.
+    Plain text and genuinely malformed JSON retain the terminal SDK answer.
+    """
+    responses = [text for text in responses if text.strip()]
+    answer = (terminal or (responses[-1] if responses else "")).strip()
+
+    def complete_json(text: str) -> bool:
+        clean = text.strip()
+        if clean.startswith("```") and clean.endswith("```") and "\n" in clean:
+            clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        if not clean.startswith(("{", "[")):
+            return False
+        try:
+            return isinstance(json.loads(clean), (dict, list))
+        except (ValueError, RecursionError):
+            return False
+
+    if complete_json(answer):
+        return answer
+    # Do not replace a distinct terminal answer with earlier JSON commentary.
+    if responses and responses[-1].strip().endswith(answer):
+        combined = ""
+        for response in reversed(responses):
+            combined = response + combined
+            if complete_json(combined):
+                return combined.strip()
+    return answer
+
+
 @timed("model_response", "external_response")
 async def _agent_complete_single(
     system_prompt: str,
@@ -348,6 +385,7 @@ async def _agent_complete_single(
             )
 
         text_parts: list[str] = []
+        prior_responses: list[str] = []
         assistant_message_id: str | None = None
         assistant_stop_reason: str | None = None
         result: ResultMessage | None = None
@@ -404,10 +442,11 @@ async def _agent_complete_single(
                                 # The CLI can restart a max_tokens response in
                                 # the same SDK turn. Assistant messages are
                                 # separate answers, not cumulative text deltas.
-                                # Keep blocks of one message together, but never
-                                # prepend an abandoned answer to its replacement.
+                                # Keep response boundaries until terminal output
+                                # can distinguish a restart from a continuation.
                                 if text_parts:
-                                    _log(log, f"{label}: superseded an earlier assistant response "
+                                    prior_responses.append("".join(text_parts))
+                                    _log(log, f"{label}: buffered an earlier assistant response "
                                          f"({assistant_stop_reason or 'unknown stop reason'})")
                                 text_parts.clear()
                                 assistant_message_id = message_id
@@ -453,6 +492,11 @@ async def _agent_complete_single(
                     content = result.result.strip()
                 assistant_stop_reason = getattr(result, "stop_reason", None) or (
                     "end_turn" if result.result and not result.is_error else assistant_stop_reason
+                )
+            if content:
+                content = _sdk_completion_text(
+                    [*prior_responses, "".join(text_parts)],
+                    result.result if result is not None else None,
                 )
             if assistant_stop_reason == "max_tokens":
                 content = ""
