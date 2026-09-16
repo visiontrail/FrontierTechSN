@@ -90,6 +90,33 @@ test('Gemini checkpoint rejects wrong resume ownership and expired generation be
   } finally { fs.rmSync(directory, { recursive: true, force: true }) }
 })
 
+test('Gemini download recovery uses the remaining original budget without waiting for generation again', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-download-resume-'))
+  try {
+    const stateFile = path.join(directory, 'state.json')
+    const checkpoint = { request_id: 'b'.repeat(64), url: 'https://gemini.google.com/app/abc123',
+      status: 'downloading', deadline: Date.now() - 1000, totalDeadline: Date.now() + 120000 }
+    fs.writeFileSync(stateFile, JSON.stringify(checkpoint))
+    let downloadReached = false
+    const page = {
+      async goto(url) { assert.equal(url, checkpoint.url) },
+      async evaluate(script) {
+        assert.match(script, /fetch\(source/)
+        downloadReached = true
+        return { ok: false, reason: 'simulated network interruption' }
+      },
+    }
+    const kwargs = { resume: checkpoint.url, output: path.join(directory, 'video.mp4'),
+      'state-file': stateFile, 'request-id': checkpoint.request_id }
+    await assert.rejects(videoCommand.func(page, kwargs), /in-page download failed/)
+    assert.equal(downloadReached, true)
+    assert.deepEqual(JSON.parse(fs.readFileSync(stateFile)), checkpoint)
+    checkpoint.totalDeadline = Date.now() - 1
+    fs.writeFileSync(stateFile, JSON.stringify(checkpoint))
+    await assert.rejects(videoCommand.func({}, kwargs), /GENERATION_TIMEOUT/)
+  } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+})
+
 test('Gemini video stops waiting when its submitted conversation disappears into the home composer', async () => {
   let reads = 0
   const page = {

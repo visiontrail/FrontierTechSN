@@ -890,7 +890,13 @@ export const videoCommand = cli({
             fs.renameSync(stateFile + '.tmp', stateFile);
         };
         try {
-            if (checkpoint.deadline && Date.now() >= checkpoint.deadline) {
+            // Retain a download allowance inside the original total budget,
+            // including navigation/upload time. Recovery never starts a new
+            // full generation or download window for an accepted request.
+            checkpoint.totalDeadline ||= checkpoint.deadline || Date.now() + timeout * 1000;
+            checkpoint.deadline ||= checkpoint.totalDeadline - Math.min(180, timeout / 2) * 1000;
+            if (Date.now() >= checkpoint.totalDeadline
+                || (checkpoint.status !== 'downloading' && Date.now() >= checkpoint.deadline)) {
                 throw new CommandExecutionError('GEMINI_VIDEO_GENERATION_TIMEOUT: original generation deadline has elapsed');
             }
             await page.goto(resume || GEMINI_VIDEOS_URL, { waitUntil: 'load', settleMs: 8000 });
@@ -902,7 +908,7 @@ export const videoCommand = cli({
                 await uploadFrames(page, [first, last]);
                 // Persist before the send: a killed command must not resubmit
                 // blindly when the provider may already have accepted it.
-                Object.assign(checkpoint, { status: 'submitting', deadline: Date.now() + timeout * 1000 });
+                checkpoint.status = 'submitting';
                 save();
                 await submitVideoPrompt(page, prompt);
                 checkpoint.status = 'submitted';
@@ -910,10 +916,16 @@ export const videoCommand = cli({
                 if (/^https:\/\/gemini\.google\.com\/app\/[a-z0-9]+$/i.test(url)) checkpoint.url = url;
                 save();
             }
-            await waitForVideo(page, checkpoint.before || [], timeout, { stallTimeoutSeconds, checkpoint, save });
+            if (checkpoint.status !== 'downloading') {
+                await waitForVideo(page, checkpoint.before || [], timeout, { stallTimeoutSeconds, checkpoint, save });
+            }
             checkpoint.status = 'downloading';
             save();
-            await downloadVideo(page, output, Math.min(timeout, 180));
+            const downloadSeconds = Math.min(180, Math.floor((checkpoint.totalDeadline - Date.now()) / 1000));
+            if (downloadSeconds <= 0) {
+                throw new CommandExecutionError('GEMINI_VIDEO_GENERATION_TIMEOUT: original download deadline has elapsed');
+            }
+            await downloadVideo(page, output, downloadSeconds);
             const link = String(unwrap(await page.evaluate('window.location.href')) || GEMINI_VIDEOS_URL);
             Object.assign(checkpoint, { status: 'saved', url: link });
             save();
