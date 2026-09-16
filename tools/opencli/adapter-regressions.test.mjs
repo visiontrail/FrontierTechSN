@@ -147,7 +147,9 @@ test('Gemini video tolerates transient empty navigation and resets the lost-conv
 
 test('Gemini generation errors fail explicitly while ordinary review content is preserved', () => {
   for (const text of ['', 'I seem to be encountering an error. Can I try something else for you?',
-    'I encountered an error doing what you asked. Could you try again?']) {
+    'I encountered an error doing what you asked. Could you try again?',
+    'Sorry, something went wrong. Please try your request again.',
+    "I'm having a hard time fulfilling your request. Can I help you with something else instead?"]) {
     assert.throws(() => requireGeminiGeneratedReply(text), /Gemini generation/)
   }
   const review = '{"image_received":true,"reviews":[{"issues":["An error message is visible on screen."]}]}'
@@ -156,7 +158,9 @@ test('Gemini generation errors fail explicitly while ordinary review content is 
 })
 
 for (const failure of ['I encountered an error doing what you asked. Could you try again?',
-  'I seem to be encountering an error. Can I try something else for you?']) {
+  'I seem to be encountering an error. Can I try something else for you?',
+  'Sorry, something went wrong. Please try your request again.',
+  "I'm having a hard time fulfilling your request. Can I help you with something else instead?"]) {
 test('Gemini reports an owned stable generation error while the stop button remains visible: ' + failure, async () => {
   const user = { Role: 'User', Text: 'Review the supplied image.' }
   const baseline = { url: 'https://gemini.google.com/app/current', turns: [user],
@@ -360,7 +364,17 @@ test('reapplying browser patches keeps every adapter byte-identical and recovery
   const adapters = ['clis/gemini/ask.js', 'clis/gemini/utils.js', 'clis/gemini/models.js',
     'clis/gemini/video.js', 'clis/chatgpt/ask.js', 'clis/chatgpt/utils.js',
     'clis/chatgpt/model.js', 'clis/chatgpt/detail.js', 'dist/src/execution.js', 'cli-manifest.json']
+  // Simulate the installed adapter before these two provider errors were
+  // recognized. Upgrading must extend its helper rather than insert it twice.
+  const utilsPath = path.join(root, packagePath, 'clis/gemini/utils.js')
+  const currentUtils = fs.readFileSync(utilsPath, 'utf8')
+  const legacyUtils = currentUtils
+    .replace("\n        || normalized === 'sorry, something went wrong. please try your request again.'", '')
+    .replace(`\n        || normalized === "i'm having a hard time fulfilling your request. can i help you with something else instead?"`, '')
+  assert.notEqual(legacyUtils, currentUtils)
+  fs.writeFileSync(utilsPath, legacyUtils)
   apply()
+  assert.equal(fs.readFileSync(utilsPath, 'utf8'), currentUtils)
   const contents = adapters.map(name => fs.readFileSync(path.join(root, packagePath, name), 'utf8'))
   apply()
   adapters.forEach((name, index) => assert.equal(

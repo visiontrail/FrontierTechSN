@@ -169,7 +169,9 @@ def test_batch_verdicts_are_mapped_by_id_and_missing_or_duplicate_results_fail(t
               patch.object(web_footage, 'run_opencli', AsyncMock(return_value=OpenCLIResult(
                   (), 0, json.dumps(response), ''))) as ask):
             results = await web_footage._analyze_preview_batch(requests, tmp_path)
-        assert ask.await_count == 1
+        # Two undecided rows each get three individual recovery attempts;
+        # the valid acceptance and low-confidence rejection are not repeated.
+        assert ask.await_count == 7
         assert results[0]['visible_content'] == 'Content for candidate 0'
         assert all(isinstance(results[i], Exception) for i in (1, 2, 3))
         assert (tmp_path / results[0]['batch_evidence']).is_file()
@@ -344,6 +346,48 @@ def test_batch_transport_exception_remains_an_unavailable_review(tmp_path):
             ], tmp_path)
         assert isinstance(results[0], web_footage.WebFootageReviewUnavailable)
     asyncio.run(run())
+
+
+def test_unavailable_first_candidate_does_not_discard_reviewed_batch_peers(tmp_path):
+    candidates = [{"source_page_url": f"https://youtu.be/{i}", "title": f"Building {i}",
+                   "duration_seconds": 30} for i in range(2)]
+    plan = [{"query": f"Building {i}", "script_excerpt": f"Narration {i}"} for i in range(2)]
+    manifest = {"provider_id": "youtube-web", "clips": [], "errors": [], "url_inspection_unavailable": True}
+
+    async def download(candidate, root, analysis):
+        path = root / "raw.mp4"
+        path.write_bytes(b"raw")
+        return path, True
+
+    async def trim(raw, destination, *args):
+        destination.write_bytes(b"verified peer")
+
+    async def run():
+        with (patch.object(web_footage, "search_youtube", AsyncMock(side_effect=lambda query: [
+                  candidates[int(query[-1])]])),
+              patch.object(web_footage, "_analyze_preview_batch", AsyncMock(return_value=[
+                  web_footage.WebFootageReviewUnavailable("offline"),
+                  {"suitable": True, "confidence": .9, "start_seconds": 5, "end_seconds": 20,
+                   "analyzer": "test"},
+              ])) as review,
+              patch.object(web_footage, "_download_youtube", AsyncMock(side_effect=download)),
+              patch.object(web_footage, "_trim", AsyncMock(side_effect=trim)),
+              patch.object(web_footage, "_probe", AsyncMock(return_value={
+                  "duration_seconds": 15, "width": 1280, "height": 720})),
+              patch.object(web_footage, "_evidence_frames", AsyncMock(return_value=[]))):
+            with pytest.raises(web_footage.WebFootageReviewUnavailable, match="offline"):
+                await web_footage.supplement_web_footage(
+                    task_dir=tmp_path, manifest=manifest, query_plan=plan, target_total=2,
+                    orientation="landscape", script="Narration 0. Narration 1.",
+                )
+        review.assert_awaited_once()
+    asyncio.run(run())
+    saved = json.loads((tmp_path / "footage/manifest.json").read_text())
+    assert saved["status"] == "review_unavailable"
+    assert len(saved["clips"]) == 1
+    assert saved["clips"][0]["source_page_url"] == candidates[1]["source_page_url"]
+    assert (tmp_path / saved["clips"][0]["local_path"]).read_bytes() == b"verified peer"
+    assert not saved.get("rejected_candidates")
 
 
 def test_prepared_preview_reuse_checks_identity_and_every_artifact(tmp_path):

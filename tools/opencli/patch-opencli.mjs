@@ -875,7 +875,7 @@ utils = replaceOnce(
             }`,
   'Gemini appended response ignores trailing empty speaker elements',
 )
-utils = replaceOnce(
+if (!utils.includes('export function requireGeminiGeneratedReply(response) {')) utils = replaceOnce(
   utils,
   'export async function waitForGeminiResponse(page, baseline, promptText, timeoutSeconds) {',
   `export function requireGeminiGeneratedReply(response) {
@@ -883,13 +883,23 @@ utils = replaceOnce(
     const normalized = text.replace(/\\s+/g, ' ').toLowerCase();
     if (!text) throw new CommandExecutionError('Gemini generation returned no response');
     if (normalized === 'i seem to be encountering an error. can i try something else for you?'
-        || normalized === 'i encountered an error doing what you asked. could you try again?') {
+        || normalized === 'i encountered an error doing what you asked. could you try again?'
+        || normalized === 'sorry, something went wrong. please try your request again.'
+        || normalized === "i'm having a hard time fulfilling your request. can i help you with something else instead?") {
         throw new CommandExecutionError('Gemini generation failed: ' + text);
     }
     return text;
 }
 export async function waitForGeminiResponse(page, baseline, promptText, timeoutSeconds) {`,
   'Gemini explicit generation failures retain diagnostic traces',
+)
+utils = replaceOnce(
+  utils,
+  "|| normalized === 'i encountered an error doing what you asked. could you try again?') {",
+  `|| normalized === 'i encountered an error doing what you asked. could you try again?'
+        || normalized === 'sorry, something went wrong. please try your request again.'
+        || normalized === "i'm having a hard time fulfilling your request. can i help you with something else instead?") {`,
+  'Gemini additional terminal generation error messages',
 )
 utils = replaceWithinFunction(
   utils,

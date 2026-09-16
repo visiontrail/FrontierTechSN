@@ -104,7 +104,7 @@ def test_single_preview_recovers_malformed_reply_and_retains_every_attempt(tmp_p
         assert review["reviewed_preview_sha256"] == web_footage._sha256(prepared["folder"] / "window-0/preview.mp4")
         assert prepare.await_count == 1
         assert ask.await_count == 2
-        assert ask.await_args_list[0].args == ask.await_args_list[1].args
+        assert "previous response did not satisfy" in ask.await_args_list[1].args[0][2]
     asyncio.run(run())
     attempts = sorted(prepared["folder"].glob("review-attempts/*/attempt-*.json"))
     assert len(attempts) == 2
@@ -115,12 +115,13 @@ def test_single_preview_recovers_malformed_reply_and_retains_every_attempt(tmp_p
     assert second["status"] == "reviewed"
 
 
-@pytest.mark.parametrize("defect", ["transport", "exit", "malformed", "missing_image", "bad_window", "nan_confidence"])
+@pytest.mark.parametrize("defect", ["transport", "exit", "provider_generation", "malformed", "missing_image", "bad_window", "nan_confidence"])
 def test_preview_retries_are_bounded_and_never_mark_unavailable_as_rejected(tmp_path, defect):
     prepared = prepared_preview(tmp_path)
     response = {
         "transport": OpenCLIError("Browser connection unavailable"),
         "exit": OpenCLIResult((), 1, "", "browser connection failed"),
+        "provider_generation": OpenCLIResult((), 1, "", "Gemini generation failed: Sorry, something went wrong. Please try your request again."),
         "malformed": result({"image_received": True, "reviews": []}),
         "missing_image": result({**PREVIEW, "image_received": False}),
         "bad_window": result({**PREVIEW, "selected_window": 99}),
@@ -132,12 +133,15 @@ def test_preview_retries_are_bounded_and_never_mark_unavailable_as_rejected(tmp_
               patch.object(web_footage, "run_opencli", ask),
               pytest.raises(web_footage.WebFootageReviewUnavailable) as error):
             await web_footage._analyze_candidate_preview({"title": "Demo"}, "Robots", tmp_path)
-        assert error.value.failure_kind == ("transport" if defect in {"transport", "exit"} else "response_contract")
+        expected_kind = ("transport" if defect in {"transport", "exit"}
+                         else "provider_generation" if defect == "provider_generation"
+                         else "response_contract")
+        assert error.value.failure_kind == expected_kind
         assert "Restore the browser connection" not in str(error.value)
-        assert ask.await_count == web_footage.MAX_PREVIEW_REVIEW_ATTEMPTS
+        assert ask.await_count == web_footage._preview_attempt_budget()
     asyncio.run(run())
     assert not (prepared["folder"] / "review.json").exists()
-    assert len(list(prepared["folder"].glob("review-attempts/*/attempt-*.json"))) == 3
+    assert len(list(prepared["folder"].glob("review-attempts/*/attempt-*.json"))) == web_footage._preview_attempt_budget()
 
 
 @pytest.mark.parametrize("verdict", [
@@ -175,4 +179,90 @@ def test_batch_preview_recovers_wrapper_and_preserves_independent_rejections(tmp
         assert ask.await_count == 2
         assert reviews[0]["suitable"] is True
         assert type(reviews[1]) is web_footage.WebFootageError
+    asyncio.run(run())
+
+
+def test_failed_batch_falls_back_to_saved_individual_pixels_and_narration(tmp_path):
+    previews = {}
+    for index in range(2):
+        root = tmp_path / str(index)
+        root.mkdir()
+        previews[str(index)] = prepared_preview(root)
+    requests = [({"source_page_url": str(i), "title": f"Subject {i}"}, f"Narration {i}")
+                for i in range(2)]
+    responses = [
+        OpenCLIResult((), 1, "", "Gemini generation failed"),
+        OpenCLIResult((), 1, "", "Gemini generation failed"),
+        result("Sorry, something went wrong. Please try your request again."),
+        result(PREVIEW), result({**PREVIEW, "suitable": False}),
+    ]
+    async def run():
+        with (patch.object(web_footage, "_prepare_candidate_preview", AsyncMock(
+                  side_effect=lambda candidate, *args: previews[candidate["source_page_url"]])) as prepare,
+              patch.object(web_footage, "run_opencli", AsyncMock(side_effect=responses)) as ask):
+            reviews = await web_footage._analyze_preview_batch(requests, tmp_path)
+        assert prepare.await_count == 2
+        assert ask.await_count == 5
+        assert reviews[0]["suitable"] is True
+        assert type(reviews[1]) is web_footage.WebFootageError
+        for index, call in enumerate(ask.await_args_list[3:]):
+            command = call.args[0]
+            assert f"Narration: Narration {index}" in command[2]
+            assert f"Narration {1-index}" not in command[2]
+            assert command[command.index("--file") + 1] == str(previews[str(index)]["sheet"])
+    asyncio.run(run())
+    records = [json.loads(p.read_text()) for p in tmp_path.glob("**/review-attempts/*/attempt-*.json")]
+    assert len(records) == 5
+    assert sum(r["status"] == "reviewed" for r in records) == 2
+
+
+def test_partial_batch_recovers_only_undecided_rows(tmp_path):
+    prepared = prepared_preview(tmp_path)
+    batch = {"results": [
+        {"candidate_id": 0, **PREVIEW},
+        {"candidate_id": 1, **PREVIEW, "suitable": False},
+        {"candidate_id": 2, **PREVIEW, "confidence": .4},
+    ]}
+    async def run():
+        with (patch.object(web_footage, "_prepare_candidate_preview", AsyncMock(return_value=prepared)),
+              patch.object(web_footage, "run_opencli", AsyncMock(side_effect=[result(batch), result(PREVIEW)])) as ask):
+            reviews = await web_footage._analyze_preview_batch([
+                ({"source_page_url": str(i)}, f"Narration {i}") for i in range(4)
+            ], tmp_path)
+        assert ask.await_count == 2
+        assert reviews[0]["suitable"] is True
+        assert type(reviews[1]) is type(reviews[2]) is web_footage.WebFootageError
+        assert reviews[3]["suitable"] is True
+        assert "Narration: Narration 3" in ask.await_args_list[1].args[0][2]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("budget", [2, 6, 10])
+def test_batch_and_individual_failures_share_bounded_budget(tmp_path, budget):
+    prepared = prepared_preview(tmp_path)
+    async def run():
+        with (patch.object(web_footage.config, "WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS", budget),
+              patch.object(web_footage, "_prepare_candidate_preview", AsyncMock(return_value=prepared)),
+              patch.object(web_footage, "run_opencli", AsyncMock(side_effect=OpenCLIError("offline"))) as ask):
+            reviews = await web_footage._analyze_preview_batch([
+                ({"source_page_url": "test"}, "Robots"),
+            ], tmp_path)
+        assert ask.await_count == budget
+        assert isinstance(reviews[0], web_footage.WebFootageReviewUnavailable)
+        assert not (prepared["folder"] / "review.json").exists()
+    asyncio.run(run())
+
+
+def test_cancelling_individual_recovery_does_not_start_more_reviews(tmp_path):
+    prepared = prepared_preview(tmp_path)
+    async def run():
+        with (patch.object(web_footage, "_prepare_candidate_preview", AsyncMock(return_value=prepared)),
+              patch.object(web_footage, "_request_preview_review", AsyncMock(side_effect=[
+                  web_footage.WebFootageReviewUnavailable("offline"), asyncio.CancelledError(),
+              ])) as ask):
+            with pytest.raises(asyncio.CancelledError):
+                await web_footage._analyze_preview_batch([
+                    ({"source_page_url": str(i)}, "Robots") for i in range(2)
+                ], tmp_path)
+        assert ask.await_count == 2
     asyncio.run(run())

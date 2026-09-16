@@ -769,6 +769,11 @@ SPECS: tuple[SettingSpec, ...] = (
         minimum=15, maximum=600,
     ),
     SettingSpec(
+        "WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS", "footage", "Preview review attempts", "int",
+        minimum=2, maximum=12,
+        description="Total attempts per candidate. Up to three batch attempts precede individual review of unresolved previews. Valid rejections are never retried; provider pacing and cooldown still apply.",
+    ),
+    SettingSpec(
         "WEB_FOOTAGE_CLIP_SECONDS", "footage", "Web clip max length", "int", unit="seconds",
         minimum=5, maximum=60,
         description="Maximum B-roll clip length downloaded from YouTube. Gemini is asked to aim for close to this duration.",

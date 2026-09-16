@@ -35,7 +35,6 @@ YOUTUBE_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch|youtu\.be
 GEMINI_RECOVERY_TIMEOUT_SECONDS = 60.0
 GEMINI_RECOVERY_POLL_SECONDS = 5.0
 MAX_CANDIDATE_ATTEMPTS_PER_QUERY = 3
-MAX_PREVIEW_REVIEW_ATTEMPTS = 3
 SEARCH_STOPWORDS = frozenset(
     "a an and are as at be by for from how in into is it of on or the this to use with".split()
 )
@@ -847,6 +846,14 @@ async def _analyze_candidate_preview(
     log: LogCallback | None = None,
 ) -> dict:
     prepared = await _prepare_candidate_preview(candidate, excerpt, task_dir, source_path=source_path)
+    return await _analyze_prepared_preview(candidate, excerpt, prepared, task_dir, log=log)
+
+
+async def _analyze_prepared_preview(
+    candidate: dict, excerpt: str, prepared: dict, task_dir: Path, *,
+    log: LogCallback | None = None, max_attempts: int | None = None,
+) -> dict:
+    """Review retained pixels without downloading or sampling again."""
     folder, sheet, intervals = (prepared[key] for key in ("folder", "sheet", "intervals"))
     prompt = (
         "Evaluate the attached contact sheet of REAL downloaded video frames, "
@@ -871,7 +878,7 @@ async def _analyze_candidate_preview(
         "unreadable or insufficient to establish relevance, suitable must be false."
     )
     verdict = await _request_preview_review(
-        prompt, sheet, {0: prepared}, batch=False, log=log,
+        prompt, sheet, {0: prepared}, batch=False, log=log, max_attempts=max_attempts,
     )
     (folder / "review.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
     return _validated_preview(verdict, prepared, task_dir)
@@ -914,7 +921,7 @@ def _validate_preview_response(payload: dict, prepared: dict[int, dict], *, batc
 
 async def _request_preview_review(
     prompt: str, sheet: Path, prepared: dict[int, dict], *, batch: bool,
-    log: LogCallback | None,
+    log: LogCallback | None, max_attempts: int | None = None,
 ) -> dict:
     from backend.pipeline.multimodal_review import _review_command
 
@@ -927,14 +934,22 @@ async def _request_preview_review(
         "contract": "footage-preview-batch" if batch else "footage-preview",
         "candidate_ids": list(prepared),
     })
+    attempts = _preview_attempt_budget() if max_attempts is None else max_attempts
     last_error: Exception | None = None
     failure_kind = "transport"
-    for attempt in range(1, MAX_PREVIEW_REVIEW_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         result = None
-        record = {"provider": "gemini", "attempt": attempt}
+        request_prompt = prompt
+        if last_error is not None and failure_kind == "response_contract":
+            request_prompt += (
+                "\nThe previous response did not satisfy the review format. Inspect the attached "
+                "image and return only the complete JSON object specified above, with actual "
+                "booleans and numeric row indices. Do not omit candidates or invent visible content."
+            )
+        record = {"provider": "gemini", "attempt": attempt, "prompt": request_prompt}
         try:
             result = await run_opencli(
-                _review_command("gemini", prompt, sheet, config.WEB_FOOTAGE_GEMINI_TIMEOUT),
+                _review_command("gemini", request_prompt, sheet, config.WEB_FOOTAGE_GEMINI_TIMEOUT),
                 timeout=config.WEB_FOOTAGE_GEMINI_TIMEOUT + 60,
                 check=False,
             )
@@ -950,16 +965,24 @@ async def _request_preview_review(
             return payload
         except OpenCLIError as exc:
             last_error = exc
-            failure_kind = "response_contract" if isinstance(exc, ReviewResponseError) else "transport"
+            failure_kind = (
+                "response_contract" if isinstance(exc, ReviewResponseError)
+                else "provider_generation" if "Gemini generation failed:" in str(exc)
+                else "transport"
+            )
             record.update(status="unavailable", failure_kind=failure_kind, error=str(exc))
-            _emit(log, f"Web footage: Gemini preview attempt {attempt}/{MAX_PREVIEW_REVIEW_ATTEMPTS} "
+            _emit(log, f"Web footage: Gemini preview attempt {attempt}/{attempts} "
                   f"unavailable ({failure_kind}): {exc}")
         finally:
             _write_manifest(evidence / f"attempt-{attempt:02d}.json", record)
     raise WebFootageReviewUnavailable(
         f"Gemini footage preview {failure_kind} failure after "
-        f"{MAX_PREVIEW_REVIEW_ATTEMPTS} attempts: {last_error}", failure_kind=failure_kind,
+        f"{attempts} attempts: {last_error}", failure_kind=failure_kind,
     ) from last_error
+
+
+def _preview_attempt_budget() -> int:
+    return max(2, min(12, int(config.WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS)))
 
 
 def _validated_preview(verdict: dict, prepared: dict, task_dir: Path) -> dict:
@@ -1063,9 +1086,11 @@ async def _analyze_preview_batch(
         + json.dumps(descriptions, ensure_ascii=False)
     )
     (folder / "request.json").write_text(json.dumps(descriptions, indent=2), encoding="utf-8")
+    budget = _preview_attempt_budget()
+    batch_attempts = min(3, budget // 2)
     try:
         payload = await _request_preview_review(
-            prompt, sheet_path, dict(prepared), batch=True, log=log,
+            prompt, sheet_path, dict(prepared), batch=True, log=log, max_attempts=batch_attempts,
         )
         (folder / "review.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
         verdicts = payload.get("results", [])
@@ -1088,6 +1113,22 @@ async def _analyze_preview_batch(
             results[index] = WebFootageReviewUnavailable(
                 str(exc), failure_kind=getattr(exc, "failure_kind", "transport"),
             )
+    # Keep every explicit verdict, including rejections. Only undecided rows
+    # fall back to a smaller image and a single-candidate response contract.
+    # Each candidate has one shared budget across the two request shapes.
+    for index, item in prepared:
+        if not isinstance(results[index], WebFootageReviewUnavailable):
+            continue
+        _emit(log, f"Web footage: batch review unavailable for candidate {index}; "
+              f"retrying its saved preview individually (up to {budget - batch_attempts} attempts)")
+        candidate, excerpt = requests[index]
+        try:
+            results[index] = await _analyze_prepared_preview(
+                candidate, excerpt, item, task_dir, log=log,
+                max_attempts=budget - batch_attempts,
+            )
+        except Exception as exc:
+            results[index] = exc
     return results
 
 
@@ -1281,9 +1322,14 @@ async def supplement_web_footage(
         # anywhere in the eligible results before starting another download.
         return min(available, key=needs_preview, default=None)
 
+    unavailable_reviews: list[WebFootageReviewUnavailable] = []
     for shot_index, shot in enumerate(pending_shots):
         if len(manifest.get("clips", [])) >= target_total:
             break
+        if unavailable_reviews and "_preview_result" not in shot:
+            # Drain already-reviewed peers before pausing. Starting new work
+            # while the provider is down would only multiply its retry budget.
+            continue
         query = str(shot.get("query") or "").strip()
         if shot["plan_query"] in fulfilled:
             continue
@@ -1471,11 +1517,10 @@ async def supplement_web_footage(
             })
             manifest.update(status="review_unavailable", updated_at=_now())
             _write_manifest(manifest_file, manifest)
-            raise WebFootageReviewUnavailable(
-                "Public-footage visual review unavailable; downloaded previews and verified clips "
-                f"were retained. Retry acquisition to resume from saved evidence. {exc}",
-                failure_kind=getattr(exc, "failure_kind", "transport"),
-            ) from exc
+            unavailable_reviews.append(WebFootageReviewUnavailable(
+                str(exc), failure_kind=getattr(exc, "failure_kind", "transport"),
+            ))
+            continue
         except Exception as exc:  # noqa: BLE001 - try the next query/candidate
             if "review rejected" in str(exc).casefold():
                 manifest.setdefault("rejected_candidates", []).append({
@@ -1573,6 +1618,15 @@ async def supplement_web_footage(
     if raw_dir.exists() and not any(raw_dir.iterdir()):
         raw_dir.rmdir()
     acquired = len(manifest.get("clips", []))
+    if unavailable_reviews and acquired < target_total:
+        exc = unavailable_reviews[0]
+        manifest.update(status="review_unavailable", updated_at=_now())
+        _write_manifest(manifest_file, manifest)
+        raise WebFootageReviewUnavailable(
+            "Public-footage visual review unavailable after batch and individual recovery; "
+            "downloaded previews and verified clips were retained. Retry acquisition to resume "
+            f"from saved evidence. {exc}", failure_kind=exc.failure_kind,
+        ) from exc
     manifest["missing_queries"] = [
         {"query": item["query"], "purpose": item.get("purpose", ""),
          "script_excerpt": item.get("script_excerpt", "")}
