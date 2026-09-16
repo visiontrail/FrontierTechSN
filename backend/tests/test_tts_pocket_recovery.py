@@ -81,8 +81,8 @@ def test_sentence_recovery_is_source_bound_and_preserves_other_part_names(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sentence_fails", [False, True])
-async def test_failed_paragraph_recovers_by_sentence_with_cache_and_bounded_retries(tmp_path, sentence_fails):
+@pytest.mark.parametrize("sentence_failures", [0, 4, 5])
+async def test_failed_paragraph_recovers_by_sentence_with_cache_and_bounded_retries(tmp_path, sentence_failures):
     opening = "Opening context stays here."
     first = "The apparatus runs near the magnet."
     second = "Its targets stay in the laboratory."
@@ -92,6 +92,8 @@ async def test_failed_paragraph_recovers_by_sentence_with_cache_and_bounded_retr
     script.write_text("\n".join([opening, paragraph, closing]))
     output_dir = tmp_path / "audio"
     requests = []
+    second_attempts = 0
+    messages = []
 
     def respond(request):
         requests.append(parse_qs(request.content.decode())["text"][0])
@@ -99,7 +101,10 @@ async def test_failed_paragraph_recovers_by_sentence_with_cache_and_bounded_retr
                               content=pocket_streaming_wav_bytes(frames=96_000))
 
     async def verify(_path, text, _directory, **_kwargs):
-        if text == paragraph or (sentence_fails and text == second):
+        nonlocal second_attempts
+        if text == second:
+            second_attempts += 1
+        if text == paragraph or (text == second and second_attempts <= sentence_failures):
             raise tts.TtsIntegrityError("source 'magnet' -> ASR 'market'")
         return tts._orpheus_transcript_report(text, words(text))
 
@@ -110,14 +115,15 @@ async def test_failed_paragraph_recovers_by_sentence_with_cache_and_bounded_retr
     with (patch.object(tts.httpx, "AsyncClient", client_factory),
           patch.object(tts, "_verify_orpheus_part", AsyncMock(side_effect=verify)),
           patch.object(config, "POCKET_TTS_CHUNK_WORDS", 240)):
-        if sentence_fails:
+        if sentence_failures == 5:
             with pytest.raises(tts.TtsIntegrityError, match="sentence_002"):
-                await tts.generate_tts(str(script), str(output_dir), ["alba"], "pocket-tts-en")
-            assert requests == [opening, paragraph, first, second, second, second]
+                await tts.generate_tts(str(script), str(output_dir), ["alba"], "pocket-tts-en", log=messages.append)
+            assert requests == [opening, paragraph, first] + [second] * 5
+            assert any("exhausted" in message and "after 5 attempts" in message for message in messages)
             assert not (output_dir / "tts_manifest.json").exists()
         else:
             result = await tts.generate_tts(str(script), str(output_dir), ["alba"], "pocket-tts-en")
-            assert requests == [opening, paragraph, first, second, closing]
+            assert requests == [opening, paragraph, first] + [second] * (sentence_failures + 1) + [closing]
             manifest = json.loads((output_dir / "tts_manifest.json").read_text())
             assert manifest["integrity"]["verified_source_coverage"] == 1.0
             assert manifest["chunk_count"] == 4
@@ -125,7 +131,7 @@ async def test_failed_paragraph_recovers_by_sentence_with_cache_and_bounded_retr
             assert tts._read_pcm_wav(Path(result)).frame_count == 4 * 96_000
             # A fresh call reconstructs the same plan and reuses every verified sentence.
             await tts.generate_tts(str(script), str(output_dir), ["alba"], "pocket-tts-en")
-            assert len(requests) == 5
+            assert len(requests) == 5 + sentence_failures
     failure_dir = output_dir / "verification" / "tts_input_part_002"
     assert (failure_dir / "rejected.wav").is_file()
     assert "magnet" in json.loads((failure_dir / "integrity_failure.json").read_text())["reason"]

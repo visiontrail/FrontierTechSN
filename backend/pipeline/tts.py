@@ -89,11 +89,13 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 31
-POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 32
+# Bound stochastic pronunciation recovery per failed part, reusing verified
+# audio on each pass. Transport retries have their own independent budget.
+POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 5
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 14
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 15
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -149,7 +151,7 @@ CURRENCY_ADJECTIVE_RE = re.compile(
     r"(hundred|thousand|million|billion|trillion)-dollar\b",
     re.IGNORECASE,
 )
-DECIMAL_INTEGER_WORD_RE = re.compile(r"\s*(\d+)\s*")
+DECIMAL_INTEGER_WORD_RE = re.compile(r"\s*([A-Za-z]*)(\d+)\s*")
 DECIMAL_FRACTION_WORD_RE = re.compile(r"\s*\.(\d+)[.,;:!?]?\s*")
 NUMBER_WORDS = {
     "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
@@ -417,6 +419,9 @@ def _raw_lexical_tokens(text: str) -> list[str]:
     ):
         lexical_text = lexical_text.replace(symbol, f" {spoken} ")
     lexical_text = lexical_text.replace("%", " percent ")
+    # Whisper can omit the written leading zero (DM .5). Preserve the
+    # decimal point: stripping punctuation would turn 0.5 into the integer 5.
+    lexical_text = re.sub(r"(?<![\w.])\.(\d+)", r"0.\1", lexical_text)
     lexical_text = DECIMAL_LITERAL_RE.sub(
         lambda match: (
             f" decimalnumber{match.group(1)}point{match.group(2)} "
@@ -862,9 +867,15 @@ def _transcript_tokens(words: list[dict]) -> tuple[list[str], list[int]]:
             else None
         )
         if integer_match is not None and fraction_match is not None:
+            # The integer may share an ASR word with a model prefix (DM0
+            # + .5). Keep every prefix letter and digit, just as DM0.5 does
+            # in the source tokenizer, and retain the original onset index.
+            prefix = _raw_lexical_tokens(integer_match.group(1))
+            tokens.extend(prefix)
+            word_indexes.extend([index] * len(prefix))
             tokens.append(
                 "decimalnumber"
-                f"{integer_match.group(1)}point{fraction_match.group(1)}"
+                f"{integer_match.group(2)}point{fraction_match.group(1)}"
             )
             word_indexes.append(index)
             index += 2
@@ -2960,7 +2971,15 @@ def _medium_asr_verdict_is_corroborated(
     # Whole-paragraph spelling similarity must never hide a changed, missing,
     # or added numeric value even when only one character differs.
     def numeric_tokens(tokens: list[str]) -> list[str]:
-        return [token for token in tokens if any(character.isdigit() for character in token)]
+        # Decimal tokenization separates a compact model's letters (DM0.5 ->
+        # dm, decimalnumber0point5). Keep the preceding token in that identity
+        # check so DM -> DN cannot pass as an unrelated proper-name spelling.
+        return [
+            f"{tokens[index - 1]}:{token}"
+            if index and token.startswith("decimalnumber") else token
+            for index, token in enumerate(tokens)
+            if any(character.isdigit() for character in token)
+        ]
 
     if not (numeric_tokens(expected_tokens) == numeric_tokens(normal_tokens)
             == numeric_tokens(slower_tokens)):
@@ -4747,6 +4766,10 @@ async def generate_tts(
                 attempt = integrity_attempts.get(part_key, 0) + 1
                 integrity_attempts[part_key] = attempt
                 if attempt >= POCKET_TTS_MAX_INTEGRITY_ATTEMPTS:
+                    emit(
+                        f"Pocket TTS integrity attempts exhausted for {part_key} "
+                        f"after {attempt} attempts; rejected audio will not be used."
+                    )
                     raise
                 emit(
                     f"Pocket TTS integrity retry for {part_key} "
