@@ -20,6 +20,11 @@ Rules:
   For a recent event, a concrete narrated venue or object can supply contextual
   B-roll: state that illustrative purpose and bind it to the sentence naming
   the place or object. Never use another named event as the narrated event.
+- For named awards or conferences, retain the organizer or event name in the
+  query. Registration or an announcement does not imply a ceremony has happened;
+  do not propose generic trophies, galas or audiences as coverage of that event.
+  When quantity is automatic, omit such a beat if no concrete filmed subject
+  is supported by the narration; it can use the source article's imagery.
 - Make every query meaningfully different.
 - Normally target a different narration story or scene with every query. For a
   long beat, you may return multiple clearly different shots for the same

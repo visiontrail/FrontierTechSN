@@ -35,6 +35,8 @@ YOUTUBE_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch|youtu\.be
 GEMINI_RECOVERY_TIMEOUT_SECONDS = 60.0
 GEMINI_RECOVERY_POLL_SECONDS = 5.0
 MAX_CANDIDATE_ATTEMPTS_PER_QUERY = 3
+YOUTUBE_SEARCH_ATTEMPTS = 3
+YOUTUBE_SEARCH_TIMEOUT_SECONDS = 45
 SEARCH_STOPWORDS = frozenset(
     "a an and are as at be by for from how in into is it of on or the this to use with".split()
 )
@@ -54,6 +56,10 @@ class WebFootageReviewUnavailable(WebFootageError):
     def __init__(self, message: str, *, failure_kind: str = "transport") -> None:
         super().__init__(message)
         self.failure_kind = failure_kind
+
+
+class WebFootageSearchUnavailable(WebFootageError):
+    """Discovery failed to execute; this is not evidence of missing footage."""
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -240,12 +246,29 @@ async def search_youtube(query: str, *, limit: int = 8) -> list[dict]:
         _yt_dlp_bin(),
         *_yt_dlp_common_args(include_cookies=False),
         "--flat-playlist",
+        "--socket-timeout", "15",
+        "--retries", "0",
+        "--extractor-retries", "0",
         "--dump-json",
         "--playlist-end",
         str(limit),
         f"ytsearch{limit}:{query}",
     ]
-    _, stdout, _ = await _run_command(command, timeout=90)
+    for attempt in range(YOUTUBE_SEARCH_ATTEMPTS):
+        try:
+            _, stdout, _ = await _run_command(command, timeout=YOUTUBE_SEARCH_TIMEOUT_SECONDS)
+            break
+        except WebFootageError as exc:
+            transient = re.search(
+                r"timed? out|timeout|connection|network|temporary|temporarily|"
+                r"HTTP Error (?:429|5\d\d)|remote.*closed|unable to download",
+                str(exc), re.I,
+            )
+            if not transient or attempt + 1 == YOUTUBE_SEARCH_ATTEMPTS:
+                raise WebFootageSearchUnavailable(
+                    f"YouTube search unavailable after {attempt + 1} attempt(s): {exc}"
+                ) from exc
+            await asyncio.sleep(attempt + 1)
     candidates = []
     for line in stdout.splitlines():
         try:
@@ -1219,8 +1242,12 @@ async def supplement_web_footage(
                     "Repair a failed editorial B-roll search. Return JSON only: "
                     '{"queries":["specific search phrase", "different specific search phrase"]}. '
                     "Return at most two 2-6 word queries. Keep the SAME narrated story and visual purpose. "
-                    "Use its exact company/product/event, or a concrete narrated process. Read the rejection "
-                    "reasons, but treat the supplied narration as authoritative if an old rejection used a wrong story. "
+                    "Use its exact company/product/event, or a concrete narrated process. "
+                    "When awards or conference searches return unrelated events, search for the narrated "
+                    "organizer/event or an isolated unbranded object as illustrative B-roll; "
+                    "another generic ceremony, gala or audience is not a repair. "
+                    "Read the rejection reasons, but treat the supplied narration as authoritative "
+                    "if an old rejection used a wrong story. "
                     "Change the failed direction. Do not merely append stock footage, broaden "
                     "to a generic theme, or substitute an unrelated event. Search for the planned visible "
                     "subject/action: contextual footage need not prove the report's spoken statistics. "
@@ -1273,6 +1300,10 @@ async def supplement_web_footage(
             pending_shots.extend(await replan(shot))
         else:
             pending_shots.append({**shot, "_candidate_attempt": len(prior) + 1})
+    # A scout may choose several candidates for one query. Cache both results
+    # and outages so batch probing cannot silently multiply network retries.
+    search_results: dict[str, list[dict] | Exception] = {}
+
     async def choose_candidate(shot: dict, reserved: set[str] | None = None) -> dict | None:
         cached_candidates = []
         for cache_path in (task_dir / "footage" / "evidence" / "previews").glob("*/preview-cache.json"):
@@ -1288,32 +1319,44 @@ async def supplement_web_footage(
         # A completed preview is a retained discovery result even if its
         # source falls out of the next search page. It still needs a fresh
         # context-bound visual verdict before it can become a clip.
-        results = [*cached_candidates, *await search_youtube(shot["query"])]
-        eligible = []
-        for candidate in results:
-            reason = _metadata_rejection(candidate, shot["query"])
-            if reason:
-                record = {"query": shot["query"], "plan_query": shot["plan_query"],
-                          "script_excerpt": shot.get("script_excerpt", ""),
-                          "stage": "web-metadata", "source_page_url": candidate["source_page_url"],
-                          "message": reason}
-                if record not in manifest.setdefault("errors", []):
-                    manifest["errors"].append(record)
-                continue
-            # A repaired search changes the proposed visible subject, while
-            # plan_query remains the stable shot identity used for recovery.
-            # Reviewing the old discovery phrase defeats that repair.
-            eligible.append({**candidate, "visual_query": shot["query"],
-                             "visual_plan_query": shot["plan_query"],
-                             "visual_purpose": shot.get("purpose", "")})
         failed = {
             error.get("source_page_url") for error in manifest.get("errors", [])
             if error.get("plan_query", str(error.get("query", "")).removesuffix(" stock footage")) == shot["plan_query"]
             and (not error.get("script_excerpt") or error["script_excerpt"] == shot.get("script_excerpt"))
             and (error.get("stage") != "web-metadata" or error.get("query") == shot["query"])
         }
-        available = [item for item in eligible if item["source_page_url"] not in
-                     used_sources | failed | (reserved or set())]
+        def eligible(results: list[dict]) -> list[dict]:
+            available = []
+            for candidate in results:
+                if candidate["source_page_url"] in used_sources | failed | (reserved or set()):
+                    continue
+                reason = _metadata_rejection(candidate, shot["query"])
+                if reason:
+                    record = {"query": shot["query"], "plan_query": shot["plan_query"],
+                              "script_excerpt": shot.get("script_excerpt", ""),
+                              "stage": "web-metadata", "source_page_url": candidate["source_page_url"],
+                              "message": reason}
+                    if record not in manifest.setdefault("errors", []):
+                        manifest["errors"].append(record)
+                    continue
+                available.append({**candidate, "visual_query": shot["query"],
+                                  "visual_plan_query": shot["plan_query"],
+                                  "visual_purpose": shot.get("purpose", "")})
+            return available
+
+        # Resume intact evidence before depending on fresh network discovery.
+        available = eligible(cached_candidates)
+        if not available:
+            query = shot["query"]
+            if query not in search_results:
+                try:
+                    search_results[query] = await search_youtube(query)
+                except Exception as exc:
+                    search_results[query] = exc
+            results = search_results[query]
+            if isinstance(results, Exception):
+                raise results
+            available = eligible(results)
         def needs_preview(item: dict) -> bool:
             key = hashlib.sha256(item["source_page_url"].encode()).hexdigest()[:16]
             folder = task_dir / "footage" / "evidence" / "previews" / key
@@ -1323,6 +1366,7 @@ async def supplement_web_footage(
         return min(available, key=needs_preview, default=None)
 
     unavailable_reviews: list[WebFootageReviewUnavailable] = []
+    unavailable_searches: dict[str, Exception] = {}
     for shot_index, shot in enumerate(pending_shots):
         if len(manifest.get("clips", [])) >= target_total:
             break
@@ -1405,9 +1449,15 @@ async def supplement_web_footage(
         try:
             candidate = shot.pop("_candidate", None) or await choose_candidate(shot)
         except Exception as exc:  # noqa: BLE001 - record and continue with the next shot
+            unavailable_searches[shot["plan_query"]] = exc
             manifest.setdefault("errors", []).append(
-                {"query": query, "stage": "youtube-search", "message": str(exc)}
+                {"query": query, "plan_query": shot["plan_query"],
+                 "script_excerpt": shot.get("script_excerpt", ""),
+                 "stage": "youtube-search", "failure_kind": "discovery_unavailable",
+                 "message": str(exc)}
             )
+            manifest["updated_at"] = _now()
+            _write_manifest(manifest_file, manifest)
             continue
         if candidate is None:
             manifest.setdefault("errors", []).append(
@@ -1633,6 +1683,15 @@ async def supplement_web_footage(
         for item in query_plan
         if str(item.get("plan_query") or item["query"]) not in fulfilled
     ] if acquired < target_total else []
+    unresolved_searches = {key: value for key, value in unavailable_searches.items() if key not in fulfilled}
+    if unresolved_searches and acquired < target_total:
+        manifest.update(status="search_unavailable", updated_at=_now())
+        _write_manifest(manifest_file, manifest)
+        raise WebFootageSearchUnavailable(
+            "Public-footage search unavailable after bounded retries; verified clips and previews "
+            "were retained. Retry acquisition to resume discovery for "
+            f"{', '.join(unresolved_searches)}. {next(iter(unresolved_searches.values()))}"
+        )
     manifest["status"] = "ready" if acquired >= target_total else ("partial" if acquired else "no_results")
     manifest["updated_at"] = _now()
     _write_manifest(manifest_file, manifest)

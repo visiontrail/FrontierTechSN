@@ -673,7 +673,7 @@ def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_
     cache_path.parent.mkdir(parents=True)
     cache_path.write_text(json.dumps({'candidate': retained}))
     review = AsyncMock(return_value=[web_footage.WebFootageReviewUnavailable('Review offline')])
-    with (patch.object(web_footage, 'search_youtube', AsyncMock(return_value=candidates[:2])) as search,
+    with (patch.object(web_footage, 'search_youtube', AsyncMock(side_effect=web_footage.WebFootageSearchUnavailable('Search offline'))) as search,
           patch.object(web_footage, '_load_prepared_preview', side_effect=lambda candidate, *args: {'sheet': 'cached.jpg'} if candidate['source_page_url'] == candidates[2]['source_page_url'] else None),
           patch.object(web_footage, '_analyze_preview_batch', review),
           pytest.raises(web_footage.WebFootageReviewUnavailable, match='Review offline')):
@@ -683,7 +683,7 @@ def test_cached_candidate_is_reviewed_before_downloading_spare_alternatives(tmp_
                          'script_excerpt': 'A Southern California port.'}],
             target_total=1, orientation='landscape', script='A Southern California port.',
         ))
-    search.assert_awaited_once()
+    search.assert_not_awaited()
     assert len(review.await_args.args[0]) == 1
     assert review.await_args.args[0][0][0]['source_page_url'] == candidates[2]['source_page_url']
     assert review.await_args.args[0][0][0]['visual_query'] == current_query
@@ -806,3 +806,58 @@ def test_stopped_footage_command_reaps_its_process(stop):
         assert created[0].returncode is not None
         assert created[0].returncode != 0
     asyncio.run(run())
+
+
+def test_search_outage_is_recorded_once_per_query_and_keeps_story_binding(tmp_path):
+    shot = {'query': 'QbitAI awards', 'purpose': 'QbitAI registration',
+            'script_excerpt': 'QbitAI has opened registration for its awards.'}
+    retained = {'id': 'clip-01', 'plan_query': 'verified scene'}
+    with (patch.object(web_footage, 'search_youtube', AsyncMock(
+            side_effect=web_footage.WebFootageSearchUnavailable('Connection timed out'))) as search,
+          patch.object(web_footage, '_analyze_preview_batch', AsyncMock()) as review,
+          pytest.raises(web_footage.WebFootageSearchUnavailable, match='QbitAI awards')):
+        asyncio.run(web_footage.supplement_web_footage(
+            task_dir=tmp_path, manifest={'clips': [retained], 'errors': [], 'url_inspection_unavailable': True},
+            query_plan=[shot], target_total=2, orientation='landscape', script=shot['script_excerpt'],
+        ))
+    search.assert_awaited_once_with(shot['query'])
+    review.assert_not_awaited()
+    saved = json.loads((tmp_path / 'footage/manifest.json').read_text())
+    assert saved['clips'] == [retained]
+    assert saved['status'] == 'search_unavailable'
+    assert saved['missing_queries'] == [shot]
+    assert len(saved['errors']) == 1
+    assert saved['errors'][0]['plan_query'] == shot['query']
+    assert saved['errors'][0]['script_excerpt'] == shot['script_excerpt']
+    assert not saved.get('query_replans')
+
+
+@pytest.mark.parametrize('failures', [1, 2, 3])
+def test_youtube_search_retries_transient_failure_with_a_bounded_budget(failures):
+    rows = json.dumps({'title': 'QbitAI awards', 'url': 'https://youtu.be/awards'})
+    attempts = [web_footage.WebFootageError('Command timed out after 45s: yt-dlp')] * failures
+    if failures < 3:
+        attempts.append((0, rows, ''))
+    with (patch.object(web_footage, '_run_command', AsyncMock(side_effect=attempts)) as command,
+          patch.object(web_footage.asyncio, 'sleep', AsyncMock()) as sleep):
+        if failures == 3:
+            with pytest.raises(web_footage.WebFootageSearchUnavailable, match='after 3 attempt'):
+                asyncio.run(web_footage.search_youtube('QbitAI awards'))
+        else:
+            result = asyncio.run(web_footage.search_youtube('QbitAI awards'))
+            assert result[0]['source_page_url'] == 'https://youtu.be/awards'
+    assert command.await_count == min(failures + 1, 3)
+    assert sleep.await_count == min(failures, 2)
+    assert command.await_args.kwargs['timeout'] == 45
+    assert '--socket-timeout' in command.await_args.args[0]
+
+
+@pytest.mark.parametrize('error', [web_footage.WebFootageError('Unsupported URL'), asyncio.CancelledError()])
+def test_youtube_search_does_not_retry_permanent_failure_or_cancellation(error):
+    with (patch.object(web_footage, '_run_command', AsyncMock(side_effect=error)) as command,
+          patch.object(web_footage.asyncio, 'sleep', AsyncMock()) as sleep,
+          pytest.raises(type(error) if isinstance(error, asyncio.CancelledError)
+                        else web_footage.WebFootageSearchUnavailable)):
+        asyncio.run(web_footage.search_youtube('QbitAI awards'))
+    command.assert_awaited_once()
+    sleep.assert_not_awaited()

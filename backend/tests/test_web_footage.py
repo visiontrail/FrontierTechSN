@@ -489,7 +489,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["clips"][0]["title"], "Working candidate")
         self.assertEqual(download.await_count, 1)
         self.assertEqual(len(result["rejected_candidates"]), 1)
-        self.assertEqual(search.await_count, 2)
+        self.assertEqual(search.await_count, 1)
         self.assertEqual(
             analyze.await_args.args[1], "Exact persisted narration segment."
         )
@@ -584,7 +584,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["clips"][0]["title"], "Working candidate")
         self.assertEqual(download.await_count, 2)
-        self.assertEqual(search.await_count, 2)
+        self.assertEqual(search.await_count, 1)
         self.assertEqual(
             analyze.await_args.args[1], "Exact persisted narration segment."
         )
@@ -674,7 +674,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["clips"][0]["plan_query"], "chip factory")
         self.assertIn('403 Forbidden', repair.await_args.args[1])
         self.assertEqual(download.await_count, 4)
-        self.assertEqual(search.await_count, 4)
+        self.assertEqual(search.await_count, 2)
 
 
 if __name__ == "__main__":
