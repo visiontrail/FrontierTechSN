@@ -204,3 +204,21 @@ def test_spoken_decimal_normalizes_its_entire_integer_prefix(spoken, digits):
     assert not tts._orpheus_transcript_report(source, words(observed.replace(digits, "33.5")))["verified"]
     tokens, indexes = tts._transcript_tokens(words(source))
     assert indexes[tokens.index("dollars")] == source.split().index("dollars")
+
+
+@pytest.mark.parametrize("identity", ["a16z", "T6", "Mu2e"])
+def test_medium_verdict_requires_exact_model_identity_in_both_transcripts(identity):
+    source = f"DeepTech reports that Andreessen Horowitz discussed {identity} during the conference today."
+    normal = source.replace("DeepTech", "Deep Tech").replace("Andreessen", "Andreasen")
+    expected = tts._lexical_tokens(source)
+    assert tts._medium_asr_verdict_is_corroborated(expected, normal, normal)
+    changed = normal.replace(identity, identity.replace("6", "7").replace("2", "3"))
+    assert not tts._medium_asr_verdict_is_corroborated(expected, normal, changed)
+    assert not tts._medium_asr_verdict_is_corroborated(expected, changed, changed)
+
+
+def test_sentence_recovery_keeps_uppercase_model_abbreviation_with_its_name():
+    source = "The chip will go into the ID. AURA T6. The next shipment leaves tomorrow."
+    assert tts._split_pocket_tts_text(source, max_words=1) == [
+        "The chip will go into the ID. AURA T6.", "The next shipment leaves tomorrow.",
+    ]

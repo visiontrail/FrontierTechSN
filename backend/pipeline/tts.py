@@ -88,11 +88,11 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 28
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 29
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 3
 # Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
 # is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 11
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 12
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -1467,7 +1467,7 @@ def _split_pocket_tts_text(text: str, max_words: int) -> list[str]:
         # than cutting a spoken name in half; max_words is a soft target.
         boundaries = [0]
         for match in SENTENCE_BOUNDARY_RE.finditer(line):
-            if re.search(r"\b(?:(?:[A-Z]\.)+|(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)\.)$", line[:match.start()]):
+            if re.search(r"\b(?:(?:[A-Z]\.)+|[A-Z]{2,5}\.|(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Inc|Ltd|Corp|Co|vs|etc|e\.g|i\.e)\.)$", line[:match.start()]):
                 continue
             boundaries.append(match.end())
         boundaries.append(len(line))
@@ -2913,9 +2913,9 @@ def _medium_asr_verdict_is_corroborated(
     This handles Whisper artifacts such as duplicate words sharing an end time
     without accepting an extra word heard at the same position by both decodes.
 
-    Mixed letter/digit brands such as ``a16z`` remain excluded. Internal
-    decimal/date/range tokens are formatting, not brands, and may pass only
-    when their exact numeric values agree in both decodes.
+    Numeric values and mixed letter/digit identities such as ``a16z`` must
+    match exactly in both decodes. An unchanged model number does not prevent
+    adjudicating an unrelated name's spelling elsewhere in the paragraph.
     """
     def normalized(transcript: str) -> list[str]:
         raw_words = [{"text": word} for word in transcript.split()]
@@ -2925,16 +2925,6 @@ def _medium_asr_verdict_is_corroborated(
     normal_tokens = normalized(normal_transcript)
     slower_tokens = normalized(slower_transcript)
     if not normal_tokens or not slower_tokens:
-        return False
-    if any(
-        any(character.isalpha() for character in token)
-        and any(character.isdigit() for character in token)
-        and not re.fullmatch(
-            r"calendar-day-\d+|decimalnumber\d+point\d+|numberrange\d+(?:to|through)\d+|\d+(?:st|nd|rd|th)",
-            token,
-        )
-        for token in expected_tokens
-    ):
         return False
     # Whole-paragraph spelling similarity must never hide a changed, missing,
     # or added numeric value even when only one character differs.
