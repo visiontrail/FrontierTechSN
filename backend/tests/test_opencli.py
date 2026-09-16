@@ -1,4 +1,7 @@
 import asyncio
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -94,6 +97,11 @@ class OpenCLISessionIsolationTests(unittest.TestCase):
         self.assertEqual(env["OPENCLI_SITE_SESSION_NAMESPACE"], "frontiertechsn")
         self.assertEqual(env["OPENCLI_CHATGPT_MODEL_MIN"], "medium")
         self.assertEqual(env["OPENCLI_CHATGPT_MODEL_MAX"], "xhigh")
+        self.assertEqual(env["OPENCLI_GEMINI_MODEL"], "3.1-pro")
+
+    def test_gemini_model_uses_live_admin_value(self):
+        with patch.object(config, "OPENCLI_GEMINI_MODEL", "3.2-pro"):
+            self.assertEqual(opencli_module._environment()["OPENCLI_GEMINI_MODEL"], "3.2-pro")
 
     def test_one_review_can_isolate_and_reuse_its_own_persistent_tab(self):
         env = opencli_module._environment(
@@ -138,6 +146,37 @@ class OpenCLISessionIsolationTests(unittest.TestCase):
             "OPENCLI_ISOLATED_START_TIMEOUT",
         ):
             self.assertTrue(specs[key].restart_required)
+
+
+@pytest.mark.parametrize("args,configured,expected", [
+    (["gemini", "ask", "Review this image", "--file", "/path with spaces/frames.jpg"], None,
+     ["--model", "3.1-pro"]),
+    (["gemini", "ask", "Narration includes literal --model wording"], "3.2-pro",
+     ["--model", "3.2-pro"]),
+    (["gemini", "ask", "Review", "--model", "3.8-flash"], None, []),
+    (["gemini", "ask", "Review", "--model=3.8-flash"], None, []),
+    (["gemini", "models", "-f", "json"], None, []),
+    (["gemini", "read"], None, []),
+    (["gemini", "image", "Draw a scene"], None, []),
+    (["gemini", "video", "Animate a scene"], None, []),
+    (["chatgpt", "ask", "Review"], None, []),
+])
+def test_real_wrapper_selects_pro_for_gemini_ask_only(tmp_path, args, configured, expected):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    wrapper = scripts / "opencli.sh"
+    wrapper.write_text((config.PROJECT_ROOT / "scripts/opencli.sh").read_text())
+    binary = tmp_path / "tools/opencli/node_modules/.bin/opencli"
+    binary.parent.mkdir(parents=True)
+    binary.write_text(f"#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+    binary.chmod(0o755)
+    env = {**os.environ, "OPENCLI_BROWSER_RUNTIME": "bridge", "OPENCLI_WEB_REQUEST_SLOT_RESERVED": "1"}
+    env.pop("OPENCLI_GEMINI_MODEL", None)
+    if configured is not None:
+        env["OPENCLI_GEMINI_MODEL"] = configured
+    result = subprocess.run(["bash", str(wrapper), *args], env=env, capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == args + expected
+    assert ("Requesting verified model" in result.stderr) == bool(expected)
 
 
 class OpenCLISessionCleanupTests(unittest.IsolatedAsyncioTestCase):

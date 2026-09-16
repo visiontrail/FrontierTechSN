@@ -711,6 +711,11 @@ SPECS: tuple[SettingSpec, ...] = (
         restart_required=True,
     ),
     SettingSpec(
+        "OPENCLI_GEMINI_MODEL", "footage", "Gemini reasoning model", "string",
+        placeholder="3.1-pro", allow_blank=False,
+        description="Canonical model ID used for Gemini ask requests, including footage and final visual review. OpenCLI selects and verifies it in each new conversation. Explicit per-command model choices take precedence; image/video generation uses its own model controls.",
+    ),
+    SettingSpec(
         "OPENCLI_TIMEOUT", "footage", "OpenCLI command timeout", "int", unit="seconds",
         minimum=10, maximum=1800,
     ),

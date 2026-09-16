@@ -109,6 +109,7 @@ def _environment(*, site_session_namespace: str | None = None) -> dict[str, str]
     # can be sent.
     env["OPENCLI_CHATGPT_MODEL_MIN"] = config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL
     env["OPENCLI_CHATGPT_MODEL_MAX"] = config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL
+    env["OPENCLI_GEMINI_MODEL"] = config.OPENCLI_GEMINI_MODEL
     if runtime_mode() == ISOLATED_HEADLESS_RUNTIME:
         # Never let an isolated run auto-select among connected profiles. The
         # dedicated context id/alias is a fail-closed isolation boundary.

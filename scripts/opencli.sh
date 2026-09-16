@@ -10,6 +10,24 @@ RATE_LIMITER="$PROJECT_ROOT/backend/pipeline/opencli_rate_limit.py"
 # cannot navigate an in-flight FrontierTechSN conversation away.
 export OPENCLI_SITE_SESSION_NAMESPACE="${OPENCLI_SITE_SESSION_NAMESPACE:-frontiertechsn}"
 
+# A new Gemini conversation can otherwise inherit Flash regardless of a model
+# selected manually in another tab. The ask adapter discovers the menu, selects
+# this canonical ID and checks the selection before attaching/submitting. Keep
+# explicit overrides, and do not pass ask-only flags to image/video commands.
+if [ "${1:-}" = "gemini" ] && [ "${2:-}" = "ask" ]; then
+  gemini_model_explicit=0
+  for argument in "${@:3}"; do
+    case "$argument" in
+      --model|--model=*) gemini_model_explicit=1 ;;
+    esac
+  done
+  if [ "$gemini_model_explicit" = "0" ]; then
+    gemini_model="${OPENCLI_GEMINI_MODEL:-3.1-pro}"
+    set -- "$@" --model "$gemini_model"
+    echo "[gemini/model] Requesting verified model $gemini_model" >&2
+  fi
+fi
+
 if [ ! -x "$OPENCLI_BIN" ]; then
   echo "Project-local OpenCLI is not installed." >&2
   echo "Run: npm install --prefix \"$PROJECT_ROOT/tools/opencli\"" >&2

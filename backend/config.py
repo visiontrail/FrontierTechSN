@@ -120,6 +120,8 @@ NEWS_IMAGE_SEARCH_TIMEOUT = int(os.getenv("NEWS_IMAGE_SEARCH_TIMEOUT", "60"))
 # upgrading this feature never changes the operator's global Claude Code setup.
 OPENCLI_BIN = resolve_project_path(os.getenv("OPENCLI_BIN", "scripts/opencli.sh"))
 OPENCLI_PROFILE = os.getenv("OPENCLI_PROFILE", "").strip()
+# Explicit selection is verified by OpenCLI after opening each new Gemini chat.
+OPENCLI_GEMINI_MODEL = os.getenv("OPENCLI_GEMINI_MODEL", "3.1-pro").strip() or "3.1-pro"
 OPENCLI_BROWSER_RUNTIME = (
     os.getenv("OPENCLI_BROWSER_RUNTIME", "bridge").strip().lower() or "bridge"
 )
