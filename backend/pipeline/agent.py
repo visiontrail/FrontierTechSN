@@ -41,6 +41,7 @@ LogCallback = Callable[[str], None]
 DIAGNOSTIC_STDERR_LINES = 20
 _NOISE_LEVELS = ("[DEBUG]", "[INFO]")
 PROVIDER_RECOVERY_SECONDS = 300
+MAX_REASONING_OUTPUT_TOKENS = 32_768
 # Loop-local ephemeral state also keeps isolated request/probe test loops from
 # retaining another loop's health observations. Never store raw credentials.
 _provider_recovery = WeakKeyDictionary()
@@ -330,6 +331,7 @@ async def _agent_complete_single(
 
     last_error: Exception | None = None
     attempt = 0
+    current_max_tokens = max_tokens
     rate_limit_waits = 0
     tried_key_ids = {current_route.api_key_id}
     while attempt <= retry_limit:
@@ -358,7 +360,7 @@ async def _agent_complete_single(
             current_route.model,
             current_route.endpoint,
             current_route.api_key,
-            max_tokens,
+            current_max_tokens,
         )
         base_options["env"] = env
         _log(
@@ -541,6 +543,21 @@ async def _agent_complete_single(
                 f"{label} failed after model/tool output began; refusing to replay "
                 f"through another key or provider: {last_error}"
             ) from last_error
+
+        if (
+            ("max_output_tokens" in assistant_errors or assistant_stop_reason == "max_tokens")
+            and current_max_tokens
+            and attempt < retry_limit
+        ):
+            expanded = min(MAX_REASONING_OUTPUT_TOKENS, current_max_tokens * 2)
+            if expanded > current_max_tokens:
+                # Some gateways ignore thinking=disabled. Match the HTTP
+                # transport's bounded adaptation when reasoning consumes the
+                # budget without emitting any answer/tool output. Keep the
+                # configured attempt count and normal provider pacing.
+                current_max_tokens = expanded
+                _warn(log, f"{label}: output budget exhausted before an answer; "
+                      f"next attempt uses max_tokens={current_max_tokens}")
 
         if rate_limited:
             alternate = current_route.next_untried_key(tried_key_ids)

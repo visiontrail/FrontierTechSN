@@ -657,6 +657,47 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result, 'Final answer')
 
+    async def test_reasoning_only_token_exhaustion_expands_budget_within_retry_limit(self):
+        budgets = []
+
+        async def query(*, prompt, options):
+            budgets.append(int(options.env['CLAUDE_CODE_MAX_OUTPUT_TOKENS']))
+            if len(budgets) == 1:
+                yield FakeAssistantMessage([FakeThinkingBlock('reasoning')], stop_reason='max_tokens')
+                yield FakeAssistantMessage([FakeTextBlock('Token limit diagnostic')], error='max_output_tokens')
+                yield FakeResultMessage('Token limit diagnostic', is_error=True)
+            else:
+                yield FakeAssistantMessage([FakeTextBlock('complete answer')], stop_reason='end_turn')
+                yield FakeResultMessage('complete answer')
+
+        with (patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+              patch.object(config, 'AI_RETRY_BASE_SECONDS', 0),
+              patch.object(config, 'AI_RETRY_MAX_SECONDS', 0)):
+            result, _ = await agent._agent_complete_single(
+                'Return text.', 'content', endpoint='https://example.test', model='test',
+                enable_skills=False, disable_thinking=True, max_tokens=500, max_retries=1,
+            )
+        self.assertEqual(result, 'complete answer')
+        self.assertEqual(budgets, [500, 1000])
+
+    async def test_reasoning_adaptation_stays_bounded_and_never_returns_diagnostic_text(self):
+        budgets = []
+
+        async def query(*, prompt, options):
+            budgets.append(int(options.env['CLAUDE_CODE_MAX_OUTPUT_TOKENS']))
+            yield FakeAssistantMessage([FakeTextBlock('Token limit diagnostic')], error='max_output_tokens')
+            yield FakeResultMessage('Token limit diagnostic', is_error=True)
+
+        with (patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+              patch.object(config, 'AI_RETRY_BASE_SECONDS', 0),
+              patch.object(config, 'AI_RETRY_MAX_SECONDS', 0)):
+            with self.assertRaises(RuntimeError):
+                await agent._agent_complete_single(
+                    'Return text.', 'content', endpoint='https://example.test', model='test',
+                    enable_skills=False, max_tokens=agent.MAX_REASONING_OUTPUT_TOKENS, max_retries=1,
+                )
+        self.assertEqual(budgets, [agent.MAX_REASONING_OUTPUT_TOKENS] * 2)
+
     async def test_blocks_share_one_message_but_not_an_abandoned_answer(self):
         async def query(*, prompt, options):
             yield FakeAssistantMessage([FakeTextBlock('abandoned')], message_id='first', stop_reason='max_tokens')
