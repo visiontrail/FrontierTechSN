@@ -45,6 +45,9 @@ YOUTUBE_EMBEDDED_PLAYER_ARGS = (
     "--extractor-args",
     "youtube:player_client=web_embedded",
 )
+YOUTUBE_FINISHED_VIDEO_ARGS = (
+    "--match-filters", "!is_live & !is_upcoming & live_status !=? 'post_live'",
+)
 
 
 class WebFootageError(RuntimeError):
@@ -234,6 +237,9 @@ def _metadata_matches_query(candidate: dict, query: str) -> bool:
 
 
 def _metadata_rejection(candidate: dict, query: str) -> str | None:
+    if (candidate.get("is_live") is True or candidate.get("is_upcoming") is True
+            or candidate.get("live_status") in {"is_live", "is_upcoming", "post_live"}):
+        return "Live or unfinished broadcast has no stable downloadable interval"
     if re.search(r"(?:\(|\[|\|)\s*audio[\s-]+only\s*(?:\)|\]|\||$)",
                  str(candidate.get("title") or ""), re.I):
         return "Source title explicitly labels the recording Audio Only; no B-roll candidate"
@@ -288,6 +294,9 @@ async def search_youtube(query: str, *, limit: int = 8) -> list[dict]:
                 "creator": str(row.get("channel") or row.get("uploader") or "Unknown"),
                 "source_page_url": str(url),
                 "duration_seconds": float(row.get("duration") or 0),
+                "is_live": row.get("is_live"),
+                "is_upcoming": row.get("is_upcoming"),
+                "live_status": row.get("live_status"),
                 "description": str(row.get("description") or "")[:500],
                 "search_score": int(row.get("view_count") or 0),
             }
@@ -509,11 +518,15 @@ async def _download_youtube(
     analysis: dict,
 ) -> tuple[Path, bool]:
     template = raw_dir / "%(id)s.%(ext)s"
+    if (candidate.get("is_live") is True or candidate.get("is_upcoming") is True
+            or candidate.get("live_status") in {"is_live", "is_upcoming", "post_live"}):
+        raise WebFootageError("Live or unfinished broadcast cannot be acquired as B-roll")
     sectioned = float(candidate.get("duration_seconds") or 0) > 0
     command = [
         _yt_dlp_bin(),
         *_yt_dlp_common_args(include_cookies=False),
         "--force-overwrites", "--no-mtime",
+        *YOUTUBE_FINISHED_VIDEO_ARGS,
         "--no-playlist",
         "-f",
         "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
@@ -543,6 +556,7 @@ async def _download_youtube(
                 *_yt_dlp_common_args(include_cookies=False),
                 "--force-overwrites", "--no-mtime",
                 *YOUTUBE_EMBEDDED_PLAYER_ARGS,
+                *YOUTUBE_FINISHED_VIDEO_ARGS,
                 "--no-playlist",
                 "-f",
                 "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
@@ -575,6 +589,7 @@ async def _download_youtube(
                 *_yt_dlp_common_args(include_cookies=False),
                 "--force-overwrites", "--no-mtime",
                 *YOUTUBE_EMBEDDED_PLAYER_ARGS,
+                *YOUTUBE_FINISHED_VIDEO_ARGS,
                 "--no-playlist",
                 "-f",
                 "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
@@ -600,6 +615,7 @@ async def _download_youtube(
                     _yt_dlp_bin(),
                     *_yt_dlp_common_args(include_cookies=False),
                     "--force-overwrites", "--no-mtime",
+                    *YOUTUBE_FINISHED_VIDEO_ARGS,
                     "--no-playlist",
                     "-f",
                     (
