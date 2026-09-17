@@ -147,3 +147,9 @@ def test_composer_stops_before_collage_generation_for_unplaceable_clip(tmp_path,
         asyncio.run(composer.compose_video(str(script), "unused.wav", str(tmp_path),
                                            tts_model="test", collage_broll_enabled=True))
     collage.assert_not_awaited()
+
+
+def test_replacement_id_preserves_retired_normalized_and_source_artifacts(tmp_path):
+    (tmp_path / 'clip-01-render.mp4').write_bytes(b'rejected render')
+    (tmp_path / 'source-clip-02.webm').write_bytes(b'rejected source')
+    assert footage._next_clip_id(tmp_path, [{'id': 'clip-03'}]) == 'clip-04'

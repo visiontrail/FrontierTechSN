@@ -966,7 +966,13 @@ def _next_clip_id(footage_dir: Path, clips: list[dict]) -> str:
         for clip in clips
         if isinstance(clip, dict) and clip.get("id")
     }
-    used.update(path.stem for path in footage_dir.glob("clip-*.*") if path.is_file())
+    # A retired Commons clip may only have source-clip-NN.webm and
+    # clip-NN-render.mp4 left. Reserve its base ID too, or normalization of a
+    # replacement would overwrite the rejected artifact's audit evidence.
+    for path in footage_dir.iterdir():
+        match = re.match(r"^(?:source-)?(clip-\d+)(?:-|$)", path.stem)
+        if path.is_file() and match:
+            used.add(match.group(1))
     index = 1
     while f"clip-{index:02d}" in used:
         index += 1
