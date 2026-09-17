@@ -554,17 +554,8 @@ def _footage_body(plan: dict) -> str:
     return " · ".join(sides)
 
 
-def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, task_dir: Path) -> int:
-    """Promote scenes to full-bleed footage plates where a clip actually fits.
-
-    Clips are matched to the scene whose keywords best overlap the query that
-    found them, so a sunflower plate lands on the sunflower paragraph instead of
-    wherever it happened to download.
-    """
-    clips = (manifest or {}).get("clips") or []
-    if not clips:
-        return 0
-
+def match_footage_scene(clip: dict, storyboard: dict, *, eligible_ids: set[str] | None = None) -> dict | None:
+    """Apply the same narration grounding before download, reuse, and placement."""
     scenes_by_id = {scene["id"]: scene for scene in storyboard.get("scenes", [])}
     scene_terms = {
         scene_id: _terms(
@@ -580,6 +571,112 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
     common_terms = {
         term for term, frequency in document_frequency.items() if frequency >= common_threshold
     }
+    plans = [{"id": scene_id} for scene_id in scenes_by_id
+             if eligible_ids is None or scene_id in eligible_ids]
+    analysis = clip.get("analysis") or {}
+    confidence = float(analysis.get("confidence") or 1.0)
+    # The deterministic-safe-offset analyzer is used only after search and
+    # download have already selected a result for an exact script excerpt.
+    # Its 0.25 score means "trim not visually reviewed", not "unrelated
+    # footage". Treat the excerpt match as the minimum admissible grounding
+    # confidence while retaining the manifest's raw analyzer confidence.
+    fallback_excerpt = (
+        str(analysis.get("status") or "").lower() == "fallback"
+        and bool(str(clip.get("script_excerpt") or "").strip())
+    )
+    if fallback_excerpt:
+        confidence = max(confidence, 0.65)
+    if analysis and confidence < 0.65:
+        return None
+    if _NEGATIVE_ANALYSIS.search(str(analysis.get("reason") or "")):
+        return None
+
+    weighted_terms: dict[str, int] = {}
+    for value, weight in (
+        # The excerpt is the narration for which the clip/interval was
+        # actually selected. It is a stronger constraint than the broad
+        # discovery query: without it, a "fiat money" search result chosen
+        # for a history paragraph can be reassigned to an unrelated central
+        # bank paragraph that happens to share two query words.
+        (clip.get("script_excerpt", ""), 5),
+        (clip.get("query", ""), 3),
+        (clip.get("purpose", ""), 2),
+        (clip.get("title", ""), 1),
+    ):
+        for term in _terms(value):
+            weighted_terms[term] = max(weighted_terms.get(term, 0), weight)
+    distinctive = set(weighted_terms) - common_terms
+    excerpt_terms = _terms(clip.get("script_excerpt", "")) - common_terms
+    candidate_metadata_terms = _terms(
+        f"{clip.get('title', '')} {clip.get('description', '')}"
+    ) - common_terms
+    is_commons_clip = (
+        str(clip.get("provider_id") or "").casefold() == "wikimedia"
+        or str(clip.get("provider") or "").casefold()
+        == "wikimedia commons"
+    )
+    minimum_excerpt_matches = min(3, len(excerpt_terms))
+    normalized_excerpt = " ".join(str(clip.get("script_excerpt") or "").casefold().split())
+    bound_scene_ids = {
+        scene_id for scene_id, scene in scenes_by_id.items()
+        if normalized_excerpt and normalized_excerpt in " ".join(str(scene.get("text") or "").casefold().split())
+    }
+
+    best_id, best_score, best_matches, best_excerpt_matches = None, 0.0, [], []
+    for plan in plans:
+        # An exact excerpt is ownership, not a soft keyword preference.
+        # Metadata rejection in its own story must never move the clip to
+        # another story that happens to share a few generic words.
+        if bound_scene_ids and plan["id"] not in bound_scene_ids:
+            continue
+        scene = scenes_by_id.get(plan["id"])
+        if not scene:
+            continue
+        matches = sorted(distinctive & scene_terms[plan["id"]])
+        if len(matches) < 2:
+            continue
+        # A Commons discovery query and its narration ``purpose`` prove
+        # where the clip was intended to land, but not what the pixels
+        # actually depict.  Require two narration anchors in the source
+        # title/description before a public clip may replace a grounded
+        # card.  This rejects, for example, a robotic arm for a robot-duck
+        # story and a branded NeuroMat lecture for an IEEE-HKN event.
+        candidate_matches = sorted(
+            candidate_metadata_terms & scene_terms[plan["id"]]
+        )
+        if is_commons_clip and len(candidate_matches) < 2:
+            continue
+        excerpt_matches = sorted(excerpt_terms & scene_terms[plan["id"]])
+        if excerpt_terms and len(excerpt_matches) < minimum_excerpt_matches:
+            continue
+        score = sum(weighted_terms[term] for term in matches)
+        if score > best_score:
+            best_id = plan["id"]
+            best_score = score
+            best_matches = matches
+            best_excerpt_matches = excerpt_matches
+    if best_id is None or best_score <= 0:
+        return None
+
+    return {
+        "id": best_id, "score": best_score, "matches": best_matches,
+        "excerpt_matches": best_excerpt_matches if excerpt_terms else None,
+        "candidate_matches": sorted(candidate_metadata_terms & scene_terms[best_id]),
+        "confidence": confidence, "fallback_excerpt": fallback_excerpt,
+    }
+
+
+def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, task_dir: Path) -> int:
+    """Promote scenes to full-bleed footage plates where a clip actually fits.
+
+    Clips are matched to the scene whose keywords best overlap the query that
+    found them, so a sunflower plate lands on the sunflower paragraph instead of
+    wherever it happened to download.
+    """
+    clips = (manifest or {}).get("clips") or []
+    if not clips:
+        return 0
+
     used: set[str] = set()
     allow_sequences = str((manifest or {}).get("selection_mode") or "") == "ai"
     attached = 0
@@ -608,93 +705,13 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
         except ValueError:
             continue
 
-        analysis = clip.get("analysis") or {}
-        confidence = float(analysis.get("confidence") or 1.0)
-        # The deterministic-safe-offset analyzer is used only after search and
-        # download have already selected a result for an exact script excerpt.
-        # Its 0.25 score means "trim not visually reviewed", not "unrelated
-        # footage". Treat the excerpt match as the minimum admissible grounding
-        # confidence while retaining the manifest's raw analyzer confidence.
-        fallback_excerpt = (
-            str(analysis.get("status") or "").lower() == "fallback"
-            and bool(str(clip.get("script_excerpt") or "").strip())
+        match = match_footage_scene(
+            clip, storyboard,
+            eligible_ids={p["id"] for p in plans if allow_sequences or p["id"] not in used},
         )
-        if fallback_excerpt:
-            confidence = max(confidence, 0.65)
-        if analysis and confidence < 0.65:
+        if match is None:
             continue
-        if _NEGATIVE_ANALYSIS.search(str(analysis.get("reason") or "")):
-            continue
-
-        weighted_terms: dict[str, int] = {}
-        for value, weight in (
-            # The excerpt is the narration for which the clip/interval was
-            # actually selected. It is a stronger constraint than the broad
-            # discovery query: without it, a "fiat money" search result chosen
-            # for a history paragraph can be reassigned to an unrelated central
-            # bank paragraph that happens to share two query words.
-            (clip.get("script_excerpt", ""), 5),
-            (clip.get("query", ""), 3),
-            (clip.get("purpose", ""), 2),
-            (clip.get("title", ""), 1),
-        ):
-            for term in _terms(value):
-                weighted_terms[term] = max(weighted_terms.get(term, 0), weight)
-        distinctive = set(weighted_terms) - common_terms
-        excerpt_terms = _terms(clip.get("script_excerpt", "")) - common_terms
-        candidate_metadata_terms = _terms(
-            f"{clip.get('title', '')} {clip.get('description', '')}"
-        ) - common_terms
-        is_commons_clip = (
-            str(clip.get("provider_id") or "").casefold() == "wikimedia"
-            or str(clip.get("provider") or "").casefold()
-            == "wikimedia commons"
-        )
-        minimum_excerpt_matches = min(3, len(excerpt_terms))
-        normalized_excerpt = " ".join(str(clip.get("script_excerpt") or "").casefold().split())
-        bound_scene_ids = {
-            scene_id for scene_id, scene in scenes_by_id.items()
-            if normalized_excerpt and normalized_excerpt in " ".join(str(scene.get("text") or "").casefold().split())
-        }
-
-        best_id, best_score, best_matches, best_excerpt_matches = None, 0.0, [], []
-        for plan in plans:
-            # An exact excerpt is ownership, not a soft keyword preference.
-            # Metadata rejection in its own story must never move the clip to
-            # another story that happens to share a few generic words.
-            if bound_scene_ids and plan["id"] not in bound_scene_ids:
-                continue
-            if plan["id"] in used and not allow_sequences:
-                continue
-            scene = scenes_by_id.get(plan["id"])
-            if not scene:
-                continue
-            matches = sorted(distinctive & scene_terms[plan["id"]])
-            if len(matches) < 2:
-                continue
-            # A Commons discovery query and its narration ``purpose`` prove
-            # where the clip was intended to land, but not what the pixels
-            # actually depict.  Require two narration anchors in the source
-            # title/description before a public clip may replace a grounded
-            # card.  This rejects, for example, a robotic arm for a robot-duck
-            # story and a branded NeuroMat lecture for an IEEE-HKN event.
-            candidate_matches = sorted(
-                candidate_metadata_terms & scene_terms[plan["id"]]
-            )
-            if is_commons_clip and len(candidate_matches) < 2:
-                continue
-            excerpt_matches = sorted(excerpt_terms & scene_terms[plan["id"]])
-            if excerpt_terms and len(excerpt_matches) < minimum_excerpt_matches:
-                continue
-            score = sum(weighted_terms[term] for term in matches)
-            if score > best_score:
-                best_id = plan["id"]
-                best_score = score
-                best_matches = matches
-                best_excerpt_matches = excerpt_matches
-        if best_id is None or best_score <= 0:
-            continue
-
+        best_id = match["id"]
         plan = next(p for p in plans if p["id"] == best_id)
         clip_duration = max(0.0, float(clip.get("duration_seconds") or 0))
         sequence = list(plan.get("footage_sequence") or [])
@@ -716,23 +733,19 @@ def attach_footage(plans: list[dict], storyboard: dict, manifest: dict | None, t
         plan["footage_sequence"] = sequence
         plan["footage_playback_policy"] = "play_each_once_then_hyperframe"
         plan["footage_query"] = str(clip.get("query") or "")[:160]
-        plan["footage_match_terms"] = best_matches
-        plan["footage_candidate_match_terms"] = sorted(
-            candidate_metadata_terms & scene_terms[best_id]
-        )
+        plan["footage_match_terms"] = match["matches"]
+        plan["footage_candidate_match_terms"] = match["candidate_matches"]
         # Commons clips selected from a user query carry a narration-grounded
         # ``purpose`` but no web-scout ``script_excerpt``.  Preserve ``None``
         # for that case: an empty list incorrectly means that an excerpt was
         # present and matched zero words, causing the final quality gate to
         # reject otherwise strongly grounded footage.
-        plan["footage_script_match_terms"] = (
-            best_excerpt_matches if excerpt_terms else None
-        )
-        plan["footage_match_score"] = best_score
-        plan["footage_confidence"] = round(confidence, 3)
-        if fallback_excerpt:
+        plan["footage_script_match_terms"] = match["excerpt_matches"]
+        plan["footage_match_score"] = match["score"]
+        plan["footage_confidence"] = round(match["confidence"], 3)
+        if match["fallback_excerpt"]:
             plan["footage_analysis_confidence"] = round(
-                float(analysis.get("confidence") or 0), 3
+                float((clip.get("analysis") or {}).get("confidence") or 0), 3
             )
             plan["footage_analysis_status"] = "fallback"
         used.add(best_id)

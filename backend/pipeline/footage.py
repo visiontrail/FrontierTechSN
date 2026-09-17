@@ -899,6 +899,27 @@ def read_manifest(task_dir: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _commons_narration_rejection(clip: dict, script: str) -> str:
+    """Commons discovery metadata must pass the composer's grounding policy."""
+    if not (
+        str(clip.get("provider_id") or "").casefold() == "wikimedia"
+        or str(clip.get("provider") or "").casefold() == "wikimedia commons"
+    ):
+        return ""
+    from backend.pipeline.visual_plan import match_footage_scene
+
+    # Physical narration paragraphs exist before audio timing. In paced daily
+    # programs these become the editorial scenes, including the bookends.
+    board = {"scenes": [
+        {"id": str(index), "text": text}
+        for index, line in enumerate(script.splitlines())
+        if (text := re.sub(r"^Speaker\s+\d+\s*:\s*", "", line.strip(), flags=re.I))
+    ]}
+    if match_footage_scene(clip, board) is None:
+        return "Commons source metadata failed exact-narration grounding; requires two distinctive narration anchors"
+    return ""
+
+
 def acquisition_is_complete(task_dir: Path, manifest: dict | None, script: str) -> bool:
     """An absent ledger is not an AI decision to request zero clips."""
     if not isinstance(manifest, dict):
@@ -922,6 +943,8 @@ def acquisition_is_complete(task_dir: Path, manifest: dict | None, script: str) 
         if not path.is_relative_to(root) or not path.is_file():
             return False
         if _file_sha256(path) != clip["sha256"]:
+            return False
+        if _commons_narration_rejection(clip, script):
             return False
     return True
 
@@ -1009,6 +1032,8 @@ def _reusable_manifest_clips(
                 # can fill this slot with a script-grounded result.
                 continue
             clip["purpose"] = grounded_purpose
+        if _commons_narration_rejection({**clip, "provider_id": "wikimedia"}, script):
+            continue
         scene_purpose = _closest_storyboard_purpose(
             str(clip.get("purpose") or ""), scenes
         ) or str(clip.get("purpose") or "")
@@ -1157,11 +1182,24 @@ async def acquire_public_footage(
                 _emit(log, f"Public footage search failed for '{query}': {exc}")
                 continue
 
-            available = [
-                item for item in candidates
-                if item["source_page_url"] not in used_sources
-                and _candidate_query_is_specific(item, query)
-            ]
+            available = []
+            for item in candidates:
+                if item["source_page_url"] in used_sources or not _candidate_query_is_specific(item, query):
+                    continue
+                reason = _commons_narration_rejection({
+                    **item, "provider_id": "wikimedia", "query": query,
+                    "purpose": shot.get("purpose") or "",
+                    "script_excerpt": shot.get("script_excerpt") or "",
+                }, script)
+                if reason:
+                    manifest["errors"].append({
+                        "query": query, "script_excerpt": shot.get("script_excerpt") or "",
+                        "stage": "narration-grounding", "source_page_url": item["source_page_url"],
+                        "message": reason,
+                    })
+                    _emit(log, f"Public footage rejected {item.get('title')}: {reason}")
+                    continue
+                available.append(item)
             if not available:
                 manifest["errors"].append(
                     {
@@ -1348,6 +1386,8 @@ def _resume_web_manifest(
                 reason = "Missing explicit preview review evidence"
         elif not _is_open_license(str(clip.get("license") or "")):
             reason = "Missing open-license evidence"
+        if not reason:
+            reason = _commons_narration_rejection(clip, script)
         if reason:
             invalidated.append({**clip, "invalidation_reason": reason})
         else:

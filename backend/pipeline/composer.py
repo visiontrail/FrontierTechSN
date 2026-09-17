@@ -1335,6 +1335,46 @@ def _retain_bookend_review_feedback(staged: dict, previous: dict) -> dict:
     return staged
 
 
+def _require_public_footage_placement(plans: list[dict], manifest: dict | None, task_dir: Path) -> None:
+    """Fail before expensive downstream generation and name every missing clip."""
+    requested = int((manifest or {}).get("requested_clip_count") or 0)
+    if not requested:
+        return
+    clips = (manifest or {}).get("clips") or []
+    placements: dict[str, list[str]] = {}
+    for plan in plans:
+        if plan.get("archetype") != "footage":
+            continue
+        sequence = plan.get("footage_sequence") or (
+            [{"src": plan.get("footage_src")}] if not plan.get("collage_broll") else []
+        )
+        for item in sequence:
+            placements.setdefault(str(item.get("src") or ""), []).append(plan["id"])
+    results = []
+    for clip in clips:
+        source = Path(clip.get("local_path") or clip.get("path") or "")
+        source = source if source.is_absolute() else task_dir / source
+        try:
+            relative = source.resolve().relative_to(task_dir.resolve()).as_posix()
+        except ValueError:
+            relative = ""
+        scenes = placements.get(relative, [])
+        results.append({"id": clip.get("id"), "query": clip.get("query"),
+                        "src": relative, "scene_ids": scenes, "placed": len(scenes) == 1})
+    delivered = sum(item["placed"] for item in results)
+    report = {"requested": requested, "acquired": len(clips), "placed": delivered,
+              "passed": delivered == requested and len(clips) == requested, "clips": results}
+    (task_dir / "footage-placement.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if not report["passed"]:
+        missing = "; ".join(f"{item['id']} ({item['query']})" for item in results if not item["placed"])
+        raise RuntimeError(
+            f"Public-footage delivery blocked: {len(clips)}/{requested} clips were acquired and "
+            f"{delivered}/{requested} reached exact narration scenes. "
+            f"Unplaced or duplicated clips: {missing or 'missing acquired clips'}. "
+            "An enabled Public Footage request may not silently fall back to template visuals."
+        )
+
+
 async def compose_video(
     script_path: str,
     audio_path: str,
@@ -1559,8 +1599,7 @@ async def compose_video(
     attached = visual_plan.attach_footage(plans, board, manifest, output_dir_path)
     if attached:
         emit(f"Footage: {attached} manifest clip(s) placed as full-bleed scenes")
-    requested_footage = int((manifest or {}).get("requested_clip_count") or 0)
-    acquired_footage = len((manifest or {}).get("clips") or [])
+    _require_public_footage_placement(plans, manifest, output_dir_path)
 
     # Morning Desk has explicit spoken opening/closing scenes. Those are owned
     # by the selected system bookend preset, never by generated collage B-roll.
@@ -1597,13 +1636,7 @@ async def compose_video(
         if plan.get("archetype") == "footage"
     )
     final_collages = sum(1 for plan in plans if plan.get("collage_broll"))
-    if requested_footage and final_public_footage != requested_footage:
-        raise RuntimeError(
-            "Public-footage delivery blocked: "
-            f"{acquired_footage}/{requested_footage} clips were acquired and "
-            f"{final_public_footage}/{requested_footage} reached exact narration scenes. "
-            "An enabled Public Footage request may not silently fall back to template visuals."
-        )
+    _require_public_footage_placement(plans, manifest, output_dir_path)
     if collage_broll_enabled or force_collage_opening:
         if final_collages != planned_collages and (requested_collages is not None or force_collage_opening):
             raise RuntimeError(

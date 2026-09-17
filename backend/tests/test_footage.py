@@ -385,7 +385,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             task_dir = Path(temp_dir)
             script_path = task_dir / "script.txt"
-            script_path.write_text("A story about cycling through a changing city.")
+            script_path.write_text("City cyclists cross a changing street.")
 
             with (
                 patch.object(footage, "search_wikimedia", fake_search),
@@ -473,6 +473,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                                 "id": "clip-01",
                                 "query": "visual stories",
                                 "purpose": "Two visual stories.",
+                                "title": "Two visual stories",
                                 "license": "CC0",
                                 "source_page_url": "https://commons.wikimedia.org/wiki/File:First.webm",
                                 "local_path": "footage/clip-01.webm",
@@ -483,7 +484,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             script_path = task_dir / "script.txt"
-            script_path.write_text("Two visual stories.")
+            script_path.write_text("Two visual stories.\nSolar panels collect clean energy.")
 
             with (
                 patch.object(footage, "search_wikimedia", fake_search),
@@ -563,6 +564,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                         "id": f"clip-{index:02d}",
                         "query": query,
                         "purpose": purpose,
+                        "title": purpose,
                         "license": "CC BY 4.0",
                         "source_page_url": f"https://commons.example/{index}",
                         "local_path": f"footage/clip-{index:02d}.mp4",
