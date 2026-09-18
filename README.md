@@ -1,69 +1,91 @@
 # FrontierTechSN
 
-FrontierTechSN is a fully automated daily frontier-technology video-podcast desk. It researches a bilingual source roster, selects a balanced edition, writes and independently reviews a broadcast script, synthesizes speech, generates matching Paper-Collage B-roll and music, renders a verified video, and distributes it through the accounts signed into the local browser.
+FrontierTechSN automatically produces a daily video podcast about frontier technology. It gathers stories from sources in two languages and balances the selection for each edition. The pipeline writes a broadcast script, sends it for independent review, synthesizes narration, and generates matching Paper-Collage B-roll and music. It then renders and validates the video and, when publishing is enabled, distributes it through accounts signed into the local browser.
 
-The project is a new repository derived from the proven media pipeline in Video-Promotional. Runtime data, credentials, browser identities, generated episodes, and publication receipts are local and ignored by Git.
+The project uses a media pipeline derived from Video-Promotional. Runtime data, credentials, browser identities, generated episodes, and publication receipts stay local and are ignored by Git.
 
-## Daily edition contract
+## Daily production
 
-Every daily run is fail-closed around these checks:
+Each daily run follows these steps and stops if a required check fails:
 
 1. Fetch all enabled sources in the 23-source catalog and require at least three working sources.
 2. Deduplicate and balance six stories across source, language, and technology category.
-3. Inject an exact, date-stamped morning-news opening and an exact spoken closing.
-4. Generate the script from the evidence dossier only through yhroot AI.
-5. Submit every material claim to Gemini Web through project-local OpenCLI. Each story group gets up to two bounded Gemini attempts; a failed, late, or malformed primary review falls back to a fresh ChatGPT conversation at the configured non-Pro reasoning level. Blocking findings trigger a corrected-script review cycle.
-6. Synthesize TTS using the same engines and complete spoken-text integrity gate as Video-Promotional.
-7. Generate four Paper-Collage B-roll clips by default and hard-fail if requested and placed clip counts differ.
-8. Generate an instrumental Gemini Create Music bed (with a deterministic local musical fallback), duck it to `-25 dB` under narration, side-chain it against speech, and duration-lock the program mix.
+3. Include the required morning-news opening with the edition date and the required spoken closing, both verbatim.
+4. Use yhroot AI to generate the script from the evidence dossier alone.
+5. Submit every material claim to Gemini Web through project-local OpenCLI. Each story group gets up to two Gemini attempts. If the review fails, times out, or returns a malformed response, start a fresh ChatGPT conversation at the configured non-Pro reasoning level. Correct and re-review the script when findings block approval.
+6. Synthesize speech using the same TTS engines and full spoken-text integrity checks as Video-Promotional.
+7. Generate four Paper-Collage B-roll clips by default. Stop if the number of placed clips differs from the requested count.
+8. Generate instrumental music with Gemini Create Music, using deterministic local music as a fallback. Duck it to `-25 dB` under narration, side-chain it against speech, and match the program mix to the required duration.
 9. Render with HyperFrames and run final A/V validation.
-10. When enabled, publish with the current signed-in browser accounts. Account identities and exact URLs are discovered at run time and recorded; nothing is hard-coded.
+10. When publishing is enabled, use the accounts currently signed into the browser. Discover and record account identities and exact URLs at runtime rather than hard-coding them.
 
-All yhroot stages get ten total attempts (one initial call plus nine retries). Most browser-backed OpenCLI stages also get ten attempts. The daily-news claim audit instead makes at most two Gemini primary attempts and one ChatGPT fallback, so a slow web turn cannot consume the old ten-attempt review window. Gemini briefly uses a foreground window because its current composer requires trusted keyboard input; ChatGPT stays in a background window. Every review request carries an ownership marker, and recovery accepts only the assistant turn paired with that marker. FrontierTechSN also namespaces its persistent OpenCLI site sessions, preventing another local OpenCLI project from navigating these Gemini or ChatGPT tabs. The default provider wait is 90 seconds. Gemini and ChatGPT prompt/image submissions retain the cross-process start limiter within this checkout: adjacent generation requests begin at least ten minutes apart. Read-only recovery, conversation detail, and status checks do not consume a generation slot; ChatGPT model checks do not reserve one, but they wait until the prior generation's ten-minute quiet period has elapsed. Operators can choose 10–30 minutes under **Admin → System → Footage Sources** with `OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`; the Gemini primary model, ChatGPT fallback level, and per-provider review timeout are configured in the same panel.
+### Reviews and browser requests
 
-Each Paper-Collage clip targets the duration of its selected narration scene, capped by Gemini's configured single-generation limit (eight seconds by default). Public Footage and Paper-Collage can share the same news story; a collage never moves to a neighboring story to avoid an occupied scene. Operators can change the provider ceiling under **Admin → System → Paper-collage B-roll** with `COLLAGE_GEMINI_MAX_SECONDS`.
+All yhroot stages allow ten attempts: one initial call and nine retries. Most OpenCLI stages that use a browser have the same limit. The daily-news claim audit allows at most two Gemini attempts and one ChatGPT fallback. The default provider wait is 90 seconds.
 
-Paper-Collage browser sessions belong to each task, scene and provider. Their tabs persist only through the operation's retries; success, failure and cancellation explicitly close the owned session and verify that no tabs remain. A durable ownership journal permits cleanup after a worker restart or before cached acquisition results are reused. Other sessions and user tabs are not reclaimed. Cleanup failures remain recorded for recovery.
+Gemini briefly uses a foreground window because its composer requires trusted keyboard input. ChatGPT stays in the background. Each review request carries an ownership marker; recovery accepts only the assistant turn paired with that marker. Persistent OpenCLI site sessions use a FrontierTechSN namespace so another local OpenCLI project cannot navigate these Gemini or ChatGPT tabs.
 
-Gemini video submissions also use the shared generation limiter. A transport retry resumes the same input-bound conversation when its URL is known; an uncertain submission without a recoverable URL stops instead of sending a duplicate. Resume retains the original deadline. An unchanged generation response stops after `COLLAGE_GEMINI_STALL_TIMEOUT` (600 seconds by default, configurable in **Admin → System → Paper-collage B-roll**); spinner animation is not progress. A stalled, expired or explicitly failed generation ends that acquisition rather than starting ten fresh videos. Optional collage failures can fall back to the available media inventory; explicit required counts remain hard requirements.
+Gemini and ChatGPT prompt and image submissions share a start limiter across processes in this checkout. Consecutive generation requests must start at least ten minutes apart. Read-only recovery, conversation details, and status checks do not consume a generation slot. ChatGPT model checks do not reserve a slot either, but must wait until the previous generation's ten-minute quiet period ends.
 
-After acquisition, an AI shot editor chooses the order, duration, copy and layout of shots within each story using the actual media inventory. Collage may precede or follow footage; editorial graphics, acquired photos and article captures can appear wherever they explain the narration. There is no fixed media sequence. Video durations are measured with ffprobe, videos play only once, and any remaining narration receives a complete information layout rather than an empty gradient or a long frozen video frame. The editor gets validation feedback and one repair round for incomplete or invalid schedules. If the provider remains unavailable, an explicitly recorded recovery plan retains verified assets and fills the remainder with grounded editorial graphics. Automatic collage selection can replan after a generation failure; an explicit requested clip count remains a hard delivery requirement.
+Choose an interval from 10 to 30 minutes under **Admin → System → Footage Sources** with `OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`. The same panel configures the Gemini primary model, ChatGPT fallback level, and review timeout for each provider.
 
-`media_shots.json` records the AI rationale, exact shot intervals, source hashes, measured durations, recovery diagnostics and coverage checks. Its per-story checkpoints invalidate when that story's narration, assets or editor prompt change. The renderer verifies the emitted media elements against this schedule before capture, and `av_sync_report.json` includes `visual_coverage` alongside existing audio and semantic quality gates.
+### Paper-Collage acquisition
 
-Public-footage retries resume the saved shot plan when the script, orientation, provider and requested count still match. Hybrid and YouTube clips are reused only after checksum and narration-binding checks; changed bindings require a fresh review. Exhausted searches use rejection evidence to select new directions. When URL inspection is unavailable, up to four labelled contact sheets share one Gemini request, with a separate suitability verdict for each candidate. Missing shots still block rendering. The task's `footage/manifest.json` records missing searches, rejections and invalidated clips, and `footage/history/` retains earlier ledgers.
+Each Paper-Collage clip targets the length of its narration scene, up to Gemini's configured limit for one generation (eight seconds by default). Public Footage and Paper-Collage can share a news story. A collage stays with its assigned story even when footage already occupies the scene. Change the duration limit under **Admin → System → Paper-collage B-roll** with `COLLAGE_GEMINI_MAX_SECONDS`.
+
+Each Paper-Collage browser session belongs to a task, scene, and provider. Tabs stay open during retries. When the operation succeeds, fails, or is cancelled, it closes its session and checks that all owned tabs are gone. A persistent ownership journal supports cleanup after a worker restart or before cached acquisition results are reused. Cleanup leaves other sessions and user tabs alone and records failures for later recovery.
+
+Gemini video submissions use the shared generation limiter. After a transport failure, a retry resumes the conversation associated with the same input if its URL is known, keeping the original deadline. If submission is uncertain and the URL cannot be recovered, the operation stops to avoid a duplicate submission.
+
+A generation response that stays unchanged reaches the stall limit at `COLLAGE_GEMINI_STALL_TIMEOUT` (600 seconds by default, configurable in **Admin → System → Paper-collage B-roll**). Spinner animation does not count as progress. A stall, expired deadline, or explicit generation failure ends the acquisition without starting a fresh video. If the collage is optional, the pipeline can use available media instead. Explicit clip counts must still be met.
+
+### Shot editing and footage recovery
+
+After acquisition, an AI shot editor uses the available media to choose each story's shot order, durations, copy, and layout. There is no fixed media sequence: collage can come before or after footage, and editorial graphics, acquired photos, and article captures appear where they explain the narration.
+
+The pipeline measures video durations with ffprobe and plays each video once. Any remaining narration gets a complete information layout, avoiding empty gradients and long frozen frames. An incomplete or invalid schedule gets validation feedback and one repair attempt. If the provider remains unavailable, the pipeline records a recovery plan that keeps verified assets and fills the remaining time with editorial graphics based on the story's evidence. Automatic collage selection can replan after a generation failure; an explicitly requested clip count must still be delivered.
+
+`media_shots.json` records the AI's reasoning, exact shot intervals, source hashes, measured durations, recovery diagnostics, and coverage checks. A story's checkpoints become invalid when its narration, assets, or editor prompt changes. Before capture, the renderer checks the generated media elements against the schedule. The `av_sync_report.json` report includes `visual_coverage` along with audio and semantic quality checks.
+
+Public-footage retries resume the saved shot plan if the script, orientation, provider, and requested count still match. Hybrid and YouTube clips must pass checksum and narration-binding checks before reuse. A changed binding requires a fresh review. When a search runs out of candidates, the pipeline uses the rejection evidence to choose new search directions.
+
+If URL inspection is unavailable, one Gemini request can include up to four labelled contact sheets, with a separate suitability verdict for each candidate. Missing shots block rendering. The task's `footage/manifest.json` records missing searches, rejections, and invalidated clips; `footage/history/` keeps earlier ledgers.
 
 ## Source roster
 
 The catalog lives in [`config/news_sources.json`](config/news_sources.json). The 23-source roster combines bilingual specialist sources with Bloomberg, Financial Times, The Wall Street Journal, CNBC Technology, BBC Technology, TechCrunch, The Verge, WIRED, MIT Technology Review, Nature, a16z, and Sequoia Capital. The Signal board uses the enabled catalog count and shows reporting, aggregators, institutional viewpoints, and access notes.
 
-Institutional articles use an explicit 168-hour lookback (news retains the edition's configured window). Editions with at least three stories can include at most one institutional reading, after the news, only after its publication date and article excerpt are verified. The script uses 3–4 sentences to explain the attributed thesis and one supporting example, identifies the investor perspective and publication date, and retains supported limitations. Generation and final script checks cap each interpretation at 120 English words or 220 Chinese characters. No eligible reading means the edition uses news instead. The dossier preserves `content_kind`, `lookback_hours`, and `evidence_status`; feed summaries are never represented as complete article access.
+Institutional articles use a 168-hour lookback; news uses the edition's configured window. An edition with at least three stories can include one institutional reading at most, placed after the news. Its publication date and article excerpt must be verified first.
 
-a16z uses its current article-list HTML because its former RSS endpoint returns 404. Public media feeds do not guarantee article access: subscriptions, authorization failures, and connection failures remain explicit in the per-run fetch audit. No credentials or paywall workarounds are configured.
+The script explains the attributed thesis and one supporting example in 3 to 4 sentences. It identifies the investor perspective and publication date and keeps any limitations supported by the source. Generation and final script checks limit each interpretation to 120 English words or 220 Chinese characters. If no reading qualifies, the edition uses news instead. The dossier records `content_kind`, `lookback_hours`, and `evidence_status` so feed summaries remain distinguishable from full article access.
 
-TLDR uses its dated newsletter archive and extracts all editorial blocks rather than its first recruiting card. AIBase reads dated article records from its current Chinese daily page, excluding navigation cards. ITHome publication times come from the article's publisher timestamp; GeekPark uses its official RSS. Techmeme archive notices are discarded in favor of the actual feed summary.
+a16z uses article-list HTML because its RSS endpoint returns 404. Access to a public feed does not guarantee access to its articles. Each run's fetch audit records subscription requirements, authorization failures, and connection failures. No credentials or paywall workarounds are configured.
 
-Machine Heart uses its official article-library JSON endpoints for both discovery and article content. Its local publication timestamps are converted from Asia/Shanghai to UTC. FT uses a narrowly scoped HTTPS DNS fallback when the operating system resolver cannot connect; the original HTTP Host, TLS SNI, and certificate verification remain intact. Public addresses are resolved at runtime, cached for the DNS TTL (at most five minutes), and never pinned into configuration. This does not change system DNS.
+TLDR extracts all editorial blocks from its dated newsletter archive, skipping the first recruiting card. AIBase reads dated article records from its Chinese daily page and excludes navigation cards. ITHome publication times come from the article's publisher timestamp. GeekPark uses its official RSS, and Techmeme uses the feed summary after discarding archive notices.
+
+Machine Heart uses its official article-library JSON endpoints to discover and read articles. The adapter converts local publication timestamps from Asia/Shanghai to UTC.
+
+When the operating system resolver cannot connect to FT, the adapter uses an HTTPS DNS fallback scoped to FT. It preserves the original HTTP Host, TLS SNI, and certificate verification. Public addresses are resolved at runtime and cached for the DNS TTL, up to five minutes. They are never pinned in configuration, and system DNS stays unchanged.
 
 Reuters and VentureBeat were removed from the active catalog on 2026-09-07: Reuters' public sitemap was accessible but article requests returned 401 without usable article evidence; VentureBeat's RSS and pages returned a Vercel Security Checkpoint (429), requiring a browser verification challenge. Neither is counted as monitored coverage. They can be reconsidered when an authorized, unattended access route is available.
 
 Run `curl -X POST http://localhost:8101/api/daily-news/sources/check` to verify the deployed service's own production adapters. The check fetches every enabled source, reads up to three articles per source, requires at least one dated article excerpt or feed summary per source, and saves the exact evidence in `outputs/source-checks/`. `fresh_sample_count` is separate: a working periodic source need not have published within today's news window. HTTP success or navigation-only pages do not pass the check.
 
-One blocked or changed website cannot abort an edition. Its failure is preserved in `research/dossier.json`; the source quorum and selected-story gates decide whether the edition may continue.
+A blocked or changed website is recorded in `research/dossier.json`. That failure alone does not stop an edition: the source quorum and selected-story checks determine whether it can continue.
 
 ## Setup and start
 
 Requirements: macOS, Python 3.11, Node.js/npm, Chrome with the OpenCLI Browser Bridge, FFmpeg/FFprobe, and the original local TTS model paths configured in `.env`.
 
-TTS integrity uses the pinned `cmudict` package from `requirements.txt` as offline
-evidence for exact English homophones. Only words with a single identical
-pronunciation qualify, and the same waveform must corroborate the substitution
-in a second ASR decode. Existing brand-specific rules take precedence. Rejected
-Pocket paragraphs retry at complete sentence boundaries while retaining verified
-parts; failed WAVs and token differences remain in the task's audio verification
-directory for diagnosis.
+TTS integrity checks use the pinned `cmudict` package from `requirements.txt`
+to verify exact English homophones offline. Both words must have a single,
+identical pronunciation, and a second ASR decode of the same waveform must
+confirm the substitution. Brand-specific rules take precedence. When a Pocket
+paragraph fails verification, retries use complete sentence boundaries and keep
+the parts that passed. Failed WAVs and token differences stay in the task's
+audio verification directory for diagnosis.
 
-For YouTube/X media upload, open `chrome://extensions`, select **Details** for the ChatGPT browser extension, and enable **Allow access to file URLs**. The publication adapter detects this missing permission before it can create a remote post and returns an actionable error instead of silently waiting through retry delays.
+For YouTube/X media upload, open `chrome://extensions`, select **Details** for the ChatGPT browser extension, and enable **Allow access to file URLs**. Before creating a remote post, the publication adapter checks this permission and reports how to fix it if it is missing.
 
 ```bash
 cp .env.example .env
@@ -74,14 +96,14 @@ cp .env.example .env
 
 ### Isolated headless OpenCLI browser
 
-The existing signed-in Chrome Browser Bridge remains the default. To run web
+The signed-in Chrome Browser Bridge is the default. To run web
 automation without creating or focusing any window in the operator's Chrome,
 configure the opt-in `isolated-headless` runtime under **Admin → System →
 Footage Sources**. It starts a separate Chrome for Testing/Chromium process,
 uses an ignored project-local user-data directory, loads a separate OpenCLI
 extension instance, and pins every command to its exact Browser Bridge profile.
-It fails closed when any isolation boundary is unavailable and never falls back
-to the human profile.
+If any isolation boundary is unavailable, automation stops without falling back
+to the operator's profile.
 
 One visible bootstrap is required to discover the dedicated profile and sign in:
 
@@ -101,7 +123,7 @@ One visible bootstrap is required to discover the dedicated profile and sign in:
 After saving `OPENCLI_BROWSER_RUNTIME=isolated-headless` and restarting the app,
 the first OpenCLI command starts the same dedicated profile in headless mode.
 Use `./scripts/opencli-browser-runtime.sh status` to inspect it and `stop` for a
-controlled shutdown. The profile directory is retained across restarts; the
+controlled shutdown. The profile directory survives restarts; the
 manager never deletes it. Keep `bridge` selected until a complete production
 run, including uploads and publishing, passes against the isolated accounts.
 
@@ -110,20 +132,21 @@ Open [http://localhost:8101](http://localhost:8101). The production launcher bui
 ### Model routing
 
 Configure model endpoints and credentials under **Admin → Models**. Routing
-roles are persisted in the application database; `.env` does not select the
+roles are saved in the application database; `.env` does not select the
 primary or backup provider.
 
-- **Primary** carries normal task traffic and accepts up to 64 API keys, one
+- Primary handles normal task traffic and accepts up to 64 API keys, one
   per line. Calls reserve keys through a persisted round-robin cursor, and an
   HTTP 429 before any model output rotates to an untried primary key first.
-- **Backup** accepts one API key and activates only after the primary route's
-  bounded attempts are exhausted.
-- **Standalone** providers are used only when a task explicitly selects them.
+- Backup accepts one API key and activates only after the primary route
+  exhausts its allowed attempts.
+- Standalone providers are used only when a task explicitly selects them.
 
-The route test in the same panel exercises the real task dispatcher and reports
-the provider role and non-reversible key ID actually used. Once model or tool
-output has begun, the dispatcher refuses to replay that turn through another
-key or provider.
+The route test in the same panel calls the task dispatcher and reports the
+provider role and non-reversible key ID used. Once model or tool output begins,
+the dispatcher will not replay that turn through another key or provider.
+
+### Scheduling and manual runs
 
 With no saved desk configuration, the next edition runs automatically at 05:30 Asia/Singapore, publishes to YouTube and X through the accounts signed into Chrome, and updates the Apple Podcasts RSS feed. YouTube production visibility defaults to `public`. A first launch later than the two-hour morning window waits for the next scheduled edition instead of publishing stale news.
 
@@ -131,16 +154,16 @@ The **Morning Desk** page configures:
 
 - daily execution time and IANA timezone;
 - language, story count, and research window;
-- automatic report length based on each story’s evidence and complexity, with no fixed minute or word quota (including test runs); saved legacy duration settings are retired automatically;
+- automatic report length based on each story's evidence and complexity, with no fixed minute or word quota (including test runs); saved legacy duration settings are retired automatically;
 - TTS voice/model, Paper-Collage clip count, and the separate public-footage clip budget;
 - Gemini or deterministic local music;
 - automatic distribution targets and YouTube visibility.
 
-Use **Save & run test** for an end-to-end test edition. The current desk recipe is saved before the task is queued, the test never auto-publishes, and it does not consume that day's scheduled edition. External test publishing is a separate explicit action on the completed task.
+Use **Save & run test** for an end-to-end test edition. This saves the current desk recipe before queuing the task. A test never publishes automatically or consumes that day's scheduled edition. To publish a test, use the separate publishing action on the completed task.
 
-Use **Start full run now** to save the current recipe and immediately queue a full-length edition without waiting for the schedule. It follows the same video-generation and configured automatic-distribution path as a scheduled edition, and counts as that day's production run.
+Use **Start full run now** to save the current recipe and queue a full-length edition immediately. It generates video and uses the configured automatic distribution settings just like a scheduled edition, and counts as that day's production run.
 
-The operator UI is deliberately limited to **Morning Desk**, **Tasks**, and **Admin**. The manual **New Task** workbench and **Content Plan** calendar inherited from Video-Promotional are not part of this autonomous-desk product; old browser bookmarks redirect to Morning Desk. Manual task creation and content-planning APIs are not exposed. The database keeps non-destructive compatibility with historical planned tasks so their output remains readable and removable from Tasks.
+The operator UI has three pages: **Morning Desk**, **Tasks**, and **Admin**. Bookmarks for the unavailable **New Task** workbench and **Content Plan** calendar redirect to Morning Desk. Manual task creation and content-planning APIs are not exposed. The database preserves historical planned tasks, whose output can still be read and removed from Tasks.
 
 ## Distribution
 
@@ -154,9 +177,9 @@ The adapter asks OpenCLI for the current handle and compares it with the expecte
 
 ### Apple Podcasts
 
-The pipeline prepares RSS 2.0 at `/outputs/podcast/feed.xml` and adds the finished narration as an episode. External Podcasts Connect submission is deliberately deferred until an Apple account and a stable public HTTPS feed URL are available.
+The pipeline prepares RSS 2.0 at `/outputs/podcast/feed.xml` and adds the finished narration as an episode. Submission to Podcasts Connect is deferred until an Apple account and a stable public HTTPS feed URL are available.
 
-Unattended publishing is fail-closed: the global kill switch, target-platform switch, task-level opt-in, and exact configured account identity must all agree. Missing or mismatched identities leave the completed task awaiting review and perform no social write.
+Unattended publishing requires the global kill switch and target-platform switch to permit it, the task to opt in, and the active account identity to match the configuration exactly. If an identity is missing or mismatched, the completed task waits for review without posting.
 
 ### Test cleanup
 
@@ -176,17 +199,17 @@ opening an older completed task generates its missing copy once. Each field can
 be copied separately, and **重新生成** requests a fresh draft. Pipeline Logs are
 available under the collapsed Execution flow details.
 
-Copy uses the saved narration and selected source references. Every generation
-and repair request embeds the full pinned [blader/humanizer](https://github.com/blader/humanizer)
+The copy is based on the saved narration and selected source references.
+Every generation and repair request embeds the full pinned [blader/humanizer](https://github.com/blader/humanizer)
 skill; its MIT license and upstream revision are retained in
 `backend/prompts/vendor/humanizer/`. The writing prompt is editable in Admin.
-Results and skill/source fingerprints are saved in each task's `social_copy.json`.
-Script changes mark old copy stale; interrupted or failed generations can be
-retried while the previous good copy remains saved. This feature drafts text
-for manual upload and does not submit posts or change publication receipts.
+Each task's `social_copy.json` stores the results and skill/source fingerprints.
+Changing the script marks existing copy as stale. Interrupted or failed
+generations can be retried without losing the previous good copy. This feature
+drafts text for manual upload and does not submit posts or change publication receipts.
 
 YouTube titles are limited to 100 characters and descriptions to 5,000. X copy
-has 2–4 short sentences, a blank line after every two, at most two hashtags, and
+has 2 to 4 short sentences, a blank line after every two, at most two hashtags, and
 at most 280 weighted characters including whitespace. The `twitter-text-parser`
 dependency handles CJK, emoji, NFC normalization and URL weights. Its bundled
 emoji data loader requires the `setuptools<81` compatibility bound in
@@ -224,4 +247,4 @@ npx eslint src/components/MorningDesk.tsx src/components/PublicationPanel.tsx sr
 npm run build
 ```
 
-Runtime outputs are ignored. Every implementation change is committed on local `main`; no remote is configured or pushed by setup.
+Git ignores runtime outputs. Commit each implementation change on local `main`. Setup does not configure a remote or push commits.
