@@ -19,7 +19,7 @@ def draft(**changes):
     return json.dumps({
         "youtube_title": "Huawei outlines its next AI chips",
         "youtube_show_notes": "Huawei outlined its chip plans. The schedule remains a company target.",
-        "x_sentences": ["Huawei outlined its next AI chips.", "The schedule is a company target.", "Can it deliver?"],
+        "x_paragraphs": ["Huawei outlined its next AI chips.", "The schedule is a company target.", "Can it deliver?"],
         **changes,
     }, ensure_ascii=False)
 
@@ -28,13 +28,36 @@ class CopyValidationTests(unittest.TestCase):
     def setUp(self):
         self.inputs = {"final_narration": "Huawei outlined its next AI chips.", "source_references": []}
 
-    def test_formats_one_post_with_two_sentences_per_paragraph(self):
+    def test_preserves_three_semantic_paragraphs(self):
         value = sc._validate(draft(), self.inputs)
-        self.assertEqual(value["x_post"], "Huawei outlined its next AI chips. The schedule is a company target.\n\nCan it deliver?")
+        self.assertEqual(value["x_post"], "Huawei outlined its next AI chips.\n\nThe schedule is a company target.\n\nCan it deliver?")
         self.assertEqual(value["x_weighted_length"], parse_tweet(value["x_post"]).weightedLength)
 
+    def test_two_sentence_post_stays_in_one_paragraph(self):
+        for paragraph in [
+            "Huawei outlined its next AI chips. What would the schedule mean for developers?",
+            "华为公布下一代 AI 芯片计划。这一时间表对开发者意味着什么？",
+        ]:
+            with self.subTest(paragraph=paragraph):
+                value = sc._validate(draft(x_paragraphs=[paragraph]), self.inputs)
+                self.assertEqual(value["x_post"], paragraph)
+
+    def test_breaks_follow_meaning_instead_of_sentence_pairs(self):
+        paragraphs = [
+            "  Huawei outlined its next AI chips.  ",
+            "The schedule is a company target. What would it mean for developers?",
+        ]
+        value = sc._validate(draft(x_paragraphs=paragraphs), self.inputs)
+        self.assertEqual(value["x_post"], "\n\n".join(p.strip() for p in paragraphs))
+
+    def test_paragraph_breaks_count_toward_platform_limit(self):
+        value = sc._validate(draft(x_paragraphs=["a" * 138, "b" * 140]), self.inputs)
+        self.assertEqual(value["x_weighted_length"], 280)
+        with self.assertRaisesRegex(ValueError, "280"):
+            sc._validate(draft(x_paragraphs=["a" * 139, "b" * 140]), self.inputs)
+
     def test_preserves_numbers_initials_and_chinese_sentences(self):
-        value = sc._validate(draft(x_sentences=["Dr. Li discussed U.S. investment of $23.5 billion.", "这仍是计划。", "何时落地？"]), self.inputs)
+        value = sc._validate(draft(x_paragraphs=["Dr. Li discussed U.S. investment of $23.5 billion.", "这仍是计划。", "何时落地？"]), self.inputs)
         self.assertIn("$23.5 billion.", value["x_post"])
         self.assertIn("\n\n何时落地？", value["x_post"])
 
@@ -43,18 +66,20 @@ class CopyValidationTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(parse_tweet(text).weightedLength, expected)
         with self.assertRaisesRegex(ValueError, "280"):
-            sc._validate(draft(x_sentences=["中" * 139 + "。", "继续。"]), self.inputs)
+            sc._validate(draft(x_paragraphs=["中" * 139 + "。", "继续。"]), self.inputs)
 
     def test_rejects_invalid_platform_content(self):
         invalid = [
             {"youtube_title": "x" * 101}, {"youtube_show_notes": "x" * 5001},
             {"youtube_title": " "}, {"youtube_show_notes": " "},
             {"youtube_title": "A\nB"}, {"youtube_title": "<Title>"},
-            {"x_sentences": [" ", "A fact."]},
-            {"x_sentences": ["First. Second. Third.", "Fourth."]},
-            {"x_sentences": ["第一句。第二句。", "第三句。"]},
-            {"x_sentences": ["Hello\nworld.", "Next."]},
-            {"x_sentences": ["#AI #tech #news", "Facts."]},
+            {"x_paragraphs": [" ", "A fact."]},
+            {"x_paragraphs": []},
+            {"x_paragraphs": ["One.", "Two.", "Three.", "Four."]},
+            {"x_paragraphs": ["Hello\nworld.", "Next."]},
+            {"x_paragraphs": ["Hello\rworld."]},
+            {"x_paragraphs": ["#AI #tech #news", "Facts."]},
+            {"x_paragraphs": ["Read https://invented.example.com/video"]},
             {"youtube_show_notes": "https://invented.example.com/video"},
             {"youtube_show_notes": "Intro\n00:30 Chips"},
         ]
@@ -131,7 +156,7 @@ class CopyGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chat.await_count, 1)
 
     async def test_validation_repair_also_loads_humanizer(self):
-        self.chat.side_effect = [draft(x_sentences=["x" * 280, "More."]), draft()]
+        self.chat.side_effect = [draft(x_paragraphs=["x" * 280, "More."]), draft()]
         result, _ = await self.generate()
         self.assertEqual(result["status"], "ready")
         self.assertEqual(self.chat.await_count, 2)

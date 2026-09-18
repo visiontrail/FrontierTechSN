@@ -10,7 +10,7 @@ The supplied source URLs are only references for stories actually in the
 narration. Do not imply direct access when the narration attributes a relay.
 
 Return exactly this JSON shape, with no Markdown fences or commentary:
-{"youtube_title":"...","youtube_show_notes":"...","x_sentences":["...","..."]}
+{"youtube_title":"...","youtube_show_notes":"...","x_paragraphs":["...","...","..."]}
 
 YouTube title: one specific, readable line. Aim for 45–75 characters, hard
 maximum 100 characters. Accurately express the main story or viewer benefit;
@@ -24,13 +24,36 @@ attribution. End with relevant supplied source links when available. Aim for
 YouTube description field. Blank lines between sections. Do not invent chapters
 or timestamps. Do not include editing notes, placeholders or a duplicate title.
 
-X: one standard post promoting the attached video, not a thread. Focus on one
-concrete takeaway or question that the narration supports. Use 2–4 short,
-conversational sentences, exactly one sentence per x_sentences item. We insert
-a blank line after every two sentences. Aim for 180–250 weighted characters
-TOTAL including spaces and paragraph breaks; never exceed 280. Chinese/Japanese/
-Korean characters and emoji count as 2, most Latin characters as 1, URLs as 23.
-Keep the copy concise rather than filling the limit. Use zero hashtags by
-default, at most two when clearly useful. Avoid emoji decoration, engagement
-bait, ALL CAPS, stock hooks and multiple calls to action. No fabricated video
-URL or 'link in bio'. A useful post can stand alone without a call to action.
+X: one standard post introducing the attached frontier-tech news video, not a
+thread or a narration transcript. Use this three-part editorial structure:
+1. Open immediately with the most newsworthy fact: who did what and the key
+   change. Keep necessary attribution such as "the company says" or "reportedly"
+   beside the claim. No "Today's tech news is here", exaggerated significance,
+   "shocking", "changes everything", or suspense that withholds the actual news.
+2. Give concrete viewing highlights: what the video explains and why it matters,
+   strictly supported by the narration. Focus on one main story; optionally add
+   no more than two or three secondary highlights if space permits. Do not list
+   every story or copy the spoken script.
+3. Close with one clear direction: a specific reason to watch OR one specific
+   question grounded in the story. Do not stack requests to like, repost, follow
+   and watch. Do not promise explanations absent from the narration.
+
+Prefer three short paragraphs matching these parts, but group by meaning, not
+sentence count. Return 1–3 x_paragraphs items, each containing a complete paragraph
+without embedded line breaks. Aim for 1–2 short, natural, conversational sentences
+per paragraph. If the whole post is only two sentences, keep them together when
+they form one thought; do not force three paragraphs or filler. Related parts can
+share a paragraph. We preserve your paragraph choices with one blank line between
+items. Blank lines help scanning; never describe them as an algorithm or ranking
+trick.
+
+Never exceed 280 weighted characters TOTAL, including spaces and paragraph
+breaks. Chinese/Japanese/Korean characters and emoji count as 2, most Latin
+characters as 1, URLs as 23. Keep the copy concise rather than filling the limit.
+Use zero hashtags by default, at most 1–2 highly relevant hashtags when useful.
+Avoid emoji decoration, engagement bait, full sentences in ALL CAPS and stock
+hooks. Write to accompany a directly uploaded video, not an external-link-only
+post; no fabricated video URL or 'link in bio'. Do not claim the video is already
+uploaded, autoplay is guaranteed, or captions are present. Uploading video and
+providing captions for muted viewing are publishing steps, not claims to put in
+the post.

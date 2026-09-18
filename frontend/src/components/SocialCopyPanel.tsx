@@ -75,7 +75,7 @@ export default function SocialCopyPanel({ task, scriptDirty }: { task: Task, scr
         {[
           { key: 'title', label: 'YouTube 标题', hint: '用于视频上传标题', value: copy?.youtube_title || '', count: copy ? `${Array.from(copy.youtube_title).length} / 100` : '最多 100 字符', rows: 3 },
           { key: 'notes', label: 'YouTube Show Notes', hint: '粘贴到视频下方的说明栏', value: copy?.youtube_show_notes || '', count: copy ? `${Array.from(copy.youtube_show_notes).length.toLocaleString()} / 5,000` : '最多 5,000 字符', rows: 13 },
-          { key: 'x', label: 'X 推文', hint: '每两句空一行 · 最多 280 加权字符', value: copy?.x_post || '', count: copy ? `${copy.x_weighted_length} / 280` : '标准单条推文', rows: 6 },
+          { key: 'x', label: 'X 推文', hint: '首句新闻事实 · 按意思分段 · 最多 280 加权字符', value: copy?.x_post || '', count: copy ? `${copy.x_weighted_length} / 280` : '标准单条推文', rows: 6 },
         ].map((field, index) => (
           <div className={`social-copy-field social-copy-${field.key}`} key={field.key}>
             <div className="social-copy-field-heading">

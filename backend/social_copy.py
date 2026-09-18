@@ -28,7 +28,7 @@ class CopyDraft(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     youtube_title: str = Field(min_length=1, max_length=100)
     youtube_show_notes: str = Field(min_length=1, max_length=5000)
-    x_sentences: list[str] = Field(min_length=2, max_length=4)
+    x_paragraphs: list[str] = Field(min_length=1, max_length=3)
 
 
 def _path(task: TaskResponse) -> Path:
@@ -93,19 +93,11 @@ def _validate(raw: str, inputs: dict) -> dict:
         raise ValueError("Title must be one nonempty line and Show Notes must not be blank")
     if any(char in title + notes for char in "<>"):
         raise ValueError("YouTube fields cannot contain angle brackets")
-    sentences = [sentence.strip() for sentence in draft.x_sentences]
-    if any(not sentence or "\n" in sentence or "\r" in sentence for sentence in sentences):
-        raise ValueError("Each X item must be one nonempty sentence on one line")
-    # Detect packed sentences while leaving decimals, URLs and common initials intact.
-    for sentence in sentences:
-        prose = sentence
-        for url in extract_urls(prose):
-            prose = prose.replace(url, "URL")
-        prose = re.sub(r"\b(?:Mr|Mrs|Ms|Dr|Prof|vs|etc)\.", "ABBR", prose)
-        prose = re.sub(r"\b(?:[A-Za-z]\.){2,}", "ABBR", prose)
-        if re.search(r"[。！？!?][\"'”’）)]*\s*\S|\.[\"'”’)]*\s+\S", prose):
-            raise ValueError("Return exactly one sentence per X item so paragraphs contain at most two sentences")
-    post = "\n\n".join(" ".join(sentences[i:i + 2]) for i in range(0, len(sentences), 2))
+    paragraphs = [paragraph.strip() for paragraph in draft.x_paragraphs]
+    if any(not paragraph or "\n" in paragraph or "\r" in paragraph for paragraph in paragraphs):
+        raise ValueError("Each X item must be one nonempty paragraph on one line")
+    # Preserve the writer's semantic grouping; sentence counts do not set breaks.
+    post = "\n\n".join(paragraphs)
     parsed = parse_tweet(post)
     if not parsed.valid:
         raise ValueError(f"X post is invalid or exceeds 280 weighted characters (got {parsed.weightedLength})")
