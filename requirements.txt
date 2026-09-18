@@ -19,6 +19,11 @@ pytest-asyncio>=0.24.0
 # Offline exact-homophone evidence for the corroborated TTS integrity gate.
 cmudict==1.1.3
 
+# X weighted length, URL and emoji validation (twitter-text v3 rules).
+twitter-text-parser==3.0.0
+# The parser loads its bundled emoji table with pkg_resources.
+setuptools>=68,<81
+
 # Fast word-level timestamps for post-TTS alignment on Apple Silicon.
 # Microsoft VibeVoice remains the narration generator; MLX Whisper only reads
 # the finished WAV. If unavailable, composition continues with a warning.

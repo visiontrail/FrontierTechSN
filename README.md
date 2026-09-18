@@ -170,6 +170,29 @@ outputs/<task-id>/publications/manifest.json
 
 ## Episode evidence
 
+Task results include a **发布文案** panel with a YouTube upload title, Show Notes,
+and one X post. Completed pipeline runs generate this copy in the background;
+opening an older completed task generates its missing copy once. Each field can
+be copied separately, and **重新生成** requests a fresh draft. Pipeline Logs are
+available under the collapsed Execution flow details.
+
+Copy uses the saved narration and selected source references. Every generation
+and repair request embeds the full pinned [blader/humanizer](https://github.com/blader/humanizer)
+skill; its MIT license and upstream revision are retained in
+`backend/prompts/vendor/humanizer/`. The writing prompt is editable in Admin.
+Results and skill/source fingerprints are saved in each task's `social_copy.json`.
+Script changes mark old copy stale; interrupted or failed generations can be
+retried while the previous good copy remains saved. This feature drafts text
+for manual upload and does not submit posts or change publication receipts.
+
+YouTube titles are limited to 100 characters and descriptions to 5,000. X copy
+has 2–4 short sentences, a blank line after every two, at most two hashtags, and
+at most 280 weighted characters including whitespace. The `twitter-text-parser`
+dependency handles CJK, emoji, NFC normalization and URL weights. Its bundled
+emoji data loader requires the `setuptools<81` compatibility bound in
+`requirements.txt`. Length/format failures trigger up to two repair attempts;
+invented URLs and chapter timestamps are rejected.
+
 Each task directory contains the evidence needed to audit an edition:
 
 ```text

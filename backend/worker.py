@@ -333,6 +333,14 @@ async def _worker_loop():
                         )
                     completion_committed = True
                 final_task = await get_task(task.id)
+                if final_task and final_task.status == TaskStatus.COMPLETE:
+                    # Copy is a separate output; a writing failure must not
+                    # invalidate a finished cut or repeat any social publish.
+                    from backend.social_copy import start_generation
+                    try:
+                        start_generation(final_task)
+                    except (ValueError, OSError) as exc:
+                        logger.warning("Upload copy could not start for %s: %s", task.id, exc)
                 finish_task_logs(
                     task.id,
                     final_task.status.value if final_task else TaskStatus.COMPLETE.value,

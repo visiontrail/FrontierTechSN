@@ -425,6 +425,34 @@ export async function fetchTask(id: string): Promise<Task> {
   return res.json();
 }
 
+export interface SocialCopy {
+  status: 'missing' | 'generating' | 'ready' | 'failed'
+  copy: {
+    youtube_title: string
+    youtube_show_notes: string
+    x_post: string
+    x_weighted_length: number
+  } | null
+  stale: boolean
+  error: string | null
+  generated_at?: string
+}
+
+export async function fetchSocialCopy(taskId: string): Promise<SocialCopy> {
+  const response = await fetch(`${BASE}/api/tasks/${taskId}/social-copy`)
+  if (!response.ok) throw new Error('Could not load upload copy')
+  return response.json()
+}
+
+export async function generateSocialCopy(taskId: string, regenerate = false): Promise<SocialCopy> {
+  const response = await fetch(`${BASE}/api/tasks/${taskId}/social-copy?regenerate=${regenerate}`, { method: 'POST' })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.detail || 'Could not start copy generation')
+  }
+  return response.json()
+}
+
 /** Move a queued task's start time; pass null to release it immediately. */
 export async function scheduleTask(taskId: string, scheduledAt: string | null): Promise<Task> {
   const res = await fetch(`${BASE}/api/tasks/${taskId}/schedule`, {

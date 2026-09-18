@@ -17,6 +17,7 @@ import {
   thumbnailPromptUrl,
 } from '../api'
 import LogPanel from './LogPanel'
+import SocialCopyPanel from './SocialCopyPanel'
 import FootagePanel from './FootagePanel'
 import PublicationPanel from './PublicationPanel'
 import { IconChevronLeft, IconChevronRight } from './Icons'
@@ -115,8 +116,6 @@ export default function TaskDetail() {
   )
 
   const [startOverride, setStartOverride] = useState<string | null>(null)
-  const [titleCopied, setTitleCopied] = useState(false)
-  const [expandedLogTaskId, setExpandedLogTaskId] = useState<string | null>(null)
   const resumableFailedTts = task?.status === 'failed'
     && !task.publication_safety_hold
     && !!task.script_path
@@ -177,7 +176,6 @@ export default function TaskDetail() {
   const parked = task.status === 'queued' && isPendingStart(task.scheduled_at)
   const startDraft = startOverride ?? (task.scheduled_at ? toLocalInputValue(new Date(task.scheduled_at)) : '')
   const startMoved = !!startOverride && localInputToIso(startDraft) !== task.scheduled_at
-  const logsExpanded = expandedLogTaskId === task.id
 
   return (
     <div className="detail-workspace">
@@ -330,10 +328,11 @@ export default function TaskDetail() {
               <dd>{OUTRO_LABELS[task.config.outro_style || 'morning-brief']} · dynamic date intro + editable outro</dd>
             </div>
           </dl>
+          <LogPanel key={task.id} taskId={task.id} taskStatus={task.status} />
         </div>
       </details>
 
-      <div className={`detail-body${logsExpanded ? '' : ' is-log-collapsed'}`}>
+      <div className="detail-body">
         <section className="detail-column detail-main">
           {task.origin_type === 'content_plan' && (
             <div className="task-origin-banner">
@@ -382,40 +381,6 @@ export default function TaskDetail() {
 
           {task.status === 'failed' && task.error_message && (
             <div className="error-box">{task.error_message}</div>
-          )}
-
-          {task.generated_title && (
-            <section className="detail-panel title-result">
-              <div className="title-result-head">
-                <div>
-                  <span className="eyebrow">Independent Agent output</span>
-                  <h3>Publication title</h3>
-                </div>
-                <span className="title-result-mark">TITLE / READY</span>
-              </div>
-              <p className="title-result-copy">{task.generated_title}</p>
-              <div className="title-result-footer">
-                <div>
-                  <span>Source title</span>
-                  <strong>{task.source_title || 'Untitled source'}</strong>
-                </div>
-                <button
-                  className="btn-ghost"
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(task.generated_title!)
-                      setTitleCopied(true)
-                      window.setTimeout(() => setTitleCopied(false), 1600)
-                    } catch {
-                      setTitleCopied(false)
-                    }
-                  }}
-                >
-                  {titleCopied ? 'Copied' : 'Copy title'}
-                </button>
-              </div>
-            </section>
           )}
 
           {task.thumbnail_path && (
@@ -547,13 +512,7 @@ export default function TaskDetail() {
         </section>
 
         <aside className="detail-column detail-rail">
-          <LogPanel
-            taskId={task.id}
-            taskStatus={task.status}
-            fill
-            expanded={logsExpanded}
-            onExpandedChange={(expanded) => setExpandedLogTaskId(expanded ? task.id : null)}
-          />
+          <SocialCopyPanel key={task.id} task={task} scriptDirty={dirty} />
         </aside>
       </div>
     </div>

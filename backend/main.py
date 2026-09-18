@@ -87,6 +87,8 @@ async def lifespan(app: FastAPI):
             pass
         await stop_daily_scheduler()
         await stop_worker()
+        from backend.social_copy import stop_generations
+        await stop_generations()
 
 
 app = FastAPI(title="FrontierTechSN", lifespan=lifespan)

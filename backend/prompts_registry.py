@@ -41,6 +41,13 @@ class PromptSpec:
 # (plus its .txt file) is all it takes to expose it in the admin console.
 PROMPT_REGISTRY: list[PromptSpec] = [
     PromptSpec(
+        key="social_copy",
+        file="social_copy.txt",
+        label="Social upload copy",
+        stage="Publication",
+        description="YouTube title, Show Notes and X post. The full pinned Humanizer skill is loaded with every request.",
+    ),
+    PromptSpec(
         key="summarize",
         file="summarize.txt",
         label="Content Summarization",

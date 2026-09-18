@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 from backend import database as db
+from backend import social_copy
 from backend.models import (
     TaskListResponse,
     TaskResponse,
@@ -51,6 +52,25 @@ from backend.worker import (
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 _task_operation_locks: dict[str, asyncio.Lock] = {}
+
+
+@router.get("/{task_id}/social-copy")
+async def get_social_copy(task_id: str):
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return social_copy.read_copy(task)
+
+
+@router.post("/{task_id}/social-copy", status_code=202)
+async def generate_social_copy(task_id: str, regenerate: bool = False):
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    try:
+        return social_copy.start_generation(task, regenerate=regenerate)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 def _task_operation_lock(task_id: str) -> asyncio.Lock:
