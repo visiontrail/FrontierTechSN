@@ -352,3 +352,59 @@ def test_correction_spells_quantity_only_in_failed_story():
     assert result.splitlines()[1] == "Bloomberg reports capacity for six hundred thousand homes."
     assert result.splitlines()[2] == passing
     assert len(result.splitlines()) == 4
+
+
+@pytest.mark.parametrize("bad_response", [False, True])
+def test_review_repairs_contract_before_web_and_records_exhaustion(tmp_path, bad_response):
+    data = dossier(("bbc", "BBC", "en"), ("deeptech", "DeepTech China", "zh"))
+    passing = "BBC reports that the company says its trial has started."
+    fixed = "The Chinese-language outlet DeepTech China reports that the company says its trial has started."
+    original = "\n".join([scriptwriter.morning_opening(EDITION), passing,
+                          "The company says its trial has started.", CLOSING])
+    chat = AsyncMock(return_value="not JSON" if bad_response else json.dumps({"2": fixed}))
+    web = AsyncMock(return_value=({"issues": []}, "W1P;2P", "", "chatgpt"))
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+        patch.object(scriptwriter, "_chat", chat),
+        patch.object(review, "_web_story_review", web),
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()),
+    ):
+        task = review.review_daily_script(
+            original, data, EDITION, tmp_path, language="en", closing_remarks=CLOSING,
+            ai_endpoint=None, ai_model=None, provider_id=None,
+        )
+        if bad_response:
+            with pytest.raises(RuntimeError, match="Automatic script contract repair exhausted"):
+                asyncio.run(task)
+        else:
+            result = asyncio.run(task)
+            assert result.script.splitlines()[1:-1] == [passing, fixed]
+            assert result.report["final_contract"]["passed"]
+            assert fixed in web.await_args.args[0]
+    report = json.loads((tmp_path / "review/fact_check_report.json").read_text())
+    assert report["passed"] is not bad_response
+    assert report["contract_repairs"][0]["before_contract"]["passed"] is False
+    assert chat.await_count == (3 if bad_response else 1)
+    assert web.await_count == (0 if bad_response else 1)
+    for call in chat.await_args_list:
+        assert "Repair ONLY story numbers [2]" in call.args[0]
+        assert passing not in call.args[1]
+
+
+def test_review_bounds_contract_duration_oscillation(tmp_path):
+    data = dossier(("bbc", "BBC", "en"))
+    original = "\n".join([scriptwriter.morning_opening(EDITION), "BBC reports a trial.", CLOSING])
+    with (
+        patch.object(review, "script_contract_report", return_value={"passed": False, "failures": ["duration mismatch"]}),
+        patch.object(review, "generate_daily_script", AsyncMock(return_value=original)) as repair,
+        patch.object(review, "_web_story_review", AsyncMock()) as web,
+        pytest.raises(RuntimeError, match="bounded automatic repairs"),
+    ):
+        asyncio.run(review._review_daily_script(
+            original, data, EDITION, tmp_path, language="en", closing_remarks=CLOSING,
+            ai_endpoint=None, ai_model=None, provider_id=None, review_session_namespace="test",
+        ))
+    assert repair.await_count == 3
+    web.assert_not_awaited()
+    report = json.loads((tmp_path / "review/fact_check_report.json").read_text())
+    assert report["manual_review_required"]

@@ -19,6 +19,7 @@ from backend.daily_news.editorial import ATTRIBUTION_REVIEW_RULES, source_langua
 from backend.daily_news.research import ResearchDossier
 from backend.daily_news.scriptwriter import (
     fit_daily_script_duration,
+    generate_daily_script,
     revise_daily_script,
     script_contract_report,
 )
@@ -1340,12 +1341,13 @@ async def _review_daily_script(
     protected_story_numbers: set[int] = set()
     max_corrections = 3
     correction_count = 0
+    contract_repairs: list[dict[str, Any]] = []
     audit_round = 0
     repeated_issue_counts: dict[tuple, int] = {}
     failure_reason = ""
     all_numbers = list(range(1, len(dossier.selected) + 1))
     review_numbers = list(all_numbers)
-    while audit_round < max_corrections * 2 + 1:
+    while audit_round < max_corrections * 3 + 1:
         audit_round += 1
         length_contract = None
         if target_duration_minutes is not None:
@@ -1381,10 +1383,51 @@ async def _review_daily_script(
             target_duration_minutes=target_duration_minutes,
         )
         if not contract["passed"]:
-            raise RuntimeError(
-                "Deterministic script audit failed before web review: "
-                + "; ".join(contract["failures"])
+            if len(contract_repairs) >= max_corrections:
+                failure_reason = (
+                    "Script contract still failed after bounded automatic repairs: "
+                    + "; ".join(contract["failures"])
+                )
+                break
+            repair = {"cycle": audit_round, "before_contract": contract}
+            contract_repairs.append(repair)
+            prefix = review_dir / f"contract-repair-{len(contract_repairs)}"
+            prefix.with_suffix(".before.txt").write_text(candidate, encoding="utf-8")
+            prefix.with_suffix(".json").write_text(
+                json.dumps(repair, indent=2, ensure_ascii=False), encoding="utf-8"
             )
+            if log:
+                log("Script contract requires automatic repair: " + "; ".join(contract["failures"]))
+            try:
+                candidate = await generate_daily_script(
+                    dossier, edition_date,
+                    initial_script=candidate,
+                    target_duration_minutes=target_duration_minutes,
+                    language=language, closing_remarks=closing_remarks,
+                    opening_remarks=opening_remarks,
+                    ai_endpoint=ai_endpoint, ai_model=ai_model,
+                    provider_id=provider_id, log=log,
+                )
+            except RuntimeError as exc:
+                repair["error"] = str(exc)
+                prefix.with_suffix(".json").write_text(
+                    json.dumps(repair, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                failure_reason = "Automatic script contract repair exhausted: " + str(exc)
+                break
+            prefix.with_suffix(".after.txt").write_text(candidate, encoding="utf-8")
+            repair["after_contract"] = script_contract_report(
+                candidate, dossier, edition_date, language=language,
+                closing_remarks=closing_remarks, opening_remarks=opening_remarks,
+                target_duration_minutes=target_duration_minutes,
+            )
+            prefix.with_suffix(".json").write_text(
+                json.dumps(repair, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            # Recheck duration and full coverage. Exact evidence matching reuses
+            # unchanged stories and invalidates any paragraph changed by repair.
+            review_numbers = list(all_numbers)
+            continue
         claims = _claim_catalog(candidate, dossier)
         group_results: list[dict[str, Any]] = []
         pending_numbers = []
@@ -1527,6 +1570,7 @@ async def _review_daily_script(
                 ),
                 "attempts": attempts,
                 "final_contract": contract,
+                "contract_repairs": contract_repairs,
                 "correction_count": correction_count,
             }
             (review_dir / "fact_check_report.json").write_text(
@@ -1595,6 +1639,8 @@ async def _review_daily_script(
         "attempts": attempts,
         "correction_count": correction_count,
         "manual_review_required": True,
+        "contract_repairs": contract_repairs,
+        "final_contract": contract,
         "failure_reason": failure_reason or "The bounded web-review loop did not approve the script.",
     }
     (review_dir / "fact_check_report.json").write_text(

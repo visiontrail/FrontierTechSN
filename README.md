@@ -23,6 +23,8 @@ Each daily run follows these steps and stops if a required check fails:
 
 All yhroot stages allow ten attempts: one initial call and nine retries. Most OpenCLI stages that use a browser have the same limit. The daily-news claim audit allows at most two Gemini attempts and one ChatGPT fallback. The default provider wait is 90 seconds.
 
+Before each Web review, script constraints are checked again after duration edits and factual corrections. A failed check enters the shared bounded script editor instead of stopping immediately: it repairs failing story paragraphs using the dossier and preserves passing paragraphs. Each repair has up to three model responses; a review run allows at most three contract-repair cycles to prevent duration/edit oscillation. Changed paragraphs require fresh matching Web evidence. Repair inputs, outputs, and diagnostics are saved as `review/contract-repair-*`; exhausted repairs are recorded in `review/fact_check_report.json`.
+
 Gemini briefly uses a foreground window because its composer requires trusted keyboard input. ChatGPT stays in the background. Each review request carries an ownership marker; recovery accepts only the assistant turn paired with that marker. Persistent OpenCLI site sessions use a FrontierTechSN namespace so another local OpenCLI project cannot navigate these Gemini or ChatGPT tabs.
 
 Gemini and ChatGPT prompt and image submissions share a start limiter across processes in this checkout. Consecutive generation requests must start at least ten minutes apart. Read-only recovery, conversation details, and status checks do not consume a generation slot. ChatGPT model checks do not reserve a slot either, but must wait until the previous generation's ten-minute quiet period ends.

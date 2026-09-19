@@ -784,7 +784,13 @@ async def generate_daily_script(
     ai_model: str | None,
     provider_id: int | None,
     log: LogCallback | None = None,
+    initial_script: str | None = None,
 ) -> str:
+    """Generate a draft, or repair an existing draft with the same bounded editor.
+
+    An existing draft is validated before any model response; passing story
+    paragraphs are preserved verbatim by the targeted JSON correction protocol.
+    """
     opening = opening_remarks or morning_opening(edition_date, language)
     units_per_minute = (
         DAILY_NEWS_CHINESE_CHARACTERS_PER_MINUTE
@@ -850,7 +856,8 @@ Software-controlled closing (for context only; DO NOT repeat):
     current_paragraphs: list[str] | None = None
     failed_story_numbers: list[int] = []
     failures: list[str] = []
-    for response_attempt in range(1, DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS + 1):
+    first_attempt = 0 if initial_script is not None else 1
+    for response_attempt in range(first_attempt, DAILY_NEWS_EDIT_RESPONSE_ATTEMPTS + 1):
         response_prompt = system_prompt
         response_content = user_content
         if response_error is not None:
@@ -891,19 +898,22 @@ Return only a JSON object shaped exactly like {shape}, with one complete spoken 
             if selected_route is not None
             else (endpoint, model, api_key)
         )
-        raw = await _chat(
-            response_prompt,
-            response_content,
-            call_endpoint,
-            call_model,
-            call_api_key,
-            log,
-            "Daily news script",
-            max_tokens=response_tokens,
-            enable_skills=False,
-            disable_thinking=response_attempt > 1,
-            route_selected=remember_route,
-        )
+        if response_attempt == 0:
+            raw = initial_script
+        else:
+            raw = await _chat(
+                response_prompt,
+                response_content,
+                call_endpoint,
+                call_model,
+                call_api_key,
+                log,
+                "Daily news script",
+                max_tokens=response_tokens,
+                enable_skills=False,
+                disable_thinking=initial_script is not None or response_attempt > 1,
+                route_selected=remember_route,
+            )
         raw = _strip_model_reasoning_preamble(raw)
         if not failed_story_numbers and language == "en" and NON_ENGLISH_RE.search(raw):
             if log:
@@ -938,6 +948,7 @@ Return only a JSON object shaped exactly like {shape}, with one complete spoken 
                 opening=opening,
                 closing=closing_remarks,
                 language=language,
+                normalize_numbers=initial_script is None,
             )
             candidate_paragraphs = _script_paragraphs(
                 candidate,
