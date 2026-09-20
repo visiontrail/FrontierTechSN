@@ -53,6 +53,39 @@ The pipeline measures video durations with ffprobe and plays each video once. An
 
 Public-footage retries resume the saved shot plan if the script, orientation, provider, and requested count still match. Hybrid and YouTube clips must pass checksum and narration-binding checks before reuse. A changed binding requires a fresh review. When a search runs out of candidates, the pipeline uses the rejection evidence to choose new search directions.
 
+### 4K delivery
+
+Final videos default to **4K at 30 fps**, using HyperFrames' `high` quality H.264
+SDR preset. Landscape delivery is 3840×2160; portrait delivery is 2160×3840.
+The existing 1920×1080 / 1080×1920 CSS layouts stay unchanged: Chrome captures
+them at twice the pixel density, including titles, captions and credits.
+
+**Admin → System → Render** controls output density (`4k` or `1080p`), frame rate
+and encoder quality. Existing explicit `.env` or Admin overrides are preserved;
+upgrading an installation with overrides requires selecting `4k`, `30` and
+`high`. Legacy resolution values `landscape`, `portrait` and `square` select
+1080p density; the task's orientation determines the actual aspect ratio.
+The selected render profile is saved in `av_sync_report.json`. Changing it
+invalidates a pending review checkpoint. Validation checks both output pixels
+and frame rate, followed by a complete audio/video decode before promotion.
+
+YouTube footage acquisition prefers the highest available resolution within the
+3840×2160 / 2160×3840 source limits, regardless of container. All download
+fallbacks retain this policy. The default download ceiling is 250 MiB per file.
+Normalization preserves source detail with H.264 CRF 18 and never enlarges a
+low-resolution video to claim native 4K. Footage acquired under the old 720p
+policy is reacquired when a task is rendered again; its old files and audit
+history remain available. Article captures use a 1440×900 CSS viewport at 2×
+density, producing 2880×1800 PNGs with crop coordinates converted to physical
+pixels. Wikimedia still requests use a 3840-pixel target width. Generated
+collage clips retain their available native resolution, up to the delivery
+dimensions, and are normalized to 30 fps; provider output can still be below 4K.
+
+The encoder uses constant-quality encoding, so final bitrate and file size
+depend on content. A 4K output file does not imply every embedded source is
+native 4K. Preview at 1080p when needed; final UHD rendering has a larger
+pixel-aware deadline and may consume substantially more memory and time.
+
 If URL inspection is unavailable, one Gemini request can include up to four labelled contact sheets, with a separate suitability verdict for each candidate. Missing shots block rendering. The task's `footage/manifest.json` records missing searches, rejections, and invalidated clips; `footage/history/` keeps earlier ledgers.
 
 ## Source roster

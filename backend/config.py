@@ -94,14 +94,14 @@ FOOTAGE_USER_AGENT = os.getenv(
     "FrontierTechSN/1.0 (local AI media scout)",
 )
 FOOTAGE_TIMEOUT = int(os.getenv("FOOTAGE_TIMEOUT", "45"))
-FOOTAGE_MAX_BYTES = int(os.getenv("FOOTAGE_MAX_BYTES", str(50 * 1024 * 1024)))
+FOOTAGE_MAX_BYTES = int(os.getenv("FOOTAGE_MAX_BYTES", str(250 * 1024 * 1024)))
 # Browser renderers are much more reliable with a bounded AVC mezzanine than
 # with arbitrary Commons masters (notably 4K VP9/WebM).  Keep the original
 # download for the rights ledger, but feed HyperFrames this normalized copy.
-FOOTAGE_RENDER_MAX_WIDTH = int(os.getenv("FOOTAGE_RENDER_MAX_WIDTH", "1920"))
-FOOTAGE_RENDER_MAX_HEIGHT = int(os.getenv("FOOTAGE_RENDER_MAX_HEIGHT", "1080"))
+FOOTAGE_RENDER_MAX_WIDTH = int(os.getenv("FOOTAGE_RENDER_MAX_WIDTH", "3840"))
+FOOTAGE_RENDER_MAX_HEIGHT = int(os.getenv("FOOTAGE_RENDER_MAX_HEIGHT", "2160"))
 FOOTAGE_RENDER_MAX_SECONDS = int(os.getenv("FOOTAGE_RENDER_MAX_SECONDS", "20"))
-FOOTAGE_RENDER_CRF = int(os.getenv("FOOTAGE_RENDER_CRF", "23"))
+FOOTAGE_RENDER_CRF = int(os.getenv("FOOTAGE_RENDER_CRF", "18"))
 
 # News stills are planned against exact narrated scenes by ChatGPT through
 # OpenCLI, independently researched with Google News/Search through OpenCLI,
@@ -564,9 +564,8 @@ HYPERFRAME_DIR = resolve_project_path(os.getenv("HYPERFRAME_DIR", "hyperframe"))
 # HYPERFRAME_DIR/node_modules so a render never triggers an on-demand `npx`
 # install (the old unpinned `npx hyperframes` re-installed latest every run —
 # minutes of silent stall on first/cold runs, and a moving version target).
-# Frame-by-frame headless-Chrome capture of a multi-minute 1080p composition is
-# inherently heavy (~frames = duration x fps), so the defaults trade frame rate
-# and quality for wall-clock time.
+# Capture the existing 1080p CSS layout at 2x pixel density for UHD delivery.
+# Render deadlines account for both frame count and output pixel count.
 # Claude Agent SDK video-production crews. When enabled, agents author the
 # per-scene HyperFrames compositions on top of the deterministic drafts; every
 # file they write is gated against the runtime contract and reverted to its
@@ -582,13 +581,13 @@ DIRECTOR_MAX_SCENES = int(os.getenv("DIRECTOR_MAX_SCENES", "0"))
 INSPECT_ENABLED = _env_bool("INSPECT_ENABLED", "1")
 
 HYPERFRAMES_VERSION = os.getenv("HYPERFRAMES_VERSION", "0.6.99")
-RENDER_FPS = int(os.getenv("RENDER_FPS", "15"))
-RENDER_QUALITY = os.getenv("RENDER_QUALITY", "draft")  # draft | standard | high
+RENDER_FPS = int(os.getenv("RENDER_FPS", "30"))
+RENDER_QUALITY = os.getenv("RENDER_QUALITY", "high")  # draft | standard | high
 RENDER_WORKERS = os.getenv("RENDER_WORKERS", "2")      # integer or "auto"
-RENDER_RESOLUTION = os.getenv("RENDER_RESOLUTION", "landscape")  # 1920x1080
+RENDER_RESOLUTION = os.getenv("RENDER_RESOLUTION", "4k")  # follows task orientation
 # HyperFrames' default five-minute CDP timeout can expire inside one live
 # multi-worker capture call even though the outer render is still progressing.
-# Keep this bounded but long enough for 1080p multi-video scenes on Apple Silicon.
+# Keep this bounded but long enough for UHD multi-video scenes on Apple Silicon.
 RENDER_PROTOCOL_TIMEOUT_MS = int(os.getenv("RENDER_PROTOCOL_TIMEOUT_MS", "900000"))
 
 OUTPUTS_DIR = resolve_project_path(os.getenv("OUTPUTS_DIR", "outputs"))

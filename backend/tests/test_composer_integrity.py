@@ -201,9 +201,9 @@ def test_rendered_video_probe_requires_expected_streams_dimensions_and_duration(
             {
                 "streams": [
                     {
-                        "codec_type": "video",
-                        "width": 1920,
-                        "height": 1080,
+                        "codec_type": "video", "avg_frame_rate": "30/1", "r_frame_rate": "30/1",
+                        "width": 3840,
+                        "height": 2160,
                     },
                     {"codec_type": "audio"},
                 ],
@@ -239,7 +239,7 @@ def test_rendered_video_probe_requires_expected_streams_dimensions_and_duration(
         stdout=json.dumps(
             {
                 "streams": [
-                    {"codec_type": "video", "width": 1280, "height": 720}
+                    {"codec_type": "video", "avg_frame_rate": "30/1", "r_frame_rate": "30/1", "width": 1280, "height": 720}
                 ],
                 "format": {"duration": "3.0"},
             }
@@ -263,7 +263,7 @@ def test_rendered_video_probe_rejects_a_stream_that_cannot_fully_decode():
         stdout=json.dumps(
             {
                 "streams": [
-                    {"codec_type": "video", "width": 1920, "height": 1080},
+                    {"codec_type": "video", "avg_frame_rate": "30/1", "r_frame_rate": "30/1", "width": 3840, "height": 2160},
                     {"codec_type": "audio"},
                 ],
                 "format": {"duration": "12.0"},

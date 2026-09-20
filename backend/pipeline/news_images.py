@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
-MANIFEST_VERSION = 17
+MANIFEST_VERSION = 18
 QUERY_SEMANTICS_VERSION = 11
 WIKIMEDIA_SEARCH_ATTEMPTS = 4
 WIKIMEDIA_DOWNLOAD_ATTEMPTS = 5
@@ -2999,7 +2999,7 @@ async def resolve_wikimedia_reference_images(
             "redirects": 1,
             "prop": "imageinfo",
             "iiprop": "url|extmetadata|mime|size",
-            "iiurlwidth": 1600,
+            "iiurlwidth": 3840,
             "format": "json",
             "formatversion": 2,
         },
@@ -3027,7 +3027,7 @@ async def search_wikimedia_images(
         "gsrlimit": limit,
         "prop": "imageinfo",
         "iiprop": "url|extmetadata|mime|size",
-        "iiurlwidth": 1600,
+        "iiurlwidth": 3840,
         "format": "json",
         "formatversion": 2,
     }

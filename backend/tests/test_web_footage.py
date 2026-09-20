@@ -398,7 +398,7 @@ class WebFootageAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--download-sections", fallback_command)
         self.assertIn("--max-filesize", fallback_command)
         self.assertIn(
-            "bestvideo[height<=360]",
+            "bestvideo[width<=3840][height<=3840]",
             fallback_command[fallback_command.index("-f") + 1],
         )
 

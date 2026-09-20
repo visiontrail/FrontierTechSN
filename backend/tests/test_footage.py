@@ -380,6 +380,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                 "width": 1280,
                 "height": 720,
                 "render_profile": {"video_codec": "h264"},
+                "acquisition_profile": footage.acquisition_profile(),
             }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -453,6 +454,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                 "width": 1280,
                 "height": 720,
                 "render_profile": {"video_codec": "h264"},
+                "acquisition_profile": footage.acquisition_profile(),
             }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -478,6 +480,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                                 "source_page_url": "https://commons.wikimedia.org/wiki/File:First.webm",
                                 "local_path": "footage/clip-01.webm",
                                 "sha256": first_sha,
+                                "acquisition_profile": footage.acquisition_profile(),
                             }
                         ],
                     }
@@ -528,6 +531,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                         "title": "Research vessel",
                         "description": "A university research ship",
                         "license": "CC BY 4.0",
+                        "acquisition_profile": footage.acquisition_profile(),
                         "source_page_url": "https://commons.example/vessel",
                         "local_path": "footage/clip-01.mp4",
                         "sha256": digest,
@@ -566,6 +570,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                         "purpose": purpose,
                         "title": purpose,
                         "license": "CC BY 4.0",
+                        "acquisition_profile": footage.acquisition_profile(),
                         "source_page_url": f"https://commons.example/{index}",
                         "local_path": f"footage/clip-{index:02d}.mp4",
                         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

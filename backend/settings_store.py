@@ -565,8 +565,10 @@ SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         "RENDER_RESOLUTION", "render", "Resolution", "choice",
-        options=("landscape", "portrait", "square"),
-        description="landscape is 1920x1080.",
+        options=("4k", "1080p", "landscape", "portrait", "square"),
+        description="4k outputs 3840x2160 (2160x3840 for portrait tasks). "
+                    "1080p is available for previews. Legacy orientation values "
+                    "select 1080p; the task always controls orientation.",
     ),
     SettingSpec(
         "RENDER_FPS", "render", "Frame rate", "int", unit="fps",
@@ -577,7 +579,8 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         "RENDER_QUALITY", "render", "Quality", "choice",
         options=("draft", "standard", "high"),
-        description="Encoder preset passed to the CLI.",
+        description="High is the default for final delivery; standard and draft "
+                    "reduce encoding cost for previews.",
     ),
     SettingSpec(
         "RENDER_WORKERS", "render", "Workers", "string",

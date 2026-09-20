@@ -29,9 +29,9 @@ LogCallback = Callable[[str], None]
 
 SOURCE_REPOSITORY = "https://github.com/pyang5166/gbro-collage-broll"
 SOURCE_COMMIT = "a1a4ee2e2abf7d44e460026b706d0c72c2cf8a91"
-CLIP_FPS = 24
+CLIP_FPS = 30
 MOTION_SAMPLE_FPS = 4
-CACHE_CONTRACT_VERSION = 3
+CACHE_CONTRACT_VERSION = 4
 SELECTION_POLICY_VERSION = 7
 PLAYBACK_POLICY = "play_once_then_hold_last_frame"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -869,6 +869,7 @@ def image_prompt(spec: dict[str, Any], frame: FrameSpec) -> str:
     accents = ", ".join(spec["accent_colors"]) or "no mandatory accent swatches"
     return f"""Use case: documentary B-roll.
 Asset type: final still frame for a {frame.aspect_ratio} image-to-video clip.
+Delivery canvas: {frame.media_width}x{frame.media_height} pixels. Generate at the highest supported native resolution so fine details survive this canvas size.
 Create an original editorial collage expressing this visual metaphor: {spec['visual_metaphor']}
 
 Treat collage as an open medium, not a house style. Exercise broad creative control over the visual era, materials, edge treatment, mark-making, density, scale, depth, and balance. The result may be raw or refined, minimal or maximal, analog or graphic, playful or severe, as the story demands. Do not fall back to a generic centered halftone-paper template.
@@ -890,6 +891,7 @@ def video_prompt(spec: dict[str, Any], frame: FrameSpec) -> str:
     target_duration = _seconds(spec.get("target_duration_seconds"), 8.0)
     element_brief = _element_behavior_brief(spec)
     return f"""Create a {frame.aspect_ratio} editorial collage video. Image 1 and Image 2 are endpoint constraints only: begin from the supplied first frame and reach the supplied completed final frame in time to hold it at the end.
+Delivery target: {frame.media_width}x{frame.media_height} pixels at {CLIP_FPS} fps. Use the highest supported native resolution and frame rate; preserve source detail without artificial sharpening.
 
 Story meaning: {spec['script_meaning']}
 Visual metaphor: {spec['visual_metaphor']}
@@ -1353,8 +1355,11 @@ async def _normalize_video(
         [
             "ffmpeg", "-y", "-i", str(raw),
             "-t", str(target_duration), "-vf",
-            f"scale={frame.media_width}:{frame.media_height}:force_original_aspect_ratio=increase,crop={frame.media_width}:{frame.media_height},fps={CLIP_FPS}",
-            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(final),
+            f"crop=w='trunc(min(iw,ih*{frame.media_width}/{frame.media_height})/2)*2':"
+            f"h='trunc(min(ih,iw*{frame.media_height}/{frame.media_width})/2)*2',"
+            f"scale=w='min(iw,{frame.media_width})':h='min(ih,{frame.media_height})':"
+            f"force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,fps={CLIP_FPS}",
+            "-an", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(final),
         ],
         timeout=300,
     )
@@ -1389,7 +1394,14 @@ async def probe_video(
     )
     required_motion_seconds = min(4.0, max(1.0, target_duration * 0.5))
     checks = {
-        "dimensions": (stream.get("width"), stream.get("height")) == (frame.media_width, frame.media_height),
+        "dimensions": (
+            min(frame.media_width, 360 if frame.is_portrait else 640)
+            <= int(stream.get("width") or 0) <= frame.media_width
+            and min(frame.media_height, 640 if frame.is_portrait else 360)
+            <= int(stream.get("height") or 0) <= frame.media_height
+            and abs(int(stream.get("width") or 0) / max(1, int(stream.get("height") or 0))
+                    - frame.media_width / frame.media_height) < 0.01
+        ),
         "duration": abs(duration - target_duration) <= 0.15,
         "fps": abs(fps - CLIP_FPS) <= 0.1,
         "no_audio": not audio,

@@ -46,7 +46,13 @@ from backend.pipeline import (
     visual_plan,
 )
 from backend.pipeline.process_logging import run_capture_logged, stream_subprocess
-from backend.pipeline.video_format import FrameSpec, LANDSCAPE, resolve_frame_spec
+from backend.pipeline.video_format import (
+    FrameSpec,
+    LANDSCAPE,
+    RenderSpec,
+    resolve_frame_spec,
+    resolve_render_spec,
+)
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -769,8 +775,10 @@ def _rendered_video_failures(
     *,
     frame: FrameSpec,
     expected_duration: float,
+    render: RenderSpec | None = None,
 ) -> list[str]:
     """Probe a staged render before it can replace the last completed cut."""
+    render = render or resolve_render_spec(frame)
     result = run_capture_logged(
         name="Rendered video probe",
         command=[
@@ -803,11 +811,19 @@ def _rendered_video_failures(
     else:
         width = int(videos[0].get("width") or 0)
         height = int(videos[0].get("height") or 0)
-        if (width, height) != (frame.width, frame.height):
+        if (width, height) != (render.width, render.height):
             failures.append(
                 f"render dimensions are {width}x{height}, expected "
-                f"{frame.width}x{frame.height}"
+                f"{render.width}x{render.height}"
             )
+        for field in ("avg_frame_rate", "r_frame_rate"):
+            try:
+                numerator, denominator = str(videos[0].get(field) or "0/1").split("/")
+                fps = float(numerator) / float(denominator)
+            except (ValueError, ZeroDivisionError):
+                fps = 0
+            if not math.isfinite(fps) or abs(fps - render.fps) > 0.01:
+                failures.append(f"render {field} is {fps:g}, expected {render.fps} fps")
     if len(audios) != 1:
         failures.append(f"expected one audio stream, found {len(audios)}")
     try:
@@ -818,8 +834,8 @@ def _rendered_video_failures(
         )
     except (TypeError, ValueError):
         duration = 0.0
-    tolerance = max(0.5, 2 / max(1, config.RENDER_FPS))
-    if duration <= 0 or abs(duration - expected_duration) > tolerance:
+    tolerance = max(0.5, 2 / max(1, render.fps))
+    if not math.isfinite(duration) or duration <= 0 or abs(duration - expected_duration) > tolerance:
         failures.append(
             f"render duration is {duration:.3f}s, expected {expected_duration:.3f}s "
             f"within {tolerance:.3f}s"
@@ -977,10 +993,17 @@ def _project_relative(path: str | Path, project_dir: Path) -> str:
         return str(resolved)
 
 
+def _render_timeout(duration: float, render: RenderSpec) -> int:
+    frames = max(1, round(duration * render.fps))
+    pixel_ratio = render.width * render.height / (1920 * 1080)
+    return max(RENDER_TIMEOUT_FLOOR, math.ceil(300 + frames * RENDER_SECONDS_PER_FRAME * pixel_ratio))
+
+
 def _build_render_command(
     project_dir: Path,
     video_path: Path,
     frame: FrameSpec = LANDSCAPE,
+    render: RenderSpec | None = None,
 ) -> list[str]:
     """Build the render command for the current HyperFrames CLI (v0.6.x).
 
@@ -990,6 +1013,7 @@ def _build_render_command(
     on-demand ``npx`` install; fall back to a *pinned* npx invocation only if the
     local install is missing.
     """
+    render = render or resolve_render_spec(frame)
     local_bin = config.HYPERFRAME_DIR / "node_modules" / ".bin" / "hyperframes"
     if local_bin.exists():
         base = [str(local_bin)]
@@ -998,11 +1022,12 @@ def _build_render_command(
     command = base + [
         "render", str(project_dir),
         "--output", str(video_path),
-        "--resolution", frame.render_resolution,
-        "--fps", str(config.RENDER_FPS),
-        "--quality", config.RENDER_QUALITY,
-        "-w", str(config.RENDER_WORKERS),
-        "--protocol-timeout", str(config.RENDER_PROTOCOL_TIMEOUT_MS),
+        "--resolution", render.resolution,
+        "--fps", str(render.fps),
+        "--quality", render.quality,
+        "--sdr",
+        "-w", render.workers,
+        "--protocol-timeout", str(render.protocol_timeout_ms),
     ]
     variables_path = project_dir / intros.INTRO_VARIABLES_FILENAME
     if variables_path.is_file():
@@ -1222,7 +1247,7 @@ def _available_collage_storyboard(board: dict, plans: list[dict], count: int | N
     return {**board, "scenes": scenes}
 
 
-def _review_retry_fingerprint(directory: Path, request: dict) -> str:
+def _review_retry_fingerprint(directory: Path, request: dict, render: RenderSpec | None = None) -> str:
     """Bind review-only recovery to the unchanged render inputs and settings."""
     paths = {Path(request[key]) for key in ("script_path", "audio_path", "background_music_path") if request.get(key)}
     for name in ("index.html", "storyboard.json", "visual_plan.json", "footage/manifest.json",
@@ -1234,18 +1259,20 @@ def _review_retry_fingerprint(directory: Path, request: dict) -> str:
     paths.update(Path(__file__).parent / name for name in (
         "scene_kit.py", "assembler.py", "storyboard.py", "intros.py", "outros.py",
         "composer.py", "news_images.py", "collage_broll.py", "visual_plan.py",
-        "media_shots.py",
+        "media_shots.py", "video_format.py",
     ))
     paths.add(config.PROMPTS_DIR / "media_shots.txt")
     evidence = {
         "request": request,
-        "render": [config.RENDER_FPS, config.RENDER_QUALITY, config.RENDER_WORKERS],
+        "render": (render or resolve_render_spec(
+            resolve_frame_spec(request.get("video_orientation"))
+        )).to_dict(),
         "files": {str(path.resolve()): _sha256_path(path) if path.is_file() else None for path in sorted(paths)},
     }
     return hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest()
 
 
-async def _resume_unavailable_visual_review(directory: Path, request: dict, frame: FrameSpec, emit) -> str | None:
+async def _resume_unavailable_visual_review(directory: Path, request: dict, frame: FrameSpec, emit, render: RenderSpec | None = None) -> str | None:
     try:
         checkpoint = json.loads((directory / "render_review_checkpoint.json").read_text())
         report_path = directory / "av_sync_report.next.json"
@@ -1261,7 +1288,7 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
         if (
             not config.AV_SYNC_GEMINI_REVIEW_ENABLED
             or not (unavailable or interrupted)
-            or checkpoint.get("input_sha256") != _review_retry_fingerprint(directory, request)
+            or checkpoint.get("input_sha256") != _review_retry_fingerprint(directory, request, render)
             or not candidate.is_file()
         ):
             return None
@@ -1274,7 +1301,7 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
         ):
             return None
         board = json.loads((directory / "storyboard.json").read_text())
-        if _rendered_video_failures(candidate, frame=frame, expected_duration=float(board["total_duration"])):
+        if _rendered_video_failures(candidate, frame=frame, expected_duration=float(board["total_duration"]), render=render):
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -1420,6 +1447,7 @@ async def compose_video(
     prefer_previous_reviewer = _previous_rejection_used_fallback(output_dir_path)
     quality_retry_source, _ = _pending_visual_repairs(output_dir_path, [])
     frame = resolve_frame_spec(video_orientation)
+    render = resolve_render_spec(frame)
 
     # Mirror to the task log (pipeline.log + LogPanel) when available, else the
     # module logger (start.sh log). Prefer the callback to avoid double-logging.
@@ -1438,7 +1466,7 @@ async def compose_video(
             "Narration audio does not retain a 100% verified script contract; "
             f"refusing to render. {detail}"
         )
-    resumed = await _resume_unavailable_visual_review(output_dir_path, review_request, frame, emit)
+    resumed = await _resume_unavailable_visual_review(output_dir_path, review_request, frame, emit, render)
     if resumed is not None:
         return resumed
     if source_contract_verified:
@@ -1767,6 +1795,7 @@ async def compose_video(
     scene_plans = list(plans)
     visual_grounding = visual_plan.visual_grounding_report(scene_plans, board)
     quality_report = {
+        "render_profile": render.to_dict(),
         "passed": bool(board["alignment"].get("passed")) and visual_grounding["passed"],
         "quality_status": "pending",
         "delivery_status": "pending",
@@ -2073,16 +2102,16 @@ async def compose_video(
     # --- 5. Render ---------------------------------------------------------
     staged_video_path = output_dir_path / "video.next.mp4"
     staged_video_path.unlink(missing_ok=True)
-    total_frames = max(1, round(float(board["total_duration"]) * config.RENDER_FPS))
-    render_timeout = max(RENDER_TIMEOUT_FLOOR, int(300 + total_frames * RENDER_SECONDS_PER_FRAME))
+    total_frames = max(1, round(float(board["total_duration"]) * render.fps))
+    render_timeout = _render_timeout(float(board["total_duration"]), render)
     emit(
         f"Rendering ~{total_frames} frames "
-        f"({board['total_duration']:.0f}s @ {config.RENDER_FPS}fps, {config.RENDER_QUALITY}, "
-        f"{config.RENDER_WORKERS} worker(s)); render timeout {render_timeout}s, "
+        f"({render.width}x{render.height}, {board['total_duration']:.0f}s @ {render.fps}fps, {render.quality}, "
+        f"{render.workers} worker(s)); render timeout {render_timeout}s, "
         f"stall timeout {RENDER_STALL_TIMEOUT}s"
     )
 
-    render_command = _build_render_command(output_dir_path, staged_video_path, frame)
+    render_command = _build_render_command(output_dir_path, staged_video_path, frame, render)
     returncode, output = await stream_subprocess(
         name="HyperFrames render",
         command=render_command,
@@ -2104,6 +2133,7 @@ async def compose_video(
         staged_video_path,
         frame=frame,
         expected_duration=float(board["total_duration"]),
+        render=render,
     )
     if probe_failures:
         staged_video_path.unlink(missing_ok=True)
@@ -2115,7 +2145,7 @@ async def compose_video(
         f"({staged_video_path.stat().st_size / 1024 / 1024:.1f} MB)"
     )
     (output_dir_path / "render_review_checkpoint.json").write_text(json.dumps({
-        "input_sha256": _review_retry_fingerprint(output_dir_path, review_request),
+        "input_sha256": _review_retry_fingerprint(output_dir_path, review_request, render),
         "video_sha256": _sha256_path(staged_video_path),
     }))
     if config.AV_SYNC_GEMINI_REVIEW_ENABLED:

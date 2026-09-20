@@ -66,7 +66,7 @@ async def test_capture_keeps_valid_source_and_only_relays_missing_prose(
         yield object()
 
     def save_image(raw, focus, destination):
-        Image.new("RGB", (1440, 900)).save(destination)
+        Image.new("RGB", (2880, 1800)).save(destination)
         return {}
 
     monkeypatch.setattr(news_webpages.websockets, "connect", connect)
@@ -345,8 +345,8 @@ def test_techmeme_capture_relays_to_matched_original_publisher():
 
 
 def test_focused_screenshot_makes_story_block_legible_on_fixed_canvas(tmp_path):
-    source = Image.new("RGB", (1440, 900), "#eeeeee")
-    source.paste("#123456", (100, 120, 500, 320))
+    source = Image.new("RGB", (2880, 1800), "#eeeeee")
+    source.paste("#123456", (200, 240, 1000, 640))
     payload = io.BytesIO()
     source.save(payload, format="PNG")
     destination = tmp_path / "focused.png"
@@ -358,18 +358,61 @@ def test_focused_screenshot_makes_story_block_legible_on_fixed_canvas(tmp_path):
     )
 
     with Image.open(destination) as rendered:
-        assert rendered.size == (1440, 900)
-        assert rendered.getpixel((720, 450)) == (18, 52, 86)
+        assert rendered.size == (2880, 1800)
+        assert rendered.getpixel((1440, 900)) == (18, 52, 86)
         assert rendered.getpixel((10, 10)) == (255, 255, 255)
-    assert result["focus_width"] == 400
-    assert result["focused_render_width"] == 1320
+    assert result["focus_width"] == 800
+    assert result["focused_render_width"] == 2640
+
+
+@pytest.mark.asyncio
+async def test_real_chromium_capture_and_crop_use_physical_pixels(tmp_path):
+    """Exercise the real screenshot API; a DPR setting alone is not proof."""
+    try:
+        news_webpages._chrome_binary()
+    except RuntimeError:
+        pytest.skip("Local Chromium is required for screenshot integration coverage")
+    process, browser_url, profile = await news_webpages._start_chrome()
+    try:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(browser_url)
+        async with news_webpages.httpx.AsyncClient() as client:
+            target = (await client.put(
+                f"http://{parsed.hostname}:{parsed.port}/json/new",
+                params={"url": "about:blank"},
+            )).json()
+        async with news_webpages.websockets.connect(target["webSocketDebuggerUrl"]) as socket:
+            counter = [0]
+            await news_webpages._cdp_command(socket, counter, "Emulation.setDeviceMetricsOverride", {
+                "width": news_webpages.VIEWPORT_WIDTH, "height": news_webpages.VIEWPORT_HEIGHT,
+                "deviceScaleFactor": news_webpages.CAPTURE_SCALE, "mobile": False,
+            })
+            await news_webpages._runtime_value(socket, counter,
+                "document.body.style='margin:0;background:#123456'; true")
+            shot = await news_webpages._cdp_command(socket, counter, "Page.captureScreenshot", {
+                "format": "png", "fromSurface": True, "captureBeyondViewport": False,
+            })
+        raw = base64.b64decode(shot["data"])
+        with Image.open(io.BytesIO(raw)) as captured:
+            assert captured.size == (2880, 1800)
+        destination = tmp_path / "article.png"
+        info = news_webpages._focused_screenshot(
+            raw, {"x": 100, "y": 120, "width": 400, "height": 200}, destination,
+        )
+        assert (info["focus_x"], info["focus_y"]) == (200, 240)
+        with Image.open(destination) as image:
+            assert image.size == (2880, 1800)
+            assert image.getpixel((1440, 900)) == (18, 52, 86)
+    finally:
+        await news_webpages._stop_chrome(process, profile)
 
 
 def test_attach_news_webpage_preserves_underlying_public_footage(tmp_path):
     root = tmp_path / "news_webpages"
     root.mkdir()
     image_path = root / "page-01.png"
-    Image.new("RGB", (1440, 900), "white").save(image_path)
+    Image.new("RGB", (2880, 1800), "white").save(image_path)
     digest = hashlib.sha256(image_path.read_bytes()).hexdigest()
     manifest = {
         "status": "ready",
@@ -554,7 +597,7 @@ async def test_capture_uses_later_english_story_when_a_publisher_blocks(
             )
         saved = json.loads((tmp_path / "news_webpages/manifest.json").read_text())
         assert saved["errors"][0]["source_url"].endswith("story-1")
-        Image.new("RGB", (1440, 900), "white").save(destination)
+        Image.new("RGB", (2880, 1800), "white").save(destination)
         return {
             "document_language": "en",
             "headline": assignment["expected_headline"],

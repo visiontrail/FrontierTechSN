@@ -512,6 +512,12 @@ async def analyze_candidate_link(candidate: dict, script_excerpt: str) -> dict:
         return _fallback_analysis(candidate, reason=f"Gemini analysis fallback: {exc}")
 
 
+def _youtube_format() -> str:
+    # Resolution wins over container: a 4K WebM must not lose to a 720p MP4.
+    edge = max(config.FOOTAGE_RENDER_MAX_WIDTH, config.FOOTAGE_RENDER_MAX_HEIGHT)
+    return f"bestvideo[width<={edge}][height<={edge}]/best[width<={edge}][height<={edge}]"
+
+
 async def _download_youtube(
     candidate: dict,
     raw_dir: Path,
@@ -529,7 +535,8 @@ async def _download_youtube(
         *YOUTUBE_FINISHED_VIDEO_ARGS,
         "--no-playlist",
         "-f",
-        "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+        _youtube_format(),
+        "-S", f"res:{min(config.FOOTAGE_RENDER_MAX_WIDTH, config.FOOTAGE_RENDER_MAX_HEIGHT)}",
         "-o",
         str(template),
     ]
@@ -559,7 +566,8 @@ async def _download_youtube(
                 *YOUTUBE_FINISHED_VIDEO_ARGS,
                 "--no-playlist",
                 "-f",
-                "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+                _youtube_format(),
+                "-S", f"res:{min(config.FOOTAGE_RENDER_MAX_WIDTH, config.FOOTAGE_RENDER_MAX_HEIGHT)}",
                 "--max-filesize",
                 str(config.FOOTAGE_MAX_BYTES),
                 "-o",
@@ -592,7 +600,8 @@ async def _download_youtube(
                 *YOUTUBE_FINISHED_VIDEO_ARGS,
                 "--no-playlist",
                 "-f",
-                "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+                _youtube_format(),
+                "-S", f"res:{min(config.FOOTAGE_RENDER_MAX_WIDTH, config.FOOTAGE_RENDER_MAX_HEIGHT)}",
                 "-o",
                 str(template),
                 "--download-sections",
@@ -606,7 +615,7 @@ async def _download_youtube(
                     timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT,
                 )
             except WebFootageError as embedded_section_error:
-                # Some videos cannot be embedded. Fetch a bounded 360p source
+                # Some videos cannot be embedded. Fetch the same source quality
                 # with yt-dlp's native downloader, then trim it locally. The
                 # byte ceiling prevents an unexpectedly long source from
                 # filling the task workspace.
@@ -618,10 +627,8 @@ async def _download_youtube(
                     *YOUTUBE_FINISHED_VIDEO_ARGS,
                     "--no-playlist",
                     "-f",
-                    (
-                        "bestvideo[height<=360][ext=mp4]/"
-                        "bestvideo[height<=360]/best[height<=360]"
-                    ),
+                    _youtube_format(),
+                    "-S", f"res:{min(config.FOOTAGE_RENDER_MAX_WIDTH, config.FOOTAGE_RENDER_MAX_HEIGHT)}",
                     "--max-filesize",
                     str(config.FOOTAGE_MAX_BYTES),
                     "-o",
@@ -712,13 +719,14 @@ def _fit_analysis_to_media(analysis: dict, duration: float) -> dict:
 async def _trim(raw_path: Path, destination: Path, analysis: dict, orientation: str) -> None:
     start = float(analysis["start_seconds"])
     length = max(1.0, float(analysis["end_seconds"]) - start)
-    if orientation == "portrait":
-        width, height = 720, 1280
-    else:
-        width, height = 1280, 720
+    from backend.pipeline.footage import native_scale_filter
+
+    ratio = "9/16" if orientation == "portrait" else "16/9"
+    inverse = "16/9" if orientation == "portrait" else "9/16"
     video_filter = (
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},setsar=1"
+        f"crop=w='trunc(min(iw,ih*{ratio})/2)*2':"
+        f"h='trunc(min(ih,iw*{inverse})/2)*2',"
+        + native_scale_filter() + ",setsar=1"
     )
     await _run_command(
         [
@@ -740,14 +748,14 @@ async def _trim(raw_path: Path, destination: Path, analysis: dict, orientation: 
             "-preset",
             "veryfast",
             "-crf",
-            "21",
+            str(config.FOOTAGE_RENDER_CRF),
             "-pix_fmt",
             "yuv420p",
             "-movflags",
             "+faststart",
             str(destination),
         ],
-        timeout=180,
+        timeout=900,
     )
 
 
@@ -777,7 +785,10 @@ def _sha256(path: Path) -> str:
 
 
 def _preview_cache_identity(candidate: dict) -> dict:
-    return {"version": 1, "source_page_url": candidate["source_page_url"],
+    from backend.pipeline.footage import acquisition_profile
+
+    return {"version": 2, "acquisition_profile": acquisition_profile(),
+            "source_page_url": candidate["source_page_url"],
             "duration_seconds": float(candidate.get("duration_seconds") or 0)}
 
 
@@ -1660,8 +1671,15 @@ async def supplement_web_footage(
         if raw_path and raw_path.exists() and not using_reviewed_preview:
             raw_path.unlink()
 
+        from backend.pipeline.footage import acquisition_profile
+
         entry = {
             "id": clip_id,
+            "acquisition_profile": acquisition_profile(),
+            "source_width": media["width"],
+            "source_height": media["height"],
+            "render_safe": True,
+            "render_metadata_version": 1,
             "query": query,
             "plan_query": shot["plan_query"],
             "purpose": str(shot.get("purpose") or ""),

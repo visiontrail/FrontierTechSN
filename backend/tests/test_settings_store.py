@@ -40,17 +40,17 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(config.RENDER_FPS, settings_store.defaults()["RENDER_FPS"])
 
     def test_update_applies_live_and_survives_a_restart(self):
-        settings_store.update({"RENDER_FPS": 30, "RENDER_QUALITY": "high"})
+        settings_store.update({"RENDER_FPS": 60, "RENDER_QUALITY": "standard"})
 
-        self.assertEqual(config.RENDER_FPS, 30)
-        self.assertEqual(config.RENDER_QUALITY, "high")
-        self.assertEqual(self.stored()["RENDER_FPS"], 30)
+        self.assertEqual(config.RENDER_FPS, 60)
+        self.assertEqual(config.RENDER_QUALITY, "standard")
+        self.assertEqual(self.stored()["RENDER_FPS"], 60)
 
         # Simulate a fresh process: config reverts to .env, then re-applies.
         config.apply_values(settings_store.defaults())
         self.assertEqual(config.RENDER_FPS, settings_store.defaults()["RENDER_FPS"])
         settings_store.apply_saved()
-        self.assertEqual(config.RENDER_FPS, 30)
+        self.assertEqual(config.RENDER_FPS, 60)
 
     def test_moving_aiwork_root_relocates_the_tts_contract(self):
         settings_store.update({"AIWORK_ROOT": str(self.root / "aiwork")})

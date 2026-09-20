@@ -939,7 +939,7 @@ def test_failed_quality_report_never_promotes_and_preserves_candidate(tmp_path, 
 def test_portrait_render_command_uses_task_resolution(tmp_path):
     command = composer._build_render_command(tmp_path, tmp_path / "video.mp4", PORTRAIT)
 
-    assert command[command.index("--resolution") + 1] == "portrait"
+    assert command[command.index("--resolution") + 1] == "portrait-4k"
     assert command[command.index("--protocol-timeout") + 1] == str(
         composer.config.RENDER_PROTOCOL_TIMEOUT_MS
     )

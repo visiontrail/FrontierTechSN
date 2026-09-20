@@ -30,7 +30,7 @@ def task_and_manifest(root):
     )
     manifest = {
         "status": "ready", "requested_clip_count": 1, "selection_mode": "ai",
-        "clips": [{"local_path": "footage/clip.mp4", "sha256": hashlib.sha256(clip.read_bytes()).hexdigest()}],
+        "clips": [{"acquisition_profile": footage.acquisition_profile(), "local_path": "footage/clip.mp4", "sha256": hashlib.sha256(clip.read_bytes()).hexdigest()}],
     }
     return task, manifest
 
@@ -64,7 +64,7 @@ def test_all_resume_paths_acquire_enabled_footage_before_composition(tmp_path, e
     render.assert_awaited_once()
 
 
-@pytest.mark.parametrize("change", ["none", "script", "file", "missing", "count", "orientation", "policy", "partial"])
+@pytest.mark.parametrize("change", ["none", "script", "file", "missing", "count", "orientation", "policy", "partial", "resolution"])
 def test_resume_reuses_only_current_complete_intact_footage(tmp_path, change):
     task, manifest = task_and_manifest(tmp_path)
     with patch.object(orchestrator, "acquire_footage", AsyncMock(return_value=manifest)):
@@ -81,6 +81,9 @@ def test_resume_reuses_only_current_complete_intact_footage(tmp_path, change):
         task.config.video_orientation = "portrait"
     elif change == "policy":
         task.config.footage_provider = "wikimedia"
+    elif change == "resolution":
+        manifest["clips"][0].pop("acquisition_profile")
+        footage._write_manifest(tmp_path, manifest)
     elif change == "partial":
         manifest["status"] = "partial"
         footage._write_manifest(tmp_path, manifest)

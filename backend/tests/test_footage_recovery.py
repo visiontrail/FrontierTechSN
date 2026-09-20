@@ -63,7 +63,7 @@ def saved_hybrid(root):
         relative = f'footage/clip-{index + 1:02}.mp4'
         body = f'reviewed content {index}'.encode()
         (root / relative).write_bytes(body)
-        clips.append({**shot, 'query': shot['query'] + ' stock footage',
+        clips.append({**shot, 'acquisition_profile': footage.acquisition_profile(), 'query': shot['query'] + ' stock footage',
                       'id': f'clip-{index + 1:02}', 'local_path': relative,
                       'sha256': hashlib.sha256(body).hexdigest(),
                       'platform': 'youtube', 'source_page_url': f'https://youtu.be/{index}',
@@ -94,11 +94,13 @@ def test_legacy_hybrid_resume_keeps_artifacts_plan_count_and_history(tmp_path):
     assert again['clips'] == result['clips']
 
 
-@pytest.mark.parametrize('defect', ['checksum', 'missing', 'rejected', 'misbound', 'outside'])
+@pytest.mark.parametrize('defect', ['checksum', 'missing', 'rejected', 'misbound', 'outside', 'resolution'])
 def test_resume_invalidates_only_the_unusable_clip(tmp_path, defect):
     script, manifest = saved_hybrid(tmp_path)
     bad = manifest['clips'][1]
-    if defect == 'checksum':
+    if defect == 'resolution':
+        bad.pop('acquisition_profile')
+    elif defect == 'checksum':
         (tmp_path / bad['local_path']).write_bytes(b'changed')
     elif defect == 'missing':
         (tmp_path / bad['local_path']).unlink()

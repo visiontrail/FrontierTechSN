@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
+
+from backend import config
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,46 @@ _SPECS = {
 }
 
 
+@dataclass(frozen=True)
+class RenderSpec:
+    """Delivery pixels are independent of the composition's CSS coordinates."""
+
+    resolution: str
+    width: int
+    height: int
+    fps: int
+    quality: str
+    workers: str
+    protocol_timeout_ms: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def resolve_render_spec(frame: FrameSpec = LANDSCAPE) -> RenderSpec:
+    value = str(config.RENDER_RESOLUTION).strip().lower()
+    if value in {"4k", "uhd", "landscape-4k", "portrait-4k", "square-4k"}:
+        scale = 2
+    elif value in {"1080p", "hd", "landscape", "portrait", "square"}:
+        # Older installations saved orientation here. Task orientation remains
+        # authoritative; these legacy values select 1080p output density only.
+        scale = 1
+    else:
+        raise ValueError(f"Unsupported render resolution: {value}")
+    return RenderSpec(
+        resolution=frame.orientation + ("-4k" if scale == 2 else ""),
+        width=frame.width * scale,
+        height=frame.height * scale,
+        fps=int(config.RENDER_FPS),
+        quality=str(config.RENDER_QUALITY),
+        workers=str(config.RENDER_WORKERS),
+        protocol_timeout_ms=int(config.RENDER_PROTOCOL_TIMEOUT_MS),
+    )
+
+
 def resolve_frame_spec(orientation: str | None) -> FrameSpec:
-    """Resolve a task value, deliberately falling back to landscape."""
-    return _SPECS.get(str(orientation or "").strip().lower(), LANDSCAPE)
+    """Keep layout coordinates stable while preparing media for delivery."""
+    frame = _SPECS.get(str(orientation or "").strip().lower(), LANDSCAPE)
+    render = resolve_render_spec(frame)
+    return replace(frame, media_width=render.width, media_height=render.height,
+                   render_resolution=render.resolution)

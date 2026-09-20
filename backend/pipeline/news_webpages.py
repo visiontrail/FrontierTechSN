@@ -30,10 +30,15 @@ from PIL import Image, UnidentifiedImageError
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
 
-MANIFEST_VERSION = 5
+MANIFEST_VERSION = 6
 MAX_PAGE_OVERLAYS = 2
 VIEWPORT_WIDTH = 1440
 VIEWPORT_HEIGHT = 900
+# DOM geometry stays in CSS pixels; screenshots and crop rectangles use 2x
+# physical pixels so article text remains sharp in a UHD composition.
+CAPTURE_SCALE = 2
+CAPTURE_WIDTH = VIEWPORT_WIDTH * CAPTURE_SCALE
+CAPTURE_HEIGHT = VIEWPORT_HEIGHT * CAPTURE_SCALE
 PAGE_LOAD_TIMEOUT_SECONDS = 24.0
 PAGE_CAPTURE_TIMEOUT_SECONDS = 75.0
 CDP_COMMAND_TIMEOUT_SECONDS = 12.0
@@ -237,7 +242,7 @@ def _asset_is_intact(task_dir: Path, item: dict) -> bool:
     try:
         with Image.open(path) as image:
             image.load()
-            return image.size == (VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+            return image.size == (CAPTURE_WIDTH, CAPTURE_HEIGHT)
     except (OSError, UnidentifiedImageError):
         return False
 
@@ -627,45 +632,45 @@ def _focused_screenshot(raw: bytes, focus_rect: object, destination: Path) -> di
     with Image.open(io.BytesIO(raw)) as source:
         source.load()
         source = source.convert("RGB")
-        if source.size != (VIEWPORT_WIDTH, VIEWPORT_HEIGHT):
+        if source.size != (CAPTURE_WIDTH, CAPTURE_HEIGHT):
             raise RuntimeError(f"Unexpected news screenshot size: {source.size}")
 
         rect = focus_rect if isinstance(focus_rect, dict) else {}
         try:
-            left = max(0, min(VIEWPORT_WIDTH - 1, int(float(rect.get("x", 0)))))
-            top = max(0, min(VIEWPORT_HEIGHT - 1, int(float(rect.get("y", 0)))))
+            left = max(0, min(CAPTURE_WIDTH - 1, int(float(rect.get("x", 0)) * CAPTURE_SCALE)))
+            top = max(0, min(CAPTURE_HEIGHT - 1, int(float(rect.get("y", 0)) * CAPTURE_SCALE)))
             right = max(
                 left + 1,
                 min(
-                    VIEWPORT_WIDTH,
-                    int(float(rect.get("x", 0)) + float(rect.get("width", 0))),
+                    CAPTURE_WIDTH,
+                    int((float(rect.get("x", 0)) + float(rect.get("width", 0))) * CAPTURE_SCALE),
                 ),
             )
             bottom = max(
                 top + 1,
                 min(
-                    VIEWPORT_HEIGHT,
-                    int(float(rect.get("y", 0)) + float(rect.get("height", 0))),
+                    CAPTURE_HEIGHT,
+                    int((float(rect.get("y", 0)) + float(rect.get("height", 0))) * CAPTURE_SCALE),
                 ),
             )
         except (TypeError, ValueError):
-            left, top, right, bottom = 0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT
+            left, top, right, bottom = 0, 0, CAPTURE_WIDTH, CAPTURE_HEIGHT
 
-        if right - left < 280 or bottom - top < 100:
-            left, top, right, bottom = 0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT
+        if right - left < 280 * CAPTURE_SCALE or bottom - top < 100 * CAPTURE_SCALE:
+            left, top, right, bottom = 0, 0, CAPTURE_WIDTH, CAPTURE_HEIGHT
         focused = source.crop((left, top, right, bottom))
-        scale = min(1320 / focused.width, 780 / focused.height)
+        scale = min(1320 * CAPTURE_SCALE / focused.width, 780 * CAPTURE_SCALE / focused.height)
         rendered_size = (
             max(1, round(focused.width * scale)),
             max(1, round(focused.height * scale)),
         )
         focused = focused.resize(rendered_size, Image.Resampling.LANCZOS)
-        canvas = Image.new("RGB", (VIEWPORT_WIDTH, VIEWPORT_HEIGHT), "white")
+        canvas = Image.new("RGB", (CAPTURE_WIDTH, CAPTURE_HEIGHT), "white")
         canvas.paste(
             focused,
             (
-                (VIEWPORT_WIDTH - rendered_size[0]) // 2,
-                (VIEWPORT_HEIGHT - rendered_size[1]) // 2,
+                (CAPTURE_WIDTH - rendered_size[0]) // 2,
+                (CAPTURE_HEIGHT - rendered_size[1]) // 2,
             ),
         )
         canvas.save(destination, format="PNG", optimize=True)
@@ -775,7 +780,7 @@ async def _capture_target(target: dict, assignment: dict, destination: Path) -> 
             {
                 "width": VIEWPORT_WIDTH,
                 "height": VIEWPORT_HEIGHT,
-                "deviceScaleFactor": 1,
+                "deviceScaleFactor": CAPTURE_SCALE,
                 "mobile": False,
             },
         )
@@ -874,7 +879,7 @@ async def _capture_target(target: dict, assignment: dict, destination: Path) -> 
 
     with Image.open(destination) as image:
         image.load()
-        if image.size != (VIEWPORT_WIDTH, VIEWPORT_HEIGHT):
+        if image.size != (CAPTURE_WIDTH, CAPTURE_HEIGHT):
             raise RuntimeError(f"Unexpected news screenshot size: {image.size}")
     return info
 
@@ -989,16 +994,17 @@ async def acquire_news_webpages(
                 "english_word_count": int(info.get("english_word_count") or 0),
                 "focus_x": int(info.get("focus_x") or 0),
                 "focus_y": int(info.get("focus_y") or 0),
-                "focus_width": int(info.get("focus_width") or VIEWPORT_WIDTH),
-                "focus_height": int(info.get("focus_height") or VIEWPORT_HEIGHT),
+                "focus_width": int(info.get("focus_width") or CAPTURE_WIDTH),
+                "focus_height": int(info.get("focus_height") or CAPTURE_HEIGHT),
                 "focused_render_width": int(
-                    info.get("focused_render_width") or VIEWPORT_WIDTH
+                    info.get("focused_render_width") or CAPTURE_WIDTH
                 ),
                 "focused_render_height": int(
-                    info.get("focused_render_height") or VIEWPORT_HEIGHT
+                    info.get("focused_render_height") or CAPTURE_HEIGHT
                 ),
-                "width": VIEWPORT_WIDTH,
-                "height": VIEWPORT_HEIGHT,
+                "width": CAPTURE_WIDTH,
+                "height": CAPTURE_HEIGHT,
+                "capture_scale": CAPTURE_SCALE,
                 "bytes": destination.stat().st_size,
                 "sha256": _sha256(destination),
                 "local_path": destination.relative_to(task_dir).as_posix(),

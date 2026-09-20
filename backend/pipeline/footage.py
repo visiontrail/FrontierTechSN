@@ -759,16 +759,34 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def acquisition_profile() -> dict:
+    """Invalidate derivatives acquired under the former 720p download policy."""
+    return {
+        "version": 2,
+        "max_width": config.FOOTAGE_RENDER_MAX_WIDTH,
+        "max_height": config.FOOTAGE_RENDER_MAX_HEIGHT,
+        "max_duration_seconds": config.FOOTAGE_RENDER_MAX_SECONDS,
+        "crf": config.FOOTAGE_RENDER_CRF,
+    }
+
+
+def native_scale_filter() -> str:
+    """Cap either orientation at UHD without enlarging low-resolution sources."""
+    long_edge = max(config.FOOTAGE_RENDER_MAX_WIDTH, config.FOOTAGE_RENDER_MAX_HEIGHT)
+    short_edge = min(config.FOOTAGE_RENDER_MAX_WIDTH, config.FOOTAGE_RENDER_MAX_HEIGHT)
+    return (
+        f"scale=w='min(iw,if(gte(iw,ih),{long_edge},{short_edge}))':"
+        f"h='min(ih,if(gte(iw,ih),{short_edge},{long_edge}))':"
+        "force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
+    )
+
+
 async def _normalize_render_clip(source: Path, destination: Path) -> dict:
     """Create the bounded, seek-safe video copy consumed by HyperFrames."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp.mp4")
     temporary.unlink(missing_ok=True)
-    scale = (
-        f"scale=w='min({config.FOOTAGE_RENDER_MAX_WIDTH},iw)':"
-        f"h='min({config.FOOTAGE_RENDER_MAX_HEIGHT},ih)':"
-        "force_original_aspect_ratio=decrease:flags=lanczos,format=yuv420p"
-    )
+    scale = native_scale_filter() + ",format=yuv420p"
     process = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-hide_banner",
@@ -797,12 +815,12 @@ async def _normalize_render_clip(source: Path, destination: Path) -> dict:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=900)
     except TimeoutError:
         process.kill()
         await process.communicate()
         temporary.unlink(missing_ok=True)
-        raise RuntimeError("footage render normalization timed out after 300s")
+        raise RuntimeError("footage render normalization timed out after 900s")
     if process.returncode or not temporary.is_file() or temporary.stat().st_size == 0:
         temporary.unlink(missing_ok=True)
         detail = (stderr or stdout).decode(errors="replace")[-1200:]
@@ -820,6 +838,7 @@ async def _normalize_render_clip(source: Path, destination: Path) -> dict:
         "local_path": destination,
         "render_safe": True,
         "render_metadata_version": 1,
+        "acquisition_profile": acquisition_profile(),
         "render_profile": {
             "container": "mp4",
             "video_codec": "h264",
@@ -881,7 +900,7 @@ async def normalize_manifest_clips(
         clip["render_safe"] = True
         clip["render_profile"] = normalized["render_profile"]
         changed = True
-        _emit(log, f"Normalized {clip_id} to seek-safe H.264/1080p footage")
+        _emit(log, f"Normalized {clip_id} to seek-safe H.264 at {clip['width']}x{clip['height']}")
     if changed:
         current["updated_at"] = _now()
         _write_manifest(task_dir, current)
@@ -938,6 +957,8 @@ def acquisition_is_complete(task_dir: Path, manifest: dict | None, script: str) 
     root = task_dir.resolve()
     for clip in clips:
         if not isinstance(clip, dict) or not clip.get("local_path") or not clip.get("sha256"):
+            return False
+        if clip.get("acquisition_profile") != acquisition_profile():
             return False
         path = (root / clip["local_path"]).resolve()
         if not path.is_relative_to(root) or not path.is_file():
@@ -1000,6 +1021,8 @@ def _reusable_manifest_clips(
     used_sources: set[str] = set()
     for raw in previous.get("clips") or []:
         if not isinstance(raw, dict) or not _is_open_license(str(raw.get("license") or "")):
+            continue
+        if raw.get("acquisition_profile") != acquisition_profile():
             continue
         source = str(raw.get("source_page_url") or "").strip()
         relative = str(raw.get("local_path") or "").strip()
@@ -1265,6 +1288,7 @@ async def acquire_public_footage(
                     "local_path": destination.relative_to(task_dir).as_posix(),
                     "render_safe": True,
                     "render_profile": normalized["render_profile"],
+                    "acquisition_profile": normalized["acquisition_profile"],
                     "status": "downloaded",
                 }
                 break
@@ -1368,6 +1392,8 @@ def _resume_web_manifest(
         source = str(clip.get("source_page_url") or "")
         if not shot or clip.get("script_excerpt") != shot.get("script_excerpt"):
             reason = "Narration binding changed; a fresh visual review is required"
+        elif clip.get("acquisition_profile") != acquisition_profile():
+            reason = "Footage acquisition profile changed; reacquire at the current source resolution"
         elif not source or source in used_sources or shot["query"] in used_queries:
             reason = "Missing or duplicate source/shot identity"
         elif root not in path.parents or not path.is_file():

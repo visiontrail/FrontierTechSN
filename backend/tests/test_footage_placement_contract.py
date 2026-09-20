@@ -39,6 +39,7 @@ def save_manifest(root):
         body = clip["id"].encode()
         (root / clip["local_path"]).write_bytes(body)
         clip["sha256"] = hashlib.sha256(body).hexdigest()
+        clip["acquisition_profile"] = footage.acquisition_profile()
     manifest = {
         "provider_id": "hybrid-youtube", "orientation": "landscape", "selection_mode": "ai",
         "binding_version": 2, "status": "ready", "requested_clip_count": 2,
