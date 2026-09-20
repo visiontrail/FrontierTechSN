@@ -50,16 +50,16 @@ export default function SocialCopyPanel({ task, scriptDirty }: { task: Task, scr
     <section className="social-copy-panel" aria-labelledby="social-copy-heading">
       <header className="social-copy-header">
         <span className="eyebrow">Ready for your audience</span>
-        <h2 id="social-copy-heading">发布文案</h2>
-        <p>YouTube 标题、Show Notes 与 X 推文</p>
+        <h2 id="social-copy-heading">Publishing Copy</h2>
+        <p>YouTube title, Show Notes, and X post</p>
         <div className="social-copy-toolbar">
           <span className={`social-copy-state${stale ? ' is-stale' : ''}`} role="status">
-            {generating ? '正在编写…' : stale ? '脚本已变更' : data?.status === 'failed' ? '生成失败' : copy ? '文案已就绪' : '等待生成'}
+            {generating ? 'Writing…' : stale ? 'Script changed' : data?.status === 'failed' ? 'Generation failed' : copy ? 'Copy ready' : 'Not generated yet'}
           </span>
           <button type="button" className="btn-ghost" disabled={!eligible || scriptDirty || generating || query.isPending}
             onClick={() => generation.mutate(!!copy || data?.status === 'failed')}
           >
-            {generating ? '生成中…' : copy ? '重新生成' : data?.status === 'failed' ? '重试生成' : '生成文案'}
+            {generating ? 'Generating…' : copy ? 'Regenerate' : data?.status === 'failed' ? 'Retry generation' : 'Generate copy'}
           </button>
         </div>
       </header>
@@ -67,36 +67,36 @@ export default function SocialCopyPanel({ task, scriptDirty }: { task: Task, scr
       {error && <div className="error-box" role="alert">{error}</div>}
       {copyError && <p className="social-copy-notice" role="alert">{copyError}</p>}
       {stale && <p className="social-copy-notice" role="status">
-        {scriptDirty ? '先保存脚本，再重新生成与当前内容一致的发布文案。' : '文案对应旧版脚本。请重新生成后使用。'}
+        {scriptDirty ? 'Save the script, then regenerate the copy to match the current content.' : 'This copy is based on an earlier script. Regenerate it before use.'}
       </p>}
-      {task.status !== 'complete' && <p className="social-copy-notice">视频尚未完成。文案基于已保存的脚本，供发布前准备。</p>}
+      {task.status !== 'complete' && <p className="social-copy-notice">The video is not complete yet. This copy is based on the saved script to help you prepare for publishing.</p>}
 
       <div className="social-copy-fields">
         {[
-          { key: 'title', label: 'YouTube 标题', hint: '用于视频上传标题', value: copy?.youtube_title || '', count: copy ? `${Array.from(copy.youtube_title).length} / 100` : '最多 100 字符', rows: 3 },
-          { key: 'notes', label: 'YouTube Show Notes', hint: '粘贴到视频下方的说明栏', value: copy?.youtube_show_notes || '', count: copy ? `${Array.from(copy.youtube_show_notes).length.toLocaleString()} / 5,000` : '最多 5,000 字符', rows: 13 },
-          { key: 'x', label: 'X 推文', hint: '首句新闻事实 · 按意思分段 · 最多 280 加权字符', value: copy?.x_post || '', count: copy ? `${copy.x_weighted_length} / 280` : '标准单条推文', rows: 6 },
+          { key: 'title', label: 'YouTube Title', hint: 'Use as the title when uploading your video', value: copy?.youtube_title || '', count: copy ? `${Array.from(copy.youtube_title).length} / 100` : 'Up to 100 characters', rows: 3 },
+          { key: 'notes', label: 'YouTube Show Notes', hint: 'Paste into the video description', value: copy?.youtube_show_notes || '', count: copy ? `${Array.from(copy.youtube_show_notes).length.toLocaleString()} / 5,000` : 'Up to 5,000 characters', rows: 13 },
+          { key: 'x', label: 'X Post', hint: 'Lead with the news · Group related ideas into paragraphs · Up to 280 weighted characters', value: copy?.x_post || '', count: copy ? `${copy.x_weighted_length} / 280` : 'One standard post', rows: 6 },
         ].map((field, index) => (
           <div className={`social-copy-field social-copy-${field.key}`} key={field.key}>
             <div className="social-copy-field-heading">
               <label htmlFor={`social-copy-${field.key}`}><span>{String(index + 1).padStart(2, '0')}</span>{field.label}</label>
               <button type="button" className="btn-ghost" disabled={!field.value || stale}
-                aria-label={`复制 ${field.label}`} onClick={() => copyText(field.key, field.value)}>
-                {copied === field.key ? '已复制' : '复制'}
+                aria-label={`Copy ${field.label}`} onClick={() => copyText(field.key, field.value)}>
+                {copied === field.key ? 'Copied' : 'Copy'}
               </button>
             </div>
             <p className="social-copy-hint">{field.hint}</p>
             <textarea id={`social-copy-${field.key}`} readOnly value={field.value} rows={field.rows}
-              placeholder={generating ? '正在根据本期脚本编写…' : eligible ? '生成后可在此复制文案' : '脚本就绪后可生成文案'} />
+              placeholder={generating ? 'Writing from this episode’s script…' : eligible ? 'Generate copy to preview and copy it here' : 'Copy can be generated once the script is ready'} />
             <span className="social-copy-count">{field.count}</span>
           </div>
         ))}
       </div>
       <footer className="social-copy-footer">
-        <span>Show Notes 与推文使用 <a href="https://github.com/blader/humanizer" target="_blank" rel="noreferrer">Humanizer</a> 编写</span>
-        {data?.generated_at && <time dateTime={data.generated_at}>更新于 {new Date(data.generated_at).toLocaleString()}</time>}
+        <span>Show Notes and X posts written with <a href="https://github.com/blader/humanizer" target="_blank" rel="noreferrer">Humanizer</a></span>
+        {data?.generated_at && <time dateTime={data.generated_at}>Updated {new Date(data.generated_at).toLocaleString('en-US')}</time>}
       </footer>
-      <span className="sr-only" role="status">{copied ? '文案已复制到剪贴板' : ''}</span>
+      <span className="sr-only" role="status">{copied ? 'Copy saved to clipboard' : ''}</span>
     </section>
   )
 }
