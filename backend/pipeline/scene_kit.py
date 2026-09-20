@@ -1548,10 +1548,14 @@ def _render_outro(plan: ScenePlan) -> str:
     if plan.outro_credits:
         # Percentage translation follows the final font layout. Pixel heights
         # sampled at timeline creation can clip the last source after fonts load.
+        # Reserve 10% at each end, so shorter outros spend most of their time
+        # scrolling and the last source settles before the closing fade.
+        scroll_start = round(plan.duration * 0.1, 2)
+        scroll_duration = round(plan.duration * 0.8, 2)
         timeline += f'''        inAt("#{plan.id} .outro-credits-roll", {{ y: 36, yPercent: 0 }}, {{
           y: {1000 if portrait else 600}, yPercent: -100,
-          duration: {max(.1, plan.duration - 6):.2f}, ease: "none"
-        }}, 2.5);
+          duration: {scroll_duration:.2f}, ease: "none"
+        }}, {scroll_start:.2f});
 '''
     return _shell(plan, css=css, markup=markup, timeline=timeline, wash=(50, 50))
 

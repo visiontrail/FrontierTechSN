@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pytest
 
@@ -194,7 +195,7 @@ def test_credit_tail_preserves_speech_and_is_idempotent(tmp_path, monkeypatch):
     board['scenes'][0].update(start=100, duration=6, lines=[dict(start=100, duration=6, text='Goodbye')])
     board['audio_duration'] = 106
     staged = outros.stage_outro(task, board, 'morning-brief')
-    assert 6 < staged['duration'] <= 29.9
+    assert 10 <= staged['duration'] <= 14.9
     assert board['total_duration'] == pytest.approx(100 + staged['duration'])
     assert board['audio_duration'] == 106
     assert board['scenes'][0]['lines'][0]['duration'] == 6
@@ -216,20 +217,66 @@ def test_source_roll_caps_duration_and_replaces_old_long_tail(tmp_path, monkeypa
     board = _storyboard()
     board['scenes'][0].update(start=100, duration=80, spoken_closing_duration=6)
     staged = outros.stage_outro(task, board, 'morning-brief', video_orientation=orientation)
-    assert staged['duration'] == 29.9
+    assert staged['duration'] == 14.9
     assert len(staged['outro_credits']) == 40
-    assert board['total_duration'] == 129.9
-    assert board['credits_tail_duration'] == 23.9
+    assert board['total_duration'] == 114.9
+    assert board['credits_tail_duration'] == 8.9
 
 
-def test_overlong_closing_is_rejected_without_cutting_speech(tmp_path, monkeypatch):
+@pytest.mark.parametrize('spoken_duration', [15, 20, 42.5])
+def test_overlong_closing_is_rejected_without_cutting_speech(tmp_path, monkeypatch, spoken_duration):
     _install_fake_library(tmp_path, monkeypatch)
     task = tmp_path / 'task'
     _write_json(task / 'summary.json', dict(talking_points=[dict(headline='News', url='https://news.test')]))
     board = _storyboard()
-    with pytest.raises(ValueError, match='shorten the closing narration'):
+    board['scenes'][0]['duration'] = spoken_duration
+    with pytest.raises(ValueError, match='15-second outro budget'):
         outros.stage_outro(task, board, 'morning-brief')
-    assert board['scenes'][0]['duration'] == 42.5
+    assert board['scenes'][0]['duration'] == spoken_duration
+
+
+@pytest.mark.parametrize('portrait', [False, True])
+def test_credit_duration_adapts_to_list_height_within_short_budget(portrait):
+    row = dict(kind='NEWS', title='Report', source='Publisher', url='https://news.test')
+    durations = [outros.credits_duration([row] * count, portrait=portrait) for count in range(1, 41)]
+    assert durations[0] == 10
+    assert durations[-1] == 14.9
+    assert durations == sorted(durations)
+    assert any(10 < duration < 14.9 for duration in durations)
+    assert outros.credits_duration([], portrait=portrait) == 0
+
+
+@pytest.mark.parametrize('spoken_duration, expected', [(6, 10), (12, 12), (14.9, 14.9)])
+def test_short_roll_fits_spoken_closing_without_retiming_it(tmp_path, monkeypatch, spoken_duration, expected):
+    _install_fake_library(tmp_path, monkeypatch)
+    task = tmp_path / 'task'
+    _write_json(task / 'summary.json', dict(talking_points=[dict(headline='News', url='https://news.test')]))
+    board = _storyboard()
+    board['scenes'][0]['duration'] = spoken_duration
+    staged = outros.stage_outro(task, board, 'morning-brief')
+    assert staged['duration'] == expected
+    assert board['credits_tail_duration'] == round(expected - spoken_duration, 2)
+    assert board['scenes'][0]['spoken_closing_duration'] == spoken_duration
+
+
+@pytest.mark.parametrize('duration', [10, 12.5, 14.9])
+def test_source_roll_scales_timing_and_finishes_before_fade(duration):
+    plan = scene_kit.ScenePlan(
+        id='scene-09', duration=duration, archetype='outro',
+        footage_src='background.mp4', outro_logo_src='logo.png',
+        outro_credits=(dict(kind='NEWS', title='Report', source='Publisher'),),
+    )
+    rendered = scene_kit.render_scene(plan)
+    match = re.search(
+        r'inAt\("#scene-09 \.outro-credits-roll".*?yPercent: -100,\s*'
+        r'duration: ([\d.]+), ease: "none"\s*\}, ([\d.]+)\);',
+        rendered, re.S,
+    )
+    assert match is not None
+    scroll_duration, start = map(float, match.groups())
+    assert start == pytest.approx(duration * 0.1)
+    assert scroll_duration == pytest.approx(duration * 0.8)
+    assert start + scroll_duration < duration - 0.58
 
 
 def test_source_roll_is_locked_against_director_removal():

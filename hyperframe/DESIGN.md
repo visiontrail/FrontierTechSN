@@ -54,9 +54,11 @@ Credit every selected news article and the media used in the finished scenes.
 Show publisher, complete headline, publication date when available, and website;
 retain full permalinks in `outro_credits.json` and the editable source markup.
 Extend the picture and music when necessary for reading, preserving the spoken
-closing and caption timestamps. Cap the credit outro at 29.9 seconds to keep
-the encoded result below 30 seconds, including final-frame/audio rounding.
-Increase scroll speed to fit all entries within that budget, retaining the
-opening and final reading holds. Reject an overlong spoken closing instead of
+closing and caption timestamps. Choose a 10–15 second credit outro based on
+the source-list height and spoken closing, capped at 14.9 seconds to leave room
+for final-frame/audio rounding. Scroll through the complete list during the
+middle 80% of the outro, reserving 10% at each end for reading holds (the final
+hold includes the closing fade). Speed follows the actual duration and rendered
+list height in both orientations. Reject an overlong spoken closing instead of
 cutting off narration. The source roll stays deterministic during director edits
 and retries.

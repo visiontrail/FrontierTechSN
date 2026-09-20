@@ -22,8 +22,9 @@ from backend import config
 
 DEFAULT_OUTRO_STYLE = "morning-brief"
 OUTRO_DURATION_SECONDS = 6.0
+MIN_CREDITS_OUTRO_SECONDS = 10.0
 # Leave room for the renderer's inclusive final frame and AAC packet rounding.
-MAX_CREDITS_OUTRO_SECONDS = 29.9
+MAX_CREDITS_OUTRO_SECONDS = 14.9
 OUTRO_LIBRARY_DIR = config.PROJECT_ROOT / "data" / "outros"
 OUTRO_LOGO_FILENAME = "bytefront-logo-transparent.png"
 OUTRO_LOGO_SHA256 = "d4e2fd3d0b0c8b8a0cacc0c4b710acde141961652363af414a9e262bdef40c57"
@@ -184,7 +185,11 @@ def credits_duration(rows: list[dict[str, str]], *, portrait: bool = False) -> f
     height = sum(68 + sum(36 * max(1, math.ceil(sum(
         2 if unicodedata.east_asian_width(c) in "WF" else 1.1 for c in line
     ) / units)) for line in credit_lines(row)) for row in rows)
-    return min(MAX_CREDITS_OUTRO_SECONDS, round(6 + max(36, height - viewport) / 60, 2)) if rows else 0
+    if not rows:
+        return 0.0
+    return min(MAX_CREDITS_OUTRO_SECONDS, max(
+        MIN_CREDITS_OUTRO_SECONDS, round(6 + max(36, height - viewport) / 60, 2),
+    ))
 
 
 def credits_markup(rows: list[dict[str, str]]) -> str:
@@ -238,7 +243,7 @@ def stage_outro(
     credits = collect_credits(task_root, media_plans or [])
     spoken_duration = float(closing.get("spoken_closing_duration", duration))
     if credits and spoken_duration > MAX_CREDITS_OUTRO_SECONDS:
-        raise ValueError("Spoken closing exceeds the 30-second outro budget; shorten the closing narration")
+        raise ValueError("Spoken closing exceeds the 15-second outro budget; shorten the closing narration")
     if credits:
         _stage_background_hold(background_dest, asset_dir / "hold.png")
     closing["spoken_closing_duration"] = spoken_duration
