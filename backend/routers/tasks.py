@@ -607,6 +607,27 @@ async def download_video(
     )
 
 
+@router.get("/{task_id}/subtitles")
+async def download_subtitles(
+    task_id: str,
+    artifact: Literal["final", "retained"] = "final",
+):
+    # Reuse the video's state gate so subtitles always refer to the same cut.
+    video = await download_video(task_id, artifact)
+    path = Path(video.path).with_suffix(".srt")
+    if not path.is_file():
+        raise HTTPException(404, "Subtitles are not available for this video cut")
+    suffix = "" if artifact == "final" else "-retained"
+    return FileResponse(
+        path, media_type="application/x-subrip; charset=utf-8",
+        filename=f"{task_id}{suffix}.srt",
+        headers={
+            "X-Video-Artifact-State": video.headers["X-Video-Artifact-State"],
+            "X-Task-Status": video.headers["X-Task-Status"],
+        },
+    )
+
+
 @router.get("/{task_id}/thumbnail")
 async def download_thumbnail(task_id: str):
     task = await db.get_task(task_id)

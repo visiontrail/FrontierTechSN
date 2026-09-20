@@ -134,6 +134,7 @@ export interface Task {
   audio_path: string | null;
   video_path: string | null;
   video_artifact_state: VideoArtifactState | null;
+  subtitles_available: boolean;
   thumbnail_path: string | null;
   duration_seconds: number | null;
   suppress_next_auto_publish: boolean;
@@ -783,6 +784,10 @@ export function videoUrl(taskId: string, artifact: VideoArtifactState): string {
 
 export function audioUrl(taskId: string): string {
   return `${BASE}/api/tasks/${taskId}/audio`;
+}
+
+export function subtitlesUrl(taskId: string, artifact: VideoArtifactState): string {
+  return `${BASE}/api/tasks/${taskId}/subtitles?artifact=${artifact}`;
 }
 
 export function scriptUrl(taskId: string): string {

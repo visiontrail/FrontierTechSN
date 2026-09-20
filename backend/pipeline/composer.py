@@ -43,6 +43,7 @@ from backend.pipeline import (
     outros,
     scene_kit,
     storyboard as sb,
+    subtitles,
     visual_plan,
 )
 from backend.pipeline.process_logging import run_capture_logged, stream_subprocess
@@ -923,6 +924,12 @@ def _promote_quality_gated_candidate(
             f"not promoted; automatic compose retry {state['attempt_count']} requested"
             + (f": {'; '.join(details)}" if details else "")
         )
+    # Export only after the candidate passes. The versioned filename keeps a
+    # failed/new attempt from replacing the retained cut's subtitle track.
+    board = sb.read_storyboard(output_dir)
+    if board is None:
+        raise RuntimeError("The validated video's storyboard is missing; cannot export subtitles")
+    subtitles.write_subtitles(board, output_dir / f"video-{video_sha256[:16]}.mp4")
     retry_state_path = output_dir / QUALITY_RETRY_STATE_FILENAME
     if retry_state_path.is_file():
         try:

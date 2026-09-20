@@ -185,7 +185,7 @@ def _caption_chunks(value: object) -> list[str]:
     return chunks
 
 
-def _caption_clips(storyboard: dict) -> list[str]:
+def caption_segments(storyboard: dict) -> list[dict]:
     """Timed single-line caption groups, clamped so neighbours never overlap."""
     lines: list[dict] = []
     for scene in storyboard.get("scenes", []):
@@ -212,7 +212,7 @@ def _caption_clips(storyboard: dict) -> list[str]:
             end = line_start + (line_end - line_start) * elapsed_weight / total_weight
             segments.append({"start": start, "end": end, "text": chunk})
 
-    out: list[str] = []
+    out: list[dict] = []
     for i, segment in enumerate(segments):
         start = round(float(segment["start"]), 2)
         end = round(float(segment["end"]), 2)
@@ -220,6 +220,15 @@ def _caption_clips(storyboard: dict) -> list[str]:
         if next_start is not None:
             end = min(end, next_start - 0.02)
         duration = round(max(0.02, end - start), 2)
+        out.append({"start": start, "duration": duration, "text": segment["text"]})
+    return out
+
+
+def _caption_clips(storyboard: dict) -> list[str]:
+    out: list[str] = []
+    for i, segment in enumerate(caption_segments(storyboard)):
+        start = segment["start"]
+        duration = segment["duration"]
         text = _esc(segment["text"])
         out.append(
             f'      <div id="cap-{i:03d}" class="clip caption" data-start="{start}" '

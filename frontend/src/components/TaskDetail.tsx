@@ -11,6 +11,7 @@ import {
   renderTask,
   scheduleTask,
   videoUrl,
+  subtitlesUrl,
   audioUrl,
   scriptUrl,
   thumbnailUrl,
@@ -226,6 +227,13 @@ export default function TaskDetail() {
               <a href={videoUrl(task.id, task.video_artifact_state)} download>
                 <button className="btn-primary" type="button">
                   {task.video_artifact_state === 'final' ? 'Download Video' : 'Download Last Validated Cut'}
+                </button>
+              </a>
+            )}
+            {task.subtitles_available && task.video_artifact_state && (
+              <a href={subtitlesUrl(task.id, task.video_artifact_state)} download>
+                <button className="btn-ghost" type="button" title="Upload this file with timing in YouTube Studio → Subtitles">
+                  {task.video_artifact_state === 'final' ? 'Download Subtitles (.srt)' : 'Last Validated Subtitles (.srt)'}
                 </button>
               </a>
             )}

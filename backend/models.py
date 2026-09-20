@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 import re
+from pathlib import Path
 from typing import Any, Literal, Optional
 import uuid
 from urllib.parse import parse_qs, urlparse
@@ -249,6 +250,11 @@ class TaskResponse(BaseModel):
     origin_id: Optional[str] = None
     origin_label: Optional[str] = None
     planned_publish_at: Optional[str] = None
+
+    @computed_field
+    @property
+    def subtitles_available(self) -> bool:
+        return bool(self.video_path and Path(self.video_path).with_suffix(".srt").is_file())
 
     @computed_field
     @property

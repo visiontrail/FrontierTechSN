@@ -386,7 +386,8 @@ def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, 
     candidate = tmp_path / "video.next.mp4"
     candidate.write_bytes(b"rendered video")
     request = {"script_path": str(script), "captions_enabled": False}
-    board = {"total_duration": 8.0, "alignment": {"passed": True}}
+    board = {"total_duration": 8.0, "audio_duration": 8.0, "alignment": {"passed": True},
+             "scenes": [{"lines": [{"start": 0.0, "duration": 8.0, "text": "The complete narration"}]}]}
     (tmp_path / "storyboard.json").write_text(json.dumps(board))
     digest = composer._sha256_path(candidate)
     (tmp_path / "render_review_checkpoint.json").write_text(json.dumps({

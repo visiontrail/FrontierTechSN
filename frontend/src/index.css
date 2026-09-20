@@ -3676,7 +3676,7 @@ video {
 .detail-command {
   display: grid;
   flex: 0 0 auto;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1.2fr) minmax(0, 1fr);
   align-items: start;
   gap: 16px clamp(16px, 2.4vw, 34px);
 }
@@ -3714,6 +3714,7 @@ video {
 
 .detail-command-side {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   align-items: flex-end;
   gap: 12px;
