@@ -85,6 +85,9 @@ The encoder uses constant-quality encoding, so final bitrate and file size
 depend on content. A 4K output file does not imply every embedded source is
 native 4K. Preview at 1080p when needed; final UHD rendering has a larger
 pixel-aware deadline and may consume substantially more memory and time.
+The quiet-period limit also scales with duration, pixels and frame rate because
+software encoding may produce no progress output. Nested FFmpeg deadlines use
+these same limits, avoiding the renderer's fixed ten-minute encoding cutoff.
 
 If URL inspection is unavailable, one Gemini request can include up to four labelled contact sheets, with a separate suitability verdict for each candidate. Missing shots block rendering. The task's `footage/manifest.json` records missing searches, rejections, and invalidated clips; `footage/history/` keeps earlier ledgers.
 

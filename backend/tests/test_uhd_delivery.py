@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import replace
@@ -52,6 +53,29 @@ def test_resolution_change_invalidates_review_checkpoint_and_extends_timeout(mon
     uhd = resolve_render_spec()
     assert old_hash != composer._review_retry_fingerprint(tmp_path, request)
     assert composer._render_timeout(300, uhd) > composer._render_timeout(300, hd)
+
+
+def test_uhd_encoder_and_quiet_deadlines_cover_long_episodes(monkeypatch):
+    monkeypatch.setenv("FFMPEG_ENCODE_TIMEOUT_MS", "600000")
+    monkeypatch.setenv("RENDER_ENV_INHERITANCE_TEST", "preserved")
+    hd = replace(resolve_render_spec(), width=1920, height=1080, fps=30)
+    uhd = replace(hd, width=3840, height=2160)
+    timeout = composer._render_timeout(600, uhd)
+    stall_timeout = composer._render_stall_timeout(600, uhd)
+    assert 960 < stall_timeout < timeout
+    assert stall_timeout > composer._render_stall_timeout(600, hd)
+    assert composer._render_stall_timeout(600, replace(uhd, fps=60)) > stall_timeout
+    env = composer._render_environment(timeout, stall_timeout)
+    assert int(env["FFMPEG_ENCODE_TIMEOUT_MS"]) == stall_timeout * 1000
+    assert int(env["FFMPEG_PROCESS_TIMEOUT_MS"]) == stall_timeout * 1000
+    assert int(env["FFMPEG_STREAMING_TIMEOUT_MS"]) == timeout * 1000
+    assert env["RENDER_ENV_INHERITANCE_TEST"] == "preserved"
+    assert os.environ["FFMPEG_ENCODE_TIMEOUT_MS"] == "600000"
+
+
+def test_quiet_deadline_covers_frozen_browser_protocol_limit():
+    render = replace(resolve_render_spec(), protocol_timeout_ms=1800000)
+    assert composer._render_stall_timeout(1, render) >= 1860
 
 
 @pytest.mark.parametrize("rate", ["15/1", "0/0", "bad", "nan/1", None])

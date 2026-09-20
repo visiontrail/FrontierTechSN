@@ -67,9 +67,9 @@ SILENCE_TIMEOUT = 120
 # kill a slow-but-live render, only a genuinely wedged one.
 RENDER_SECONDS_PER_FRAME = 1.5
 RENDER_TIMEOUT_FLOOR = 900  # never below 15 min, regardless of how short the clip is
-# The real hang detector: HyperFrames reports capture progress continuously, so
-# going silent for this long means it is wedged rather than merely slow. Warmup
-# (Chrome launch, first-frame compile) is the longest legitimate quiet stretch.
+# Capture reports progress continuously, but software encoding can stay silent
+# until the entire episode is encoded. This is only the quiet-period floor;
+# the per-render ceiling also accounts for the encoding workload.
 RENDER_STALL_TIMEOUT = max(600, math.ceil(config.RENDER_PROTOCOL_TIMEOUT_MS / 1000) + 60)
 
 VISUAL_PLAN_CACHE_FILENAME = "visual_plan.cache.json"
@@ -997,6 +997,28 @@ def _render_timeout(duration: float, render: RenderSpec) -> int:
     frames = max(1, round(duration * render.fps))
     pixel_ratio = render.width * render.height / (1920 * 1080)
     return max(RENDER_TIMEOUT_FLOOR, math.ceil(300 + frames * RENDER_SECONDS_PER_FRAME * pixel_ratio))
+
+
+def _render_stall_timeout(duration: float, render: RenderSpec) -> int:
+    """Allow a bounded quiet encode proportional to duration, pixels and fps."""
+    pixel_ratio = render.width * render.height / (1920 * 1080)
+    encode_seconds = math.ceil(300 + max(0, duration) * 2 * pixel_ratio * render.fps / 30)
+    return max(RENDER_STALL_TIMEOUT, math.ceil(render.protocol_timeout_ms / 1000) + 60, encode_seconds)
+
+
+def _render_environment(timeout: int, stall_timeout: int) -> dict[str, str]:
+    """Keep the renderer's nested FFmpeg timers consistent with our limits.
+
+    HyperFrames otherwise stops a disk encode after ten minutes, regardless of
+    the outer UHD deadline. Streaming encoding spans capture and therefore
+    uses the total deadline; quiet disk encoding and muxing use the stall limit.
+    """
+    return {
+        **os.environ,
+        "FFMPEG_ENCODE_TIMEOUT_MS": str(stall_timeout * 1000),
+        "FFMPEG_PROCESS_TIMEOUT_MS": str(stall_timeout * 1000),
+        "FFMPEG_STREAMING_TIMEOUT_MS": str(timeout * 1000),
+    }
 
 
 def _build_render_command(
@@ -2104,11 +2126,12 @@ async def compose_video(
     staged_video_path.unlink(missing_ok=True)
     total_frames = max(1, round(float(board["total_duration"]) * render.fps))
     render_timeout = _render_timeout(float(board["total_duration"]), render)
+    stall_timeout = _render_stall_timeout(float(board["total_duration"]), render)
     emit(
         f"Rendering ~{total_frames} frames "
         f"({render.width}x{render.height}, {board['total_duration']:.0f}s @ {render.fps}fps, {render.quality}, "
         f"{render.workers} worker(s)); render timeout {render_timeout}s, "
-        f"stall timeout {RENDER_STALL_TIMEOUT}s"
+        f"stall timeout {stall_timeout}s"
     )
 
     render_command = _build_render_command(output_dir_path, staged_video_path, frame, render)
@@ -2119,7 +2142,8 @@ async def compose_video(
         log=log,
         cwd=config.HYPERFRAME_DIR,
         timeout=render_timeout,
-        stall_timeout=RENDER_STALL_TIMEOUT,
+        stall_timeout=stall_timeout,
+        env=_render_environment(render_timeout, stall_timeout),
     )
 
     if returncode != 0:
