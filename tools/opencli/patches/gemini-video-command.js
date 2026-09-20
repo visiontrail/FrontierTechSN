@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { cli, Strategy } from '@jackwener/opencli/registry';
@@ -718,110 +719,104 @@ export async function waitForVideo(page, before, timeoutSeconds, {
     throw new CommandExecutionError(`GEMINI_VIDEO_GENERATION_TIMEOUT: no completed video within the original generation deadline; conversation=${checkpoint.url || 'unknown'}`);
 }
 
-function downloadedPath(result) {
-    const filename = String(result?.filename || '').trim();
-    if (!filename) return '';
-    const candidates = [filename, path.join(os.homedir(), 'Downloads', path.basename(filename))];
-    return candidates.find(candidate => path.isAbsolute(candidate) && fs.existsSync(candidate)) || '';
-}
-
-async function downloadVideo(page, outputPath, timeoutSeconds) {
-    const browserFileName = `opencli-gemini-video-${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`;
-    const browserDownload = unwrap(await page.evaluate(`(async () => {
-      try {
-        const video = document.querySelector('generated-video video');
-        const source = String(video?.currentSrc || video?.src || '');
-        if (!source) return { ok: false, reason: 'generated video source URL is missing' };
-        // The contribution URL requires the signed-in Gemini cookies. Fetch it
-        // inside the page, then hand the Blob to Chrome with a unique filename;
-        // this avoids depending on a hover-only control or an extension download
-        // event that some Browser Bridge builds do not emit.
-        const response = await fetch(source, { credentials: 'include' });
-        if (!response.ok) return { ok: false, reason: 'video fetch returned HTTP ' + response.status };
-        const blob = await response.blob();
-        if (blob.size < 1024) return { ok: false, reason: 'video fetch returned an empty blob' };
-        const anchor = document.createElement('a');
-        const objectUrl = URL.createObjectURL(blob);
-        anchor.href = objectUrl;
-        anchor.download = ${JSON.stringify(browserFileName)};
-        anchor.style.display = 'none';
-        document.body.appendChild(anchor);
-        anchor.click();
-        setTimeout(() => {
-          URL.revokeObjectURL(objectUrl);
-          anchor.remove();
-        }, 30000);
-        return { ok: true, size: blob.size, type: blob.type };
-      } catch (error) {
-        return { ok: false, reason: String(error?.message || error) };
-      }
-    })()`));
-    if (browserDownload?.ok) {
-        const source = path.join(os.homedir(), 'Downloads', browserFileName);
-        const deadline = Date.now() + timeoutSeconds * 1000;
-        while (Date.now() < deadline) {
-            if (fs.existsSync(source) && fs.statSync(source).size >= Number(browserDownload.size || 1024)) {
-                fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-                fs.copyFileSync(source, outputPath);
-                return { downloaded: true, filename: source, size: fs.statSync(source).size };
-            }
-            await page.wait(0.5);
-        }
-        throw new CommandExecutionError(`Gemini video was fetched but Chrome did not finish ${browserFileName}`);
-    }
-
-    if (typeof page.waitForDownload !== 'function') {
-        throw new CommandExecutionError(
-            `Gemini in-page download failed (${browserDownload?.reason || 'unknown error'}) and the Browser Bridge has no download lifecycle support`
-        );
-    }
-    if (typeof page.cdp === 'function') {
-        const videoCenter = unwrap(await page.evaluate(`(() => {
-          const video = document.querySelector('generated-video');
-          if (!video) return null;
-          const rect = video.getBoundingClientRect();
-          return { x: rect.left + rect.width / 2, y: rect.top + Math.min(48, rect.height / 2) };
-        })()`));
-        if (Number.isFinite(videoCenter?.x) && Number.isFinite(videoCenter?.y)) {
-            await page.cdp('Input.dispatchMouseEvent', {
-                type: 'mouseMoved', x: videoCenter.x, y: videoCenter.y,
-            });
-            await page.wait(0.5);
-        }
-    }
-    const download = page.waitForDownload('', timeoutSeconds * 1000);
-    if (!await clickLabel(page, ['download video'])) {
-        if (!await clickLabel(page, ['share video', 'share'])) {
-            throw new CommandExecutionError('Gemini generated video is visible, but no Download or Share control was found');
-        }
-        await page.wait(1);
-        if (!await clickLabel(page, ['download video', 'download'])) {
-            throw new CommandExecutionError('Gemini Share menu did not expose Download video');
-        }
-    }
-    let result;
+export async function downloadVideo(page, outputPath, timeoutSeconds) {
+    const transferKey = `__opencliGeminiVideo_${randomUUID().replaceAll('-', '')}`;
+    const output = path.resolve(outputPath);
+    const partial = `${output}.${randomUUID()}.part`;
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    const chunkSize = 192 * 1024;
+    let descriptor;
     try {
-        result = await download;
-    } catch (error) {
-        throw new CommandExecutionError(
-            `${String(error?.message || error)}; Gemini in-page fetch failed first: ${browserDownload?.reason || 'unknown error'}`
-        );
+        // Fetch with the signed-in page's cookies, but transfer bytes through
+        // the bridge to the requested task path. Never use the browser's
+        // download manager or change a shared browser download directory.
+        const started = unwrap(await page.evaluate(`(() => {
+          const video = document.querySelector('generated-video video');
+          const source = String(video?.currentSrc || video?.src || '');
+          if (!source) return { ok: false, reason: 'generated video source URL is missing' };
+          const transfer = { pending: true, controller: new AbortController() };
+          globalThis[${JSON.stringify(transferKey)}] = transfer;
+          const timer = setTimeout(() => transfer.controller.abort(), ${Math.max(1, Math.floor(timeoutSeconds * 1000))});
+          // Return immediately; a bridge evaluate call has a shorter timeout
+          // than a media transfer. Poll small metadata responses instead.
+          (async () => {
+            try {
+              const response = await fetch(source, { credentials: 'include', signal: transfer.controller.signal });
+              if (!response.ok) throw new Error('video fetch returned HTTP ' + response.status);
+              const blob = await response.blob();
+              if (blob.size < 1024) throw new Error('video fetch returned an empty blob');
+              Object.assign(transfer, { ok: true, size: blob.size, blob });
+            } catch (error) {
+              Object.assign(transfer, { ok: false, reason: String(error?.message || error) });
+            } finally {
+              transfer.pending = false;
+              clearTimeout(timer);
+            }
+          })();
+          return { ok: true };
+        })()`));
+        if (!started?.ok) {
+            throw new CommandExecutionError(`Gemini in-page download failed: ${started?.reason || 'could not start video transfer'}`);
+        }
+        let metadata;
+        while (Date.now() < deadline) {
+            metadata = unwrap(await page.evaluate(`(() => {
+              const transfer = globalThis[${JSON.stringify(transferKey)}];
+              if (!transfer) return { ok: false, reason: 'video transfer was lost after navigation' };
+              return { pending: transfer.pending, ok: transfer.ok, size: transfer.size, reason: transfer.reason };
+            })()`));
+            if (!metadata?.pending) break;
+            await page.wait(0.5);
+        }
+        if (metadata?.pending) throw new CommandExecutionError('Gemini video download exceeded its remaining deadline');
+        if (!metadata?.ok || !Number.isSafeInteger(metadata.size) || metadata.size < 1024) {
+            throw new CommandExecutionError(`Gemini in-page download failed: ${metadata?.reason || 'invalid video size'}`);
+        }
+        fs.mkdirSync(path.dirname(output), { recursive: true });
+        descriptor = fs.openSync(partial, 'wx');
+        for (let offset = 0; offset < metadata.size; offset += chunkSize) {
+            if (Date.now() >= deadline) {
+                throw new CommandExecutionError('Gemini video download exceeded its remaining deadline');
+            }
+            const length = Math.min(chunkSize, metadata.size - offset);
+            const encoded = unwrap(await page.evaluate(`(async () => {
+              const blob = globalThis[${JSON.stringify(transferKey)}]?.blob;
+              if (!blob) throw new Error('Gemini video transfer was lost after navigation');
+              const bytes = new Uint8Array(await blob.slice(${offset}, ${offset + length}).arrayBuffer());
+              let binary = '';
+              for (let start = 0; start < bytes.length; start += 8192) {
+                binary += String.fromCharCode(...bytes.subarray(start, start + 8192));
+              }
+              return btoa(binary);
+            })()`));
+            const bytes = Buffer.from(typeof encoded === 'string' ? encoded : '', 'base64');
+            if (bytes.length !== length) {
+                throw new CommandExecutionError('Gemini video download returned an incomplete chunk');
+            }
+            if (offset === 0 && bytes.toString('ascii', 4, 8) !== 'ftyp') {
+                throw new CommandExecutionError('Gemini video download did not return an MP4 file');
+            }
+            let written = 0;
+            while (written < bytes.length) {
+                written += fs.writeSync(descriptor, bytes, written, bytes.length - written);
+            }
+        }
+        if (Date.now() >= deadline || fs.fstatSync(descriptor).size !== metadata.size) {
+            throw new CommandExecutionError('Gemini video download did not finish within its remaining budget');
+        }
+        fs.fsyncSync(descriptor);
+        fs.closeSync(descriptor);
+        descriptor = undefined;
+        fs.renameSync(partial, output);
+        return { downloaded: true, filename: output, size: metadata.size };
+    } finally {
+        if (descriptor !== undefined) fs.closeSync(descriptor);
+        fs.rmSync(partial, { force: true });
+        await page.evaluate(`(() => {
+          globalThis[${JSON.stringify(transferKey)}]?.controller.abort();
+          delete globalThis[${JSON.stringify(transferKey)}];
+        })()`).catch(() => {});
     }
-    if (!result?.downloaded) {
-        throw new CommandExecutionError(
-            result?.error || `Gemini video download did not complete after in-page fetch failed: ${browserDownload?.reason || 'unknown error'}`
-        );
-    }
-    const source = downloadedPath(result);
-    if (!source) {
-        throw new CommandExecutionError(`Gemini download completed but its local path could not be resolved: ${JSON.stringify(result)}`);
-    }
-    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    fs.copyFileSync(source, outputPath);
-    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1024) {
-        throw new CommandExecutionError(`Downloaded Gemini video is empty: ${outputPath}`);
-    }
-    return result;
 }
 
 export const videoCommand = cli({

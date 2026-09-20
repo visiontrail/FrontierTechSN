@@ -37,7 +37,9 @@ Each Paper-Collage clip targets the length of its narration scene, up to Gemini'
 
 Each Paper-Collage browser session belongs to a task, scene, and provider. Tabs stay open during retries. When the operation succeeds, fails, or is cancelled, it closes its session and checks that all owned tabs are gone. A persistent ownership journal supports cleanup after a worker restart or before cached acquisition results are reused. Cleanup leaves other sessions and user tabs alone and records failures for later recovery.
 
-Gemini video submissions use the shared generation limiter. After a transport failure, a retry resumes the conversation associated with the same input if its URL is known, keeping the original deadline. If submission is uncertain and the URL cannot be recovered, the operation stops to avoid a duplicate submission.
+Gemini videos are fetched through the signed-in page and written directly to `outputs/<task_id>/collage_broll/<item>/video/gemini-web-original.mp4`. Transfers use a temporary file in that same directory and publish it only after all bytes arrive and the MP4 header is checked. Failed transfers remove their partial file and preserve any existing complete video. The browser's Downloads folder is not used.
+
+Gemini video submissions use its 60–120 second randomized generation limiter. After a transport failure, a retry resumes the conversation associated with the same input if its URL is known, keeping the original deadline. If submission is uncertain and the URL cannot be recovered, the operation stops to avoid a duplicate submission.
 
 A generation response that stays unchanged reaches the stall limit at `COLLAGE_GEMINI_STALL_TIMEOUT` (600 seconds by default, configurable in **Admin → System → Paper-collage B-roll**). Spinner animation does not count as progress. A stall, expired deadline, or explicit generation failure ends the acquisition without starting a fresh video. If the collage is optional, the pipeline can use available media instead. Explicit clip counts must still be met.
 

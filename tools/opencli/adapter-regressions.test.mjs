@@ -25,8 +25,96 @@ import {
   uploadFrames,
   submittedVideoPrompt,
   waitForVideo,
+  downloadVideo,
   videoCommand,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+function videoTransferPage(payload, { failChunk = 0, httpStatus = 200 } = {}) {
+  let chunks = 0
+  const context = vm.createContext({
+    document: { querySelector(selector) {
+      assert.equal(selector, 'generated-video video')
+      return { currentSrc: 'https://example.test/generated.mp4' }
+    } },
+    async fetch(url, options) {
+      assert.equal(url, 'https://example.test/generated.mp4')
+      assert.equal(options.credentials, 'include')
+      assert.ok(options.signal)
+      return { ok: httpStatus === 200, status: httpStatus, async blob() { return new Blob([payload]) } }
+    },
+    AbortController, setTimeout, clearTimeout, btoa,
+  })
+  return {
+    context,
+    async wait() { await new Promise(resolve => setImmediate(resolve)) },
+    async evaluate(script) {
+      if (script.includes('blob.slice(') && ++chunks === failChunk) throw new Error('bridge disconnected')
+      return await vm.runInContext(script, context)
+    },
+  }
+}
+
+test('Gemini video downloads bytes directly into the task directory across multiple bridge chunks', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-task-download-'))
+  try {
+    const output = path.join(directory, 'collage_broll', 'scene-02', 'video', 'gemini-web-original.mp4')
+    const payload = Buffer.alloc(420123, 37)
+    payload.write('ftyp', 4)
+    const page = videoTransferPage(payload)
+    const result = await downloadVideo(page, output, 30)
+    assert.deepEqual(result, { downloaded: true, filename: output, size: payload.length })
+    assert.deepEqual(fs.readFileSync(output), payload)
+    assert.deepEqual(fs.readdirSync(path.dirname(output)), ['gemini-web-original.mp4'])
+    assert.equal(Object.keys(page.context).some(key => key.startsWith('__opencliGeminiVideo_')), false)
+  } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('Gemini interrupted downloads remove task partials and preserve the previous complete video', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-task-interrupted-'))
+  try {
+    const output = path.join(directory, 'video.mp4')
+    fs.writeFileSync(output, 'previous complete video')
+    const payload = Buffer.alloc(420123, 37)
+    payload.write('ftyp', 4)
+    const page = videoTransferPage(payload, { failChunk: 2 })
+    await assert.rejects(downloadVideo(page, output, 30), /bridge disconnected/)
+    assert.equal(fs.readFileSync(output, 'utf8'), 'previous complete video')
+    assert.deepEqual(fs.readdirSync(directory), ['video.mp4'])
+    assert.equal(Object.keys(page.context).some(key => key.startsWith('__opencliGeminiVideo_')), false)
+  } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('Gemini video rejects HTTP failures and non-video bodies without publishing files', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-task-invalid-'))
+  try {
+    const output = path.join(directory, 'video.mp4')
+    await assert.rejects(downloadVideo(videoTransferPage(Buffer.alloc(2048), { httpStatus: 403 }), output, 30), /HTTP 403/)
+    await assert.rejects(downloadVideo(videoTransferPage(Buffer.alloc(2048, 65)), output, 30), /not return an MP4/)
+    assert.deepEqual(fs.readdirSync(directory), [])
+  } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('Gemini stalled fetch is polled briefly and aborted without leaving a transfer or partial file', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-task-deadline-'))
+  try {
+    const page = videoTransferPage(Buffer.alloc(2048))
+    let signal
+    let reads = 0
+    page.context.fetch = (_url, options) => {
+      signal = options.signal
+      return new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('fetch aborted')), { once: true })
+      })
+    }
+    const evaluate = page.evaluate
+    page.evaluate = async script => { reads++; return evaluate(script) }
+    await assert.rejects(downloadVideo(page, path.join(directory, 'video.mp4'), 0.02), /deadline|aborted/)
+    assert.equal(signal.aborted, true)
+    assert.ok(reads > 2)
+    assert.deepEqual(fs.readdirSync(directory), [])
+    assert.equal(Object.keys(page.context).some(key => key.startsWith('__opencliGeminiVideo_')), false)
+  } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+})
 
 test('Gemini video spinner without changing response stops early and records progress', async () => {
   let clock = 1000
