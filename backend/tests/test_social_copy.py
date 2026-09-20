@@ -158,11 +158,13 @@ class CopyGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chat.await_count, 1)
 
     async def test_validation_repair_also_loads_humanizer(self):
-        self.chat.side_effect = [draft(x_paragraphs=["x" * 280, "More."]), draft()]
+        invalid = draft(x_paragraphs=["x" * 280, "More."])
+        self.chat.side_effect = [invalid, draft()]
         result, _ = await self.generate()
         self.assertEqual(result["status"], "ready")
         self.assertEqual(self.chat.await_count, 2)
         self.assertIn("validation_feedback", json.loads(self.chat.await_args.args[1]))
+        self.assertEqual(json.loads(self.chat.await_args.args[1])["previous_draft"], invalid)
         self.assertIn("<humanizer_skill>", self.chat.await_args.args[0])
         for call in self.chat.await_args_list:
             self.assertIn("<shared_title_strategy>", call.args[0])

@@ -131,10 +131,12 @@ async def _generate(task: TaskResponse, previous: dict) -> None:
             task.config.provider_id, task.config.ai_endpoint, task.config.ai_model,
         )
         feedback = None
+        previous_draft = None
         for attempt in range(3):
             payload = {**inputs}
             if feedback:
                 payload["validation_feedback"] = feedback
+                payload["previous_draft"] = previous_draft
             # Humanizer's draft/critique/rewrite pass needs reasoning headroom
             # even on providers that ignore disable_thinking. Let the shared
             # transport own timeouts and primary/backup retry policy.
@@ -148,6 +150,7 @@ async def _generate(task: TaskResponse, previous: dict) -> None:
                 break
             except (ValueError, ValidationError) as exc:
                 feedback = str(exc)
+                previous_draft = raw
                 logger.info("Social copy validation for %s, attempt %d/3: %s", task.id, attempt + 1, feedback)
                 if attempt == 2:
                     raise ValueError(f"Copy failed validation after 3 attempts: {feedback}") from exc
