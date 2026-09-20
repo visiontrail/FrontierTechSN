@@ -133,6 +133,8 @@ class CopyGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["humanizer_revision"], sc.HUMANIZER_REVISION)
         prompt = self.chat.await_args.args[0]
         self.assertIn((sc.HUMANIZER_DIR / "SKILL.md").read_text(), prompt)
+        self.assertIn((sc.config.PROMPTS_DIR / "title_strategy.txt").read_text().strip(), prompt)
+        self.assertEqual(len(result["prompt_sha256"]), 64)
         self.assertFalse(self.chat.await_args.kwargs["enable_skills"])
         payload = json.loads(self.chat.await_args.args[1])
         self.assertEqual(payload["final_narration"], self.script.read_text())
@@ -162,6 +164,8 @@ class CopyGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chat.await_count, 2)
         self.assertIn("validation_feedback", json.loads(self.chat.await_args.args[1]))
         self.assertIn("<humanizer_skill>", self.chat.await_args.args[0])
+        for call in self.chat.await_args_list:
+            self.assertIn("<shared_title_strategy>", call.args[0])
 
     async def test_retry_failure_preserves_last_good_copy(self):
         good, _ = await self.generate()

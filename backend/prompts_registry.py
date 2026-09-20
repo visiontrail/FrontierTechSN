@@ -48,6 +48,13 @@ PROMPT_REGISTRY: list[PromptSpec] = [
         description="YouTube title, Show Notes and X post. The full pinned Humanizer skill is loaded with every request.",
     ),
     PromptSpec(
+        key="title_strategy",
+        file="title_strategy.txt",
+        label="Title editorial strategy",
+        stage="Publication",
+        description="Shared lead-feature, evidence and readability rules for production titles and upload copy. Show Notes open on the chosen title's subject.",
+    ),
+    PromptSpec(
         key="summarize",
         file="summarize.txt",
         label="Content Summarization",
@@ -84,7 +91,7 @@ PROMPT_REGISTRY: list[PromptSpec] = [
         stage="Title",
         description=(
             "Guides the independent Agent SDK task that turns the final narration "
-            "and content brief into one publication-ready video title."
+            "into one publication-ready video title, using the shared editorial strategy."
         ),
         variables=[],
     ),

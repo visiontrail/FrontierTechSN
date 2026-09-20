@@ -16,6 +16,7 @@ from twitter_text import extract_urls, parse_tweet
 from backend import config, database as db
 from backend.models import TaskResponse, TaskStatus
 from backend.pipeline.digester import _chat, _resolve_provider
+from backend.title_strategy import YOUTUBE_TITLE_MAX_CHARS, with_title_strategy
 
 logger = logging.getLogger(__name__)
 HUMANIZER_REVISION = "9862685f575c65a8247f90369951df1b3416e3d6"
@@ -26,7 +27,7 @@ ELIGIBLE_STATUSES = {TaskStatus.COMPLETE, TaskStatus.AWAITING_REVIEW, TaskStatus
 
 class CopyDraft(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    youtube_title: str = Field(min_length=1, max_length=100)
+    youtube_title: str = Field(min_length=1, max_length=YOUTUBE_TITLE_MAX_CHARS)
     youtube_show_notes: str = Field(min_length=1, max_length=5000)
     x_paragraphs: list[str] = Field(min_length=1, max_length=3)
 
@@ -122,7 +123,9 @@ async def _generate(task: TaskResponse, previous: dict) -> None:
         inputs = _inputs(task)
         fingerprint = _fingerprint(inputs)
         skill = (HUMANIZER_DIR / "SKILL.md").read_text(encoding="utf-8")
-        system = (config.PROMPTS_DIR / "social_copy.txt").read_text(encoding="utf-8")
+        system = with_title_strategy(
+            (config.PROMPTS_DIR / "social_copy.txt").read_text(encoding="utf-8")
+        )
         system += "\n\n<humanizer_skill>\n" + skill + "\n</humanizer_skill>"
         endpoint, model, api_key = await _resolve_provider(
             task.config.provider_id, task.config.ai_endpoint, task.config.ai_model,
@@ -158,6 +161,7 @@ async def _generate(task: TaskResponse, previous: dict) -> None:
             generated_at=datetime.now(timezone.utc).isoformat(), stale=False,
             humanizer_revision=HUMANIZER_REVISION,
             humanizer_sha256=hashlib.sha256(skill.encode()).hexdigest(),
+            prompt_sha256=hashlib.sha256(system.encode()).hexdigest(),
         )
         logger.info("Social copy ready for %s (X: %d/280)", task.id, copy["x_weighted_length"])
     except asyncio.CancelledError:

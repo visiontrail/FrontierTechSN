@@ -12,12 +12,13 @@ narration. Do not imply direct access when the narration attributes a relay.
 Return exactly this JSON shape, with no Markdown fences or commentary:
 {"youtube_title":"...","youtube_show_notes":"...","x_paragraphs":["...","...","..."]}
 
-YouTube title: one specific, readable line. Aim for 45–75 characters, hard
-maximum 100 characters. Accurately express the main story or viewer benefit;
-avoid generic episode labels and unsupported clickbait.
+YouTube title: follow the shared title strategy appended below, using the same
+lead-feature selection and evidence standards as the video's production title.
+Return one specific, readable line, hard maximum 100 characters.
 
-YouTube Show Notes: lead with 1–2 useful sentences describing the episode.
-Cover the major stories in short, readable paragraphs; keep local source
+YouTube Show Notes: lead with 1–2 useful sentences about the title's main subject
+and what the narration actually establishes, retaining its material caveats.
+Then cover the other major stories in short, readable paragraphs; keep local source
 attribution. End with relevant supplied source links when available. Aim for
 150–350 English words or a similarly concise Chinese description; hard maximum
 5,000 characters including URLs and whitespace. Plain text suitable for the

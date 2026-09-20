@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 from collections.abc import Callable
@@ -13,6 +14,7 @@ from typing import Any
 
 from backend import config
 from backend.pipeline.digester import _chat, _resolve_provider
+from backend.title_strategy import YOUTUBE_TITLE_MAX_CHARS, with_title_strategy
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -52,13 +54,17 @@ def clean_generated_title(value: str) -> str:
     lines = [line.strip() for line in clean.splitlines() if line.strip()]
     if not lines:
         raise RuntimeError("Title agent returned an empty title")
+    if len(lines) != 1:
+        raise RuntimeError("Title agent must return exactly one title on one line")
 
     title = _TITLE_PREFIX_RE.sub("", lines[0]).strip()
     title = title.strip("\"'“”‘’《》")
     title = re.sub(r"\s+", " ", title).strip()
     if not title:
         raise RuntimeError("Title agent returned an empty title")
-    if len(title) > 160:
+    if any(char in title for char in "<>"):
+        raise RuntimeError("Title cannot contain angle brackets")
+    if len(title) > YOUTUBE_TITLE_MAX_CHARS:
         raise RuntimeError(f"Title agent returned an overlong title ({len(title)} characters)")
     return title
 
@@ -101,32 +107,36 @@ async def generate_title(
             ai_endpoint,
             ai_model,
         )
-        system_prompt = (config.PROMPTS_DIR / "title.txt").read_text(encoding="utf-8")
+        system_prompt = with_title_strategy(
+            (config.PROMPTS_DIR / "title.txt").read_text(encoding="utf-8")
+        )
+        manifest["prompt_sha256"] = hashlib.sha256(system_prompt.encode()).hexdigest()
         if not script.strip():
             raise RuntimeError("Title generation requires the final narration script")
-        payload = json.dumps(
-            {
-                "final_audio_script": script,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+        payload: dict[str, str] = {"final_audio_script": script}
         _log(log, "Title agent: starting an independent Agent SDK session")
-        result = await _chat(
-            system_prompt,
-            payload,
-            model=model,
-            endpoint=endpoint,
-            api_key=api_key,
-            # Reasoning models may consume a few hundred internal tokens before
-            # emitting a short title. A 256-token ceiling made the CLI exit 1.
-            max_tokens=1024,
-            enable_skills=False,
-            disable_thinking=True,
-            log=log,
-            label="Title agent",
-        )
-        generated_title = clean_generated_title(result)
+        for attempt in range(3):
+            result = await _chat(
+                system_prompt,
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                model=model,
+                endpoint=endpoint,
+                api_key=api_key,
+                # Allow reasoning headroom before the one-line response.
+                max_tokens=1024,
+                enable_skills=False,
+                disable_thinking=True,
+                log=log,
+                label="Title agent",
+            )
+            try:
+                generated_title = clean_generated_title(result)
+                break
+            except RuntimeError as exc:
+                if attempt == 2:
+                    raise RuntimeError(f"Title failed validation after 3 attempts: {exc}") from exc
+                payload["validation_feedback"] = f"{exc}. Rewrite from the final narration; do not truncate."
+                _log(log, f"Title agent: repairing invalid format (attempt {attempt + 1}/3): {exc}")
         title_path.write_text(generated_title + "\n", encoding="utf-8")
         manifest.update(
             {
