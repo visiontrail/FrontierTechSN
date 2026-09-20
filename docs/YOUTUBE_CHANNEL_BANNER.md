@@ -63,4 +63,3 @@ AI, chips, robotics and the business behind them.
 Keep the same centered text block and generous upper/lower negative space, with all text and B mark inside the central 58% width and central 25% height.
 Use full detail, crisp antialiased typography, navy fine-paper grain, copper glow on right, cobalt circuitry on left. No new objects, no added text, no crop guides, no borders. Deliver a single high-resolution banner PNG.
 ```
-
