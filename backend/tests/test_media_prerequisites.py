@@ -9,6 +9,7 @@ import pytest
 
 from backend.models import TaskConfig, TaskResponse
 from backend.pipeline import composer, footage, orchestrator
+from backend.daily_news import freshness
 
 
 def task_and_manifest(root):
@@ -52,6 +53,7 @@ def test_all_resume_paths_acquire_enabled_footage_before_composition(tmp_path, e
         return str(tmp_path / "future.mp4")
 
     with (
+        patch.object(freshness, "refresh_review_history", AsyncMock()),
         patch.object(orchestrator, "update_task", AsyncMock()),
         patch.object(orchestrator, "generate_tts", AsyncMock(return_value=task.audio_path)),
         patch.object(orchestrator, "_generate_task_title", AsyncMock(return_value=SimpleNamespace(title="News"))),

@@ -5,13 +5,25 @@ from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 
 from backend.daily_news import research
+from backend.daily_news import freshness
 from backend.daily_news.source_catalog import load_source_catalog
 
 
 def source(name):
     return next(row for row in load_source_catalog() if row.id == name)
+
+
+@pytest.fixture(autouse=True)
+def isolate_editorial_assessment(monkeypatch):
+    # These are adapter/selection tests; semantic eligibility has separate tests.
+    async def assess(rows, *args, **kwargs):
+        for row in rows:
+            row.freshness = {"decision": "include"}
+    monkeypatch.setattr(freshness, 'load_history', AsyncMock(return_value=[]))
+    monkeypatch.setattr(freshness, 'assess_candidates', assess)
 
 
 def article(sid, *, days=0, score=50, kind='news', evidence='article_excerpt'):
@@ -55,19 +67,20 @@ def test_atom_and_rdf_feeds_retain_article_urls_and_dates():
         assert rows[0].url.startswith('https://www.')
 
 
-def test_analysis_window_does_not_widen_news_window():
+def test_analysis_legacy_lookback_cannot_widen_news_window():
     now = datetime.now(timezone.utc)
-    assert research._within_window(article('a16z', days=5, kind='analysis'), now, 36)
+    assert not research._within_window(article('a16z', days=5, kind='analysis'), now, 36)
     assert not research._within_window(article('a16z', days=8, kind='analysis'), now, 36)
     assert not research._within_window(article('bloomberg', days=5), now, 36)
 
 
-def test_one_supported_institutional_reading_closes_edition():
+def test_institutional_readings_compete_without_a_reserved_slot():
     news = [article(sid) for sid in ['bloomberg', 'bbc_technology', 'nature', 'wired']]
-    analyses = [article(sid, kind='analysis') for sid in ['a16z', 'sequoia']]
+    analyses = [article(sid, kind='analysis', score=10) for sid in ['a16z', 'sequoia']]
     selected = research.select_balanced(news + analyses, 4)
     assert len(selected) == 4
-    assert [a.content_kind for a in selected] == ['news', 'news', 'news', 'analysis']
+    assert all(a.content_kind == 'news' for a in selected)
+    assert research.select_balanced(news + [replace(analyses[0], score=100)], 4)[0].source_id == 'a16z'
     blocked = [replace(a, evidence_status='feed_summary') for a in analyses]
     assert research.select_balanced(news + blocked, 4) == research.select_balanced(news, 4)
     assert all(a.content_kind == 'news' for a in research.select_balanced(news + analyses, 2))
@@ -105,7 +118,7 @@ def test_paywall_shell_never_becomes_article_evidence():
     asyncio.run(run())
 
 
-def test_research_verifies_undated_analysis_and_serializes_interpretation_contract(tmp_path):
+def test_research_verifies_undated_analysis_and_rejects_old_essay(tmp_path):
     now = datetime.now(timezone.utc)
     sources = [source(s) for s in ['bloomberg', 'bbc_technology', 'nature', 'a16z']]
     rows = [article(s.id, kind=s.content_kind) for s in sources]
@@ -120,10 +133,10 @@ def test_research_verifies_undated_analysis_and_serializes_interpretation_contra
     with patch.object(research, 'enabled_sources', return_value=sources), patch.object(research, 'fetch_source', side_effect=fetch), patch.object(research, 'hydrate_evidence', side_effect=hydrate):
         dossier = asyncio.run(research.run_research(date.today(), tmp_path, max_stories=3))
     assert len(dossier.selected) == 3
-    assert dossier.selected[-1].source_id == 'a16z'
+    assert all(a.source_id != 'a16z' for a in dossier.selected)
     text = (tmp_path / 'research/dossier.md').read_text()
-    assert 'institutional viewpoint' in text
-    assert 'Freshness window: 168 hours' in text
+    assert 'Freshness window: 36 hours' in text
+    assert '168 hours' not in text
     assert 'Evidence access: article_excerpt' in text
     assert (tmp_path / 'research/dossier.json').exists()
 

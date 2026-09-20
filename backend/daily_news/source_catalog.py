@@ -26,6 +26,8 @@ class NewsSource:
     access_note: str = "Public headlines and available article excerpts."
     lookback_hours: int | None = None
     article_selector: str | None = None
+    selection_bonus: float = 0.0
+    preferred_categories: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -41,6 +43,8 @@ def load_source_catalog() -> tuple[NewsSource, ...]:
     ids = [source.id for source in sources]
     if len(ids) != len(set(ids)):
         raise RuntimeError("Daily-news source IDs must be unique")
+    if any(not 0 <= source.selection_bonus <= 8 for source in sources):
+        raise RuntimeError("News source selection bonuses must be between 0 and 8")
     return tuple(sorted(sources, key=lambda source: source.priority))
 
 

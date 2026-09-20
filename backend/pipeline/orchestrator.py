@@ -296,6 +296,11 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
             task_dir,
             max_stories=task.config.news_max_stories,
             window_hours=task.config.news_window_hours,
+            task_id=task.id,
+            timezone_name=task.config.news_timezone,
+            ai_endpoint=ai_endpoint,
+            ai_model=ai_model,
+            provider_id=provider_id,
             log=task_log,
         )
         content = ExtractedContent(
@@ -603,9 +608,19 @@ async def run_daily_review_resume(task: TaskResponse, log: LogCallback | None = 
         candidates=[NewsArticle(**item) for item in raw.get("candidates", [])],
         selected=[NewsArticle(**item) for item in raw.get("selected", [])],
         fetches=[SourceFetch(**item) for item in raw.get("fetches", [])],
+        history=raw.get("history", []),
+        freshness_policy_version=int(raw.get("freshness_policy_version", 0)),
     )
     edition_date = _daily_edition_date(task)
     script = draft_path.read_text(encoding="utf-8").strip()
+    from backend.daily_news.freshness import refresh_review_history
+
+    await refresh_review_history(
+        dossier, task_dir, force=not dossier.freshness_policy_version,
+        timezone_name=task.config.news_timezone,
+        ai_endpoint=task.config.ai_endpoint, ai_model=task.config.ai_model,
+        provider_id=task.config.provider_id, log=task_log,
+    )
     task_log("Review resume: reusing persisted research dossier and yhroot draft")
     await update_task(task.id, status=TaskStatus.REVIEWING.value, error_message=None)
     reviewed = await review_daily_script(

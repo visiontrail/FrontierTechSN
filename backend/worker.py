@@ -4,6 +4,7 @@ import logging
 import traceback
 from pathlib import Path
 from backend import config
+from backend.daily_news.freshness import completion_guard
 from backend.database import (
     compare_and_set_task_status,
     get_next_queued_task,
@@ -285,53 +286,54 @@ async def _worker_loop():
                         "Worker stage exposed COMPLETE before the publication gate"
                     )
                 if refreshed and refreshed.status == TaskStatus.PUBLISHING:
-                    if refreshed.suppress_next_auto_publish:
-                        _persist_and_publish(
-                            refreshed,
-                            "Publication pipeline: skipped — completed task was "
-                            "updated without republishing",
-                        )
-                    else:
-                        # Unexpected failures from this point may occur after a
-                        # destination accepted the media but before its receipt
-                        # was committed. No-external-result actions clear this
-                        # provisional risk again before finalization.
-                        publication_attempted = True
-                        publication = await run_auto_publish_pipeline(refreshed)
-                        if publication.action in {
-                            "not_applicable",
-                            "awaiting_review",
-                            "blocked",
-                        }:
-                            publication_attempted = False
-                        _persist_and_publish(
-                            refreshed,
-                            f"Publication pipeline: {publication.action} — "
-                            f"{publication.reason}",
-                        )
-                        if publication.action == "failed":
-                            raise RuntimeError(
-                                "Automatic publication failed or has an "
-                                f"indeterminate external result: {publication.reason}"
+                    async with completion_guard(refreshed):
+                        if refreshed.suppress_next_auto_publish:
+                            _persist_and_publish(
+                                refreshed,
+                                "Publication pipeline: skipped — completed task was "
+                                "updated without republishing",
                             )
-                    finalized = await compare_and_set_task_status(
-                        refreshed.id,
-                        TaskStatus.PUBLISHING,
-                        TaskStatus.COMPLETE,
-                        error_message=None,
-                        expected_updated_at=refreshed.updated_at,
-                        suppress_next_auto_publish=(
-                            False
-                            if refreshed.suppress_next_auto_publish
-                            else None
-                        ),
-                        publication_safety_hold=False,
-                    )
-                    if not finalized:
-                        raise RuntimeError(
-                            "Task state changed before publication could be finalized"
+                        else:
+                            # Unexpected failures from this point may occur after a
+                            # destination accepted the media but before its receipt
+                            # was committed. No-external-result actions clear this
+                            # provisional risk again before finalization.
+                            publication_attempted = True
+                            publication = await run_auto_publish_pipeline(refreshed)
+                            if publication.action in {
+                                "not_applicable",
+                                "awaiting_review",
+                                "blocked",
+                            }:
+                                publication_attempted = False
+                            _persist_and_publish(
+                                refreshed,
+                                f"Publication pipeline: {publication.action} — "
+                                f"{publication.reason}",
+                            )
+                            if publication.action == "failed":
+                                raise RuntimeError(
+                                    "Automatic publication failed or has an "
+                                    f"indeterminate external result: {publication.reason}"
+                                )
+                        finalized = await compare_and_set_task_status(
+                            refreshed.id,
+                            TaskStatus.PUBLISHING,
+                            TaskStatus.COMPLETE,
+                            error_message=None,
+                            expected_updated_at=refreshed.updated_at,
+                            suppress_next_auto_publish=(
+                                False
+                                if refreshed.suppress_next_auto_publish
+                                else None
+                            ),
+                            publication_safety_hold=False,
                         )
-                    completion_committed = True
+                        if not finalized:
+                            raise RuntimeError(
+                                "Task state changed before publication could be finalized"
+                            )
+                        completion_committed = True
                 final_task = await get_task(task.id)
                 if final_task and final_task.status == TaskStatus.COMPLETE:
                     # Copy is a separate output; a writing failure must not

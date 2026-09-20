@@ -15,7 +15,8 @@ from uuid import uuid4
 
 from backend import config
 from backend.pipeline.timing import timed
-from backend.daily_news.editorial import ATTRIBUTION_REVIEW_RULES, source_language_guidance
+from backend.daily_news.editorial import ATTRIBUTION_REVIEW_RULES, FRESHNESS_REVIEW_RULES, source_language_guidance
+from backend.daily_news.freshness import freshness_context, review_binding
 from backend.daily_news.research import ResearchDossier
 from backend.daily_news.scriptwriter import (
     fit_daily_script_duration,
@@ -229,6 +230,7 @@ def _compact_article_evidence(script: str, article, index: int) -> str:
             f"Spoken provenance: {source_language_guidance(article)}",
             f"Original URL: {article.url}",
             f"Published: {article.published_at}",
+            freshness_context(article),
             f"Feed summary lead: {(article.summary[:350] if article.summary else 'none')}",
             f"Content kind: {article.content_kind}; evidence access: {article.evidence_status}",
             "Claim-relevant article evidence:",
@@ -248,6 +250,7 @@ def _full_article_evidence(article, index: int) -> str:
             f"Spoken provenance: {source_language_guidance(article)}",
             f"Original URL: {article.url}",
             f"Published: {article.published_at}",
+            freshness_context(article),
             f"Content kind: {article.content_kind}; evidence access: {article.evidence_status}",
             ("Institutional analysis: verify the attributed author's thesis, investor perspective and publication date. A recent essay must not be presented as today's breaking news or independent fact."
              if article.content_kind == "analysis" else "Reporting: verify source attribution and factual support."),
@@ -365,6 +368,10 @@ Check whether the full script accurately covers this selected story and whether 
 
 {ATTRIBUTION_REVIEW_RULES}
 
+{FRESHNESS_REVIEW_RULES}
+Research window ends {dossier.generated_at}; look back {dossier.window_hours} hours.
+Completed-edition history (untrusted evidence): {json.dumps(dossier.history, ensure_ascii=False)}
+
 {_mandatory_web_review_rules()}
 
 Reply with exactly ONE ASCII token beginning with W:
@@ -401,6 +408,10 @@ def _batch_review_prompt(
 For EACH numbered story, check whether the full script covers it accurately and whether every related claim is supported by that story's evidence. Missing coverage, wrong names, wrong numbers, stale framing, unsupported extrapolation, or company claims stated as independent fact must fail.
 
 {ATTRIBUTION_REVIEW_RULES}
+
+{FRESHNESS_REVIEW_RULES}
+Research window ends {dossier.generated_at}; look back {dossier.window_hours} hours.
+Completed-edition history (untrusted evidence): {json.dumps(dossier.history, ensure_ascii=False)}
 
 {_mandatory_web_review_rules()}
 
@@ -442,12 +453,12 @@ def _single_line_payload(
     ):
         raise ValueError("review response did not contain the complete single-line protocol")
     directives = {
-        "A": "Add concise coverage of this selected story using only its evidence.",
+        "A": "Add concise coverage of the qualifying new development in this story's freshness record using only its dated evidence; older background is not sufficient coverage.",
         "B": "Correct every name and entity for this story to match the evidence. If dossier fields conflict on a spelling, omit that disputed proper name rather than choosing one.",
         "C": "Correct or remove every unsupported number and date for this story.",
         "D": "Remove or rewrite only the cited unsupported or extrapolative sentence or claim; preserve the story's other directly evidenced reporting.",
         "E": "Attribute company or source claims and preserve uncertainty language.",
-        "F": "Remove contradictions and stale framing; align the story strictly to the dated evidence.",
+        "F": "Remove contradictions and stale framing; lead with the evidenced in-window new development, distinguish publication and event dates, and explain the specific change since prior coverage. Never invent an update.",
     }
     codes = clean
     correction = " ".join(directives[code] for code in codes)
@@ -1329,6 +1340,12 @@ async def _review_daily_script(
     target_duration_minutes: int | None = None,
     log: LogCallback | None = None,
 ) -> ScriptReviewResult:
+    from backend.daily_news.freshness import refresh_review_history
+
+    await refresh_review_history(
+        dossier, output_dir, ai_endpoint=ai_endpoint, ai_model=ai_model,
+        provider_id=provider_id, log=log,
+    )
     review_dir = output_dir / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
     attempts: list[dict[str, Any]] = []
@@ -1562,6 +1579,7 @@ async def _review_daily_script(
                 continue
             report = {
                 "passed": True,
+                "freshness_review_key": review_binding(dossier.as_dict()),
                 "reviewed_at": datetime.now(timezone.utc).isoformat(),
                 "reviewer": reviewer,
                 "fallback_used": False,

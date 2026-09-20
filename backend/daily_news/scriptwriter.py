@@ -10,6 +10,7 @@ from datetime import date
 from backend.spoken_numbers import normalize_spoken_quantities
 from backend.daily_news.editorial import DAILY_NEWS_EDITORIAL_RULES, requires_chinese_media_label
 from backend.daily_news.research import ResearchDossier, dossier_markdown
+from backend.daily_news.freshness import eligibility_failures
 from backend.pipeline.digester import _chat, _resolve_provider
 from backend.pipeline.timing import timed
 
@@ -1257,6 +1258,7 @@ def script_contract_report(
     for identity, label in matched_publications.items():
         source_mentions.setdefault(label, True)
     failures = _analysis_length_failures(script, dossier, language) + attribution["failures"]
+    failures.extend(eligibility_failures(dossier))
     failures.extend(_bulletin_length_failures(script, dossier, language, target_duration_minutes))
     if not script.startswith(opening):
         failures.append("fixed dated opening is missing or modified")
