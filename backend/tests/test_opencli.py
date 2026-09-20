@@ -322,7 +322,7 @@ class OpenCLIRateLimitTests(unittest.TestCase):
                 reporter=lambda _message: None,
             )
             second_delay = wait_for_opencli_web_slot(
-                "gemini",
+                "chatgpt",
                 interval=600,
                 state_path=state_path,
                 clock=clock,
@@ -334,6 +334,54 @@ class OpenCLIRateLimitTests(unittest.TestCase):
             self.assertEqual(second_delay, 600)
             self.assertEqual(sleeps, [600])
             self.assertEqual(float(state_path.read_text().strip()), 1600)
+
+    def test_gemini_samples_each_gap_and_ignores_legacy_interval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "limiter-state"
+            # A recent ChatGPT request must not delay the first Gemini request.
+            state_path.write_text("1000\n")
+            now = [1000.0]
+            sleeps = []
+
+            def sleeper(seconds):
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            def reserve():
+                return wait_for_opencli_web_slot(
+                    "gemini", interval=900, state_path=state_path,
+                    clock=lambda: now[0], sleeper=sleeper,
+                    reporter=lambda _: None,
+                )
+
+            with patch.object(rate_limit_module.random, "uniform", side_effect=[90, 60, 120, 91]) as draw:
+                self.assertEqual(reserve(), 0)
+                self.assertEqual(reserve(), 60)
+                now[0] += 30
+                self.assertEqual(reserve(), 90)
+                self.assertEqual(reserve(), 91)
+
+            self.assertEqual(draw.call_count, 4)
+            for call in draw.call_args_list:
+                self.assertEqual(call.args, (60, 120))
+            self.assertEqual(sleeps, [60, 90, 91])
+            self.assertEqual(state_path.read_text(), "1000\n")
+            self.assertEqual(float(Path(f"{state_path}.gemini").read_text()), 1271)
+
+    def test_gemini_wrapper_reuses_persisted_slot_without_legacy_clamp(self):
+        state_path = rate_limit_module.default_state_path()
+        Path(f"{state_path}.gemini").write_text("1000\n")
+        with (
+            patch.dict(os.environ, {"OPENCLI_WEB_REQUEST_INTERVAL_SECONDS": "1800"}),
+            patch.object(rate_limit_module.random, "uniform", return_value=75),
+        ):
+            sleeps = []
+            delay = wait_for_opencli_web_slot(
+                "gemini", clock=lambda: 1010, sleeper=sleeps.append,
+                reporter=lambda _: None,
+            )
+        self.assertEqual(delay, 65)
+        self.assertEqual(sleeps, [65])
 
     def test_model_quiet_period_waits_without_reserving_the_next_slot(self):
         with tempfile.TemporaryDirectory() as directory:

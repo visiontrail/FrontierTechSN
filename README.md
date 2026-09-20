@@ -27,9 +27,9 @@ Before each Web review, script constraints are checked again after duration edit
 
 Gemini briefly uses a foreground window because its composer requires trusted keyboard input. ChatGPT stays in the background. Each review request carries an ownership marker; recovery accepts only the assistant turn paired with that marker. Persistent OpenCLI site sessions use a FrontierTechSN namespace so another local OpenCLI project cannot navigate these Gemini or ChatGPT tabs.
 
-Gemini and ChatGPT prompt and image submissions share a start limiter across processes in this checkout. Consecutive generation requests must start at least ten minutes apart. Read-only recovery, conversation details, and status checks do not consume a generation slot. ChatGPT model checks do not reserve a slot either, but must wait until the previous generation's ten-minute quiet period ends.
+Gemini generation requests (prompts, images, and new videos) use a random start-to-start interval sampled independently from 60 to 120 seconds for each request. The limiter persists across processes and restarts. ChatGPT uses a separate limiter, so its longer waits do not block Gemini. Read-only recovery, resumed video retrieval, conversation details, and status checks do not consume a generation slot. ChatGPT model checks do not reserve a slot either, but must wait until its previous generation's configured quiet period ends. Explicit provider access-limit cooldowns still apply separately.
 
-Choose an interval from 10 to 30 minutes under **Admin → System → Footage Sources** with `OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`. The same panel configures the Gemini primary model, ChatGPT fallback level, and review timeout for each provider.
+Choose the ChatGPT interval from 10 to 30 minutes under **Admin → System → Footage Sources** with `OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`; this setting does not override Gemini's 60–120 second random interval. The same panel configures the Gemini primary model, ChatGPT fallback level, and review timeout for each provider.
 
 ### Paper-Collage acquisition
 

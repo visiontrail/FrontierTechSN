@@ -147,8 +147,8 @@ OPENCLI_SITE_SESSION_NAMESPACE = (
 OPENCLI_TIMEOUT = int(os.getenv("OPENCLI_TIMEOUT", "180"))
 OPENCLI_MAX_ATTEMPTS = int(os.getenv("OPENCLI_MAX_ATTEMPTS", "10"))
 OPENCLI_RETRY_BASE_SECONDS = float(os.getenv("OPENCLI_RETRY_BASE_SECONDS", "3"))
-# Cross-process start-to-start spacing for Gemini and ChatGPT web commands.
-# The runtime limiter clamps direct environment overrides to 10–30 minutes too.
+# ChatGPT start-to-start spacing, clamped to 10–30 minutes across processes.
+# Gemini uses an independent random 60–120 second interval for each request.
 OPENCLI_WEB_REQUEST_INTERVAL_SECONDS = int(
     os.getenv("OPENCLI_WEB_REQUEST_INTERVAL_SECONDS", "600")
 )

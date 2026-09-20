@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,8 @@ from typing import Callable
 MIN_INTERVAL_SECONDS = 10 * 60.0
 MAX_INTERVAL_SECONDS = 30 * 60.0
 DEFAULT_INTERVAL_SECONDS = MIN_INTERVAL_SECONDS
+GEMINI_MIN_INTERVAL_SECONDS = 60.0
+GEMINI_MAX_INTERVAL_SECONDS = 120.0
 RATE_LIMITED_SITES = frozenset({"chatgpt", "gemini"})
 RATE_LIMITED_ACTIONS = frozenset({"ask", "image"})
 GENERATION_QUIET_PERIOD_ACTIONS = frozenset({("chatgpt", "model")})
@@ -171,15 +174,23 @@ def wait_for_opencli_web_slot(
     sleeper: Callable[[float], None] = time.sleep,
     reporter: Callable[[str], None] | None = None,
 ) -> float:
-    """Wait for and reserve the next global OpenCLI web-request start slot.
+    """Wait for and reserve the next provider's web-request start slot.
 
     The exclusive file lock stays held through any wait, so concurrent backend
     tasks and direct wrapper invocations cannot reserve the same start time.
     The timestamp survives process restarts; a crashed waiter releases the OS
     lock automatically.
     """
-    selected_interval = normalize_interval(interval)
+    site = site.strip().lower()
+    selected_interval = (
+        random.uniform(GEMINI_MIN_INTERVAL_SECONDS, GEMINI_MAX_INTERVAL_SECONDS)
+        if site == "gemini" else normalize_interval(interval)
+    )
     path = state_path or default_state_path()
+    # Keep Gemini independent of ChatGPT's longer wait and lock. The legacy
+    # interval setting applies only to ChatGPT, even when a caller passes it.
+    if site == "gemini":
+        path = Path(f"{path}.gemini")
     path.parent.mkdir(parents=True, exist_ok=True)
     report = reporter or (lambda message: print(message, file=sys.stderr, flush=True))
 
