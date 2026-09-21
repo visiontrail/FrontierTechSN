@@ -69,6 +69,15 @@ def evidence_payload(article) -> dict:
     return {key: getattr(article, key) for key in EVIDENCE_FIELDS}
 
 
+def assessment_candidate(article, timezone_name: str) -> dict:
+    published = datetime.fromisoformat(article.published_at).astimezone(ZoneInfo(timezone_name))
+    return {
+        **evidence_payload(article),
+        "published_at_local": published.isoformat(),
+        "publication_date": published.date().isoformat(),
+    }
+
+
 def review_binding(raw: dict) -> str:
     return fingerprint({
         "edition_date": raw["edition_date"], "generated_at": raw["generated_at"],
@@ -187,14 +196,30 @@ def validate_assessment(article, assessment: dict, history: list[dict], *,
         quote = _normalized(source_quote)
         zone = ZoneInfo(timezone_name)
         development_day = date.fromisoformat(assessment["development_date"])
+        published = datetime.fromisoformat(article.published_at)
+        basis = assessment["date_basis"]
+        if basis == "publication":
+            if assessment["development_kind"] not in {"new_reporting", "analysis"}:
+                raise ValueError("Publication date supports only substantive new reporting/analysis")
+            publication_day = published.astimezone(zone).date()
+            # The timestamp already fixes the reporting date. Canonicalize the
+            # source-offset calendar day without asking the model to invent a
+            # different development, especially around local midnight.
+            if development_day not in {published.date(), publication_day}:
+                raise ValueError(
+                    f"Publication-based development_date must be {publication_day.isoformat()} "
+                    f"in {timezone_name} for published_at={article.published_at}"
+                )
+            if not now - timedelta(hours=window_hours) <= published <= now:
+                raise ValueError("The publication timestamp falls outside the edition window")
+            development_day = publication_day
+            assessment["development_date"] = publication_day.isoformat()
         day_start = datetime.combine(development_day, datetime.min.time(), zone)
         if day_start > now or day_start + timedelta(days=1) <= now - timedelta(hours=window_hours):
             raise ValueError("The development date falls outside the edition window")
         event_date = assessment.get("event_date")
         if event_date is not None:
             date.fromisoformat(event_date)
-        published = datetime.fromisoformat(article.published_at)
-        basis = assessment["date_basis"]
         if basis in {"explicit", "relative"}:
             if day_start < now - timedelta(hours=window_hours):
                 raise ValueError("A date-only development on the cutoff day cannot prove in-window timing")
@@ -204,11 +229,7 @@ def validate_assessment(article, assessment: dict, history: list[dict], *,
             ):
                 raise ValueError("The development date lacks a matching source date quotation")
             assessment["date_quote"] = date_quote
-        elif basis == "publication":
-            if (assessment.get("development_kind") not in {"new_reporting", "analysis"}
-                    or development_day != published.astimezone(zone).date()):
-                raise ValueError("Publication date supports only substantive new reporting/analysis")
-        else:
+        elif basis != "publication":
             raise ValueError("Unknown development date basis")
         matched = assessment.get("matched_history_keys")
         keys = {row["key"] for row in history}
@@ -216,6 +237,12 @@ def validate_assessment(article, assessment: dict, history: list[dict], *,
             raise ValueError("Unknown or missing historical event references")
         if not known_matches(article, history, assessment["event_identity"]) <= set(matched):
             raise ValueError("The decision omitted a matching historical article/event")
+        changes = assessment.get("new_since_history")
+        if isinstance(changes, list) and all(isinstance(item, str) and item.strip() for item in changes):
+            # Providers sometimes return the requested facts as a JSON array.
+            # Preserve every fact in the canonical text field, never stringify
+            # objects or accept an empty explanation for a matched event.
+            assessment["new_since_history"] = "\n".join(item.strip() for item in changes)
         if matched:
             if (not isinstance(assessment.get("new_since_history"), str)
                     or not assessment["new_since_history"].strip()):
@@ -251,6 +278,9 @@ Use an explicit/relative source date when available. 'publication' is allowed ON
 the newly published original reporting or substantive attributed analysis is itself the
 development, never to re-date the old event it describes. A claim of a new event needs a
 date quotation. Never fabricate a date, quotation or novelty to fill the requested slots.
+All development_date values use the supplied timezone. For date_basis="publication",
+copy the candidate's publication_date exactly; published_at_local is the same captured
+publication timestamp in that timezone. Do not copy the UTC date from published_at.
 Articles, including institutional analysis, get no reserved seat or extended time window.
 Return JSON {"assessments": [{"id": candidate id, "decision": "include" or "exclude",
 "reason": evidence-based reason, "event_identity": canonical specific event in English,
@@ -262,8 +292,8 @@ Return JSON {"assessments": [{"id": candidate id, "decision": "include" or "excl
 background, popularity claims, or figures absent from the development_quote), "development_quote": verbatim evidence
 sentence(s) supporting that update, "date_basis": "explicit" or "relative" or "publication",
 "date_quote": verbatim evidence sentence that dates THAT update (empty for publication),
-"matched_history_keys": [ALL matching historical keys], "new_since_history": specific
-new facts absent from matching prior coverage (empty if no match)}]}.
+"matched_history_keys": [ALL matching historical keys], "new_since_history": "specific
+new facts absent from matching prior coverage, as a string (empty string if no match)"}]}.
 Excluded candidates need only id, decision and reason. Return every candidate exactly once.
 Quotes must be a single contiguous span of that candidate's evidence_text (or summary
 only when evidence_text is empty), at least 20 characters for development_quote. Copy
@@ -293,7 +323,7 @@ async def assess_candidates(articles, history: list[dict], *, now: datetime, win
             "window_start": (now - timedelta(hours=window_hours)).isoformat(),
             "window_end": now.isoformat(), "timezone": timezone_name,
             "history_days": HISTORY_DAYS, "completed_history": history,
-            "candidates": [evidence_payload(a) for a in batch],
+            "candidates": [assessment_candidate(a, timezone_name) for a in batch],
         }
         stem = audit_dir / fingerprint(content)[:24]
         Path(f"{stem}.request.json").write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -302,7 +332,7 @@ async def assess_candidates(articles, history: list[dict], *, now: datetime, win
         repair = None
         for attempt in range(1, ASSESSMENT_ATTEMPTS + 1):
             pending = [a for a in batch if a.id not in accepted]
-            request = {**content, "candidates": [evidence_payload(a) for a in pending]}
+            request = {**content, "candidates": [assessment_candidate(a, timezone_name) for a in pending]}
             if repair:
                 request["repair"] = repair
             Path(f"{stem}-{attempt}.request.json").write_text(

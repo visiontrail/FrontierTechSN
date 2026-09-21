@@ -123,6 +123,87 @@ def test_same_event_allows_a_verbatim_dated_followup_not_a_renamed_old_fact(sour
         validate(row, {**record, "new_since_history": ""}, history)
 
 
+@pytest.mark.parametrize("published,zone,local_day", [
+    ("2026-09-19T23:01:57+00:00", "Asia/Singapore", "2026-09-20"),
+    ("2026-09-20T02:01:57+00:00", "America/Los_Angeles", "2026-09-19"),
+    ("2026-09-20T07:01:57+08:00", "UTC", "2026-09-19"),
+])
+def test_publication_reporting_uses_edition_day_without_redating_event(published, zone, local_day):
+    row = article(published_at=published)
+    for model_day in {published[:10], local_day}:
+        record = assessment(row, development_kind="new_reporting", date_basis="publication",
+                            development_date=model_day, date_quote="")
+        result = freshness.validate_assessment(row, record, [], now=NOW,
+                                              window_hours=36, timezone_name=zone)
+        assert result["development_date"] == local_day
+        assert result["event_date"] == "2026-09-15"
+        assert record["development_date"] == model_day
+        assert result["evidence_sha256"] == freshness.fingerprint(freshness.evidence_payload(row))
+    with pytest.raises(ValueError, match="Publication date supports only"):
+        freshness.validate_assessment(row, {**record, "development_kind": "new_event"}, [],
+                                      now=NOW, window_hours=36, timezone_name=zone)
+
+
+def test_unrelated_publication_day_gets_precise_repair_feedback():
+    row = article(published_at="2026-09-19T23:01:57+00:00")
+    record = assessment(row, development_kind="new_reporting", date_basis="publication",
+                        development_date="2026-09-18")
+    with pytest.raises(ValueError, match="development_date must be 2026-09-20 in Asia/Singapore"):
+        freshness.validate_assessment(row, record, [], now=NOW, window_hours=36,
+                                      timezone_name="Asia/Singapore")
+
+
+@pytest.mark.parametrize("published", [NOW - timedelta(hours=36, seconds=1), NOW + timedelta(seconds=1)])
+def test_publication_date_normalization_cannot_admit_out_of_window_timestamp(published):
+    row = article(published_at=published.isoformat())
+    record = assessment(row, development_kind="new_reporting", date_basis="publication",
+                        development_date=published.date().isoformat())
+    with pytest.raises(ValueError, match="publication timestamp falls outside"):
+        validate(row, record)
+
+
+@pytest.mark.parametrize("changes", [[], [""], [" "], ["New finding", 42], [{"fact": "New finding"}], None])
+def test_history_fact_format_normalization_does_not_accept_missing_or_invalid_facts(changes):
+    row = article()
+    record = assessment(row, matched_history_keys=["prior"], new_since_history=changes)
+    with pytest.raises(ValueError, match="specific evidenced change"):
+        validate(row, record, [previous(row)])
+
+
+def test_history_fact_list_keeps_all_facts_and_duplicate_guard():
+    row = article()
+    facts = [" A reproducible evaluation was published. ", "The new results include error rates."]
+    record = assessment(row, matched_history_keys=["prior"], new_since_history=facts)
+    result = validate(row, record, [previous(row)])
+    assert result["new_since_history"] == "A reproducible evaluation was published.\nThe new results include error rates."
+    assert record["new_since_history"] == facts
+    with pytest.raises(ValueError, match="already covered"):
+        validate(row, record, [previous(row, script=QUOTE)])
+
+
+def test_cross_timezone_reporting_and_history_list_need_no_semantic_repair(tmp_path):
+    row = article("bbc", published_at="2026-09-19T23:01:57+00:00")
+    record = assessment(row, development_kind="new_reporting", date_basis="publication",
+                        development_date="2026-09-19", date_quote="", matched_history_keys=["prior"],
+                        new_since_history=["New interviews and evaluation results absent from prior coverage."])
+    chat = AsyncMock(return_value=json.dumps({"assessments": [record]}))
+    with patch.object(freshness, "_resolve_provider", AsyncMock(return_value=("e", "m", "k"))), patch.object(freshness, "_chat", chat):
+        asyncio.run(freshness.assess_candidates([row], [previous(row)], now=NOW,
+                                              window_hours=36, output_dir=tmp_path,
+                                              timezone_name="Asia/Singapore"))
+    assert chat.await_count == 1
+    request = json.loads(chat.await_args.args[1])
+    candidate = request["candidates"][0]
+    assert candidate["published_at"] == row.published_at
+    assert candidate["published_at_local"] == "2026-09-20T07:01:57+08:00"
+    assert candidate["publication_date"] == "2026-09-20"
+    assert row.freshness["decision"] == "include"
+    assert row.freshness["development_date"] == "2026-09-20"
+    assert row.freshness["new_since_history"] == record["new_since_history"][0]
+    saved = next((tmp_path / "research/freshness").glob("*-1.validation.json"))
+    assert json.loads(saved.read_text()) == {"accepted_ids": [row.id], "errors": []}
+
+
 def test_tracking_and_source_aliases_cannot_hide_same_article():
     row = article(url="https://www.nature.test/orbit/?utm_source=new&ref=x")
     assert freshness.known_matches(row, [previous(url="http://nature.test/orbit")]) == {"prior"}
