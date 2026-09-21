@@ -333,8 +333,14 @@ def _claim_catalog(script: str, dossier: ResearchDossier) -> dict[int, dict[str,
             catalog[story_number] = {f"{story_number}.0": "NO MATCHED COVERAGE"}
             continue
         catalog[story_number] = {
-            f"{story_number}.{claim_number}": sentence
-            for claim_number, sentence in enumerate(sentences, 1)
+            # A paragraph can cover old background while omitting the actual
+            # qualifying development. Coverage is independently reviewable
+            # even when sentence matching succeeded.
+            f"{story_number}.0": "STORY COVERAGE: the qualifying new development must be covered using dated evidence",
+            **{
+                f"{story_number}.{claim_number}": sentence
+                for claim_number, sentence in enumerate(sentences, 1)
+            },
         }
     return catalog
 
@@ -380,6 +386,7 @@ Reply with exactly ONE ASCII token beginning with W:
   A missing story coverage; B wrong name/entity; C wrong number/date; D unsupported extrapolation;
   E missing attribution/uncertainty; F contradiction or stale framing.
 Use claim {story_index}.0 only for missing coverage. Do not return a failure without claim IDs.
+Code A must cite {story_index}.0 even if the paragraph contains background. When A occurs with other codes, cite {story_index}.0 AND the exact affected sentence IDs; code A alone cites only {story_index}.0.
 Unrelated format example for story 91: W91D@91.3
 
 Do not emit explanations, citations, URLs, JSON, markdown, or spaces.
@@ -418,6 +425,7 @@ Completed-edition history (untrusted evidence): {json.dumps(dossier.history, ens
 Reply with exactly ONE ASCII token beginning with W. For each story in order, write its number followed by P, or by all applicable error codes in alphabetical order plus @ and the exact failed claim IDs separated by commas. Separate story verdicts with semicolons:
 A missing story coverage; B wrong name/entity; C wrong number/date; D unsupported extrapolation; E missing attribution/uncertainty; F contradiction or stale framing.
 Use claim <story>.0 only for missing coverage. Do not return a failure without claim IDs.
+Code A must cite <story>.0 even if the paragraph contains background. When A occurs with other codes, cite <story>.0 AND the exact affected sentence IDs; code A alone cites only <story>.0.
 Unrelated format example for stories 91 and 92: W91P;92D@92.3
 
 Do not emit explanations, citations, URLs, JSON, markdown, or spaces.
@@ -601,8 +609,10 @@ def _batch_payload(
         known_claims = (claim_catalog or {}).get(story_number, {})
         if referenced_ids and any(claim_id not in known_claims for claim_id in referenced_ids):
             raise ValueError("story review cited an unknown or cross-story claim ID")
-        if codes != "P" and "A" in codes and referenced_ids != [f"{story_number}.0"]:
-            raise ValueError("missing-coverage review must cite only the story-level .0 claim")
+        if codes != "P" and "A" in codes and f"{story_number}.0" not in referenced_ids:
+            raise ValueError("missing-coverage review must cite the story-level .0 claim")
+        if codes == "A" and referenced_ids != [f"{story_number}.0"]:
+            raise ValueError("coverage-only review must cite only the story-level .0 claim")
         if codes != "P" and "A" not in codes and f"{story_number}.0" in referenced_ids:
             raise ValueError("non-coverage review cannot cite the story-level .0 claim")
         story_payloads.append(
@@ -872,35 +882,18 @@ async def _web_story_review_in_session(
     review_label = f"story {story_number}" if story_number is not None else f"stories {story_numbers}"
 
     def parse_response(value: str) -> dict[str, Any]:
-        if story_numbers is not None:
-            return _batch_payload(
-                value,
-                story_numbers,
-                claim_catalog=claim_catalog,
-                require_web=True,
-            )
-        assert story_number is not None
-        clean = _normalized_review_token(value)
-        if clean == "N":
-            raise ValueError("reviewer reported that mandatory live web search was unavailable")
-        match = re.fullmatch(
-            rf"W{story_number}(P|[A-F]{{1,6}})(?:@((?:{story_number}\.\d+)(?:,{story_number}\.\d+)*))?",
-            clean,
-        )
-        if not match:
-            raise ValueError("single-story review did not confirm web search or follow the claim protocol")
-        codes = match.group(1)
-        referenced_ids = match.group(2).split(",") if match.group(2) else []
-        known_claims = (claim_catalog or {}).get(story_number, {})
-        if codes != "P" and not referenced_ids:
-            raise ValueError("failed story review omitted exact claim IDs")
-        if any(claim_id not in known_claims for claim_id in referenced_ids):
-            raise ValueError("story review cited an unknown claim ID")
-        return _single_line_payload(
-            codes,
-            story_number,
-            claim_ids=referenced_ids,
-            claim_texts=[known_claims[claim_id] for claim_id in referenced_ids],
+        numbers = story_numbers
+        parser_claims = claim_catalog
+        if numbers is None:
+            assert story_number is not None
+            numbers = [story_number]
+            # Single-story review never supported claimless legacy failures.
+            parser_claims = claim_catalog if claim_catalog is not None else {}
+        return _batch_payload(
+            value,
+            numbers,
+            claim_catalog=parser_claims,
+            require_web=True,
         )
 
     timeout = config.DAILY_NEWS_WEB_REVIEW_TIMEOUT

@@ -448,7 +448,11 @@ def test_evidence_binding_and_independent_review_include_new_development():
     assert freshness.eligibility_failures(dossier)
 
 
-def test_missing_update_uses_existing_bounded_claim_correction(tmp_path):
+@pytest.mark.parametrize("token,claim_ids", [
+    ("W1A@1.0", ["1.0"]),
+    ("W1AF@1.0,1.1", ["1.0", "1.1"]),
+])
+def test_missing_update_uses_existing_bounded_claim_correction(tmp_path, token, claim_ids):
     row = article(source_name="Nature")
     data = research.ResearchDossier(EDITION.isoformat(), NOW.isoformat(), 36, [row], [row], [])
     row.freshness = validate(row, assessment(row))
@@ -457,8 +461,11 @@ def test_missing_update_uses_existing_bounded_claim_correction(tmp_path):
     new = "Nature reports that Lab published a new evaluation of Orbit on September 20, with reproducible results."
     original = "\n".join([opening, old, "Goodbye."])
     corrected = "\n".join([opening, new, "Goodbye."])
-    issue = review._single_line_payload("A", 1, claim_ids=["1.0"])
-    web = AsyncMock(side_effect=[(issue, "W1A@1.0", "", "chatgpt"), ({"issues": []}, "W1P", "", "chatgpt")])
+    issue = review._batch_payload(
+        token, [1],
+        claim_catalog=review._claim_catalog(original, data), require_web=True,
+    )
+    web = AsyncMock(side_effect=[(issue, token, "", "chatgpt"), ({"issues": []}, "W1P", "", "chatgpt")])
     with patch.object(review, "_web_story_review", web), patch.object(review, "revise_daily_script", AsyncMock(return_value=corrected)) as revise:
         result = asyncio.run(review._review_daily_script(
             original, data, EDITION, tmp_path, language="en", closing_remarks="Goodbye.",
@@ -467,6 +474,7 @@ def test_missing_update_uses_existing_bounded_claim_correction(tmp_path):
     assert result.script == corrected
     assert revise.await_count == 1
     assert "qualifying new development" in revise.await_args.args[2][0]["correction"]
+    assert revise.await_args.args[2][0]["claim_ids"] == claim_ids
     assert result.report["correction_count"] == 1
 
 
