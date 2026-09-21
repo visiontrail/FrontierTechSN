@@ -191,8 +191,11 @@ primary or backup provider.
 - Standalone providers are used only when a task explicitly selects them.
 
 The route test in the same panel calls the task dispatcher and reports the
-provider role and non-reversible key ID used. Once model or tool output begins,
-the dispatcher will not replay that turn through another key or provider.
+provider role and non-reversible key ID used. Agent turns are not replayed after
+model or tool output begins. For requests with Skills and tools disabled, a 429
+may discard partial text that has not been returned to the caller and retry
+through the bounded cooldown/key/provider ladder. Observed tool activity still
+blocks replay, and partial responses are never accepted as completed output.
 
 ### Scheduling and manual runs
 
