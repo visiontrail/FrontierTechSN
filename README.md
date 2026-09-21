@@ -13,7 +13,7 @@ Each daily run follows these steps and stops if a required check fails:
 3. Include the required morning-news opening with the edition date and the required spoken closing, both verbatim.
 4. Use yhroot AI to generate the script from the evidence dossier alone.
 5. Submit every material claim to Gemini Web through project-local OpenCLI. Each story group gets up to two Gemini attempts. If the review fails, times out, or returns a malformed response, start a fresh ChatGPT conversation at the configured non-Pro reasoning level. Correct and re-review the script when findings block approval.
-6. Synthesize speech using the same TTS engines and full spoken-text integrity checks as Video-Promotional.
+6. Synthesize speech with WAV integrity checks and advisory ASR transcript comparisons.
 7. Generate four Paper-Collage B-roll clips by default. Stop if the number of placed clips differs from the requested count.
 8. Generate instrumental music with Gemini Create Music, using deterministic local music as a fallback. Duck it to `-25 dB` under narration, side-chain it against speech, and match the program mix to the required duration.
 9. Render with HyperFrames and run final A/V validation.
@@ -127,13 +127,14 @@ A blocked or changed website is recorded in `research/dossier.json`. That failur
 
 Requirements: macOS, Python 3.11, Node.js/npm, Chrome with the OpenCLI Browser Bridge, FFmpeg/FFprobe, and the original local TTS model paths configured in `.env`.
 
-TTS integrity checks use the pinned `cmudict` package from `requirements.txt`
-to verify exact English homophones offline. Both words must have a single,
-identical pronunciation, and a second ASR decode of the same waveform must
-confirm the substitution. Brand-specific rules take precedence. When a Pocket
-paragraph fails verification, retries use complete sentence boundaries and keep
-the parts that passed. Failed WAVs and token differences stay in the task's
-audio verification directory for diagnosis.
+Pocket TTS and Orpheus record ASR text comparisons as reference warnings.
+Recognition differences, missing transcripts, and model adjudication do not
+block generation, cause retries, or trim speech. Reports retain actual ASR
+coverage and differences without claiming that warning-bearing audio was
+verified word for word. Rendering accepts every generated part covered by the
+`asr_advisory` manifest while preserving script/audio hashes, natural speed,
+WAV decoding, duration, and physical continuity checks. Genuine audio failures
+still retry with cached valid parts and complete sentence boundaries.
 
 For YouTube/X media upload, open `chrome://extensions`, select **Details** for the ChatGPT browser extension, and enable **Allow access to file URLs**. Before creating a remote post, the publication adapter checks this permission and reports how to fix it if it is missing.
 

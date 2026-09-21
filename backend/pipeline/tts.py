@@ -89,13 +89,14 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 32
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 33
 # Bound stochastic pronunciation recovery per failed part, reusing verified
 # audio on each pass. Transport retries have their own independent budget.
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 5
-# Pocket TTS uses the same fail-closed acoustic verifier, but its cache identity
-# is independent so provider-specific changes can invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 15
+# Pocket TTS shares WAV validation and advisory ASR inspection; its cache
+# identity is independent so provider changes invalidate only Pocket audio.
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 16
+ASR_ADVISORY_POLICY = "asr_advisory"
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
 POCKET_TTS_SILENCE_WINDOW_MS = 10
@@ -3409,6 +3410,99 @@ index independently; never claim coverage merely to fill the index list:
         return None
 
 
+async def _inspect_narration_part(
+    path: Path,
+    text: str,
+    verification_dir: Path,
+    *,
+    emit: LogCallback,
+    provider_label: str,
+    validate_pocket_continuity: bool,
+) -> dict:
+    """Record ASR as reference evidence without changing or rejecting speech.
+
+    Decoding, duration and physical silence checks still validate the WAV.
+    Recognition mismatches or ASR outages cannot trigger synthesis retries,
+    model adjudication, repetition trimming, or a failed video task.
+    """
+    from backend.pipeline import av_sync
+
+    _validate_downloaded_wav_container(path, provider=provider_label)
+    _validate_wav_part(path, text)
+    words: list[dict] = []
+    try:
+        words, transcription = await av_sync.ensure_word_transcript(
+            path, verification_dir, log=None, minimum_words=1,
+        )
+    except Exception as exc:
+        transcription = {"failure_reasons": [f"{type(exc).__name__}: {exc}"]}
+    report = _orpheus_transcript_report(text, words)
+    # An uncorroborated phonetic candidate is not an exact ASR confirmation.
+    report["verified"] = bool(report["verified"] and not report["phonetic_substitutions"])
+    warnings = list(report["failure_reasons"])
+    if not words:
+        warnings = ["ASR transcript unavailable", *transcription.get("failure_reasons", [])]
+    elif report["phonetic_substitutions"]:
+        warnings.append("ASR contains uncorroborated phonetic spelling substitutions")
+    report.update({
+        "policy": ASR_ADVISORY_POLICY,
+        "accepted": True,
+        "asr_status": "unavailable" if not words else "matched" if report["verified"] else "mismatch",
+        "warnings": warnings,
+        "transcription": transcription,
+    })
+    if validate_pocket_continuity:
+        report["internal_silence"] = _validate_pocket_internal_silence(path, words)
+    verification_dir.mkdir(parents=True, exist_ok=True)
+    (verification_dir / "integrity_report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
+    if warnings:
+        emit(
+            f"{provider_label} ASR reference warning (continuing generation): "
+            + "; ".join(warnings)
+        )
+    else:
+        emit(f"{provider_label} ASR reference: source words matched")
+    return report
+
+
+def _part_integrity_accepted(integrity: object) -> bool:
+    if not isinstance(integrity, dict) or integrity.get("method") == "duration_only_preview":
+        return False
+    if integrity.get("policy") == ASR_ADVISORY_POLICY:
+        return integrity.get("accepted") is True
+    return integrity.get("verified") is True
+
+
+def _narration_integrity_summary(
+    part_metadata: list[dict], source_words: int, *, required: bool, method: str,
+) -> dict:
+    reports = [metadata.get("integrity") or {} for metadata in part_metadata]
+    verified_words = sum(
+        int(metadata.get("word_count") or 0)
+        for metadata, report in zip(part_metadata, reports) if report.get("verified")
+    )
+    accepted_words = sum(
+        int(metadata.get("word_count") or 0)
+        for metadata, report in zip(part_metadata, reports)
+        if _part_integrity_accepted(report) or not required
+    )
+    return {
+        "method": method,
+        "policy": ASR_ADVISORY_POLICY,
+        "required": required,
+        "passed": accepted_words == source_words,
+        "source_words": source_words,
+        "accepted_source_words": accepted_words,
+        "accepted_source_coverage": round(accepted_words / max(1, source_words), 4),
+        "verified_source_words": verified_words,
+        "verified_source_coverage": round(verified_words / max(1, source_words), 4),
+        "asr_warning_parts": sum(bool(report.get("warnings")) for report in reports),
+        "part_reports": reports,
+    }
+
+
 @timed("audio_integrity", "processing")
 async def _verify_orpheus_part(
     path: Path,
@@ -3420,8 +3514,16 @@ async def _verify_orpheus_part(
     provider_label: str = "Orpheus",
     validate_pocket_continuity: bool = False,
     repair_pocket_continuity: bool = True,
+    asr_advisory: bool = False,
 ) -> dict:
     from backend.pipeline import av_sync
+
+    if asr_advisory:
+        return await _inspect_narration_part(
+            path, text, verification_dir, emit=emit,
+            provider_label=provider_label,
+            validate_pocket_continuity=validate_pocket_continuity,
+        )
 
     words, transcription = await av_sync.ensure_word_transcript(
         path,
@@ -3739,11 +3841,7 @@ def _load_cached_orpheus_part(path: Path, text: str) -> dict | None:
     ):
         return None
     integrity = metadata.get("integrity")
-    if (
-        not isinstance(integrity, dict)
-        or not integrity.get("verified")
-        or integrity.get("method") == "duration_only_preview"
-    ):
+    if not _part_integrity_accepted(integrity):
         return None
     try:
         info = _read_pcm_wav(path)
@@ -3862,8 +3960,8 @@ async def _recover_orpheus_part(
 
     A process restart, or an exact-ASR spelling correction deployed after a
     rejected sample, can leave a complete WAV on disk without a sidecar.  Run
-    the same fail-closed acoustic gate before submitting another slow remote
-    CPU job.  Truly stale or incomplete audio is ignored and regenerated.
+    WAV validation and advisory ASR inspection before submitting another remote
+    CPU job. Physically invalid or incomplete audio is regenerated.
     """
     if not path.is_file():
         return None
@@ -3878,7 +3976,7 @@ async def _recover_orpheus_part(
             text,
             verification_dir,
             emit=emit,
-            adjudicate_asr=True,
+            asr_advisory=True,
         )
     except TtsIntegrityError as exc:
         emit(f"Orpheus recovery: existing WAV rejected ({exc}); regenerating")
@@ -3890,7 +3988,7 @@ async def _recover_orpheus_part(
         request_token_budget=request_token_budget,
         integrity=integrity,
     )
-    emit("Orpheus recovery: accepted existing WAV after acoustic verification")
+    emit("Orpheus recovery: accepted existing WAV after WAV validation and ASR inspection")
     return metadata
 
 
@@ -3953,7 +4051,7 @@ async def _generate_orpheus(
     if len(input_paths) > 1:
         emit(
             f"TTS input: Orpheus-safe split into {len(input_paths)} chunks "
-            f"(up to {chunk_words} words per acoustically verified utterance)"
+            f"(up to {chunk_words} words per validated utterance)"
         )
     base_url = config.ORPHEUS_TTS_URL.rstrip("/")
     headers = {"X-API-Key": config.ORPHEUS_TTS_API_KEY}
@@ -3970,7 +4068,7 @@ async def _generate_orpheus(
                 cached = _load_cached_orpheus_part(expected_part, chunk)
                 if cached is not None:
                     emit(
-                        f"{name}: reusing acoustically verified Orpheus audio "
+                        f"{name}: reusing validated Orpheus audio "
                         f"({cached['word_count']} source words)"
                     )
                     wav_parts.append(expected_part)
@@ -3985,7 +4083,7 @@ async def _generate_orpheus(
                     cached, source_name = restored
                     if cached is not None:
                         emit(
-                            f"{name}: reusing acoustically verified Orpheus audio "
+                            f"{name}: reusing validated Orpheus audio "
                             f"from {source_name} after chunk renumbering "
                             f"({cached['word_count']} source words)"
                         )
@@ -4012,7 +4110,7 @@ async def _generate_orpheus(
                         emit=emit,
                     )
                 if recovered is not None:
-                    emit(f"{name}: reusing recovered acoustically verified Orpheus audio")
+                    emit(f"{name}: reusing recovered validated Orpheus audio")
                     wav_parts.append(expected_part)
                     part_metadata.append(recovered)
                     continue
@@ -4196,7 +4294,7 @@ async def _generate_orpheus(
                         chunk,
                         output_dir_path / "verification" / input_path.stem,
                         emit=emit,
-                        adjudicate_asr=True,
+                        asr_advisory=True,
                     )
                 except TtsIntegrityError as exc:
                     raise TtsIntegrityError(str(exc), part_key=input_path.name) from exc
@@ -4218,23 +4316,12 @@ async def _generate_orpheus(
 
     expected = await _concat_wav_parts(wav_parts, output_dir_path, log=log)
     source_words = _spoken_word_count(cleaned)
-    verified_words = sum(
-        int(metadata.get("word_count") or 0)
-        for metadata in part_metadata
-        if (metadata.get("integrity") or {}).get("verified")
+    integrity = _narration_integrity_summary(
+        part_metadata, source_words, required=verify_text, method="per_utterance_mlx_whisper",
     )
-    integrity = {
-        "method": "per_utterance_mlx_whisper",
-        "required": verify_text,
-        "passed": verified_words == source_words,
-        "source_words": source_words,
-        "verified_source_words": verified_words,
-        "verified_source_coverage": round(verified_words / max(1, source_words), 4),
-        "part_reports": [metadata.get("integrity") or {} for metadata in part_metadata],
-    }
     if verify_text and not integrity["passed"]:
         raise TtsIntegrityError(
-            f"Orpheus verified only {verified_words}/{source_words} source words; "
+            f"Orpheus generated only {integrity['accepted_source_words']}/{source_words} source words; "
             "refusing to join incomplete narration"
         )
     _write_tts_manifest(
@@ -4274,11 +4361,7 @@ def _load_cached_pocket_part(path: Path, text: str, voice: str) -> dict | None:
     if any(metadata.get(key) != value for key, value in expected.items()):
         return None
     integrity = metadata.get("integrity")
-    if (
-        not isinstance(integrity, dict)
-        or not integrity.get("verified")
-        or integrity.get("method") == "duration_only_preview"
-    ):
+    if not _part_integrity_accepted(integrity):
         return None
     try:
         info = _read_pcm_wav(path)
@@ -4336,7 +4419,7 @@ async def _recover_pocket_part(
             text,
             verification_dir,
             emit=emit,
-            adjudicate_asr=True,
+            asr_advisory=True,
             provider_label="Pocket TTS",
             validate_pocket_continuity=True,
         )
@@ -4352,7 +4435,7 @@ async def _recover_pocket_part(
         integrity=integrity,
         generation_seconds=0,
     )
-    emit("Pocket TTS recovery: accepted existing WAV after acoustic verification")
+    emit("Pocket TTS recovery: accepted existing WAV after WAV validation and ASR inspection")
     return metadata
 
 
@@ -4526,7 +4609,7 @@ async def _generate_pocket_tts(
                 cached = _load_cached_pocket_part(expected_part, chunk, voice)
                 if cached is not None:
                     emit(
-                        f"{name}: reusing acoustically verified Pocket TTS paragraph "
+                        f"{name}: reusing validated Pocket TTS paragraph "
                         f"({cached['word_count']} source words)"
                     )
                     wav_parts.append(expected_part)
@@ -4547,12 +4630,6 @@ async def _generate_pocket_tts(
             staged_part = expected_part.with_suffix(".tmp.wav")
             staged_part.unlink(missing_ok=True)
             synthesis_text = _pocket_synthesis_text(chunk)
-            retry_text = _pocket_pronunciation_retry_text(
-                synthesis_text, chunk, output_dir_path / "verification" / input_path.stem,
-            )
-            if retry_text != synthesis_text:
-                emit(f"{name}: adding an evidence-based pronunciation pause for resynthesis; canonical words unchanged")
-                synthesis_text = retry_text
             if _lexical_tokens(synthesis_text) != _lexical_tokens(chunk):
                 raise TtsIntegrityError("Pocket TTS pronunciation changed source tokens")
             synthesis_dir = output_dir_path / "synthesis"
@@ -4612,7 +4689,7 @@ async def _generate_pocket_tts(
                         chunk,
                         output_dir_path / "verification" / input_path.stem,
                         emit=emit,
-                        adjudicate_asr=True,
+                        asr_advisory=True,
                         provider_label="Pocket TTS",
                         validate_pocket_continuity=True,
                     )
@@ -4662,23 +4739,12 @@ async def _generate_pocket_tts(
 
     expected = await _concat_wav_parts(wav_parts, output_dir_path, log=log)
     source_words = _spoken_word_count(cleaned)
-    verified_words = sum(
-        int(metadata.get("word_count") or 0)
-        for metadata in part_metadata
-        if (metadata.get("integrity") or {}).get("verified")
+    integrity = _narration_integrity_summary(
+        part_metadata, source_words, required=verify_text, method="per_paragraph_mlx_whisper",
     )
-    integrity = {
-        "method": "per_paragraph_mlx_whisper",
-        "required": verify_text,
-        "passed": verified_words == source_words,
-        "source_words": source_words,
-        "verified_source_words": verified_words,
-        "verified_source_coverage": round(verified_words / max(1, source_words), 4),
-        "part_reports": [metadata.get("integrity") or {} for metadata in part_metadata],
-    }
     if verify_text and not integrity["passed"]:
         raise TtsIntegrityError(
-            f"Pocket TTS verified only {verified_words}/{source_words} source words; "
+            f"Pocket TTS generated only {integrity['accepted_source_words']}/{source_words} source words; "
             "refusing to join incomplete narration"
         )
     generation_seconds = sum(float(item.get("generation_seconds") or 0) for item in part_metadata)

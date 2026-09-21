@@ -514,12 +514,9 @@ def _narration_completeness_failures(
     lets rendering remain available when timing is merely approximate while
     failing closed on the one-minute-from-a-ten-minute-script failure mode.
     """
-    # Orpheus is verified utterance-by-utterance before concatenation. Its
-    # manifest binds the exact script and complete WAV hashes and requires
-    # 100% verified source coverage. A second Whisper pass over the paced
-    # program audio is useful for approximate visual timing, but long inserted
-    # music gaps and fused proper-name spellings must not override that stronger
-    # completeness proof. Unmanifested and non-Orpheus audio remain fail-closed.
+    # The manifest binds all generated parts to the script and WAV hashes.
+    # Under the advisory policy, ASR coverage remains reference evidence;
+    # neither the part-level nor full-program decode may block rendering.
     if source_contract_verified:
         return []
     if alignment.get("method") != "whisper_script_forced_alignment":
@@ -619,22 +616,33 @@ def _narration_manifest_failures(
             failures.append(f"{provider} integrity report must be a JSON object")
             return failures
         if not integrity.get("passed"):
-            failures.append(f"{provider} per-part acoustic verification did not pass")
-        if float(integrity.get("verified_source_coverage") or 0) != 1.0:
+            failures.append(f"{provider} per-part audio validation did not pass")
+        coverage_key = _narration_coverage_key(integrity)
+        if float(integrity.get(coverage_key) or 0) != 1.0:
             failures.append(
-                f"{provider} verified source coverage is not 100% "
-                f"({float(integrity.get('verified_source_coverage') or 0):.1%})"
+                f"{provider} {coverage_key} is not 100% "
+                f"({float(integrity.get(coverage_key) or 0):.1%})"
             )
     return failures
+
+
+def _narration_coverage_key(integrity: dict) -> str:
+    from backend.pipeline.tts import ASR_ADVISORY_POLICY
+
+    return (
+        "accepted_source_coverage"
+        if integrity.get("policy") == ASR_ADVISORY_POLICY
+        else "verified_source_coverage"
+    )
 
 
 def _manifest_program_segments(
     audio_path: str | Path,
     physical_segments: list[dict],
 ) -> list[dict] | None:
-    """Recover exact line timing from verified concatenated TTS chunks.
+    """Recover exact line timing from validated concatenated TTS chunks.
 
-    Each remote-provider part is independently hash-bound and acoustically verified.
+    Each remote-provider part is independently hash-bound and WAV-validated.
     Matching the part texts back to physical script lines therefore provides a
     stronger program-boundary contract than transcribing the silence-padded
     full file again with Whisper.
@@ -650,7 +658,7 @@ def _manifest_program_segments(
     if (
         not isinstance(integrity, dict)
         or integrity.get("passed") is not True
-        or float(integrity.get("verified_source_coverage") or 0) != 1.0
+        or float(integrity.get(_narration_coverage_key(integrity)) or 0) != 1.0
         or not isinstance(parts, list)
         or not parts
     ):
@@ -694,7 +702,8 @@ def _manifest_program_segments(
                 **segment,
                 "start": cursor,
                 "duration": duration,
-                "timing_source": "verified_chunk_manifest",
+                "timing_source": "validated_chunk_manifest",
+                "asr_policy": integrity.get("policy", "strict"),
             }
         )
         cursor += duration
@@ -710,7 +719,7 @@ def _apply_manifest_program_alignment(
     *,
     provider_label: str = "Orpheus",
 ) -> dict:
-    """Promote the exact verified chunk/program contract over whole-file ASR."""
+    """Use measured chunk/program timing while retaining ASR observations."""
     if not manifest_segments or pacing_report.get("passed") is not True:
         return alignment
     original = dict(alignment)
@@ -729,7 +738,8 @@ def _apply_manifest_program_alignment(
             "failure_reasons": [],
             "source_contract": {
                 "provider": provider_label,
-                "per_utterance_acoustic_coverage": 1.0,
+                "generated_source_coverage": 1.0,
+                "asr_policy": manifest_segments[0].get("asr_policy", "strict"),
                 "program_pacing_report_passed": True,
                 "physical_segment_count": len(manifest_segments),
             },
@@ -1626,8 +1636,9 @@ async def compose_video(
         )
     if source_contract_verified and not board["alignment"].get("passed"):
         emit(
-            "A/V sync warning: paced full-file ASR is incomplete, but the "
-            f"hash-bound {tts_provider} manifest proves 100% per-part source coverage"
+            "A/V sync warning: paced full-file ASR is incomplete; "
+            f"the hash-bound {tts_provider} manifest accounts for all generated parts; "
+            "ASR remains reference evidence"
         )
     if board["alignment"].get("passed"):
         emit(

@@ -3787,7 +3787,7 @@ class GenerateTtsTests(unittest.IsolatedAsyncioTestCase):
             text,
             output_dir.resolve() / "verification" / "tts_input",
             emit=unittest.mock.ANY,
-            adjudicate_asr=True,
+            asr_advisory=True,
         )
         self.assertEqual(refreshed["job_id"], "recovered-local-output")
         self.assertEqual(
