@@ -295,81 +295,6 @@ def _parse_story_corrections(raw: str, story_numbers: list[int]) -> dict[int, st
     return corrections
 
 
-_SPOKEN_NUMBER_OR_DATE_TOKENS = {
-    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
-    "nine", "ten", "eleven", "twelve", "hundred", "thousand", "million",
-    "billion", "trillion", "percent", "january", "february", "march", "april",
-    "may", "june", "july", "august", "september", "october", "november",
-    "december",
-}
-
-
-def _number_or_date_markers(text: str) -> set[str]:
-    markers = set(re.findall(r"\d+(?:[.,]\d+)?", text.casefold()))
-    markers.update(
-        token
-        for token in re.findall(r"[a-z]+", text.casefold())
-        if token in _SPOKEN_NUMBER_OR_DATE_TOKENS
-    )
-    return markers
-
-
-def _remove_persisting_cited_numeric_claims(
-    corrections: dict[int, str],
-    issues: list[dict],
-) -> dict[int, str]:
-    """Drop a C-blocked sentence only when its disputed markers survived.
-
-    The model is still allowed to correct a cited number or date. This guard
-    acts only when the returned sentence remains recognisably the same claim
-    and retains at least one exact number/date marker from the rejected text.
-    Processing by best sentence overlap avoids relying on shifted sentence
-    indices after the model removes another cited claim.
-    """
-    cleaned = dict(corrections)
-    for issue in issues:
-        if not re.search(r"audit codes [A-F]*C", str(issue.get("claim", "")), re.I):
-            continue
-        claim_ids = [str(value) for value in issue.get("claim_ids", [])]
-        claim_texts = [str(value) for value in issue.get("claim_texts", [])]
-        for claim_id, blocked_text in zip(claim_ids, claim_texts, strict=False):
-            match = re.fullmatch(r"(\d+)\.(\d+)", claim_id)
-            if match is None:
-                continue
-            story_number = int(match.group(1))
-            paragraph = cleaned.get(story_number)
-            blocked_markers = _number_or_date_markers(blocked_text)
-            if not paragraph or not blocked_markers:
-                continue
-            sentences = [
-                sentence.strip()
-                for sentence in re.split(r"(?<=[.!?])\s+", paragraph)
-                if sentence.strip()
-            ]
-            blocked_tokens = set(re.findall(r"[a-z0-9]+", blocked_text.casefold()))
-            best_index = -1
-            best_overlap = 0.0
-            for index, sentence in enumerate(sentences):
-                sentence_tokens = set(re.findall(r"[a-z0-9]+", sentence.casefold()))
-                denominator = min(len(blocked_tokens), len(sentence_tokens))
-                overlap = (
-                    len(blocked_tokens & sentence_tokens) / denominator
-                    if denominator
-                    else 0.0
-                )
-                if overlap > best_overlap:
-                    best_index = index
-                    best_overlap = overlap
-            if (
-                best_index >= 0
-                and best_overlap >= 0.5
-                and blocked_markers & _number_or_date_markers(sentences[best_index])
-            ):
-                sentences.pop(best_index)
-                cleaned[story_number] = " ".join(sentences)
-    return cleaned
-
-
 def _ensure_persisting_company_claim_attribution(
     corrections: dict[int, str],
     issues: list[dict],
@@ -1060,7 +985,7 @@ Keep corrections concise, including any added attribution. Shorten or remove onl
 {DAILY_NEWS_EDITORIAL_RULES}
 Edit ONLY failed story numbers {failed_story_numbers}. The software will preserve and merge every passing story, the opening, and the closing; do not output any of them.
 Every blocking issue carries claim_ids and claim_texts from the reviewed script. Modify only those cited claims inside a failed story paragraph. Preserve every uncited claim in that paragraph word-for-word unless changing punctuation is necessary to remove a cited sentence. Never discard an entire paragraph merely because one claim failed.
-Treat each audit code as a mechanical edit requirement. For D, remove the cited unsupported interpretation or replace only that claim with a direct paraphrase or translation of full article evidence. For C, correct or remove only the cited unsupported number or date. For B, correct or omit only the cited disputed name. For E, add source/company attribution or uncertainty to the cited claim. For F, update or remove only the cited contradiction or stale framing. For A with claim <story>.0, add the missing evidence-backed qualifying development to the existing story paragraph, or write one concise paragraph if the story is absent. The .0 ID is a coverage requirement, not a spoken sentence; do not copy its label into the script. When A accompanies other codes, also correct those cited sentences and preserve uncited claims. Never invent a development when the dossier supplies none.
+Treat each audit code as a mechanical edit requirement. For D, remove the cited unsupported interpretation or replace only that claim with a direct paraphrase or translation of full article evidence. For C, correct or remove only the cited unsupported number or date; retain the supported event, product, or business change in that sentence. Do not delete the qualifying development just to remove a price. Shared words such as thousand, percent, or a month do not by themselves prove a corrected value is still wrong. For B, correct or omit only the cited disputed name. For E, add source/company attribution or uncertainty to the cited claim. For F, update or remove only the cited contradiction or stale framing. For A with claim <story>.0, add the missing evidence-backed qualifying development to the existing story paragraph, or write one concise paragraph if the story is absent. The .0 ID is a coverage requirement, not a spoken sentence; do not copy its label into the script. When A accompanies other codes, also correct those cited sentences and preserve uncited claims. Never invent a development when the dossier supplies none.
 You MUST NOT copy a cited blocked sentence back unchanged. Apply the directive to that exact sentence or remove the sentence while preserving uncited claims.
 When a cited number, date, name, contradiction, or stale framing is ambiguous or internally inconsistent in the dossier, remove the disputed detail instead of choosing one version.
 For E findings, distinguish source attribution from claim attribution: state both who reported the statement and that the named company or person says, reports, argues, or claims it. A publication prefix alone does not make a company statement independently verified.
@@ -1107,7 +1032,9 @@ For an English edition, output no Chinese, Japanese, or Korean characters.
             route_selected=remember_route,
         )
         corrections = _parse_story_corrections(raw, failed_story_numbers)
-        corrections = _remove_persisting_cited_numeric_claims(corrections, issues)
+        # Numeric word overlap cannot identify which value was disputed. Leave
+        # the evidence-bound edit intact for the mandatory Web recheck; deleting
+        # a whole sentence here can erase the story's qualifying development.
         corrections = _ensure_persisting_company_claim_attribution(corrections, issues)
         if language == "en" and any(
             NON_ENGLISH_RE.search(paragraph) for paragraph in corrections.values()

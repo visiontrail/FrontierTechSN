@@ -94,6 +94,44 @@ def test_clean_text_does_not_parse_plain_url_as_html():
     assert cleaned == "https://www.example.com/story?a=1&b=2"
 
 
+def test_atom_prefers_publication_over_earlier_updated_element():
+    source = load_source_catalog()[0]
+    payload = '''<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+    <title>A previously published technology story</title><link href="https://example.com/story"/>
+    <updated>2026-09-21T03:51:31Z</updated><published>2026-09-19T00:50:13Z</published>
+    </entry></feed>'''
+    rows = research.parse_rss(payload, source, datetime(2026, 9, 21, tzinfo=timezone.utc))
+    assert rows[0].published_at == "2026-09-19T00:50:13+00:00"
+    undated = payload.replace('<published>2026-09-19T00:50:13Z</published>', '')
+    assert research.parse_rss(undated, source, datetime.now(timezone.utc))[0].published_at is None
+
+
+def test_article_publication_beats_unlabelled_update_time():
+    payload = '''<time datetime="2026-09-21T03:51:31Z">Updated today</time>
+    <script type="application/ld+json">{"@type":"NewsArticle",
+    "datePublished":"2026-09-19T00:50:13Z","dateModified":"2026-09-21T03:51:31Z"}</script>'''
+    assert research._extract_published_at(payload) == datetime(2026, 9, 19, 0, 50, 13, tzinfo=timezone.utc)
+    assert research._extract_published_at('<time datetime="2026-09-21T03:51:31Z">Updated</time>') is None
+
+
+@pytest.mark.parametrize("metadata,expected", [
+    ('<meta property="article:published_time" content="2026-09-19T00:50:13+0000">', "2026-09-19T00:50:13+00:00"),
+    ('<meta property="article:modified_time" content="2026-09-21T03:51:31+0000">', "2026-09-21T03:51:31+00:00"),
+])
+def test_hydration_reconciles_feed_dates_with_original_publication(metadata, expected):
+    article = research.NewsArticle(
+        id="story", source_id="example", source_name="Example", language="en",
+        title="An older story refreshed in the RSS feed", url="https://example.com/story",
+        published_at="2026-09-21T03:51:31+00:00",
+    )
+    payload = metadata + '<article><p>This is sufficient article evidence for the captured story.</p></article>'
+    with patch.object(research, "_request_text", AsyncMock(return_value=(payload, 200))):
+        asyncio.run(research.hydrate_evidence(None, [article]))
+    assert article.published_at == expected
+    assert article.evidence_status == "article_excerpt"
+    assert research._within_window(article, datetime(2026, 9, 21, 4, 9, tzinfo=timezone.utc), 36) == expected.startswith("2026-09-21")
+
+
 def test_clean_text_still_removes_html_markup():
     assert research._clean_text("<p>Hello&nbsp;<b>world</b></p>") == "Hello world"
 
@@ -472,32 +510,35 @@ def test_d_only_audit_rewrites_from_evidence_before_trimming():
     assert chat.await_args.kwargs["disable_thinking"] is True
 
 
-def test_c_audit_removes_a_rewritten_sentence_that_keeps_disputed_numbers():
-    corrections = {
-        2: (
-            "Skild says S1 learns from one demonstration. "
-            "QbitAI reports tasks over ten minutes and 66 percent success. "
-            "The report describes traditional post-training as more expensive."
-        )
-    }
+@pytest.mark.parametrize("corrected_claim", [
+    "The company says its new platform moves to per-robot licenses, provisionally priced at five thousand yuan per year.",
+    "The company says its new platform moves to per-robot licenses, with pricing subject to negotiation.",
+])
+def test_numeric_correction_preserves_the_supported_development_for_web_recheck(corrected_claim):
+    edition = date(2026, 9, 21)
+    opening = morning_opening(edition, "en")
+    closing = "Thanks for listening."
+    blocked = "The new platform moves to per-robot licenses, priced at ten thousand yuan per year."
+    article = research.NewsArticle(
+        id="robot", source_id="example", source_name="Example", language="en",
+        title="Robot platform adopts per-robot licenses", url="https://example.com/robot",
+        published_at="2026-09-21T00:00:00+00:00", evidence_text=corrected_claim,
+    )
+    dossier = research.ResearchDossier("2026-09-21", "now", 36, [article], [article], [])
+    lead = "Example interviews the robot platform company. "
     issues = [{
-        "claim": "Web audit codes C for story 2 at claims 2.2",
-        "claim_ids": ["2.2"],
-        "claim_texts": [
-            "QbitAI reports tasks over ten minutes, with 66 percent success versus 9 percent."
-        ],
-        "evidence_story_numbers": [2],
+        "claim": "Web audit codes C for story 1 at claims 1.2",
+        "claim_ids": ["1.2"], "claim_texts": [blocked], "evidence_story_numbers": [1],
     }]
-
-    cleaned = scriptwriter._remove_persisting_cited_numeric_claims(
-        corrections,
-        issues,
-    )
-
-    assert cleaned[2] == (
-        "Skild says S1 learns from one demonstration. "
-        "The report describes traditional post-training as more expensive."
-    )
+    with (
+        patch.object(scriptwriter, "_resolve_provider", AsyncMock(return_value=("https://example.com", "model", "key"))),
+        patch.object(scriptwriter, "_chat", AsyncMock(return_value=json.dumps({"1": lead + corrected_claim}))),
+    ):
+        revised = asyncio.run(scriptwriter.revise_daily_script(
+            "\n".join([opening, lead + blocked, closing]), dossier, issues, edition,
+            language="en", closing_remarks=closing, ai_endpoint=None, ai_model=None, provider_id=None,
+        ))
+    assert revised.splitlines()[1] == lead + corrected_claim
 
 
 def test_e_audit_attributes_the_company_claim_not_only_the_publication():

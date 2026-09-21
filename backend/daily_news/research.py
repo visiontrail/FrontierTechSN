@@ -238,7 +238,10 @@ def parse_rss(payload: str, source: NewsSource, fetched_at: datetime) -> list[Ne
         url = _canonical_url(url, source.homepage)
         if len(title) < MIN_HEADLINE_CHARS or not url:
             continue
-        published = _parse_datetime(_entry_text(entry, "pubdate", "published", "updated", "date"))
+        # Atom often puts updated before published. XML order must not turn a
+        # refreshed old article into a newly published story.
+        published = next((parsed for name in ("published", "pubdate", "date")
+                          if (parsed := _parse_datetime(_entry_text(entry, name))) is not None), None)
         summary = _clean_text(_entry_text(entry, "description", "summary", "content"))[:1200]
         articles.append(
             NewsArticle(
@@ -662,7 +665,8 @@ def _extract_published_at(payload: str) -> datetime | None:
         ('meta[name="date"]', "content"),
         ('meta[name="publishdate"]', "content"),
         ('meta[itemprop="datePublished"]', "content"),
-        ('time[datetime]', "datetime"),
+        ('meta[itemprop="dateCreated"]', "content"),
+        ('time[itemprop="datePublished"][datetime]', "datetime"),
     ):
         node = soup.select_one(selector)
         if node and node.get(attribute):
@@ -714,15 +718,21 @@ async def hydrate_evidence(
                     payload = f"<article>{detail.get('content') or ''}</article>"
                 else:
                     payload, _ = await _request_text(client, article.url, attempts=2)
-                if not article.published_at:
-                    published = _extract_published_at(payload)
-                    if published is None and article.source_id == "ithome_ai":
-                        node = BeautifulSoup(payload, "html.parser").select_one("#pubtime_baidu")
-                        if node is not None:
-                            published = datetime.strptime(node.get_text(strip=True), "%Y/%m/%d %H:%M:%S").replace(
-                                tzinfo=ZoneInfo("Asia/Shanghai"),
-                            ).astimezone(timezone.utc)
-                    article.published_at = published.isoformat() if published else None
+                # Publisher metadata is authoritative even when a feed already
+                # supplied a date: some RSS pubDate values are modification times.
+                published = _extract_published_at(payload)
+                if published is None and article.source_id == "ithome_ai":
+                    node = BeautifulSoup(payload, "html.parser").select_one("#pubtime_baidu")
+                    if node is not None:
+                        published = datetime.strptime(node.get_text(strip=True), "%Y/%m/%d %H:%M:%S").replace(
+                            tzinfo=ZoneInfo("Asia/Shanghai"),
+                        ).astimezone(timezone.utc)
+                if published is not None:
+                    verified_date = published.isoformat()
+                    if article.published_at and article.published_at != verified_date:
+                        _log(log, f"Publication date corrected for {article.url}: "
+                             f"{article.published_at} -> {verified_date}")
+                    article.published_at = verified_date
                 article.evidence_text = _extract_article_text(payload)
                 if article.source_id == "tldr_ai":
                     article.evidence_text = _extract_tldr_newsletter(payload)
