@@ -260,6 +260,46 @@ def test_new_developments_can_use_chinese_or_relative_source_dates(text, basis):
     assert validate(row, assessment(row, development_quote=text, date_quote=text, date_basis=basis))["decision"] == "include"
 
 
+@pytest.mark.parametrize("day", ["on Monday", "Monday", "周一", "星期一"])
+@pytest.mark.parametrize("published", ["2026-09-21T11:10:55+00:00", "2026-09-20T23:10:55+00:00"])
+def test_weekday_development_uses_captured_publication_date(day, published):
+    now = datetime(2026, 9, 22, 3, tzinfo=timezone.utc)
+    text = f"The lab published its new reproducible evaluation {day}."
+    row = article(published_at=published, evidence_text=text)
+    record = assessment(row, development_date="2026-09-21", development_kind="new_event",
+                        development_quote=text, date_quote=text, date_basis="relative")
+    result = freshness.validate_assessment(row, record, [], now=now, window_hours=36,
+                                          timezone_name="Asia/Singapore")
+    assert result["date_basis"] == "relative"
+    assert result["development_date"] == "2026-09-21"
+    assert result["date_quote"] == text
+
+
+@pytest.mark.parametrize("day", ["last Monday", "next Monday", "previous Monday",
+                                "Monday last week", "Monday next week", "上周一", "下星期一",
+                                "Monday, September 14, 2026", "周一（9月14日）",
+                                "Monday in January", "Monday in 2025", "this past Monday", "on Tuesday",
+                                "on Monday a week ago", "every Monday", "each Monday"])
+def test_weekday_cannot_redate_past_future_or_conflicting_source_date(day):
+    now = datetime(2026, 9, 21, 12, tzinfo=timezone.utc)
+    text = f"The lab published its new reproducible evaluation {day}."
+    row = article(published_at="2026-09-21T11:10:55+00:00", evidence_text=text)
+    record = assessment(row, development_date="2026-09-21", development_kind="new_event",
+                        development_quote=text, date_quote=text, date_basis="relative")
+    with pytest.raises(ValueError, match="date quotation"):
+        freshness.validate_assessment(row, record, [], now=now, window_hours=36,
+                                      timezone_name="Asia/Singapore")
+
+
+def test_weekday_on_cutoff_day_still_needs_precise_timing():
+    text = "On Friday the lab published its new reproducible evaluation."
+    row = article(evidence_text=text)
+    record = assessment(row, development_date="2026-09-18", development_quote=text,
+                        date_quote=text, date_basis="relative")
+    with pytest.raises(ValueError, match="cutoff day"):
+        validate(row, record)
+
+
 def test_editorial_assessment_compares_all_history_and_repairs_malformed_response(tmp_path):
     row = article("jiqizhixin_daily", url="https://newsite.test/new-url", title="A renamed retrospective")
     history = [previous(title="另一种语言的旧发布报道")]
@@ -333,6 +373,45 @@ def test_assessment_exhaustion_never_falls_back_to_publication_date(tmp_path):
             asyncio.run(freshness.assess_candidates([row], [], now=NOW, window_hours=36, output_dir=tmp_path))
     assert chat.await_count == 3
     assert not row.freshness
+
+
+def test_discovery_excludes_exhausted_candidate_and_preserves_accepted_batch(tmp_path):
+    good, bad, later = [article(name) for name in ("good", "bad", "later")]
+    initial = json.dumps({"assessments": [assessment(good), assessment(bad, date_basis="publication")]})
+    invalid = json.dumps({"assessments": [assessment(bad, date_basis="publication")]})
+    chat = AsyncMock(side_effect=[initial, invalid, invalid,
+                                 json.dumps({"assessments": [assessment(later)]})])
+    logs = []
+    with (patch.object(freshness, "ASSESSMENT_BATCH_SIZE", 2),
+          patch.object(freshness, "_resolve_provider", AsyncMock(return_value=("e", "m", "k"))),
+          patch.object(freshness, "_chat", chat)):
+        asyncio.run(freshness.assess_candidates([good, bad, later], [], now=NOW, window_hours=36,
+                                              output_dir=tmp_path, log=logs.append,
+                                              exclude_invalid_candidates=True))
+    assert chat.await_count == 4
+    assert good.freshness["decision"] == later.freshness["decision"] == "include"
+    assert bad.freshness["decision"] == "exclude"
+    assert bad.freshness["exclusion_basis"] == "validation_exhausted"
+    assert "Publication date supports only" in bad.freshness["validation_error"]
+    assert "development_date" not in bad.freshness
+    assert bad.freshness["evidence_sha256"] == freshness.fingerprint(freshness.evidence_payload(bad))
+    assert any("excluded candidate bad" in line for line in logs)
+    receipts = [json.loads(p.read_text()) for p in (tmp_path / "research/freshness").glob("*.json")
+                if "assessments" in json.loads(p.read_text())]
+    assert any(bad.freshness in receipt["assessments"] for receipt in receipts)
+
+
+@pytest.mark.parametrize("failure", ["not JSON", '{"assessments": []}', RuntimeError("provider 429")])
+def test_discovery_does_not_hide_response_or_provider_failures(tmp_path, failure):
+    row = article()
+    chat = AsyncMock(side_effect=failure) if isinstance(failure, Exception) else AsyncMock(return_value=failure)
+    with (patch.object(freshness, "_resolve_provider", AsyncMock(return_value=("e", "m", "k"))),
+          patch.object(freshness, "_chat", chat)):
+        with pytest.raises(RuntimeError, match="provider 429|exhausted bounded repairs"):
+            asyncio.run(freshness.assess_candidates([row], [], now=NOW, window_hours=36,
+                                                  output_dir=tmp_path, exclude_invalid_candidates=True))
+    assert not row.freshness
+    assert chat.await_count == (1 if isinstance(failure, Exception) else 3)
 
 
 @pytest.fixture
@@ -579,3 +658,53 @@ def test_research_filters_old_sources_then_semantic_repeats_before_selection(tmp
     assert not freshness.eligibility_failures(result)
     assert next(a for a in result.selected if a.source_id == "bloomberg").preference_bonus == 6
     assert next(a for a in result.candidates if a.id == "reprint").freshness["decision"] == "exclude"
+
+
+@pytest.mark.parametrize("usable_replacements", [True, False])
+def test_research_replaces_exhausted_candidates_without_weakening_minimum(tmp_path, usable_replacements):
+    sources = [s for s in load_source_catalog() if s.id in {"nature", "bloomberg", "jiqizhixin_daily"}]
+    rows = [article(sources[i % 3].id, id=f"candidate-{i}", title=f"Independent story {i}",
+                    url=f"https://example.test/story/{i}") for i in range(27)]
+    by_id = {row.id: row for row in rows}
+
+    async def fetch(client, source):
+        matches = [a for a in rows if a.source_id == source.id]
+        return matches, research.SourceFetch(source.id, source.name, source.homepage, True, 200, len(matches))
+
+    async def chat(system, content, *args, **kwargs):
+        decisions = []
+        for candidate in json.loads(content)["candidates"]:
+            row = by_id[candidate["id"]]
+            valid = usable_replacements and row in rows[24:]
+            decisions.append(assessment(row, development_quote=QUOTE if valid else "invented"))
+        return json.dumps({"assessments": decisions})
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW
+
+    # Keep discovery order deterministic so the first hydration batch consists
+    # entirely of invalid candidates, followed by three possible replacements.
+    def rank(articles, *args):
+        return sorted(articles, key=lambda a: int(a.id.split("-")[1]))
+
+    with (
+        patch.object(research, "datetime", Clock),
+        patch.object(research, "enabled_sources", return_value=sources),
+        patch.object(research, "fetch_source", AsyncMock(side_effect=fetch)),
+        patch.object(research, "score_and_deduplicate", side_effect=rank),
+        patch.object(research, "hydrate_evidence", AsyncMock()) as hydrate,
+        patch.object(freshness, "load_history", AsyncMock(return_value=[])),
+        patch.object(freshness, "_resolve_provider", AsyncMock(return_value=("e", "m", "k"))),
+        patch.object(freshness, "_chat", AsyncMock(side_effect=chat)),
+    ):
+        if usable_replacements:
+            result = asyncio.run(research.run_research(EDITION, tmp_path, max_stories=3))
+            assert {a.id for a in result.selected} == {a.id for a in rows[24:]}
+            assert not freshness.eligibility_failures(result)
+        else:
+            with pytest.raises(RuntimeError, match="only 0 usable stories"):
+                asyncio.run(research.run_research(EDITION, tmp_path, max_stories=3))
+    assert [len(call.args[1]) for call in hydrate.await_args_list] == [24, 3]
+    assert all(a.freshness["decision"] == "exclude" for a in rows[:24])

@@ -874,6 +874,7 @@ async def run_research(
                 dated_batch, history, now=now, window_hours=window_hours,
                 output_dir=output_dir, timezone_name=timezone_name,
                 ai_endpoint=ai_endpoint, ai_model=ai_model, provider_id=provider_id, log=log,
+                exclude_invalid_candidates=True,
             )
             eligible.extend(article for article in dated_batch
                             if article.freshness.get("decision") == "include")

@@ -26,6 +26,7 @@ HISTORY_DAYS = 14
 ASSESSMENT_ATTEMPTS = 3
 ASSESSMENT_BATCH_SIZE = 4
 CATEGORIES = {"ai_models", "agents", "robotics", "chips", "science", "security_policy", "business", "general"}
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 EVIDENCE_FIELDS = (
     "id", "title", "url", "published_at", "source_name", "language",
     "content_kind", "evidence_status", "summary", "evidence_text",
@@ -167,8 +168,36 @@ def _date_supported(value: date, quote: str, published: datetime, zone: ZoneInfo
         if match:
             return not match[1] or int(match[1]) == value.year
     publication_day = published.astimezone(zone).date()
-    return any(value == publication_day - timedelta(days=days) and re.search(pattern, text)
-               for days, pattern in [(0, r"\btoday\b|今天|今日"), (1, r"\byesterday\b|昨天|昨日")])
+    if any(value == publication_day - timedelta(days=days) and re.search(pattern, text)
+           for days, pattern in [(0, r"\btoday\b|今天|今日"), (1, r"\byesterday\b|昨天|昨日")]):
+        return True
+    # News commonly dates a development with "on Monday". Resolve an
+    # unqualified weekday to its most recent occurrence at publication, never
+    # to the edition's current day. Qualified/ambiguous weeks need stronger
+    # evidence; in particular, "last Monday" must not become today's Monday.
+    weekdays = "|".join(WEEKDAYS)
+    if re.search(
+        rf"\b(?:last|next|previous|following|coming|past)\s+(?:{weekdays}|week|month|year)\b"
+        rf"|\b(?:every|each)\s+(?:{weekdays})\b|\b(?:weeks?|months?|years?)\s+(?:ago|earlier|later)\b"
+        r"|(?:上|下|前|后)(?:个)?(?:周|星期|礼拜)", text,
+    ):
+        return False
+    # Do not let a weekday override a conflicting written calendar date.
+    months = "january|february|march|april|may|june|july|august|september|october|november|december"
+    month_names = months + "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
+    if re.search(
+        rf"\b(?:{month_names})\.?\s+\d|\b\d+\s+(?:{month_names})\b"
+        rf"|\b(?:{weekdays})\s+(?:in|during)\b"
+        r"|\d{1,2}\s*月\s*\d{1,2}\s*日", text,
+    ):
+        return False
+    for weekday, name in enumerate(WEEKDAYS):
+        chinese = "一二三四五六日"[weekday]
+        if re.search(rf"\b{name}\b|(?:周|星期|礼拜)[{chinese}{'天' if weekday == 6 else ''}]", text):
+            expected = publication_day - timedelta(days=(publication_day.weekday() - weekday) % 7)
+            if value == expected:
+                return True
+    return False
 
 
 def validate_assessment(article, assessment: dict, history: list[dict], *,
@@ -278,6 +307,10 @@ Use an explicit/relative source date when available. 'publication' is allowed ON
 the newly published original reporting or substantive attributed analysis is itself the
 development, never to re-date the old event it describes. A claim of a new event needs a
 date quotation. Never fabricate a date, quotation or novelty to fill the requested slots.
+Relative dates include today/yesterday and unqualified weekdays such as "on Monday"
+or "周一", anchored to the candidate's publication date, never the current edition date.
+Keep date_basis="relative" for a quoted weekday; do not change it to "publication"
+to evade a date error. Qualified or ambiguous weeks require stronger date evidence.
 All development_date values use the supplied timezone. For date_basis="publication",
 copy the candidate's publication_date exactly; published_at_local is the same captured
 publication timestamp in that timezone. Do not copy the UTC date from published_at.
@@ -311,7 +344,13 @@ verify facts: this is extraction from supplied evidence, followed by a separate 
 
 async def assess_candidates(articles, history: list[dict], *, now: datetime, window_hours: int,
                             output_dir: Path, timezone_name: str = "UTC", ai_endpoint=None,
-                            ai_model=None, provider_id=None, log=None) -> None:
+                            ai_model=None, provider_id=None, log=None,
+                            exclude_invalid_candidates: bool = False) -> None:
+    """Assess evidence; discovery may exclude individually invalid candidates.
+
+    Review refresh remains strict. Provider failures and unusable response
+    envelopes always propagate, even during discovery.
+    """
     if not articles:
         return
     endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
@@ -373,16 +412,28 @@ async def assess_candidates(articles, history: list[dict], *, now: datetime, win
                 if log:
                     log(f"Freshness response rejected ({attempt}/{ASSESSMENT_ATTEMPTS}): {error}")
                 continue
-            results = [accepted[a.id] for a in batch]
-            for article, result in zip(batch, results):
-                article.freshness = result
-                article.category = result.get("category", article.category)
-            Path(f"{stem}.json").write_text(json.dumps(
-                {"request": content, "assessments": results}, indent=2, ensure_ascii=False,
-            ), encoding="utf-8")
             break
         else:
-            raise RuntimeError(f"News freshness assessment exhausted bounded repairs: {error}")
+            if not exclude_invalid_candidates or any(row["id"] is None for row in errors):
+                raise RuntimeError(f"News freshness assessment exhausted bounded repairs: {error}")
+            for row in errors:
+                article = next(a for a in batch if a.id == row["id"])
+                accepted[article.id] = validate_assessment(article, {
+                    "id": article.id, "decision": "exclude",
+                    "reason": f"Freshness evidence could not be validated after {ASSESSMENT_ATTEMPTS} attempts: {row['error']}",
+                    "exclusion_basis": "validation_exhausted",
+                    "validation_error": row["error"],
+                    "assessment_attempts": ASSESSMENT_ATTEMPTS,
+                }, history, now=now, window_hours=window_hours, timezone_name=timezone_name)
+                if log:
+                    log(f"Freshness: excluded candidate {article.id} after bounded repairs: {row['error']}; continuing research")
+        results = [accepted[a.id] for a in batch]
+        for article, result in zip(batch, results):
+            article.freshness = result
+            article.category = result.get("category", article.category)
+        Path(f"{stem}.json").write_text(json.dumps(
+            {"request": content, "assessments": results}, indent=2, ensure_ascii=False,
+        ), encoding="utf-8")
 
 
 def freshness_context(article) -> str:
