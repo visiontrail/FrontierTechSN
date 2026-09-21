@@ -136,6 +136,40 @@ def test_invented_quote_and_unrelated_date_cannot_pass():
         validate(row, assessment(row, date_quote="On September 20, the company changed its name."))
 
 
+def test_typographic_quote_variants_are_bound_back_to_exact_captured_text():
+    captured = "On September 20, 2026, Lab’s new evaluation showed “reproducible results” for Orbit."
+    row = article(evidence_text=captured)
+    generated = captured.replace("’", "'").replace("“", '"').replace("”", '"').lower()
+    generated = generated.replace("new evaluation", "new\n  evaluation")
+    record = assessment(row, development_quote=generated, date_quote=generated)
+    result = validate(row, record)
+    assert result["development_quote"] == captured
+    assert result["date_quote"] == captured
+    assert record["development_quote"] == generated
+    with pytest.raises(ValueError, match="already covered"):
+        validate(row, {**record, "matched_history_keys": ["prior"], "new_since_history": "Claimed update"},
+                 [previous(row, script=captured)])
+
+
+@pytest.mark.parametrize("generated", [
+    "Lab publishes reproducible Orbit evaluation — " + QUOTE,
+    "On September 20, 2026, Lab published a new evaluation of Orbit with conclusive results.",
+    "On September 20, 2026, Lab published … with reproducible results.",
+    QUOTE.replace("September 20", "September 21"),
+])
+def test_quote_matching_still_rejects_stitched_paraphrased_or_changed_evidence(generated):
+    row = article()
+    with pytest.raises(ValueError, match="verbatim"):
+        validate(row, assessment(row, development_quote=generated))
+
+
+def test_quotes_cannot_borrow_summary_when_captured_article_text_exists():
+    row = article(evidence_text=OLD, summary=QUOTE)
+    with pytest.raises(ValueError, match="verbatim"):
+        validate(row, assessment(row))
+    assert validate(replace(row, evidence_text=""), assessment(row))["development_quote"] == QUOTE
+
+
 @pytest.mark.parametrize("text,basis", [
     ("实验室在 9 月 20 日发布了 Orbit 新评估，提供了可复现的实验结果。", "explicit"),
     ("Today Lab published a new evaluation of Orbit with reproducible results.", "relative"),
@@ -157,7 +191,57 @@ def test_editorial_assessment_compares_all_history_and_repairs_malformed_respons
     assert "across languages" in chat.await_args.args[0]
     assert history[0]["title"] in chat.await_args.args[1]
     assert row.url in chat.await_args.args[1]
+    repair = json.loads(chat.await_args.args[1])["repair"]
+    assert repair["previous_response"] == '{"assessments": []}'
+    assert repair["validation_errors"] == [{"id": None, "error": "Missing, duplicate or unexpected candidate IDs"}]
     assert len(list((tmp_path / "research/freshness").glob("*.txt"))) == 2
+
+
+def test_repairs_report_each_candidate_failure_and_keep_valid_decisions(tmp_path):
+    valid, bad_date, bad_quote = [article(name) for name in ("valid", "bad-date", "bad-quote")]
+    first = json.dumps({"assessments": [
+        assessment(valid),
+        assessment(bad_date, development_kind="new_event", date_basis="publication"),
+        assessment(bad_quote, development_quote=bad_quote.title + " — " + QUOTE),
+    ]})
+    second = json.dumps({"assessments": [
+        assessment(bad_date),
+        {"id": bad_quote.id, "decision": "exclude", "reason": "The captured evidence cannot support the claimed update"},
+    ]})
+    chat = AsyncMock(side_effect=[first, second])
+    logs = []
+    with patch.object(freshness, "_resolve_provider", AsyncMock(return_value=("e", "m", "k"))), patch.object(freshness, "_chat", chat):
+        asyncio.run(freshness.assess_candidates([valid, bad_date, bad_quote], [], now=NOW,
+                                              window_hours=36, output_dir=tmp_path, log=logs.append))
+    request = json.loads(chat.await_args.args[1])
+    assert [a["id"] for a in request["candidates"]] == [bad_date.id, bad_quote.id]
+    assert request["repair"]["previous_response"] == first
+    errors = request["repair"]["validation_errors"]
+    assert [e["id"] for e in errors] == [bad_date.id, bad_quote.id]
+    assert "Publication date" in errors[0]["error"]
+    assert "verbatim" in errors[1]["error"]
+    assert all(a.freshness["decision"] == "include" for a in (valid, bad_date))
+    assert bad_quote.freshness["decision"] == "exclude"
+    assert bad_date.id in logs[0] and bad_quote.id in logs[0]
+    audit = tmp_path / "research/freshness"
+    saved = json.loads(next(audit.glob("*-1.validation.json")).read_text())
+    assert saved == {"accepted_ids": [valid.id], "errors": errors}
+    saved_request = json.loads(next(audit.glob("*-2.request.json")).read_text())
+    assert saved_request == request
+
+
+def test_failed_repairs_remain_bounded_without_committing_partial_batch(tmp_path):
+    good, bad = article("good"), article("bad")
+    initial = json.dumps({"assessments": [assessment(good), assessment(bad, development_quote="invented")]})
+    invalid = json.dumps({"assessments": [assessment(bad, development_quote="invented")]})
+    chat = AsyncMock(side_effect=[initial, "not JSON", invalid])
+    with patch.object(freshness, "_resolve_provider", AsyncMock(return_value=("e", "m", "k"))), patch.object(freshness, "_chat", chat):
+        with pytest.raises(RuntimeError, match="bad: The new development must quote"):
+            asyncio.run(freshness.assess_candidates([good, bad], [], now=NOW, window_hours=36, output_dir=tmp_path))
+    assert chat.await_count == 3
+    assert not good.freshness and not bad.freshness
+    assert all([a["id"] for a in json.loads(call.args[1])["candidates"]] == [bad.id]
+               for call in chat.await_args_list[1:])
 
 
 def test_assessment_exhaustion_never_falls_back_to_publication_date(tmp_path):

@@ -36,6 +36,22 @@ def _normalized(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def _source_quote(evidence: str, quote: str) -> str | None:
+    """Recover one contiguous source span, tolerating only quote typography/space.
+
+    Store the captured spelling, punctuation and case, not the model's version.
+    Never bridge separate fields, omitted words, or paraphrased sentences.
+    """
+    parts = re.split(r"(\s+|['‘’\"“”])", quote.strip())
+    pattern = "".join(
+        r"\s+" if part.isspace() else "['‘’]" if part in {"'", "‘", "’"}
+        else '["“”]' if part in {'"', "“", "”"} else re.escape(part)
+        for part in parts
+    )
+    match = re.search(pattern, evidence, re.IGNORECASE) if pattern else None
+    return match.group(0) if match else None
+
+
 def article_identity(url: str) -> str:
     """Ignore transport, fragments and tracking, retaining meaningful query keys."""
     parts = urlsplit(url)
@@ -149,6 +165,7 @@ def _date_supported(value: date, quote: str, published: datetime, zone: ZoneInfo
 def validate_assessment(article, assessment: dict, history: list[dict], *,
                         now: datetime, window_hours: int, timezone_name: str) -> dict:
     """Validate extraction and bind it to exact source evidence and history."""
+    assessment = dict(assessment)
     if (assessment.get("decision") not in {"include", "exclude"}
             or not isinstance(assessment.get("reason"), str) or not assessment["reason"].strip()):
         raise ValueError("Each decision needs include/exclude and an evidence-based reason")
@@ -162,10 +179,12 @@ def validate_assessment(article, assessment: dict, history: list[dict], *,
         for key in ("event_identity", "development", "development_quote", "development_date", "date_basis"):
             if not isinstance(assessment.get(key), str) or not assessment[key].strip():
                 raise ValueError(f"Missing {key}")
-        quote = _normalized(assessment["development_quote"])
-        evidence = _normalized(article.evidence_text or article.summary)
-        if len(quote) < 20 or quote not in evidence:
+        evidence = article.evidence_text or article.summary
+        source_quote = _source_quote(evidence, assessment["development_quote"])
+        if len(_normalized(assessment["development_quote"])) < 20 or not source_quote:
             raise ValueError("The new development must quote the captured evidence verbatim")
+        assessment["development_quote"] = source_quote
+        quote = _normalized(source_quote)
         zone = ZoneInfo(timezone_name)
         development_day = date.fromisoformat(assessment["development_date"])
         day_start = datetime.combine(development_day, datetime.min.time(), zone)
@@ -179,11 +198,12 @@ def validate_assessment(article, assessment: dict, history: list[dict], *,
         if basis in {"explicit", "relative"}:
             if day_start < now - timedelta(hours=window_hours):
                 raise ValueError("A date-only development on the cutoff day cannot prove in-window timing")
-            date_quote = _normalized(assessment.get("date_quote", ""))
-            if not date_quote or date_quote not in evidence or not _date_supported(
+            date_quote = _source_quote(evidence, assessment.get("date_quote", ""))
+            if not date_quote or not _date_supported(
                 development_day, date_quote, published, zone,
             ):
                 raise ValueError("The development date lacks a matching source date quotation")
+            assessment["date_quote"] = date_quote
         elif basis == "publication":
             if (assessment.get("development_kind") not in {"new_reporting", "analysis"}
                     or development_day != published.astimezone(zone).date()):
@@ -245,6 +265,15 @@ sentence(s) supporting that update, "date_basis": "explicit" or "relative" or "p
 "matched_history_keys": [ALL matching historical keys], "new_since_history": specific
 new facts absent from matching prior coverage (empty if no match)}]}.
 Excluded candidates need only id, decision and reason. Return every candidate exactly once.
+Quotes must be a single contiguous span of that candidate's evidence_text (or summary
+only when evidence_text is empty), at least 20 characters for development_quote. Copy
+the original wording and punctuation. Do not quote the title, join title and summary,
+stitch separated passages, translate, paraphrase, or borrow another candidate's text.
+If the captured evidence cannot support an inclusion, return exclude with the reason.
+Assess each candidate independently; deduplication among candidates happens later.
+Return valid JSON only, with escaped quotation marks inside strings.
+On repair, return only the requested candidates. Use repair.previous_response and ALL
+repair.validation_errors to fix the rejected decisions; do not regenerate accepted ones.
 Do not use source reputation as evidence of novelty. Do not claim to browse or independently
 verify facts: this is extraction from supplied evidence, followed by a separate live-web audit.
 """
@@ -269,27 +298,52 @@ async def assess_candidates(articles, history: list[dict], *, now: datetime, win
         stem = audit_dir / fingerprint(content)[:24]
         Path(f"{stem}.request.json").write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
         error = ""
+        accepted = {}
+        repair = None
         for attempt in range(1, ASSESSMENT_ATTEMPTS + 1):
+            pending = [a for a in batch if a.id not in accepted]
+            request = {**content, "candidates": [evidence_payload(a) for a in pending]}
+            if repair:
+                request["repair"] = repair
+            Path(f"{stem}-{attempt}.request.json").write_text(
+                json.dumps(request, indent=2, ensure_ascii=False), encoding="utf-8",
+            )
             raw = await _chat(
-                ASSESSMENT_RULES + (f"\nPrevious response failed validation: {error}" if error else ""),
-                json.dumps(content, ensure_ascii=False), endpoint, model, api_key, log,
+                ASSESSMENT_RULES, json.dumps(request, ensure_ascii=False), endpoint, model, api_key, log,
                 "Daily news freshness assessment", max_tokens=8192, enable_skills=False,
                 disable_thinking=True,
             )
             Path(f"{stem}-{attempt}.txt").write_text(raw, encoding="utf-8")
+            errors = []
             try:
                 text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
                 rows = json.loads(text)["assessments"]
+                if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                    raise ValueError("assessments must be an array of candidate objects")
                 by_id = {row["id"]: row for row in rows}
-                if len(rows) != len(batch) or set(by_id) != {a.id for a in batch}:
+                if len(rows) != len(pending) or set(by_id) != {a.id for a in pending}:
                     raise ValueError("Missing, duplicate or unexpected candidate IDs")
-                results = [validate_assessment(a, by_id[a.id], history, now=now,
-                           window_hours=window_hours, timezone_name=timezone_name) for a in batch]
             except (ValueError, KeyError, TypeError, AttributeError) as exc:
-                error = str(exc)
+                errors.append({"id": None, "error": str(exc)})
+            else:
+                for article in pending:
+                    try:
+                        accepted[article.id] = validate_assessment(
+                            article, by_id[article.id], history, now=now,
+                            window_hours=window_hours, timezone_name=timezone_name,
+                        )
+                    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                        errors.append({"id": article.id, "error": str(exc)})
+            Path(f"{stem}-{attempt}.validation.json").write_text(json.dumps(
+                {"accepted_ids": list(accepted), "errors": errors}, indent=2, ensure_ascii=False,
+            ), encoding="utf-8")
+            if errors:
+                error = "; ".join(f"{row['id'] or 'response'}: {row['error']}" for row in errors)
+                repair = {"previous_response": raw, "validation_errors": errors}
                 if log:
                     log(f"Freshness response rejected ({attempt}/{ASSESSMENT_ATTEMPTS}): {error}")
                 continue
+            results = [accepted[a.id] for a in batch]
             for article, result in zip(batch, results):
                 article.freshness = result
                 article.category = result.get("category", article.category)
