@@ -328,6 +328,9 @@ sentence(s) supporting that update, "date_basis": "explicit" or "relative" or "p
 "matched_history_keys": [ALL matching historical keys], "new_since_history": "specific
 new facts absent from matching prior coverage, as a string (empty string if no match)"}]}.
 Excluded candidates need only id, decision and reason. Return every candidate exactly once.
+Both included and excluded candidates MUST have a nonempty reason. On repair, the
+candidates array is the full list to return, including candidates missing from the
+previous response; a truncated previous_response is not the requested candidate list.
 Quotes must be a single contiguous span of that candidate's evidence_text (or summary
 only when evidence_text is empty), at least 20 characters for development_quote. Copy
 the original wording and punctuation. Do not quote the title, join title and summary,
@@ -389,14 +392,28 @@ async def assess_candidates(articles, history: list[dict], *, now: datetime, win
                 rows = json.loads(text)["assessments"]
                 if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
                     raise ValueError("assessments must be an array of candidate objects")
-                by_id = {row["id"]: row for row in rows}
-                if len(rows) != len(pending) or set(by_id) != {a.id for a in pending}:
-                    raise ValueError("Missing, duplicate or unexpected candidate IDs")
+                expected_ids = {a.id for a in pending}
+                by_id = {}
+                duplicate_ids = set()
+                for row in rows:
+                    if row["id"] in by_id:
+                        duplicate_ids.add(row["id"])
+                    by_id[row["id"]] = row
+                unexpected_ids = set(by_id) - expected_ids
+                if not rows or unexpected_ids:
+                    raise ValueError(
+                        f"Missing, duplicate or unexpected candidate IDs; "
+                        f"expected={sorted(expected_ids)}, received={list(by_id)}"
+                    )
             except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 errors.append({"id": None, "error": str(exc)})
             else:
                 for article in pending:
                     try:
+                        if article.id not in by_id:
+                            raise ValueError("Missing candidate assessment; return this exact id with decision and reason")
+                        if article.id in duplicate_ids:
+                            raise ValueError("Duplicate candidate assessments; return this exact id only once")
                         accepted[article.id] = validate_assessment(
                             article, by_id[article.id], history, now=now,
                             window_hours=window_hours, timezone_name=timezone_name,

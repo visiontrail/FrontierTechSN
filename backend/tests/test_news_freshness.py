@@ -314,7 +314,8 @@ def test_editorial_assessment_compares_all_history_and_repairs_malformed_respons
     assert row.url in chat.await_args.args[1]
     repair = json.loads(chat.await_args.args[1])["repair"]
     assert repair["previous_response"] == '{"assessments": []}'
-    assert repair["validation_errors"] == [{"id": None, "error": "Missing, duplicate or unexpected candidate IDs"}]
+    assert repair["validation_errors"] == [{"id": None, "error":
+        f"Missing, duplicate or unexpected candidate IDs; expected=['{row.id}'], received=[]"}]
     assert len(list((tmp_path / "research/freshness").glob("*.txt"))) == 2
 
 
@@ -365,6 +366,25 @@ def test_failed_repairs_remain_bounded_without_committing_partial_batch(tmp_path
                for call in chat.await_args_list[1:])
 
 
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_partial_response_repairs_missing_or_duplicate_ids_and_keeps_valid_decisions(tmp_path, duplicate):
+    good, bad = article("good"), article("bad")
+    first_rows = [assessment(good)]
+    if duplicate:
+        first_rows.extend([assessment(bad), {"id": bad.id, "decision": "exclude", "reason": "Conflicting duplicate"}])
+    chat = AsyncMock(side_effect=[json.dumps({"assessments": first_rows}),
+                                 json.dumps({"assessments": [assessment(bad)]})])
+    with (patch.object(freshness, "_resolve_provider", AsyncMock(return_value=("e", "m", "k"))),
+          patch.object(freshness, "_chat", chat)):
+        asyncio.run(freshness.assess_candidates([good, bad], [], now=NOW, window_hours=36, output_dir=tmp_path))
+    request = json.loads(chat.await_args.args[1])
+    assert [a["id"] for a in request["candidates"]] == [bad.id]
+    assert request["repair"]["validation_errors"][0]["id"] == bad.id
+    assert request["repair"]["validation_errors"][0]["error"].startswith("Duplicate" if duplicate else "Missing")
+    assert good.freshness["decision"] == bad.freshness["decision"] == "include"
+    assert chat.await_count == 2
+
+
 def test_assessment_exhaustion_never_falls_back_to_publication_date(tmp_path):
     row = article()
     chat = AsyncMock(return_value="not JSON")
@@ -401,7 +421,8 @@ def test_discovery_excludes_exhausted_candidate_and_preserves_accepted_batch(tmp
     assert any(bad.freshness in receipt["assessments"] for receipt in receipts)
 
 
-@pytest.mark.parametrize("failure", ["not JSON", '{"assessments": []}', RuntimeError("provider 429")])
+@pytest.mark.parametrize("failure", ["not JSON", '{"assessments": []}',
+                                     '{"assessments": [{"id": "unexpected"}]}', RuntimeError("provider 429")])
 def test_discovery_does_not_hide_response_or_provider_failures(tmp_path, failure):
     row = article()
     chat = AsyncMock(side_effect=failure) if isinstance(failure, Exception) else AsyncMock(return_value=failure)
