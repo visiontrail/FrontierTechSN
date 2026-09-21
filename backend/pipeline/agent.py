@@ -393,6 +393,7 @@ async def _agent_complete_single(
         assistant_errors: set[str] = set()
         rate_limited = False
         attempt_committed = False
+        tool_use_seen = False
 
         env = build_agent_env(
             current_route.model,
@@ -459,10 +460,8 @@ async def _agent_complete_single(
                                     if block.text:
                                         attempt_committed = True
                                         text_parts.append(block.text)
-                                elif (
-                                    isinstance(block, ToolUseBlock)
-                                    and block.name != "Skill"
-                                ):
+                                elif isinstance(block, ToolUseBlock):
+                                    tool_use_seen = True
                                     # Project Skills only load read-only prompt
                                     # context.  If the following model turn is
                                     # rejected (for example by a 429), replaying
@@ -471,7 +470,8 @@ async def _agent_complete_single(
                                     # failover to work.  Keep the commit boundary
                                     # for every other tool in case this helper is
                                     # granted additional capabilities later.
-                                    attempt_committed = True
+                                    if block.name != "Skill" or not enable_skills:
+                                        attempt_committed = True
                         elif isinstance(message, ResultMessage):
                             result = message
             finally:
@@ -582,11 +582,21 @@ async def _agent_complete_single(
             )
             last_error = RuntimeError(detail)
 
-        if attempt_committed:
+        # One-shot transforms buffer their entire answer and expose no tools.
+        # A 429 after an internal CLI continuation can therefore discard that
+        # unfinished text and use the normal bounded cooldown/failover ladder.
+        # Never replay tool activity or a skills-enabled agent this way.
+        buffered_rate_limit = (
+            rate_limited and not enable_skills and not tool_use_seen
+        )
+        if attempt_committed and not buffered_rate_limit:
             raise model_router.ModelOutputCommittedError(
                 f"{label} failed after model/tool output began; refusing to replay "
                 f"through another key or provider: {last_error}"
             ) from last_error
+        if attempt_committed and buffered_rate_limit:
+            _warn(log, f"{label}: discarding unreturned partial text after 429; "
+                  "retrying the tool-free request through the bounded rate gate")
 
         if (
             ("max_output_tokens" in assistant_errors or assistant_stop_reason == "max_tokens")

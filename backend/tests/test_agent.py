@@ -220,6 +220,75 @@ class AgentCompleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, ["http://oneapi.example"])
         self.assertNotIn("primary-key", str(caught.exception))
 
+    async def test_tool_free_partial_429_is_discarded_before_bounded_backup(self):
+        attempts = []
+        logs = []
+
+        async def query(*, prompt, options):
+            attempts.append(options.env["ANTHROPIC_BASE_URL"])
+            self.assertEqual(options.tools, [])
+            if len(attempts) == 1:
+                yield FakeAssistantMessage([FakeTextBlock('{"partial":')], message_id="one")
+                options.stderr("429 rate_limit after internal continuation")
+                raise Exception("quota full")
+            yield FakeAssistantMessage([FakeTextBlock('{"complete":true}')])
+            yield FakeResultMessage('{"complete":true}')
+
+        routes = (
+            model_router.ModelRoute(slot="primary", provider_id=1, provider_type="yinhe",
+                provider_name="OneAPI", endpoint="http://oneapi.example", model="yinhe-thinking",
+                api_key="primary-key"),
+            model_router.ModelRoute(slot="backup", provider_id=2, provider_type="deepseek",
+                provider_name="DeepSeek", endpoint="https://api.deepseek.com/anthropic",
+                model="deepseek-v4-flash", api_key="backup-key"),
+        )
+        with (
+            patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+            patch.object(model_router, "resolve_model_routes", AsyncMock(return_value=routes)),
+            patch.object(config, "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", 0),
+            patch.object(config, "ANTHROPIC_BASE_URL", ""),
+            patch.object(config, "ANTHROPIC_AUTH_TOKEN", ""),
+            patch.object(provider_rate_limit, "wait_for_request_slot", AsyncMock(return_value=0.0)) as gate,
+            patch.object(provider_rate_limit, "record_rate_limit", AsyncMock(return_value=65.0)) as cooldown,
+        ):
+            result = await agent.agent_complete(
+                "Return JSON.", "content", endpoint=routes[0].endpoint, model=routes[0].model,
+                api_key=routes[0].api_key, enable_skills=False, max_retries=0, log=logs.append,
+            )
+        self.assertEqual(result, '{"complete":true}')
+        self.assertEqual(attempts, ["http://oneapi.example", "https://api.deepseek.com/anthropic"])
+        self.assertEqual(gate.await_count, 2)
+        cooldown.assert_awaited_once()
+        self.assertTrue(any("discarding unreturned partial text" in line for line in logs))
+
+    async def test_partial_429_recovery_stays_bounded_and_never_replays_tools(self):
+        for tool_name in [None, "Write", "Skill"]:
+            with self.subTest(tool_name=tool_name):
+                attempts = []
+
+                async def query(*, prompt, options):
+                    attempts.append(1)
+                    yield FakeAssistantMessage([FakeTextBlock("partial")])
+                    if tool_name:
+                        yield FakeAssistantMessage([FakeToolUseBlock(tool_name)])
+                    yield FakeAssistantMessage([FakeTextBlock("API Error: 429")], error="rate_limit")
+                    yield FakeResultMessage("429 rate_limit", is_error=True)
+
+                with (
+                    patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk(query)}),
+                    patch.object(config, "AI_PRIMARY_RATE_LIMIT_MAX_WAITS", 0),
+                    patch.object(provider_rate_limit, "wait_for_request_slot", AsyncMock(return_value=0.0)),
+                    patch.object(provider_rate_limit, "record_rate_limit", AsyncMock(return_value=65.0)),
+                    patch.object(agent.asyncio, "sleep", AsyncMock()),
+                ):
+                    expected = model_router.ModelOutputCommittedError if tool_name else RuntimeError
+                    with self.assertRaises(expected):
+                        await agent._agent_complete_single(
+                            "Return JSON.", "content", endpoint="https://example.test", model="test",
+                            enable_skills=False, max_retries=1,
+                        )
+                self.assertEqual(len(attempts), 1 if tool_name else 2)
+
     async def test_rate_limit_assistant_error_is_not_treated_as_committed_output(self):
         attempts: list[str] = []
 
