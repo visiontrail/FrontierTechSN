@@ -38,7 +38,7 @@ OPEN_LICENSE_MARKERS = (
     "cc-by-sa",
 )
 UNSAFE_LICENSE_MARKERS = ("noncommercial", "no derivatives", "-nc", "-nd")
-WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{1,}")
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]*(?:\.[0-9]+[A-Za-z0-9'-]*)*")
 TAG_RE = re.compile(r"<[^>]+>")
 SAFE_FILENAME_RE = re.compile(r"[^a-z0-9]+")
 USER_QUERY_PURPOSE = "User-supplied search direction"
@@ -239,7 +239,12 @@ def _unoccupied_web_plan(query_plan: list[dict[str, str]], clips: list[dict]) ->
 
 
 def _parse_plan(value: str, count: int | None) -> list[dict[str, str]]:
-    parsed = json.loads(_strip_json_fence(value))
+    from backend.pipeline.review_response import ReviewResponseError, parse_review_response
+
+    try:
+        parsed = parse_review_response(value, required_fields={"queries"}, label="Footage plan")
+    except ReviewResponseError as exc:
+        raise ValueError(str(exc)) from exc
     raw_queries = parsed.get("queries") if isinstance(parsed, dict) else None
     if not isinstance(raw_queries, list):
         raise ValueError("Footage planner did not return a queries array")
@@ -319,7 +324,7 @@ def _fallback_search_queries(shot: dict, *, excluded: set[str]) -> list[str]:
                     phrases.append((priority, query))
             words.clear()
 
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9'-]*|[.!?;—]", _search_subject_text(str(text))):
+        for token in re.findall(WORD_RE.pattern + r"|[.!?;—]", _search_subject_text(str(text))):
             word = token.removesuffix("'s").strip("'-")
             if word.casefold() in {"a", "an", "the"}:
                 continue
@@ -340,7 +345,7 @@ def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str,
     Daily-news scripts use one nonblank paragraph per editorial story.  The old
     fallback ranked words across the whole script, which elevated connective
     language such as ``and reports can`` and downloaded unrelated documentary
-    footage.  Plan per story instead, prefer rare/proper-name anchors, and keep
+    footage. Plan per story instead, preserve subject/action order, and keep
     the exact narration paragraph as the placement purpose.
     """
 
@@ -398,33 +403,12 @@ def _fallback_plan(title: str, script: str, count: int | None) -> list[dict[str,
             if len(words := useful_words(paragraph)) >= 2
         ]
 
-    document_frequency: dict[str, int] = {}
-    for _, words in candidates:
-        for key in {word.casefold() for word in words}:
-            document_frequency[key] = document_frequency.get(key, 0) + 1
-
     output: list[dict[str, str]] = []
     seen_queries: set[str] = set()
     for paragraph, words in candidates:
-        indexed = list(enumerate(words))
-        term_frequency: dict[str, int] = {}
-        for word in words:
-            key = word.casefold()
-            term_frequency[key] = len(
-                re.findall(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", paragraph.casefold())
-            )
-
-        def salience(item: tuple[int, str]) -> tuple[int, int, int, int, int]:
-            index, word = item
-            key = word.casefold()
-            proper_name = int(word[:1].isupper())
-            technical = int("-" in word or any(char.isdigit() for char in word))
-            rarity = -document_frequency.get(key, 1)
-            return proper_name, technical, rarity, -index, term_frequency[key]
-
-        selected = sorted(indexed, key=salience, reverse=True)[:6]
-        selected.sort(key=lambda item: item[0])
-        query = _sanitize_query(" ".join(word for _, word in selected))
+        # Preserve subject/action order. Ranking capitalized words across the
+        # paragraph produced unrelated bags of publishers and product names.
+        query = _sanitize_query(" ".join(words[:6]))
         if len(query.split()) < 2 or query.casefold() in seen_queries:
             continue
         seen_queries.add(query.casefold())
@@ -588,7 +572,19 @@ async def plan_footage_queries(
             enable_skills=False,
             disable_thinking=True,
         )
-        plan = _parse_plan(result, candidate_count)
+        try:
+            plan = _parse_plan(result, candidate_count)
+        except ValueError as exc:
+            _emit(log, f"Footage plan response invalid; requesting one structured correction: {exc}")
+            result = await _chat(
+                system_prompt,
+                user_content + "\nThe previous answer failed the JSON contract. Return exactly one "
+                "complete JSON object containing queries, with no analysis or commentary.\n"
+                + f"Validation error: {exc}\nPrevious answer:\n{result[:12000]}",
+                endpoint, model, api_key, log, "Footage plan correction", max_tokens=4000,
+                enable_skills=False, disable_thinking=True,
+            )
+            plan = _parse_plan(result, candidate_count)
         plan = _distinct_grounded_plan(
             plan,
             script,
@@ -1435,6 +1431,129 @@ def _resume_web_manifest(
     return previous
 
 
+async def _revise_unfilled_shots(
+    *, task_dir: Path, manifest: dict, pending: list[dict], script: str,
+    provider_id: int | None, ai_endpoint: str | None, ai_model: str | None,
+    log: LogCallback | None, attempted: set[str] | None = None,
+) -> list[dict]:
+    """Repair an exhausted visual plan, once per slot, without changing its quota.
+
+    Search retries cannot rescue an unfilmable subject. A new shot may bind to
+    another exact sentence in the SAME story, but must earn a new frame review.
+    Completed clips, their bindings, and every prior rejection remain intact.
+    """
+    from backend.pipeline.review_response import parse_review_response
+
+    revisions = manifest.setdefault("shot_revisions", [])
+    exhausted = {str(item.get("query") or "") for item in revisions if item.get("replacement")}
+    exhausted.update(str(item.get("replacement", {}).get("query") or "") for item in revisions)
+    attempted = attempted if attempted is not None else set()
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n|\n+", script) if part.strip()]
+    revised = []
+    for shot in pending:
+        original = shot["query"]
+        if original in exhausted or original in attempted:
+            revised.append(shot)
+            continue
+        excerpt = str(shot.get("script_excerpt") or "")
+        scope = next((part for part in paragraphs if excerpt and excerpt in part), "")
+        if not scope:
+            revised.append(shot)
+            continue
+        attempted.add(original)
+        failures = [item for item in manifest.get("errors", [])
+                    if item.get("plan_query", item.get("query")) == original]
+        record = {"query": original, "previous": dict(shot), "created_at": _now()}
+        try:
+            endpoint, model, api_key = await _resolve_provider(provider_id, ai_endpoint, ai_model)
+            answer = await _chat(
+                "Replan ONE failed editorial B-roll shot. Return JSON only: "
+                '{"queries":[{"query":"2-6 concrete searchable words",'
+                '"purpose":"precise illustrative purpose",'
+                '"script_excerpt":"one exact sentence copied from story"}]}. '
+                "The old subject may be abstract, unfilmable, or a future product with no footage. "
+                "Choose a DIFFERENT visible subject/action explicitly present in the SAME story. "
+                "You may change the bound sentence within that story. Contextual B-roll must "
+                "illustrate an actual narrated place, object or activity; describe that limited "
+                "purpose without claiming it proves metrics or depicts the specific announcement. "
+                "Preserve exact product/version identifiers. Never substitute a different named "
+                "product/event, invent activity, or return bags of names. Avoid talking heads, "
+                "slides, benchmark charts and future/internal processes that cannot be filmed. "
+                "Do not repeat failed searches. Return an empty queries array if no defensible "
+                "shot exists; this does not waive the missing footage requirement.",
+                json.dumps({"story": scope, "failed_shot": shot,
+                            "failures": failures[-10:]}, ensure_ascii=False),
+                endpoint, model, api_key, log, "Footage shot revision", max_tokens=2000,
+                enable_skills=False, disable_thinking=True,
+            )
+            payload = parse_review_response(answer, required_fields={"queries"}, label="Footage shot revision")
+            proposals = payload["queries"]
+            if not isinstance(proposals, list) or len(proposals) != 1 or not isinstance(proposals[0], dict):
+                raise ValueError("Shot revision must propose exactly one replacement")
+            proposal = proposals[0]
+            new_excerpt = str(proposal.get("script_excerpt") or "").strip()
+            sentences = [part.strip() for part in re.split(r"(?<!\b[A-Z]\.)(?<=[.!?。！？])\s+", scope)]
+            if not new_excerpt or new_excerpt not in sentences:
+                raise ValueError("Shot revision must copy an exact sentence from the same story")
+            replacement = {"query": _sanitize_query(str(proposal.get("query") or "")),
+                           "purpose": str(proposal.get("purpose") or "").strip(),
+                           "script_excerpt": new_excerpt}
+            existing = {item["query"].casefold() for item in manifest.get("queries", [])}
+            failed_queries = {str(item.get("query") or "").casefold() for item in failures}
+            if (len(replacement["query"].split()) < 2 or not replacement["purpose"]
+                    or replacement["query"].casefold() in existing | failed_queries):
+                raise ValueError("Shot revision repeated a search or omitted its visible purpose")
+            record["replacement"] = replacement
+            manifest["queries"] = [replacement if item["query"] == original else item
+                                   for item in manifest["queries"]]
+            revised.append(replacement)
+            _emit(log, f"Footage shot revised: '{original}' -> '{replacement['query']}'; new review required")
+        except Exception as exc:
+            record["error"] = str(exc)
+            revised.append(shot)
+            _emit(log, f"Footage shot revision unavailable; retaining unresolved shot '{original}': {exc}")
+        revisions.append(record)
+        manifest["updated_at"] = _now()
+        _write_manifest(task_dir, manifest)
+    return revised
+
+
+async def _complete_web_plan(
+    *, task_dir: Path, manifest: dict, query_plan: list[dict], target_total: int,
+    orientation: str, script: str, log: LogCallback | None,
+    provider_id: int | None, ai_endpoint: str | None, ai_model: str | None,
+) -> dict:
+    from backend.pipeline.web_footage import supplement_web_footage
+
+    revision_args = dict(task_dir=task_dir, manifest=manifest, script=script,
+                         provider_id=provider_id, ai_endpoint=ai_endpoint, ai_model=ai_model,
+                         log=log, attempted=set())
+    # A persisted failed scout already exhausted its searches. Revise before
+    # repeating those same searches on resume, including old fallback plans.
+    failed = {str(item.get("plan_query", item.get("query")) or "")
+              for item in manifest.get("errors", [])
+              if item.get("stage") in {"web-selection", "web-download-edit"}}
+    exhausted = [shot for shot in query_plan if shot["query"] in failed]
+    if exhausted:
+        replacements = await _revise_unfilled_shots(pending=exhausted, **revision_args)
+        by_query = dict(zip((shot["query"] for shot in exhausted), replacements))
+        query_plan = [by_query.get(shot["query"], shot) for shot in query_plan]
+    scout_args = dict(task_dir=task_dir, manifest=manifest, target_total=target_total,
+                      orientation=orientation, script=script, log=log,
+                      provider_id=provider_id, ai_endpoint=ai_endpoint, ai_model=ai_model)
+    result = await supplement_web_footage(query_plan=query_plan, **scout_args)
+    # Provider/search outages raise before this point and must never be
+    # interpreted as evidence that the planned subject cannot be acquired.
+    if result.get("status") in {"partial", "no_results"} and len(result.get("clips", [])) < target_total:
+        fulfilled = {clip.get("plan_query", clip.get("query")) for clip in result.get("clips", [])}
+        pending = [shot for shot in query_plan if shot["query"] not in fulfilled]
+        revised = await _revise_unfilled_shots(pending=pending, **{**revision_args, "manifest": result})
+        changed = [new for old, new in zip(pending, revised) if new != old]
+        if changed:
+            result = await supplement_web_footage(query_plan=revised, **{**scout_args, "manifest": result})
+    return result
+
+
 async def acquire_footage(
     *,
     media_provider: str,
@@ -1468,9 +1587,7 @@ async def acquire_footage(
             fulfilled = {clip["plan_query"].casefold() for clip in resumed["clips"]}
             pending = [shot for shot in resumed["queries"] if shot["query"].casefold() not in fulfilled]
             _emit(log, f"Public footage resume: reused {len(resumed['clips'])} verified clips; {len(pending)} planned shots remain")
-            from backend.pipeline.web_footage import supplement_web_footage
-
-            return await supplement_web_footage(
+            return await _complete_web_plan(
                 task_dir=task_dir, manifest=resumed, query_plan=pending,
                 target_total=resumed["requested_clip_count"], orientation=orientation,
                 script=script, log=log, provider_id=provider_id,
@@ -1588,10 +1705,6 @@ async def acquire_footage(
     manifest["binding_version"] = 2
     _write_manifest(task_dir, manifest)
 
-    # Lazy import avoids a module cycle: web_footage reuses the query/search
-    # helpers above, but footage remains the manifest-facing public API.
-    from backend.pipeline.web_footage import supplement_web_footage
-
     active_clips = [
         clip for clip in manifest.get("clips") or [] if isinstance(clip, dict)
     ]
@@ -1610,7 +1723,7 @@ async def acquire_footage(
     else:
         web_query_plan = _unoccupied_web_plan(query_plan, active_clips)
 
-    return await supplement_web_footage(
+    return await _complete_web_plan(
         task_dir=task_dir,
         manifest=manifest,
         query_plan=web_query_plan,

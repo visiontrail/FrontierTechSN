@@ -10,6 +10,13 @@ Rules:
   the narration instead of filling a quota. Omit beats that do not benefit from
   real footage.
 - Each query must contain 2-6 concrete, visually searchable English words.
+- Preserve exact product/version identifiers, including decimal points and
+  hyphens. A list of companies, model versions, publishers and benchmarks is
+  not a visual subject. Choose one visible object, place or action per shot.
+- Internal model training, future roadmaps and claimed benchmark improvements
+  may have no direct footage. Select a concrete subject explicitly present in
+  the same story and state its limited illustrative purpose, or omit the beat
+  in automatic mode. Do not promise footage of an unobservable process.
 - Prefer people, places, objects, actions, nature, technology, or archival scenes.
 - Translate non-English concepts into English.
 - Use the narrated company, product, event or location when it helps find real
