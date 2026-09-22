@@ -840,7 +840,15 @@ def _protocol_payload(text: str) -> dict[str, Any]:
 
 def _diagnostic_payload(text, numbers, claims):
     """Diagnostic context cannot approve a script or replace its Web verdict."""
-    payload = _json_object(text)
+    try:
+        payload = _json_object(text)
+    except json.JSONDecodeError:
+        # Browser-rendered JSON can expose literal newlines inside prose strings.
+        # Preserve that text; keep all evidence/coverage checks below mandatory.
+        start, end = text.find("{"), text.rfind("}")
+        payload = json.loads(text[start:end + 1], strict=False)
+    if not isinstance(payload, dict):
+        raise ValueError("Freshness diagnosis must be a JSON object")
     if payload.get("web_verified") is not True:
         raise ValueError("Freshness diagnosis requires live Web verification")
     findings = payload.get("findings")
@@ -896,6 +904,7 @@ Return only JSON: {{"web_verified": true, "findings": [{{"story_number": number,
 "claim_ids": [exact failed claim IDs], "reason": "specific diagnosis",
 "correction": "specific evidence-bound edit", "source_urls": ["https://..."]}}]}}.
 Return exactly one finding per requested story. If no live search was performed, return N.
+Keep each reason and correction under 120 words. Escape newlines inside JSON strings.
 NUMBERED SCRIPT CLAIMS
 {_numbered_claims(claims, numbers)}
 FULL STORY EVIDENCE

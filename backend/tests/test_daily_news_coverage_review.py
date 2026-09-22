@@ -63,6 +63,16 @@ def test_freshness_failure_gets_diagnosis_once_and_still_stops_on_repeat(coverag
     assert report["manual_review_required"] is True
 
 
+def test_diagnostic_preserves_browser_rendered_newline_without_relaxing_web_gate(coverage_case):
+    _, _, claims = coverage_case
+    raw = '{"web_verified": true, "findings": [{"story_number": 7, "claim_ids": ["7.0"], "reason": "Old event.\nNew article.", "correction": "Cover analysis.", "source_urls": ["https://example.com/source"]}]}'
+    result = review._diagnostic_payload(raw, [7], claims)
+    assert result["findings"][0]["reason"] == "Old event.\nNew article."
+    assert result["approved"] is False
+    with pytest.raises(ValueError, match="live Web verification"):
+        review._diagnostic_payload(raw.replace('true', 'false'), [7], claims)
+
+
 @pytest.mark.parametrize("decision", ["include", "exclude"])
 def test_diagnosis_reassesses_same_captured_evidence_and_invalidates_receipt(coverage_case, tmp_path, decision):
     from backend.daily_news import freshness
