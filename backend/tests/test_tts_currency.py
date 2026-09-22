@@ -107,6 +107,8 @@ def test_pocket_number_pronunciation_preserves_numeric_identity(source):
     ("250,000", "two hundred fifty thousand"),
     ("12,000", "twelve thousand"),
     ("1,000", "one thousand"),
+    ("3,000,000", "three million"),
+    ("1,234,567", "one million two hundred thirty-four thousand five hundred sixty-seven"),
 ])
 def test_pocket_grouped_quantity_pronunciation_preserves_value_and_unit(literal, spoken):
     source = f"Enough for the daily electricity needs of {literal} homes."
@@ -118,7 +120,7 @@ def test_pocket_grouped_quantity_pronunciation_preserves_value_and_unit(literal,
 
 @pytest.mark.parametrize("source", [
     "ID-600,000 AX600,000 600,000-R2 600,000.25 $600,000 000,123",
-    "3,000,000 homes, 1,234,567 items, 12,34,567 items, 1,000,000,000,000 stars.",
+    "12,34,567 items, 1,000,000,000,000 stars.",
 ])
 def test_pocket_grouped_numbers_do_not_change_protected_or_unsupported_values(source):
     assert tts._pocket_synthesis_text(source) == source

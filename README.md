@@ -293,6 +293,9 @@ video.mp4                              final rendered program
 
 ## Development
 
+For incident diagnosis, shared contracts, generated invariant tests and runtime
+acceptance, see [Pipeline reliability method](docs/PIPELINE_RELIABILITY_METHOD.md).
+
 ```bash
 # Backend tests
 .venv/bin/python -m pytest backend/tests -q

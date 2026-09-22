@@ -19,6 +19,13 @@ from pathlib import Path
 import httpx
 
 from backend import config
+from backend.spoken_numbers import (
+    NUMBER_SCALES,
+    NUMBER_WORDS,
+    canonicalize_integer_tokens,
+    normalize_grouped_integer_literals,
+    normalize_spoken_quantities,
+)
 from backend.pipeline.timing import span, timed
 from backend.pipeline.process_logging import stream_subprocess
 
@@ -89,7 +96,7 @@ ORPHEUS_MAX_INTEGRITY_ATTEMPTS = 3
 ORPHEUS_MIN_REQUEST_TOKENS = 512
 # Increment whenever acoustic acceptance semantics change.  Cached WAVs with
 # older sidecars must pass the current local verifier before they are reused.
-ORPHEUS_INTEGRITY_VERIFIER_VERSION = 33
+ORPHEUS_INTEGRITY_VERIFIER_VERSION = 34
 # Bound stochastic pronunciation recovery per failed part, reusing verified
 # audio on each pass. Transport retries have their own independent budget.
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 5
@@ -146,7 +153,7 @@ CURRENCY_AMOUNT_RE = re.compile(r"\$([0-9]+(?:\.\d+)?)")
 CURRENCY_TRANSCRIPT_AMOUNT_RE = re.compile(
     r"\s*\$([0-9]+)(?:\.(\d+))?[.,;:!?]?\s*"
 )
-CURRENCY_SCALE_TOKENS = {"hundred", "thousand", "million", "billion", "trillion"}
+CURRENCY_SCALE_TOKENS = set(NUMBER_SCALES) | {"trillion"}
 CURRENCY_ADJECTIVE_RE = re.compile(
     r"\b(?:\d+(?:\.\d+)?|[A-Za-z]+(?:-[A-Za-z]+)*)-"
     r"(hundred|thousand|million|billion|trillion)-dollar\b",
@@ -154,16 +161,6 @@ CURRENCY_ADJECTIVE_RE = re.compile(
 )
 DECIMAL_INTEGER_WORD_RE = re.compile(r"\s*([A-Za-z]*)(\d+)\s*")
 DECIMAL_FRACTION_WORD_RE = re.compile(r"\s*\.(\d+)[.,;:!?]?\s*")
-NUMBER_WORDS = {
-    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
-    "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
-    "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
-    "eighteen": "18", "nineteen": "19", "oh": "0", "twenty": "20",
-    "thirty": "30", "forty": "40",
-    "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80",
-    "ninety": "90",
-}
 ORDINAL_DIGITS = {
     "1st": "first", "2nd": "second", "3rd": "third", "4th": "fourth",
     "5th": "fifth", "6th": "sixth", "7th": "seventh", "8th": "eighth",
@@ -328,12 +325,6 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("joo", "yee"): "zhuyi",
     ("jew", "yee"): "zhuyi",
 }
-NUMBER_SCALES = {
-    "hundred": 100,
-    "thousand": 1_000,
-    "million": 1_000_000,
-    "billion": 1_000_000_000,
-}
 DANGLING_CHUNK_WORDS = {
     "a", "all", "an", "and", "as", "at", "but", "by", "for", "from", "in",
     "fully", "into", "nor", "of", "on", "or", "the", "to", "with",
@@ -385,7 +376,7 @@ def _spoken_word_count(text: str) -> int:
 def _raw_lexical_tokens(text: str) -> list[str]:
     """Normalize individual spellings without collapsing cross-word phrases."""
     normalized: list[str] = []
-    lexical_text = _strip_speaker_labels(text)
+    lexical_text = normalize_grouped_integer_literals(_strip_speaker_labels(text))
     # ``Ł`` is a Latin letter but does not decompose under Unicode NFKD.  The
     # ASCII-only lexical regex would therefore drop it and turn the Polish name
     # Łukasz into the impossible token ``ukasz``. Transliterate only this
@@ -578,134 +569,8 @@ def _canonicalize_decimal_transcript_tokens(
 def _canonicalize_number_tokens_with_indexes(
     tokens: list[str], word_indexes: list[int]
 ) -> tuple[list[str], list[int]]:
-    """Collapse number forms while preserving the first contributing word."""
-    if len(tokens) != len(word_indexes):
-        raise ValueError("Number tokens and word indexes must have equal length")
-    # Whisper writes spoken years as one numeric token ("1895"), while the
-    # script commonly spells them as "eighteen ninety-five". First collapse a
-    # tens+ones pair, then combine two two-digit year halves. Also support the
-    # conventional "nineteen oh five" pronunciation.
-    simple: list[str] = []
-    simple_indexes: list[int] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if (
-            token.isdigit()
-            and 20 <= int(token) <= 90
-            and int(token) % 10 == 0
-            and index + 1 < len(tokens)
-            and tokens[index + 1].isdigit()
-            and 1 <= int(tokens[index + 1]) <= 9
-        ):
-            simple.append(str(int(token) + int(tokens[index + 1])))
-            simple_indexes.append(word_indexes[index])
-            index += 2
-            continue
-        simple.append(token)
-        simple_indexes.append(word_indexes[index])
-        index += 1
-    tokens = simple
-    word_indexes = simple_indexes
-
-    result: list[str] = []
-    result_indexes: list[int] = []
-    index = 0
-    while index < len(tokens):
-        # Combine the remainder of a spoken hundred before applying a larger
-        # scale. Without this, "two hundred seventy-eight" became [200, 78]
-        # while Whisper's equivalent "278" stayed a single token.
-        remainder_index = index + 2
-        if remainder_index < len(tokens) and tokens[remainder_index] == "and":
-            remainder_index += 1
-        if (
-            tokens[index].isdigit()
-            and 1 <= int(tokens[index]) <= 9
-            and remainder_index < len(tokens)
-            and tokens[index + 1] == "hundred"
-            and tokens[remainder_index].isdigit()
-            and 1 <= int(tokens[remainder_index]) <= 99
-        ):
-            value = int(tokens[index]) * 100 + int(tokens[remainder_index])
-            end = remainder_index + 1
-            scale = NUMBER_SCALES.get(tokens[end], 0) if end < len(tokens) else 0
-            if scale >= 1_000:
-                value *= scale
-                end += 1
-            result.append(str(value))
-            result_indexes.append(word_indexes[index])
-            index = end
-            continue
-        if (
-            tokens[index].isdigit()
-            and len(tokens[index]) == 2
-            and index + 1 < len(tokens)
-            and tokens[index + 1].isdigit()
-            and len(tokens[index + 1]) == 2
-        ):
-            result.append(str(int(tokens[index]) * 100 + int(tokens[index + 1])))
-            result_indexes.append(word_indexes[index])
-            index += 2
-            continue
-        if (
-            tokens[index].isdigit()
-            and len(tokens[index]) == 2
-            and index + 2 < len(tokens)
-            and tokens[index + 1] == "0"
-            and tokens[index + 2].isdigit()
-            and 1 <= int(tokens[index + 2]) <= 9
-        ):
-            result.append(str(int(tokens[index]) * 100 + int(tokens[index + 2])))
-            result_indexes.append(word_indexes[index])
-            index += 3
-            continue
-        if (
-            tokens[index].isdigit()
-            and index + 1 < len(tokens)
-            and len(tokens[index + 1]) == 3
-            and tokens[index + 1].isdigit()
-        ):
-            result.append(tokens[index] + tokens[index + 1])
-            result_indexes.append(word_indexes[index])
-            index += 2
-            continue
-        if (
-            tokens[index].isdigit()
-            and index + 1 < len(tokens)
-            and tokens[index + 1] in NUMBER_SCALES
-        ):
-            start = index
-            current = int(tokens[index])
-            index += 1
-        elif (
-            tokens[index] == "a"
-            and index + 1 < len(tokens)
-            and tokens[index + 1] in NUMBER_SCALES
-        ):
-            start = index
-            current = 1
-        elif tokens[index] in NUMBER_SCALES:
-            start = index
-            current = 1
-        else:
-            result.append(tokens[index])
-            result_indexes.append(word_indexes[index])
-            index += 1
-            continue
-        if tokens[start] == "a":
-            index = start + 1
-        elif tokens[start] in NUMBER_SCALES:
-            index = start
-        first_scale = tokens[index]
-        current *= NUMBER_SCALES[first_scale]
-        index += 1
-        while index < len(tokens) and tokens[index] in NUMBER_SCALES:
-            scale = NUMBER_SCALES[tokens[index]]
-            current = current * scale if scale >= 1_000 else current + scale
-            index += 1
-        result.append(str(current))
-        result_indexes.append(word_indexes[start])
-    return result, result_indexes
+    """Use the shared quantity grammar without losing ASR onset indexes."""
+    return canonicalize_integer_tokens(tokens, word_indexes)
 
 
 def _canonicalize_number_tokens(tokens: list[str]) -> list[str]:
@@ -4462,43 +4327,7 @@ def _pocket_synthesis_text(text: str) -> str:
     readings of "600,000 homes". Preserve decimals, years, and model identifiers.
     Acoustic verification and cache identity still use the original script.
     """
-    small = (
-        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
-        "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
-        "sixteen", "seventeen", "eighteen", "nineteen",
-    )
-    tens = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
-
-    def integer_words(value: int) -> str:
-        if value < 20:
-            return small[value]
-        if value < 100:
-            return tens[value // 10] + (f"-{small[value % 10]}" if value % 10 else "")
-        for scale, label in ((10**9, "billion"), (10**6, "million"), (1000, "thousand"), (100, "hundred")):
-            if value >= scale:
-                head = f"{integer_words(value // scale)} {label}"
-                return head + (f" {integer_words(value % scale)}" if value % scale else "")
-        raise ValueError("Invalid integer")
-
-    def grouped(match: re.Match) -> str:
-        literal = match.group(0)
-        if literal.startswith("0") or len(literal.replace(",", "")) > 12:
-            return literal
-        words = integer_words(int(literal.replace(",", "")))
-        # Do not broaden the integrity normalizer to accommodate a request
-        # rewrite. Unsupported compound readings retain their original form.
-        return words if _lexical_tokens(words) == _lexical_tokens(literal) else literal
-
-    def spoken(match: re.Match) -> str:
-        literal = match.group(0)
-        if len(literal) > 1 and literal.startswith("0"):
-            return literal
-        return integer_words(int(literal))
-
-    text = re.sub(r"(?<![\w.,$-])\d{1,3}(?:,\d{3})+(?![\w,]|\.\d|-\w)", grouped, text)
-    return re.sub(
-        r"(?<![\w.,$-])\d{1,2}(?![\w]|\.\d|,\d|-\w)", spoken, text
-    )
+    return normalize_spoken_quantities(text, spell_small_integers=True)
 
 
 def _pocket_pronunciation_retry_text(
@@ -4597,6 +4426,25 @@ async def _generate_pocket_tts(
             "for previously rejected paragraphs; other paragraph caches are unchanged"
         )
 
+    # Validate every deterministic rewrite before spending time on the first
+    # provider request. A later paragraph must not expose a parser defect only
+    # after earlier paragraphs have finished synthesizing.
+    synthesis_texts = []
+    for index, chunk in enumerate(chunks, start=1):
+        name = "TTS" if len(chunks) == 1 else f"TTS part {index}/{len(chunks)}"
+        try:
+            synthesis_text = _pocket_synthesis_text(chunk)
+            unchanged = _lexical_tokens(synthesis_text) == _lexical_tokens(chunk)
+        except (LookupError, ValueError) as exc:
+            raise RuntimeError(
+                f"{name}: Pocket TTS pronunciation normalization failed "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
+        if not unchanged:
+            raise RuntimeError(f"{name}: Pocket TTS pronunciation changed source tokens")
+        synthesis_texts.append(synthesis_text)
+    emit(f"Pocket TTS preflight: validated pronunciation for all {len(chunks)} request(s)")
+
     base_url = config.POCKET_TTS_URL.rstrip("/")
     timeout_seconds = max(5, config.POCKET_TTS_REQUEST_TIMEOUT)
     timeout = httpx.Timeout(timeout_seconds, connect=min(30, timeout_seconds))
@@ -4635,16 +4483,7 @@ async def _generate_pocket_tts(
 
             staged_part = expected_part.with_suffix(".tmp.wav")
             staged_part.unlink(missing_ok=True)
-            try:
-                synthesis_text = _pocket_synthesis_text(chunk)
-                unchanged = _lexical_tokens(synthesis_text) == _lexical_tokens(chunk)
-            except (LookupError, ValueError) as exc:
-                raise RuntimeError(
-                    f"{name}: Pocket TTS pronunciation normalization failed "
-                    f"({type(exc).__name__}: {exc})"
-                ) from exc
-            if not unchanged:
-                raise TtsIntegrityError("Pocket TTS pronunciation changed source tokens")
+            synthesis_text = synthesis_texts[index - 1]
             synthesis_dir = output_dir_path / "synthesis"
             synthesis_dir.mkdir(parents=True, exist_ok=True)
             (synthesis_dir / input_path.name).write_text(

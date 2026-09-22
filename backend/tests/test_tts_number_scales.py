@@ -58,7 +58,7 @@ def test_large_amount_normalization_does_not_hide_changed_content(observed):
 
 
 @pytest.mark.asyncio
-async def test_normalization_failure_has_context_and_resume_reuses_completed_audio(tmp_path):
+async def test_preflight_has_context_and_successful_audio_remains_reusable(tmp_path):
     paragraphs = [
         "The company confirmed its planned acquisition today, with the final "
         "agreement expected to be completed later this year after review.",
@@ -104,7 +104,10 @@ async def test_normalization_failure_has_context_and_resume_reuses_completed_aud
                     str(script), str(output), ["jane"], "pocket-tts-en", log=messages.append,
                 )
         assert isinstance(raised.value.__cause__, KeyError)
-        assert len(requests) == 1  # A code error must not retry the provider.
+        assert len(requests) == 0  # Validate all chunks before any provider call.
+        await tts.generate_tts(
+            str(script), str(output), ["jane"], "pocket-tts-en", log=messages.append,
+        )
         first_audio = output / "tts_input_part_001_generated.wav"
         saved_audio = first_audio.read_bytes()
         saved_mtime = first_audio.stat().st_mtime_ns
