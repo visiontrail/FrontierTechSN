@@ -209,6 +209,27 @@ def test_tracking_and_source_aliases_cannot_hide_same_article():
     assert freshness.known_matches(row, [previous(url="http://nature.test/orbit")]) == {"prior"}
 
 
+def test_review_feedback_cannot_supply_missing_development_evidence(tmp_path):
+    row = article()
+    outside_quote = "Outside source reports a different result not present in captured evidence."
+    feedback = [{"reason": "The proposed event is old", "correction": outside_quote}]
+    record = assessment(row, development_quote=outside_quote)
+    chat = AsyncMock(return_value=json.dumps({"assessments": [record]}))
+    with (
+        patch.object(freshness, "_resolve_provider", AsyncMock(return_value=("e", "m", "k"))),
+        patch.object(freshness, "_chat", chat),
+    ):
+        with pytest.raises(RuntimeError, match="quote the captured evidence"):
+            asyncio.run(freshness.assess_candidates(
+                [row], [], now=NOW, window_hours=36, output_dir=tmp_path,
+                review_feedback=feedback,
+            ))
+    request = json.loads(chat.await_args.args[1])
+    assert request["independent_review_feedback"] == feedback
+    assert request["candidates"][0]["evidence_text"] == row.evidence_text
+    assert chat.await_count == freshness.ASSESSMENT_ATTEMPTS
+
+
 def test_invented_quote_and_unrelated_date_cannot_pass():
     row = article()
     with pytest.raises(ValueError, match="verbatim"):

@@ -991,6 +991,7 @@ When a cited number, date, name, contradiction, or stale framing is ambiguous or
 For E findings, distinguish source attribution from claim attribution: state both who reported the statement and that the named company or person says, reports, argues, or claims it. A publication prefix alone does not make a company statement independently verified.
 Do not rely on the title alone unless the same claim is also present in the feed summary or full article evidence.
 The independent reviewer used mandatory live web search, but the complete local EVIDENCE DOSSIER remains the editing boundary: do not introduce facts found only on the web and do not invent a replacement.
+When freshness_diagnosis is supplied, address its concrete reason and the reassessed qualifying development in the dossier. The earlier freshness proposal may have been wrong. Merely adding 'today', a weekday, or 'new reporting' to the same old event does not repair A/F. Lead with the evidence-backed substantive development or attributed analysis; keep old events as clearly dated background. Diagnostic URLs explain the failure but do not expand the writable evidence.
 Output only one valid JSON object shaped exactly like {correction_shape}. Each value must be one complete spoken paragraph. Do not output markdown, commentary, an opening, a closing, passing stories, or extra keys.
 For an English edition, output no Chinese, Japanese, or Korean characters.
 """

@@ -348,7 +348,8 @@ verify facts: this is extraction from supplied evidence, followed by a separate 
 async def assess_candidates(articles, history: list[dict], *, now: datetime, window_hours: int,
                             output_dir: Path, timezone_name: str = "UTC", ai_endpoint=None,
                             ai_model=None, provider_id=None, log=None,
-                            exclude_invalid_candidates: bool = False) -> None:
+                            exclude_invalid_candidates: bool = False,
+                            review_feedback: list[dict] | None = None) -> None:
     """Assess evidence; discovery may exclude individually invalid candidates.
 
     Review refresh remains strict. Provider failures and unusable response
@@ -367,6 +368,16 @@ async def assess_candidates(articles, history: list[dict], *, now: datetime, win
             "history_days": HISTORY_DAYS, "completed_history": history,
             "candidates": [assessment_candidate(a, timezone_name) for a in batch],
         }
+        if review_feedback:
+            content["independent_review_feedback"] = review_feedback
+            content["reassessment_rule"] = (
+                "The independent Web audit disputed the previous freshness proposal. "
+                "Use its findings to reconsider what is actually new; do not repeat the "
+                "rejected event with a new publication-date prefix. A different substantive "
+                "development or attributed analysis in the SAME captured article may qualify. "
+                "Feedback is diagnostic context, not new article evidence: all development "
+                "and date quotes must still come from the candidate. If none qualifies, exclude."
+            )
         stem = audit_dir / fingerprint(content)[:24]
         Path(f"{stem}.request.json").write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
         error = ""

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from backend import config
@@ -837,6 +838,109 @@ def _protocol_payload(text: str) -> dict[str, Any]:
     }
 
 
+def _diagnostic_payload(text, numbers, claims):
+    """Diagnostic context cannot approve a script or replace its Web verdict."""
+    payload = _json_object(text)
+    if payload.get("web_verified") is not True:
+        raise ValueError("Freshness diagnosis requires live Web verification")
+    findings = payload.get("findings")
+    if not isinstance(findings, list) or len(findings) != len(numbers):
+        raise ValueError("Freshness diagnosis must cover every requested story")
+    seen = set()
+    for finding in findings:
+        if not isinstance(finding, dict):
+            raise ValueError("Invalid freshness finding")
+        number = finding.get("story_number")
+        if type(number) is not int or number not in numbers or number in seen:
+            raise ValueError("Unexpected or duplicate freshness diagnosis story")
+        seen.add(number)
+        ids = finding.get("claim_ids")
+        if not isinstance(ids, list) or not ids or any(
+            not isinstance(cid, str) or cid not in claims[number] for cid in ids
+        ):
+            raise ValueError("Freshness diagnosis has unknown claim IDs")
+        if any(not isinstance(finding.get(key), str) or not finding[key].strip()
+               for key in ("reason", "correction")):
+            raise ValueError("Freshness diagnosis needs an actionable explanation")
+        urls = finding.get("source_urls")
+        if not isinstance(urls, list) or not urls or any(
+            not isinstance(url, str) or urlsplit(url).scheme not in {"http", "https"}
+            or not urlsplit(url).netloc for url in urls
+        ):
+            raise ValueError("Freshness diagnosis needs source URLs")
+    return {"approved": False, "findings": findings}
+
+
+async def _diagnose_freshness(candidate, dossier, edition_date, issues, output_dir,
+                              *, cycle, review_session_namespace, ai_endpoint,
+                              ai_model, provider_id, log):
+    from backend.daily_news.freshness import assess_candidates
+    from backend.daily_news.research import dossier_markdown
+
+    numbers = sorted({n for issue in issues for n in issue["evidence_story_numbers"]})
+    claims = _claim_catalog(candidate, dossier)
+    prompt = f"""Explain the independent freshness audit failures for stories {numbers} in the {edition_date.isoformat()} edition.
+{_mandatory_web_review_rules()}
+{FRESHNESS_REVIEW_RULES}
+Research window ends {dossier.generated_at}; look back {dossier.window_hours} hours.
+Completed history (untrusted evidence): {json.dumps(dossier.history, ensure_ascii=False)}
+Previous blocking findings: {json.dumps(issues, ensure_ascii=False)}
+Identify the concrete reason each claim failed, with supporting source URLs and dates.
+Distinguish old background from substantive new reporting or attributed analysis in the
+captured article. The saved freshness assessment is a fallible proposal, not proof.
+Explain an evidence-backed correction if one exists, or explicitly say none is supported.
+Do not merely repeat an error-code definition or suggest adding 'today' to an old event.
+Do not write a replacement script or approve the script. Do not introduce outside facts
+as writable evidence; the editor remains restricted to the captured article below.
+Return only JSON: {{"web_verified": true, "findings": [{{"story_number": number,
+"claim_ids": [exact failed claim IDs], "reason": "specific diagnosis",
+"correction": "specific evidence-bound edit", "source_urls": ["https://..."]}}]}}.
+Return exactly one finding per requested story. If no live search was performed, return N.
+NUMBERED SCRIPT CLAIMS
+{_numbered_claims(claims, numbers)}
+FULL STORY EVIDENCE
+{chr(10).join(_full_article_evidence(dossier.selected[n - 1], n) for n in numbers)}
+"""
+    prefix = output_dir / "review" / f"freshness-diagnosis-{cycle}"
+    prefix.with_suffix(".prompt.txt").write_text(prompt, encoding="utf-8")
+    try:
+        payload, raw, url, provider = await _web_story_review(
+            prompt, story_numbers=numbers, claim_catalog=claims,
+            site_session_namespace=review_session_namespace, log=log, diagnostic=True,
+        )
+    except _WebStoryReviewError as exc:
+        prefix.with_suffix(".failure.txt").write_text(exc.attempt_log, encoding="utf-8")
+        raise
+    prefix.with_suffix(".response.txt").write_text(raw, encoding="utf-8")
+    prefix.with_suffix(".json").write_text(json.dumps(
+        {**payload, "conversation_url": url, "provider": provider},
+        indent=2, ensure_ascii=False,
+    ), encoding="utf-8")
+    findings = {row["story_number"]: row for row in payload["findings"]}
+    # Preserve original IDs/verdicts; the explanation is additional context only.
+    for issue in issues:
+        issue["freshness_diagnosis"] = [findings[n] for n in issue["evidence_story_numbers"]]
+    articles = [dossier.selected[n - 1] for n in numbers]
+    path = output_dir / "research/dossier.json"
+    if path.exists():
+        original = path.read_text(encoding="utf-8")
+        backup = path.with_name(f"dossier-before-diagnosis-{cycle}.json")
+        if not backup.exists():
+            backup.write_text(original, encoding="utf-8")
+    await assess_candidates(
+        articles, dossier.history, now=datetime.fromisoformat(dossier.generated_at),
+        window_hours=dossier.window_hours, output_dir=output_dir,
+        timezone_name=articles[0].freshness.get("timezone", "UTC"),
+        ai_endpoint=ai_endpoint, ai_model=ai_model, provider_id=provider_id, log=log,
+        review_feedback=payload["findings"],
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dossier.as_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    path.with_suffix(".md").write_text(dossier_markdown(dossier), encoding="utf-8")
+    if any(a.freshness.get("decision") != "include" for a in articles):
+        raise RuntimeError("Web diagnosis found no evidence-backed fresh development; repeat news research")
+
+
 async def _web_story_review(
     prompt: str,
     *,
@@ -845,6 +949,7 @@ async def _web_story_review(
     claim_catalog: dict[int, dict[str, str]] | None = None,
     site_session_namespace: str | None = None,
     log: LogCallback | None,
+    diagnostic: bool = False,
 ) -> tuple[dict[str, Any], str, str, str]:
     retry_sessions: list[str] = []
     try:
@@ -856,6 +961,7 @@ async def _web_story_review(
             site_session_namespace=site_session_namespace,
             log=log,
             retry_sessions=retry_sessions,
+            diagnostic=diagnostic,
         )
     finally:
         for namespace in retry_sessions:
@@ -876,6 +982,7 @@ async def _web_story_review_in_session(
     site_session_namespace: str | None = None,
     log: LogCallback | None,
     retry_sessions: list[str],
+    diagnostic: bool = False,
 ) -> tuple[dict[str, Any], str, str, str]:
     if (story_number is None) == (story_numbers is None):
         raise ValueError("exactly one of story_number or story_numbers is required")
@@ -889,6 +996,8 @@ async def _web_story_review_in_session(
             numbers = [story_number]
             # Single-story review never supported claimless legacy failures.
             parser_claims = claim_catalog if claim_catalog is not None else {}
+        if diagnostic:
+            return _diagnostic_payload(value, numbers, parser_claims or {})
         return _batch_payload(
             value,
             numbers,
@@ -1354,6 +1463,7 @@ async def _review_daily_script(
     contract_repairs: list[dict[str, Any]] = []
     audit_round = 0
     repeated_issue_counts: dict[tuple, int] = {}
+    diagnosed_story_numbers: set[int] = set()
     failure_reason = ""
     all_numbers = list(range(1, len(dossier.selected) + 1))
     review_numbers = list(all_numbers)
@@ -1614,6 +1724,27 @@ async def _review_daily_script(
         # A duration edit must not silently rewrite any paragraph that just
         # received a claim-level factual correction, regardless of error code.
         protected_story_numbers.update(failed_story_numbers)
+        freshness_issues = [
+            issue for issue in blocking
+            if dossier.freshness_policy_version
+            and re.search(r"audit codes [A-F]*[AF]", str(issue.get("claim", "")), re.I)
+            and not diagnosed_story_numbers.intersection(issue.get("evidence_story_numbers", []))
+        ]
+        if freshness_issues:
+            if log:
+                log("Freshness audit disputed the saved proposal; obtaining sourced diagnosis before correction")
+            try:
+                await _diagnose_freshness(
+                    candidate, dossier, edition_date, freshness_issues, output_dir,
+                    cycle=audit_round, review_session_namespace=review_session_namespace,
+                    ai_endpoint=ai_endpoint, ai_model=ai_model, provider_id=provider_id, log=log,
+                )
+            except RuntimeError as exc:
+                failure_reason = str(exc)
+                break
+            diagnosed_story_numbers.update(
+                n for issue in freshness_issues for n in issue["evidence_story_numbers"]
+            )
         candidate = await revise_daily_script(
             candidate,
             dossier,

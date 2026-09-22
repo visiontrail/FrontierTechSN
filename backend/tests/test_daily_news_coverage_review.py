@@ -9,6 +9,100 @@ from backend.daily_news import research, review
 from backend.pipeline.opencli import OpenCLIResult
 
 
+@pytest.mark.parametrize("mutation", ["valid", "no_web", "missing_url", "wrong_claim", "missing_story"])
+def test_freshness_diagnosis_is_sourced_context_never_approval(coverage_case, mutation):
+    _, _, claims = coverage_case
+    payload = {"web_verified": True, "findings": [{
+        "story_number": 7, "claim_ids": ["7.0", "7.2"],
+        "reason": "The event predates the research window.",
+        "correction": "Cover the newly published analysis, not the old launch.",
+        "source_urls": ["https://example.com/original"],
+    }]}
+    if mutation == "no_web":
+        payload["web_verified"] = False
+    elif mutation == "missing_url":
+        payload["findings"][0]["source_urls"] = []
+    elif mutation == "wrong_claim":
+        payload["findings"][0]["claim_ids"] = ["8.2"]
+    elif mutation == "missing_story":
+        payload["findings"] = []
+    if mutation == "valid":
+        result = review._diagnostic_payload(json.dumps(payload), [7], claims)
+        assert result["approved"] is False
+    else:
+        with pytest.raises(ValueError):
+            review._diagnostic_payload(json.dumps(payload), [7], claims)
+
+
+def test_freshness_failure_gets_diagnosis_once_and_still_stops_on_repeat(coverage_case, tmp_path):
+    script, dossier, claims = coverage_case
+    dossier.freshness_policy_version = 1
+    issue = review._batch_payload("W7AF@7.0,7.2", [7], claim_catalog=claims, require_web=True)["issues"][0]
+    async def verdict(_prompt, *, story_numbers, **_kwargs):
+        issues = [issue] if 7 in story_numbers else []
+        return {"approved": not issues, "issues": issues}, "[RAW]", "", "chatgpt"
+    diagnose = AsyncMock()
+    revise = AsyncMock(return_value=script)
+    from backend.daily_news import freshness
+    with (
+        patch.object(freshness, "refresh_review_history", AsyncMock()),
+        patch.object(review, "script_contract_report", return_value={"passed": True, "failures": []}),
+        patch.object(review, "_web_story_review", AsyncMock(side_effect=verdict)),
+        patch.object(review, "_diagnose_freshness", diagnose),
+        patch.object(review, "revise_daily_script", revise),
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()),
+    ):
+        with pytest.raises(RuntimeError, match="same claim-level blocking verdict"):
+            asyncio.run(review.review_daily_script(
+                script, dossier, date(2026, 9, 21), tmp_path, language="en",
+                closing_remarks="Goodbye.", ai_endpoint=None, ai_model=None, provider_id=None,
+            ))
+    assert diagnose.await_count == revise.await_count == 1
+    report = json.loads((tmp_path / "review/fact_check_report.json").read_text())
+    assert report["passed"] is False
+    assert report["manual_review_required"] is True
+
+
+@pytest.mark.parametrize("decision", ["include", "exclude"])
+def test_diagnosis_reassesses_same_captured_evidence_and_invalidates_receipt(coverage_case, tmp_path, decision):
+    from backend.daily_news import freshness
+    script, dossier, claims = coverage_case
+    issue = review._batch_payload("W7AF@7.0,7.2", [7], claim_catalog=claims, require_web=True)["issues"][0]
+    finding = {"story_number": 7, "claim_ids": ["7.0", "7.2"],
+               "reason": "Old event", "correction": "Cover the new analysis",
+               "source_urls": ["https://example.com/original"]}
+    (tmp_path / "review").mkdir()
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research/dossier.json").write_text(json.dumps(dossier.as_dict()))
+    old_key, _ = review._story_evidence_key(script, dossier, date(2026, 9, 21), 7)
+    old_evidence = dossier.selected[6].evidence_text
+    async def reassess(articles, *_args, **kwargs):
+        assert articles == [dossier.selected[6]]
+        assert kwargs["review_feedback"] == [finding]
+        articles[0].freshness = {"decision": decision, "development": "New analysis"}
+    async def run():
+        await review._diagnose_freshness(
+            script, dossier, date(2026, 9, 21), [issue], tmp_path, cycle=1,
+            review_session_namespace="test", ai_endpoint=None, ai_model=None, provider_id=None, log=None,
+        )
+    with (
+        patch.object(review, "_web_story_review", AsyncMock(return_value=(
+            {"approved": False, "findings": [finding]}, "diagnostic raw", "", "chatgpt"))),
+        patch.object(freshness, "assess_candidates", AsyncMock(side_effect=reassess)),
+    ):
+        if decision == "exclude":
+            with pytest.raises(RuntimeError, match="no evidence-backed fresh development"):
+                asyncio.run(run())
+        else:
+            asyncio.run(run())
+    assert dossier.selected[6].evidence_text == old_evidence
+    assert issue["claim_ids"] == ["7.0", "7.2"]
+    assert issue["freshness_diagnosis"] == [finding]
+    new_key, _ = review._story_evidence_key(script, dossier, date(2026, 9, 21), 7)
+    assert new_key != old_key
+    assert (tmp_path / "research/dossier-before-diagnosis-1.json").exists()
+
+
 @pytest.fixture
 def coverage_case():
     names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Gemini", "Quadruped"]
