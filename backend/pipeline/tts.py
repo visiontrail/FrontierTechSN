@@ -328,7 +328,12 @@ ACOUSTIC_PHRASE_EQUIVALENTS = {
     ("joo", "yee"): "zhuyi",
     ("jew", "yee"): "zhuyi",
 }
-NUMBER_SCALES = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
+NUMBER_SCALES = {
+    "hundred": 100,
+    "thousand": 1_000,
+    "million": 1_000_000,
+    "billion": 1_000_000_000,
+}
 DANGLING_CHUNK_WORDS = {
     "a", "all", "an", "and", "as", "at", "but", "by", "for", "from", "in",
     "fully", "into", "nor", "of", "on", "or", "the", "to", "with",
@@ -623,8 +628,9 @@ def _canonicalize_number_tokens_with_indexes(
         ):
             value = int(tokens[index]) * 100 + int(tokens[remainder_index])
             end = remainder_index + 1
-            if end < len(tokens) and tokens[end] in {"thousand", "million", "billion"}:
-                value *= NUMBER_SCALES[tokens[end]]
+            scale = NUMBER_SCALES.get(tokens[end], 0) if end < len(tokens) else 0
+            if scale >= 1_000:
+                value *= scale
                 end += 1
             result.append(str(value))
             result_indexes.append(word_indexes[index])
@@ -4629,8 +4635,15 @@ async def _generate_pocket_tts(
 
             staged_part = expected_part.with_suffix(".tmp.wav")
             staged_part.unlink(missing_ok=True)
-            synthesis_text = _pocket_synthesis_text(chunk)
-            if _lexical_tokens(synthesis_text) != _lexical_tokens(chunk):
+            try:
+                synthesis_text = _pocket_synthesis_text(chunk)
+                unchanged = _lexical_tokens(synthesis_text) == _lexical_tokens(chunk)
+            except (LookupError, ValueError) as exc:
+                raise RuntimeError(
+                    f"{name}: Pocket TTS pronunciation normalization failed "
+                    f"({type(exc).__name__}: {exc})"
+                ) from exc
+            if not unchanged:
                 raise TtsIntegrityError("Pocket TTS pronunciation changed source tokens")
             synthesis_dir = output_dir_path / "synthesis"
             synthesis_dir.mkdir(parents=True, exist_ok=True)
