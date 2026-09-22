@@ -581,11 +581,13 @@ def score_and_deduplicate(
     return sorted(ranked, key=lambda article: (-article.score, article.source_name, article.title))
 
 
-def select_balanced(articles: list[NewsArticle], max_stories: int) -> list[NewsArticle]:
+def select_balanced(articles: list[NewsArticle], max_stories: int, *,
+                    existing: list[NewsArticle] | None = None) -> list[NewsArticle]:
     selected: list[NewsArticle] = []
-    source_counts: Counter[str] = Counter()
-    category_counts: Counter[str] = Counter()
-    language_counts: Counter[str] = Counter()
+    retained = existing or []
+    source_counts: Counter[str] = Counter(a.source_id for a in retained)
+    category_counts: Counter[str] = Counter(a.category for a in retained)
+    language_counts: Counter[str] = Counter(a.language for a in retained)
 
     def adjusted(article: NewsArticle) -> float:
         diversity = 6.0 if not category_counts[article.category] else -4.0 * category_counts[article.category]
@@ -598,7 +600,10 @@ def select_balanced(articles: list[NewsArticle], max_stories: int) -> list[NewsA
 
     remaining = [article for article in articles
                  if (article.content_kind != "analysis" or article.evidence_status == "article_excerpt")
-                 and article.freshness.get("decision") != "exclude"]
+                 and article.freshness.get("decision") != "exclude"
+                 and not any(article.id == a.id or article.url == a.url
+                             or _title_similarity(article.title, a.title) >= 0.68
+                             for a in retained)]
     while remaining and len(selected) < max_stories:
         unused_sources = [article for article in remaining if source_counts[article.source_id] == 0]
         pool = unused_sources or remaining

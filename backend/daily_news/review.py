@@ -906,7 +906,7 @@ async def _diagnose_freshness(candidate, dossier, edition_date, issues, output_d
                               *, cycle, review_session_namespace, ai_endpoint,
                               ai_model, provider_id, log):
     from backend.daily_news.freshness import assess_candidates
-    from backend.daily_news.research import dossier_markdown
+    from backend.daily_news.research import dossier_markdown, select_balanced
 
     numbers = sorted({n for issue in issues for n in issue["evidence_story_numbers"]})
     claims = _claim_catalog(candidate, dossier)
@@ -971,10 +971,60 @@ FULL STORY EVIDENCE
         ai_endpoint=ai_endpoint, ai_model=ai_model, provider_id=provider_id, log=log,
         review_feedback=payload["findings"],
     )
+    replacements = []
+    for number, excluded in zip(numbers, articles):
+        if excluded.freshness.get("decision") == "include":
+            continue
+        for article in dossier.candidates:
+            if article.id == excluded.id:
+                article.freshness = dict(excluded.freshness)
+        retained = [a for i, a in enumerate(dossier.selected, 1) if i != number]
+        pool = [a for a in dossier.candidates
+                if a.id != excluded.id and a.freshness.get("decision") == "include"]
+        # Reuse discovery's source/category balance, keeping all passing slots fixed.
+        for _ in range(3):
+            choices = select_balanced(pool, 1, existing=retained)
+            if not choices:
+                break
+            replacement = choices[0]
+            pool = [a for a in pool if a.id != replacement.id]
+            await assess_candidates(
+                [replacement], dossier.history,
+                now=datetime.fromisoformat(dossier.generated_at), window_hours=dossier.window_hours,
+                output_dir=output_dir, timezone_name=excluded.freshness.get("timezone", "UTC"),
+                ai_endpoint=ai_endpoint, ai_model=ai_model, provider_id=provider_id, log=log,
+            )
+            if replacement.freshness.get("decision") != "include":
+                continue
+            dossier.selected[number - 1] = replacement
+            record = {"story_number": number, "excluded": excluded.as_dict(),
+                      "replacement": replacement.as_dict(), "diagnosis": findings[number]}
+            replacements.append(record)
+            for issue in issues:
+                if number not in issue["evidence_story_numbers"]:
+                    continue
+                issue["claim_ids"] = list(claims[number])
+                issue["claim_texts"] = list(claims[number].values())
+                issue["replacement_story"] = {"id": replacement.id, "title": replacement.title,
+                                               "url": replacement.url}
+                issue["correction"] = (
+                    f"Story {number} was excluded as stale and replaced in the dossier. "
+                    "ALL claims in its old paragraph are now cited for removal. Write this "
+                    "one paragraph from the replacement article's evidence and qualifying "
+                    "development, using its own source attribution. Do not retain the old "
+                    "story or try to repair its rejected freshness proposal."
+                )
+            if log:
+                log(f"Freshness replacement: story {number} {excluded.id} -> {replacement.id}: {replacement.title}")
+            break
+    if replacements:
+        prefix.with_suffix(".replacements.json").write_text(
+            json.dumps(replacements, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dossier.as_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
     path.with_suffix(".md").write_text(dossier_markdown(dossier), encoding="utf-8")
-    if any(a.freshness.get("decision") != "include" for a in articles):
+    if any(dossier.selected[n - 1].freshness.get("decision") != "include" for n in numbers):
         raise RuntimeError("Web diagnosis found no evidence-backed fresh development; repeat news research")
 
 

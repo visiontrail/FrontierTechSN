@@ -134,6 +134,53 @@ def test_diagnosis_reassesses_same_captured_evidence_and_invalidates_receipt(cov
     assert (tmp_path / "research/dossier-before-diagnosis-1.json").exists()
 
 
+def test_stale_story_replaced_from_saved_candidates_without_changing_passing_slots(coverage_case, tmp_path):
+    from backend.daily_news import freshness
+    from dataclasses import replace
+    script, dossier, claims = coverage_case
+    old_selected = list(dossier.selected)
+    replacement = replace(dossier.selected[6], id="new", source_id="independent",
+                          title="A new solar cell efficiency experiment", url="https://example.com/new",
+                          freshness={"decision": "include"})
+    dossier.candidates = [*dossier.candidates, replacement]
+    issue = review._batch_payload("W7AF@7.0,7.2", [7], claim_catalog=claims, require_web=True)["issues"][0]
+    finding = {"story_number": 7, "claim_ids": ["7.0", "7.2"],
+               "reason": "Old event", "correction": "No qualifying development",
+               "source_urls": ["https://example.com/original"]}
+    (tmp_path / "review").mkdir()
+    async def reassess(articles, *_args, **_kwargs):
+        for a in articles:
+            a.freshness = {"decision": "include" if a.id == "new" else "exclude"}
+    with (
+        patch.object(review, "_web_story_review", AsyncMock(return_value=(
+            {"approved": False, "findings": [finding]}, "diagnostic raw", "", "chatgpt"))),
+        patch.object(freshness, "assess_candidates", AsyncMock(side_effect=reassess)) as assess,
+    ):
+        asyncio.run(review._diagnose_freshness(
+            script, dossier, date(2026, 9, 21), [issue], tmp_path, cycle=1,
+            review_session_namespace="test", ai_endpoint=None, ai_model=None, provider_id=None, log=None,
+        ))
+    assert assess.await_count == 2
+    assert dossier.selected[6] is replacement
+    assert dossier.selected[:6] + dossier.selected[7:] == old_selected[:6] + old_selected[7:]
+    assert issue["claim_ids"] == list(claims[7])
+    assert issue["replacement_story"]["id"] == "new"
+    assert "ALL claims" in issue["correction"]
+    assert (tmp_path / "review/freshness-diagnosis-1.replacements.json").exists()
+    assert old_selected[6].freshness["decision"] == "exclude"
+
+
+def test_replacement_selection_retains_source_balance(coverage_case):
+    from dataclasses import replace
+    _, dossier, _ = coverage_case
+    retained = dossier.selected[:2]
+    same_source = replace(retained[0], id="same-source", title="Fast new processors",
+                          url="https://example.com/processors", score=100)
+    independent = replace(same_source, id="new-source", source_id="new-source", score=95)
+    assert research.select_balanced([same_source, independent], 1, existing=retained) == [independent]
+    assert research.select_balanced(retained, 1, existing=retained) == []
+
+
 @pytest.fixture
 def coverage_case():
     names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Gemini", "Quadruped"]
