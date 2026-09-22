@@ -73,6 +73,27 @@ def test_diagnostic_preserves_browser_rendered_newline_without_relaxing_web_gate
         review._diagnostic_payload(raw.replace('true', 'false'), [7], claims)
 
 
+def test_saved_diagnosis_requires_exact_prompt_and_valid_owned_response(coverage_case, tmp_path):
+    _, _, claims = coverage_case
+    prefix = tmp_path / "freshness-diagnosis-1"
+    prefix.with_suffix(".prompt.txt").write_text("exact prompt")
+    payload = json.dumps({"web_verified": True, "findings": [{
+        "story_number": 7, "claim_ids": ["7.0"], "reason": "Old event",
+        "correction": "Lead with the analysis", "source_urls": ["https://example.com/source"],
+    }]})
+    prefix.with_suffix(".failure.txt").write_text(
+        '[CHATGPT 1]\n{"web_verified":\n\n--- PROVIDER ATTEMPT ---\n\n'
+        + '[CHATGPT RECOVERY INVALID 2/10]\n' + payload,
+    )
+    cached = review._cached_freshness_diagnosis(prefix, "exact prompt", [7], claims)
+    assert cached[0]["approved"] is False
+    assert cached[0]["findings"][0]["reason"] == "Old event"
+    assert review._cached_freshness_diagnosis(prefix, "changed prompt", [7], claims) is None
+    assert review._cached_freshness_diagnosis(prefix, "exact prompt", [8], claims) is None
+    prefix.with_suffix(".failure.txt").write_text("[UNRELATED RESPONSE]\n" + payload)
+    assert review._cached_freshness_diagnosis(prefix, "exact prompt", [7], claims) is None
+
+
 @pytest.mark.parametrize("decision", ["include", "exclude"])
 def test_diagnosis_reassesses_same_captured_evidence_and_invalidates_receipt(coverage_case, tmp_path, decision):
     from backend.daily_news import freshness

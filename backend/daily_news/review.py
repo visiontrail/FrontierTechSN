@@ -879,6 +879,29 @@ def _diagnostic_payload(text, numbers, claims):
     return {"approved": False, "findings": findings}
 
 
+def _cached_freshness_diagnosis(prefix, prompt, numbers, claims):
+    """Recover only a prompt-matched, validated diagnostic; never a verdict."""
+    try:
+        if prefix.with_suffix(".prompt.txt").read_text(encoding="utf-8") != prompt:
+            return None
+        for suffix in (".response.txt", ".failure.txt"):
+            path = prefix.with_suffix(suffix)
+            if not path.exists():
+                continue
+            raw = path.read_text(encoding="utf-8")
+            for attempt in reversed(raw.split("--- PROVIDER ATTEMPT ---")):
+                if not re.match(r"\s*\[CHATGPT (?:\d+|RECOVERY(?: INVALID \d+/\d+)?)\]", attempt):
+                    continue
+                try:
+                    payload = _diagnostic_payload(attempt.split("]", 1)[1], numbers, claims)
+                except (ValueError, KeyError, TypeError):
+                    continue
+                return payload, raw, "", "chatgpt"
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 async def _diagnose_freshness(candidate, dossier, edition_date, issues, output_dir,
                               *, cycle, review_session_namespace, ai_endpoint,
                               ai_model, provider_id, log):
@@ -904,19 +927,24 @@ Return only JSON: {{"web_verified": true, "findings": [{{"story_number": number,
 "claim_ids": [exact failed claim IDs], "reason": "specific diagnosis",
 "correction": "specific evidence-bound edit", "source_urls": ["https://..."]}}]}}.
 Return exactly one finding per requested story. If no live search was performed, return N.
-Keep each reason and correction under 120 words. Escape newlines inside JSON strings.
 NUMBERED SCRIPT CLAIMS
 {_numbered_claims(claims, numbers)}
 FULL STORY EVIDENCE
 {chr(10).join(_full_article_evidence(dossier.selected[n - 1], n) for n in numbers)}
 """
     prefix = output_dir / "review" / f"freshness-diagnosis-{cycle}"
+    cached = _cached_freshness_diagnosis(prefix, prompt, numbers, claims)
     prefix.with_suffix(".prompt.txt").write_text(prompt, encoding="utf-8")
     try:
-        payload, raw, url, provider = await _web_story_review(
-            prompt, story_numbers=numbers, claim_catalog=claims,
-            site_session_namespace=review_session_namespace, log=log, diagnostic=True,
-        )
+        if cached is not None:
+            payload, raw, url, provider = cached
+            if log:
+                log(f"Recovered exact prompt-matched freshness diagnosis for stories {numbers}")
+        else:
+            payload, raw, url, provider = await _web_story_review(
+                prompt, story_numbers=numbers, claim_catalog=claims,
+                site_session_namespace=review_session_namespace, log=log, diagnostic=True,
+            )
     except _WebStoryReviewError as exc:
         prefix.with_suffix(".failure.txt").write_text(exc.attempt_log, encoding="utf-8")
         raise
