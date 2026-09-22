@@ -29,6 +29,12 @@ export async function attachGeminiFile(page, filePath, allowEmptyPageReload = tr
         await page.cdp('Page.bringToFront', {}).catch(() => undefined);
         await page.wait(0.25);
     }
+    // Use the composer's image paste handler when available. The current
+    // Upload files menu is document-oriented: even its native Filedata input
+    // can show a thumbnail while image processing remains pending after send.
+    if (await pasteGeminiImage(page, absPath, stats.size)) {
+        return waitForGeminiAttachment(page, path.default.basename(absPath));
+    }
     const uploadMenuSelector = 'button[aria-label="Upload & tools"]';
     let menuOpened = false;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -260,7 +266,50 @@ export async function attachGeminiFile(page, filePath, allowEmptyPageReload = tr
         }
     }
 
-    const fileName = path.default.basename(absPath).toLowerCase();
+    return waitForGeminiAttachment(page, path.default.basename(absPath));
+}
+
+async function pasteGeminiImage(page, absPath, fileSize) {
+    const supported = await page.evaluate(`(() => {
+        const composer = document.querySelector('[contenteditable="true"][aria-label*="Gemini"]');
+        const pasteSupported = !!composer && typeof ClipboardEvent === 'function' && typeof DataTransfer === 'function';
+        return pasteSupported;
+    })()`);
+    if (supported !== true) return false;
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const fileName = path.default.basename(absPath);
+    const mimeType = fileName.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+    const base64 = fs.default.readFileSync(absPath).toString('base64');
+    const key = '__opencliGeminiPaste_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    try {
+        await page.evaluate(`globalThis[${JSON.stringify(key)}] = []; true`);
+        for (let offset = 0; offset < base64.length; offset += 64 * 1024) {
+            await page.evaluate(`globalThis[${JSON.stringify(key)}].push(${JSON.stringify(base64.slice(offset, offset + 64 * 1024))}); true`);
+        }
+        const result = await page.evaluate(`(() => {
+            const composer = document.querySelector('[contenteditable="true"][aria-label*="Gemini"]');
+            if (!composer) return { accepted: false };
+            const binary = atob(globalThis[${JSON.stringify(key)}].join(''));
+            if (binary.length !== ${fileSize}) throw new Error('Gemini image paste transfer size mismatch');
+            const bytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+            const transfer = new DataTransfer();
+            transfer.items.add(new File([bytes], ${JSON.stringify(fileName)}, { type: ${JSON.stringify(mimeType)} }));
+            const event = new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true });
+            composer.focus();
+            composer.dispatchEvent(event);
+            return { accepted: event.defaultPrevented || !!document.querySelector('input-container gem-media-attachment') };
+        })()`);
+        if (result?.accepted) console.error('[gemini/upload] Image accepted by composer paste; waiting for attachment readiness');
+        return result?.accepted === true;
+    } finally {
+        await page.evaluate(`delete globalThis[${JSON.stringify(key)}]; true`).catch(() => undefined);
+    }
+}
+
+async function waitForGeminiAttachment(page, name) {
+    const fileName = name.toLowerCase();
     let lastState;
     for (let attempt = 0; attempt < 60; attempt += 1) {
         await page.wait(1);

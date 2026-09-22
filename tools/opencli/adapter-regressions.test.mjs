@@ -623,6 +623,7 @@ function geminiAttachmentPage(nativeError, inputSelector = 'input[name="Filedata
     },
     async evaluate(script) {
       if (script === 'window.location.href') return 'https://gemini.google.com/app'
+      if (script.includes('pasteSupported')) return false
       if (script.includes('button.click();')) return false
       if (script.includes('const inputSelector = selectors.find')) {
         return { inputSelector, buttonSelector: '', expanded: true }
@@ -856,6 +857,53 @@ test('Gemini image commands reserve setup time without extending other commands'
     assert.equal(result, expected)
   }
 })
+
+for (const scenario of ['ready', 'unready', 'unsupported', 'interrupted']) {
+  test(`Gemini pastes verified image bytes without using the document picker: ${scenario}`, async (t) => {
+    const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+    const payload = Buffer.alloc(160000, 37)
+    fs.writeFileSync(image, payload)
+    let pasted = []
+    const composer = {
+      focus() {},
+      dispatchEvent(event) {
+        if (scenario === 'unsupported') return true
+        pasted = event.clipboardData.files
+        event.preventDefault()
+        return false
+      },
+    }
+    const context = vm.createContext({
+      document: { querySelector: selector => selector.includes('contenteditable') ? composer : null },
+      atob, Uint8Array, File,
+      ClipboardEvent: class extends Event {
+        constructor(type, options) { super(type, options); this.clipboardData = options.clipboardData }
+      },
+      DataTransfer: class { files = []; items = { add: file => this.files.push(file) } },
+    })
+    const page = geminiAttachmentPage('fileChooserOpened not received')
+    const originalEvaluate = page.evaluate
+    let chunks = 0
+    page.evaluate = async script => {
+      if (script.includes('pasteSupported') || script.includes('__opencliGeminiPaste_')) {
+        if (script.includes('.push(') && ++chunks === 2 && scenario === 'interrupted') throw new Error('bridge disconnected')
+        return vm.runInContext(script, context)
+      }
+      if (scenario === 'unready' && script.includes('const candidates = Array.from')) return { ready: false }
+      return originalEvaluate(script)
+    }
+    if (['unready', 'interrupted'].includes(scenario)) {
+      await assert.rejects(attachGeminiFile(page, image), /did not become ready|bridge disconnected/)
+    } else await attachGeminiFile(page, image)
+    if (['ready', 'unready'].includes(scenario)) {
+      assert.equal(pasted.length, 1)
+      assert.equal(pasted[0].type, 'image/jpeg')
+      assert.deepEqual(Buffer.from(await pasted[0].arrayBuffer()), payload)
+    }
+    assert.equal(page.actions.some(([action]) => action === 'click'), scenario === 'unsupported')
+    assert.equal(Object.keys(context).some(key => key.startsWith('__opencliGeminiPaste_')), false)
+  })
+}
 
 test('Gemini attachment never reports success while its preview remains unavailable', async (t) => {
   const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
