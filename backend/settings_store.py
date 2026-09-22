@@ -781,7 +781,7 @@ SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         "WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS", "footage", "Preview review attempts", "int",
         minimum=2, maximum=12,
-        description="Total attempts per candidate. Up to three batch attempts precede individual review of unresolved previews. Valid rejections are never retried; provider pacing and cooldown still apply.",
+        description="Total attempts per candidate (default 10). Up to five batch attempts precede individual review of unresolved previews. Valid rejections are never retried; provider pacing and cooldown still apply.",
     ),
     SettingSpec(
         "WEB_FOOTAGE_CLIP_SECONDS", "footage", "Web clip max length", "int", unit="seconds",

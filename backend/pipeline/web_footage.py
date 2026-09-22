@@ -1020,7 +1020,7 @@ async def _request_preview_review(
             last_error = exc
             failure_kind = (
                 "response_contract" if isinstance(exc, ReviewResponseError)
-                else "generation_timeout" if re.search(r"returned no response within|command timed out", str(exc), re.I)
+                else "generation_timeout" if re.search(r"returned no response within|(?:command|gemini/ask) timed out", str(exc), re.I)
                 else "provider_generation" if "Gemini generation failed:" in str(exc)
                 else "transport"
             )
@@ -1148,7 +1148,7 @@ async def _analyze_preview_batch(
     )
     (folder / "request.json").write_text(json.dumps(descriptions, indent=2), encoding="utf-8")
     budget = _preview_attempt_budget()
-    batch_attempts = min(3, budget // 2)
+    batch_attempts = min(5, budget // 2)
     try:
         payload = await _request_preview_review(
             prompt, sheet_path, dict(prepared), batch=True, log=log, max_attempts=batch_attempts,

@@ -45,6 +45,8 @@ A generation response that stays unchanged reaches the stall limit at `COLLAGE_G
 
 ### Shot editing and footage recovery
 
+Public-footage preview review allows ten attempts per candidate by default: up to five in a batch, then five individual attempts using the saved preview. Configure `WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS` (2–12) under **Admin → System → Footage Sources**. Explicit suitability rejections are not retried. Gemini image reviews reserve an additional 180 seconds for model selection, upload-menu hydration and verified image attachment before the response deadline; timed-out responses get bounded longer retries. The adapter opens the image-capable file picker instead of passing images to document-only inputs. Downloaded previews, validated clips and every review attempt remain available when acquisition resumes.
+
 After acquisition, an AI shot editor uses the available media to choose each story's shot order, durations, copy, and layout. There is no fixed media sequence: collage can come before or after footage, and editorial graphics, acquired photos, and article captures appear where they explain the narration.
 
 The pipeline measures video durations with ffprobe and plays each video once. Any remaining narration gets a complete information layout, avoiding empty gradients and long frozen frames. An incomplete or invalid schedule gets validation feedback and one repair attempt. If the provider remains unavailable, the pipeline records a recovery plan that keeps verified assets and fills the remaining time with editorial graphics based on the story's evidence. Automatic collage selection can replan after a generation failure; an explicitly requested clip count must still be delivered.

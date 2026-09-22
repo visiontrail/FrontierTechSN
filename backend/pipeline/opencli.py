@@ -126,6 +126,14 @@ async def run_opencli(
     check: bool = True,
     site_session_namespace: str | None = None,
 ) -> OpenCLIResult:
+    # Match the project adapter's upload allowance. Gemini starts its response
+    # timer only after model selection, picker hydration and attachment upload.
+    # The parent process must not kill those steps inside the response budget.
+    command_timeout = timeout or config.OPENCLI_TIMEOUT
+    if args[:2] == ["gemini", "ask"] and any(
+        arg == "--file" or arg.startswith("--file=") for arg in args[2:]
+    ):
+        command_timeout += 180
     binary = Path(config.OPENCLI_BIN)
     if not binary.is_file():
         raise OpenCLIError(
@@ -193,12 +201,12 @@ async def run_opencli(
                 )
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                        process.communicate(), timeout=timeout or config.OPENCLI_TIMEOUT
+                        process.communicate(), timeout=command_timeout
                     )
                 except TimeoutError as exc:
                     await _stop_command(process)
                     raise OpenCLIError(
-                        f"OpenCLI command timed out after {timeout or config.OPENCLI_TIMEOUT}s: "
+                        f"OpenCLI command timed out after {command_timeout}s: "
                         f"{' '.join(args[:3])}"
                     ) from exc
                 except asyncio.CancelledError:

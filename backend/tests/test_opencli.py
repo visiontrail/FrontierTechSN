@@ -421,6 +421,23 @@ class OpenCLIRateLimitTests(unittest.TestCase):
 
 
 class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gemini_image_setup_budget_matches_adapter_without_affecting_other_calls(self):
+        for args, expected in [
+            (["gemini", "ask", "Review", "--file", "sheet.jpg"], 360),
+            (["gemini", "ask", "Review", "--file=sheet.jpg"], 360),
+            (["gemini", "ask", "Review"], 180),
+            (["chatgpt", "ask", "Review", "--file", "sheet.jpg"], 180),
+        ]:
+            process = AsyncMock(returncode=0)
+            process.communicate.return_value = (b"ok", b"")
+            with (
+                patch.object(opencli_module.asyncio, "to_thread", AsyncMock()),
+                patch.object(opencli_module.asyncio, "create_subprocess_exec", AsyncMock(return_value=process)),
+                patch.object(opencli_module.asyncio, "wait_for", wraps=asyncio.wait_for) as wait,
+            ):
+                await opencli_module.run_opencli(args, timeout=180)
+            self.assertEqual(wait.call_args.kwargs["timeout"], expected)
+
     async def test_backend_reserves_slot_before_starting_provider_process(self):
         class SuccessfulProcess:
             returncode = 0

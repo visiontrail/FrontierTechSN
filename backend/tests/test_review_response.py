@@ -193,6 +193,8 @@ def test_failed_batch_falls_back_to_saved_individual_pixels_and_narration(tmp_pa
     responses = [
         OpenCLIResult((), 1, "", "Gemini generation failed"),
         OpenCLIResult((), 1, "", "Gemini generation failed"),
+        OpenCLIResult((), 1, "", "Gemini generation failed"),
+        OpenCLIResult((), 1, "", "Gemini generation failed"),
         result("Sorry, something went wrong. Please try your request again."),
         result(PREVIEW), result({**PREVIEW, "suitable": False}),
     ]
@@ -202,17 +204,17 @@ def test_failed_batch_falls_back_to_saved_individual_pixels_and_narration(tmp_pa
               patch.object(web_footage, "run_opencli", AsyncMock(side_effect=responses)) as ask):
             reviews = await web_footage._analyze_preview_batch(requests, tmp_path)
         assert prepare.await_count == 2
-        assert ask.await_count == 5
+        assert ask.await_count == 7
         assert reviews[0]["suitable"] is True
         assert type(reviews[1]) is web_footage.WebFootageError
-        for index, call in enumerate(ask.await_args_list[3:]):
+        for index, call in enumerate(ask.await_args_list[5:]):
             command = call.args[0]
             assert f"Narration: Narration {index}" in command[2]
             assert f"Narration {1-index}" not in command[2]
             assert command[command.index("--file") + 1] == str(previews[str(index)]["sheet"])
     asyncio.run(run())
     records = [json.loads(p.read_text()) for p in tmp_path.glob("**/review-attempts/*/attempt-*.json")]
-    assert len(records) == 5
+    assert len(records) == 7
     assert sum(r["status"] == "reviewed" for r in records) == 2
 
 

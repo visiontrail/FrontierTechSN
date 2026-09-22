@@ -99,6 +99,19 @@ execution = replaceOnce(
   ].join('\n'),
   'persistent site-session namespace',
 )
+execution = replaceOnce(
+  execution,
+  `                    const browserTimeout = userTimeoutSec !== null
+                        ? userTimeoutSec + RUNTIME_TIMEOUT_PADDING_SECONDS
+                        : DEFAULT_BROWSER_COMMAND_TIMEOUT;`,
+  `                    // Attachment preparation precedes the provider response timer.
+                    // Include the same bounded setup allowance as the Python caller.
+                    const attachmentSetupSeconds = cmd.site === 'gemini' && cmd.name === 'ask' && kwargs.file ? 180 : 0;
+                    const browserTimeout = (userTimeoutSec !== null
+                        ? userTimeoutSec + RUNTIME_TIMEOUT_PADDING_SECONDS
+                        : DEFAULT_BROWSER_COMMAND_TIMEOUT) + attachmentSetupSeconds;`,
+  'Gemini attachment setup timeout budget',
+)
 fs.writeFileSync(executionPath, execution)
 
 // Model selection previously had no transport deadline, so Python's 60s kill

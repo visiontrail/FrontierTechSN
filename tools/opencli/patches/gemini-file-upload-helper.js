@@ -57,14 +57,23 @@ export async function attachGeminiFile(page, filePath, allowEmptyPageReload = tr
         'input[name="Filedata"]',
         'images-files-uploader input[type="file"]',
         'uploader > input[type="file"]',
-        'input[type="file"]',
     ];
+    // Gemini now renders document-only inputs before opening the native image
+    // picker. Feeding a JPEG to those inputs can create an empty attachment
+    // chip and a send button without a usable image. Click Upload files first
+    // and wait for its Filedata input instead of trusting any file input.
     let fileInputSelector = '';
     for (let attempt = 0; attempt < 60; attempt += 1) {
         await page.wait(attempt === 0 ? 1 : 0.5);
         const picker = await page.evaluate(`(() => {
             const selectors = ${JSON.stringify(fileInputSelectors)};
-            const inputSelector = selectors.find((selector) => document.querySelector(selector)) || '';
+            const inputSelector = selectors.find((selector) => {
+                const input = document.querySelector(selector);
+                if (!input || input.disabled) return false;
+                const accept = String(input.accept || '').toLowerCase();
+                return !accept || accept.includes('image/')
+                    || ['.jpg', '.jpeg', '.png'].some(extension => accept.includes(extension));
+            }) || '';
             const legacyButton = '[data-test-id="local-images-files-uploader-button"]';
             const currentButton = 'images-files-uploader button[aria-label^="Upload files"]';
             const buttonSelector = document.querySelector(legacyButton)
@@ -87,7 +96,13 @@ export async function attachGeminiFile(page, filePath, allowEmptyPageReload = tr
             await page.wait(0.5);
             const discovered = await page.evaluate(`(() => {
                 const selectors = ${JSON.stringify(fileInputSelectors)};
-                return selectors.find((selector) => document.querySelector(selector)) || '';
+                return selectors.find((selector) => {
+                    const input = document.querySelector(selector);
+                    if (!input || input.disabled) return false;
+                    const accept = String(input.accept || '').toLowerCase();
+                    return !accept || accept.includes('image/')
+                        || ['.jpg', '.jpeg', '.png'].some(extension => accept.includes(extension));
+                }) || '';
             })()`);
             if (discovered) {
                 fileInputSelector = discovered;
@@ -192,7 +207,9 @@ export async function attachGeminiFile(page, filePath, allowEmptyPageReload = tr
                 if (!input) return !!document.querySelector('input-container button[aria-label="close attachment"]');
                 const file = input.files?.[0];
                 if (!file || file.name !== ${JSON.stringify(path.default.basename(absPath))} || file.size !== ${stats.size}) return false;
-                input.dispatchEvent(new Event('change', { bubbles: true }));
+                // Native setFileInput already emits input/change. Dispatching
+                // change again starts a second upload and can clear the first
+                // attachment while its server-side processing is in flight.
                 return true;
             })()`) === true;
             if (!uploaded) console.error('[gemini/upload] Native upload acknowledgement had no matching file; transferring the attachment');

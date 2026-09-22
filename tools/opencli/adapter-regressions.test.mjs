@@ -628,10 +628,11 @@ function geminiAttachmentPage(nativeError, inputSelector = 'input[name="Filedata
         return { inputSelector, buttonSelector: '', expanded: true }
       }
       if (
-        script.includes("input.dispatchEvent(new Event('change'")
+        script.includes('const file = input.files?.[0]')
         && !script.includes('new DataTransfer()')
       ) {
-        actions.push(['change', inputSelector])
+        assert.equal(script.includes("dispatchEvent(new Event('change'"), false)
+        actions.push(['verify-native-file', inputSelector])
         return true
       }
       if (script.includes('const transfer = new DataTransfer()')) {
@@ -784,7 +785,7 @@ test('Gemini ask supports the current unnamed images-files-uploader input', asyn
 
   const upload = page.actions.find(([action]) => action === 'setFileInput')
   assert.equal(upload[2], inputSelector)
-  assert.equal(page.actions.some(([action]) => action === 'change'), true)
+  assert.equal(page.actions.some(([action]) => action === 'verify-native-file'), true)
   assert.equal(
     page.actions.some(([action, method]) => action === 'cdp' && method === 'Page.bringToFront'),
     true,
@@ -808,6 +809,52 @@ test('Gemini attachment waits for upload-menu hydration without resetting the co
   assert.equal(menuReads, 20)
   assert.equal(page.actions.some(([action]) => action === 'goto'), false)
   assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
+})
+
+test('Gemini image review skips document-only inputs and opens the actual picker', async (t) => {
+  const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
+  const page = geminiAttachmentPage('fileChooserOpened not received')
+  const originalEvaluate = page.evaluate
+  let pickerOpened = false
+  const documentInput = { accept: '.txt,.pdf,.docx,.zip', disabled: false }
+  const imageInput = { accept: '', disabled: false }
+  const context = {
+    document: { querySelector(selector) {
+      if (selector === 'input[name="Filedata"]') return pickerOpened ? imageInput : null
+      if (selector.includes('input')) return selector.includes('[accept*=') ? null : documentInput
+      if (selector.includes('local-images-files-uploader-button')) return {}
+      if (selector.includes('Upload & tools')) return { getAttribute: () => 'true' }
+      return null
+    } },
+  }
+  page.click = async selector => {
+    page.actions.push(['click', selector])
+    if (selector.includes('local-images-files-uploader-button')) pickerOpened = true
+  }
+  page.evaluate = async script => {
+    if (script.includes('const selectors =')) return vm.runInNewContext(script, context)
+    return originalEvaluate(script)
+  }
+  await attachGeminiFile(page, image)
+  assert.equal(pickerOpened, true)
+  assert.equal(page.actions.find(([action]) => action === 'setFileInput')[2], 'input[name="Filedata"]')
+})
+
+test('Gemini image commands reserve setup time without extending other commands', () => {
+  const source = fs.readFileSync(new URL('./node_modules/@jackwener/opencli/dist/src/execution.js', import.meta.url), 'utf8')
+  const budget = source.slice(source.indexOf('const attachmentSetupSeconds ='), source.indexOf('const commandRun ='))
+  for (const [site, name, kwargs, expected] of [
+    ['gemini', 'ask', { file: 'sheet.jpg' }, 330],
+    ['gemini', 'ask', {}, 150],
+    ['gemini', 'video', { file: 'sheet.jpg' }, 150],
+    ['chatgpt', 'ask', { file: 'sheet.jpg' }, 150],
+  ]) {
+    const result = vm.runInNewContext(budget + '\nbrowserTimeout', {
+      cmd: { site, name }, kwargs, userTimeoutSec: 120,
+      RUNTIME_TIMEOUT_PADDING_SECONDS: 30, DEFAULT_BROWSER_COMMAND_TIMEOUT: 60,
+    })
+    assert.equal(result, expected)
+  }
 })
 
 test('Gemini attachment never reports success while its preview remains unavailable', async (t) => {

@@ -171,9 +171,9 @@ def test_batch_verdicts_are_mapped_by_id_and_missing_or_duplicate_results_fail(t
               patch.object(web_footage, 'run_opencli', AsyncMock(return_value=OpenCLIResult(
                   (), 0, json.dumps(response), ''))) as ask):
             results = await web_footage._analyze_preview_batch(requests, tmp_path)
-        # Two undecided rows each get three individual recovery attempts;
+        # Two undecided rows each get five individual recovery attempts;
         # the valid acceptance and low-confidence rejection are not repeated.
-        assert ask.await_count == 7
+        assert ask.await_count == 11
         assert results[0]['visible_content'] == 'Content for candidate 0'
         assert all(isinstance(results[i], Exception) for i in (1, 2, 3))
         assert (tmp_path / results[0]['batch_evidence']).is_file()
@@ -894,11 +894,16 @@ def test_failed_repair_gets_one_fresh_round_with_exhausted_queries_excluded(tmp_
     assert next(iter(result['query_replans'].values()))['repair_round'] == 2
 
 
-def test_preview_generation_timeout_expands_only_the_bounded_retry_deadline(tmp_path, monkeypatch):
+@pytest.mark.parametrize('message', [
+    'Gemini generation returned no response within 120s',
+    'gemini/ask timed out after 330s',
+    'OpenCLI command timed out after 360s',
+])
+def test_preview_generation_timeout_expands_only_the_bounded_retry_deadline(tmp_path, monkeypatch, message):
     monkeypatch.setattr(web_footage.config, 'WEB_FOOTAGE_GEMINI_TIMEOUT', 120)
     sheet = tmp_path / 'sheet.jpg'
     Image.new('RGB', (160, 90), 'blue').save(sheet)
-    timeout = OpenCLIResult((), 1, '', 'Gemini generation returned no response within 120s')
+    timeout = OpenCLIResult((), 75, '', message)
     with (patch.object(web_footage, 'run_opencli', AsyncMock(return_value=timeout)) as request,
           pytest.raises(web_footage.WebFootageReviewUnavailable) as caught):
         asyncio.run(web_footage._request_preview_review(

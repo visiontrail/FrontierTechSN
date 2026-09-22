@@ -228,7 +228,7 @@ WEB_FOOTAGE_GEMINI_ENABLED = _env_bool("WEB_FOOTAGE_GEMINI_ENABLED", "1")
 WEB_FOOTAGE_GEMINI_TIMEOUT = int(os.getenv("WEB_FOOTAGE_GEMINI_TIMEOUT", "120"))
 # Per candidate, including the initial batch and any individual recovery.
 # OpenCLI's shared provider pacing/cooldown applies to every attempt.
-WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS = int(os.getenv("WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS", "6"))
+WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS = int(os.getenv("WEB_FOOTAGE_PREVIEW_MAX_ATTEMPTS", "10"))
 WEB_FOOTAGE_CLIP_SECONDS = int(os.getenv("WEB_FOOTAGE_CLIP_SECONDS", "15"))
 WEB_FOOTAGE_CLIP_MIN_SECONDS = int(os.getenv("WEB_FOOTAGE_CLIP_MIN_SECONDS", "10"))
 WEB_FOOTAGE_DOWNLOAD_TIMEOUT = int(os.getenv("WEB_FOOTAGE_DOWNLOAD_TIMEOUT", "600"))
