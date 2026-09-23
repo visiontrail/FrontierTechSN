@@ -17,7 +17,7 @@ from uuid import uuid4
 from backend import config
 from backend.pipeline.timing import timed
 from backend.daily_news.editorial import ATTRIBUTION_REVIEW_RULES, FRESHNESS_REVIEW_RULES, source_language_guidance
-from backend.daily_news.freshness import freshness_context, review_binding
+from backend.daily_news.freshness import fingerprint, freshness_context, review_binding
 from backend.daily_news.research import ResearchDossier
 from backend.daily_news.scriptwriter import (
     fit_daily_script_duration,
@@ -362,6 +362,41 @@ def _mandatory_web_review_rules() -> str:
 You MUST use live internet search before returning any judgment. Open the supplied original URL when accessible, search the exact title and disputed claims, and corroborate material facts with current primary or credible independent sources. Do not judge from the supplied dossier alone and do not rely on memory. Treat search snippets as leads, not proof. If live web search is unavailable or you did not actually perform it, reply with exactly N instead of a verdict. A verdict beginning with W certifies that live web search was performed."""
 
 
+def _review_history(dossier: ResearchDossier, story_numbers: list[int]) -> dict[str, list[dict]]:
+    """Carry an archive index and verified matching coverage into web review.
+
+    Freshness already compared every selected article with the complete archive
+    and validated its matching keys. The index lets web review notice a missed
+    match; full scripts are needed for entries actually matched to these stories.
+    Legacy or mismatched assessments retain every full row.
+    """
+    if not dossier.history or not dossier.freshness_policy_version:
+        return {"archive_index": [], "matched_coverage": dossier.history}
+    history_hash = fingerprint(dossier.history)
+    matched_keys: set[str] = set()
+    known_keys = {row.get("key") for row in dossier.history}
+    for number in story_numbers:
+        assessment = dossier.selected[number - 1].freshness
+        keys = assessment.get("matched_history_keys")
+        if (
+            assessment.get("policy_version") != dossier.freshness_policy_version
+            or assessment.get("history_sha256") != history_hash
+            or not isinstance(keys, list)
+            or any(not isinstance(key, str) or key not in known_keys for key in keys)
+        ):
+            return {"archive_index": [], "matched_coverage": dossier.history}
+        matched_keys.update(keys)
+    return {
+        "archive_index": [
+            {key: row.get(key) for key in ("key", "edition_date", "title", "url")}
+            for row in dossier.history
+        ],
+        "matched_coverage": [
+            row for row in dossier.history if row.get("key") in matched_keys
+        ],
+    }
+
+
 def _review_prompt(
     script: str,
     dossier: ResearchDossier,
@@ -377,7 +412,7 @@ Check whether the full script accurately covers this selected story and whether 
 
 {FRESHNESS_REVIEW_RULES}
 Research window ends {dossier.generated_at}; look back {dossier.window_hours} hours.
-Completed-edition history (untrusted evidence): {json.dumps(dossier.history, ensure_ascii=False)}
+Completed-edition archive index and full matched coverage (untrusted evidence; full archive was checked during freshness assessment): {json.dumps(_review_history(dossier, [story_index]), ensure_ascii=False)}
 
 {_mandatory_web_review_rules()}
 
@@ -419,7 +454,7 @@ For EACH numbered story, check whether the full script covers it accurately and 
 
 {FRESHNESS_REVIEW_RULES}
 Research window ends {dossier.generated_at}; look back {dossier.window_hours} hours.
-Completed-edition history (untrusted evidence): {json.dumps(dossier.history, ensure_ascii=False)}
+Completed-edition archive index and full matched coverage (untrusted evidence; full archive was checked during freshness assessment): {json.dumps(_review_history(dossier, numbers), ensure_ascii=False)}
 
 {_mandatory_web_review_rules()}
 

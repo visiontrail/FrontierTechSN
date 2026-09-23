@@ -13,7 +13,7 @@ import pytest
 from backend import config
 from backend.daily_news import scheduler, scriptwriter
 from backend.daily_news.scheduler import _is_due, create_daily_task, next_run_at
-from backend.daily_news import research, review
+from backend.daily_news import freshness, research, review
 from backend.daily_news.scriptwriter import (
     SOURCE_SPOKEN_ALIASES,
     _minimalize_unsupported_paragraphs,
@@ -397,6 +397,50 @@ def test_review_prompt_requires_live_search_and_carries_full_evidence():
     assert "真·人类史上首场人形机器人自主乒乓球完整对局" in prompt
     assert "Do not browse" not in prompt
     assert "W1P2D" not in prompt
+
+
+def test_web_review_carries_only_freshness_verified_matching_history():
+    history = [
+        {"key": "old-chip", "title": "Chip history", "script": "Earlier chip announcement."},
+        {"key": "old-model", "title": "Model history", "script": "Earlier model announcement."},
+        {"key": "unrelated", "title": "Unrelated title", "script": "Unrelated completed edition."},
+    ]
+    history_hash = freshness.fingerprint(history)
+    articles = [
+        research.NewsArticle(
+            id=f"story-{number}", source_id="source", source_name="Source",
+            language="en", title=f"New report {number}",
+            url=f"https://example.com/{number}",
+            published_at="2026-09-23T00:00:00+00:00",
+            evidence_text=f"Full evidence for story {number}.",
+            freshness={
+                "policy_version": 1,
+                "history_sha256": history_hash,
+                "matched_history_keys": keys,
+            },
+        )
+        for number, keys in ((1, ["old-chip"]), (2, ["old-model"]))
+    ]
+    dossier = research.ResearchDossier(
+        "2026-09-23", "2026-09-23T07:00:00+00:00", 36,
+        articles, articles, [], history=history, freshness_policy_version=1,
+    )
+    script = "Opening.\nNew report 1.\nNew report 2.\nClosing."
+
+    prompt = review._batch_review_prompt(script, dossier, date(2026, 9, 23), [1, 2])
+    assert "Earlier chip announcement." in prompt
+    assert "Earlier model announcement." in prompt
+    assert "Unrelated title" in prompt
+    assert "Unrelated completed edition." not in prompt
+    assert "Full evidence for story 1." in prompt
+    assert "Full evidence for story 2." in prompt
+    assert "MUST use live internet search" in prompt
+
+    articles[1].freshness["history_sha256"] = "stale"
+    fallback_prompt = review._batch_review_prompt(
+        script, dossier, date(2026, 9, 23), [1, 2],
+    )
+    assert "Unrelated completed edition." in fallback_prompt
 
 
 def test_bilingual_claim_matcher_preserves_dossier_order_for_translated_evidence():
