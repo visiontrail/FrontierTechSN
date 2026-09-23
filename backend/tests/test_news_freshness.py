@@ -192,6 +192,7 @@ def test_cross_timezone_reporting_and_history_list_need_no_semantic_repair(tmp_p
                                               window_hours=36, output_dir=tmp_path,
                                               timezone_name="Asia/Singapore"))
     assert chat.await_count == 1
+    assert chat.await_args.kwargs["max_tokens"] == freshness.ASSESSMENT_MAX_OUTPUT_TOKENS
     request = json.loads(chat.await_args.args[1])
     candidate = request["candidates"][0]
     assert candidate["published_at"] == row.published_at

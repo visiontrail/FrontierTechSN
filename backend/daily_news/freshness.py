@@ -25,6 +25,11 @@ POLICY_VERSION = 1
 HISTORY_DAYS = 14
 ASSESSMENT_ATTEMPTS = 3
 ASSESSMENT_BATCH_SIZE = 4
+# A full 14-day edition history can exceed 15k words. The primary reasoning
+# gateway has exhausted 8192 output tokens mid-answer even with thinking off;
+# that partial answer cannot safely be replayed through another key/provider.
+# Give the first turn the transport's bounded reasoning allowance instead.
+ASSESSMENT_MAX_OUTPUT_TOKENS = 32_768
 CATEGORIES = {"ai_models", "agents", "robotics", "chips", "science", "security_policy", "business", "general"}
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 EVIDENCE_FIELDS = (
@@ -393,7 +398,8 @@ async def assess_candidates(articles, history: list[dict], *, now: datetime, win
             )
             raw = await _chat(
                 ASSESSMENT_RULES, json.dumps(request, ensure_ascii=False), endpoint, model, api_key, log,
-                "Daily news freshness assessment", max_tokens=8192, enable_skills=False,
+                "Daily news freshness assessment", max_tokens=ASSESSMENT_MAX_OUTPUT_TOKENS,
+                enable_skills=False,
                 disable_thinking=True,
             )
             Path(f"{stem}-{attempt}.txt").write_text(raw, encoding="utf-8")
