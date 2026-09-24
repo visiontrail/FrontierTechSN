@@ -1,0 +1,63 @@
+# 长篇图解工作台
+
+独立入口：侧边栏 **长篇图解**，路径 `/explainer-studio`。这条工作流从用户提供的调研材料开始，不接入新闻采集、公共素材搜索、新闻审核或自动发布。
+
+## 使用
+
+1. 新建项目，填写标题并粘贴调研，或导入 UTF-8 `.txt` / `.md`。资料不自动联网补充；脚本模型被要求依据已给材料保留事实强度、不编造研究。
+2. 选择语言、目标时长、配音模型及声音。Orpheus English、Pocket English 和 VibeVoice Realtime 0.5B 按英语模型处理；中文可选现有 VibeVoice 1.5B。新功能尚未完成中文实际配音验收。
+3. 修改画风、人物说明、色板和写作语气。可另存为以后新项目的默认设置，已有项目保留自己的快照。
+4. 点击生成脚本。系统先规划章节，再逐章生成带旁白与具体画面描述的分镜。目标时长用于写作预算；最终时长以真实配音为准。
+5. 可直接编辑、增加、删除分镜，修改旁白、画面、关键词和动态标记。这是创作编辑区，不是审核关卡。
+6. 点击生成视频。每镜执行配音、ChatGPT 插图、可选 Gemini 动画和合成。完成后在同页播放或下载视频、音频和时间轴。
+
+默认暖纸色、简笔人物、静态硬切、每镜约四秒、无烧录字幕。关键词由渲染器添加，避免依赖图像模型拼写。可改为轻推拉或 Gemini 动态；Gemini 默认仅处理显式选中的镜头，也可设置每 N 镜头自动生成动态（0 表示仅手动）。字幕可开启，同时总会导出按镜头配音时间生成的 SRT。
+
+镜头目标时长是写作引导，不是固定裁切时长。每个镜头使用自己的实际配音长度，最多补足一个视频帧的静音。不同图像无法保证像素级角色身份一致；重复的人物设定控制整体一致性。
+
+## 现有能力盘点与复用
+
+本表来自本次代码检查，不表示每个外部服务均在本次完成实测。
+
+| 能力 | 现有入口 | 在长篇图解中的使用 |
+| --- | --- | --- |
+| 写作、结构化输出、多模型路由、重试与凭据轮转 | `pipeline/digester.py`、`agent.py`、`model_router.py`、`providers.py` | 复用配置和请求层，新增章节/分镜写作任务 |
+| ChatGPT 网页文生图与下载 | `collage_broll.py:_generate_still`、`thumbnail.py`、OpenCLI ChatGPT adapter | 按分镜生成原创手绘图；使用独立画风提示词 |
+| Gemini 参考图片生成视频 | `collage_broll.py:_generate_video`、`tools/opencli/patches/gemini-video-command.js` | 可选镜头动效；保留首帧、任务内下载和会话来源 |
+| 请求节流、访问限流、浏览器会话隔离与回收 | `opencli.py`、`opencli_rate_limit.py`、`opencli_session.py` | 原样复用，不绕过配置或抢占其他任务会话 |
+| Orpheus、Pocket TTS、VibeVoice 配音 | `pipeline/tts.py`、`config.TTS_MODELS`、`routers/voices.py` | 单镜配音、原生语速、声音选项与既有音频完整性机制 |
+| 音频测量、FFmpeg 合成、媒体验证 | 既有媒体模块和系统 FFmpeg | 独立的确定性图片合成器，逐镜帧对齐、全片解码 |
+| HyperFrames HTML 场景、字幕、转场与渲染 | `hyperframe/`、`composer.py`、`director.py`、`scene_kit.py` | 本版简单切图用 FFmpeg，保留现有 HyperFrames 供其他节目使用 |
+| 新闻研究、事实核对、素材获取与适配 | `daily_news/`、`news_images.py`、`web_footage.py`、`review_response.py` | 不接入新流程 |
+| 缩略图、标题策略、社交文案 | `pipeline/thumbnail.py`、`title_strategy.py`、`social_copy.py` | 能力存在，当前新功能范围截至长视频成片 |
+| 音乐库和 Gemini 音乐、片头片尾、品牌包装 | `music.py`、`intros.py`、`outros.py` 及相关模块 | 保留既有能力；新功能不自动加新闻包装 |
+| YouTube/X/播客发布、发布记录、排程 | `publishing.py`、`account_ops/`、`daily_news/scheduler.py` | 不从图解项目触发发布；避免扩大本次范围 |
+
+## 产物和恢复
+
+项目保存在 `outputs/explainers/exp-<id>/project.json`，全局默认值在 `outputs/explainers/defaults.json`。这些运行产物不进入 Git。任务含保存版本号：运行中拒绝编辑，过期页面保存返回 409，以免覆盖新数据。
+
+逐章脚本在 `writing/<input-hash>/` 保存。音频、图片、动态、镜头片段分别按内容哈希保存在 `artifacts/<scene>/`；有效产物包含文件校验值与完成记录。修改旁白、声音、画风或镜头内容会使相关缓存失效。取消或服务重启保留已有文件；点击相应生成按钮继续，完成部分会复用。
+
+最终输出是 1920×1080 / 30 fps MP4、拼接 WAV、`timeline.json`、`captions.srt` 和 `manifest.json`。时间轴记录每镜对应原文、帧边界、实测语音时长、资源路径、哈希、图片和动态会话 URL。Gemini 片段只播一次，时长不足时保持末帧；长于旁白时将完整无声动作加速到镜头长度，避免截掉动作结尾。旁白始终保持原生速度。
+
+本机 FFmpeg 没有 libass，因此字幕和关键词用 Pillow 生成透明文字层再合成。字幕按整个镜头显示，不是逐字卡拉 OK 字幕。开启字幕时过长的一段会要求拆镜头，以免文字溢出。
+
+## 耗时与运行约束
+
+ChatGPT 生成沿用现有 10—30 分钟请求间隔（当前配置 600 秒），Gemini 沿用 60—120 秒随机间隔。180 张全新插图仅请求间隔下限就约 29.8 小时，尚未计入图像生成和配音。工作台会显示实际镜头数对应的下限。较长的每镜时长可减少图量，但会改变参考视频的快切节奏；缓存可减少重试成本。
+
+本版是一镜一图的生成路径，没有实现联系表批量裁图或图库检索。批量图片复用与多镜共用连贯配音是后续提高吞吐量、保持口播连贯性的明确优化空间。
+
+与现有应用相同，仅运行一个 ASGI 进程；多 worker 共享同一产物目录不受支持。应用退出会取消本进程图解作业；启动时将中断状态标记为可重试，绝不将未完成作业显示为成片。
+
+## 验证
+
+```sh
+.venv/bin/python -m pytest backend/tests/test_explainers.py backend/tests/test_explainer_pipeline.py -q
+cd frontend
+npm run lint
+npm run build
+```
+
+测试覆盖 API 保存与冲突、模型语言匹配、生成错误、取消与重启、章节结构修复、脚本缓存、真实 FFmpeg 1080p 合成/完整解码、音轨采样与帧边界、静态/推拉/Gemini 短片保持、资源缓存失效及路径约束。外部模型和浏览器调用在这些测试中使用替身；实际服务验收另记于运行产物，不能将单元测试等同于整条真实服务链路通过。

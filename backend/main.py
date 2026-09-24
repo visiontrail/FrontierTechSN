@@ -17,6 +17,7 @@ from backend.logging_setup import configure_logging
 from backend.worker import start_worker, stop_worker
 from backend.daily_news.scheduler import start_daily_scheduler, stop_daily_scheduler
 from backend.routers import (
+    explainers,
     daily_news,
     prompts,
     providers,
@@ -72,6 +73,8 @@ async def lifespan(app: FastAPI):
             "Reset %d interrupted account-operation run(s) to FAILED", account_reset
         )
     await recover_orphaned_media_sessions(config.OUTPUTS_DIR)
+    from backend import explainers as explainer_studio
+    explainer_studio.recover_interrupted()
     start_worker()
     start_daily_scheduler()
     preview_preload_task = asyncio.create_task(
@@ -87,6 +90,7 @@ async def lifespan(app: FastAPI):
             pass
         await stop_daily_scheduler()
         await stop_worker()
+        await explainer_studio.stop_jobs()
         from backend.social_copy import stop_generations
         await stop_generations()
 
@@ -107,6 +111,7 @@ app.include_router(prompts.router)
 app.include_router(skills.router)
 app.include_router(voices.router)
 app.include_router(daily_news.router)
+app.include_router(explainers.router)
 
 # Bound to the directory as it stands at startup — this is why OUTPUTS_DIR is
 # flagged "restart required" in the Admin console.

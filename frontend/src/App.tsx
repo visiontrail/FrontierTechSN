@@ -4,6 +4,7 @@ import TaskList from './components/TaskList'
 import TaskDetail from './components/TaskDetail'
 import SettingsPage from './components/SettingsPage'
 import MorningDesk from './components/MorningDesk'
+import ExplainerStudio from './components/ExplainerStudio'
 import {
   IconTasks,
   IconAdmin,
@@ -12,12 +13,14 @@ import {
   IconMenu,
   IconChevronLeft,
   IconChevronRight,
+  IconAtlas,
 } from './components/Icons'
 
 type Theme = 'light' | 'dark'
 
 const NAV = [
   { to: '/morning-desk', label: 'Morning Desk', hint: 'Daily tech briefing', Icon: IconSun, end: false },
+  { to: '/explainer-studio', label: '长篇图解', hint: 'Research to video', Icon: IconAtlas, end: false },
   { to: '/', label: 'Tasks', hint: 'Pipeline queue', Icon: IconTasks, end: true },
   { to: '/settings', label: 'Admin', hint: 'Models & prompts', Icon: IconAdmin, end: false },
 ]
@@ -33,6 +36,7 @@ type PageMeta = {
 }
 
 function pageMeta(pathname: string): PageMeta {
+  if (pathname.startsWith('/explainer-studio')) return { title: '长篇图解', sub: 'Research to video', full: true, chrome: false }
   if (pathname === '/') return { title: 'Tasks', sub: 'Every podcast render in the pipeline', full: true, chrome: false }
   if (pathname === '/morning-desk' || pathname === '/new' || pathname === '/planning') {
     return { title: 'Morning Desk', sub: 'Daily frontier-tech briefing automation', full: true, chrome: false }
@@ -200,6 +204,7 @@ export default function App() {
             <Routes>
               <Route path="/" element={<TaskList />} />
               <Route path="/morning-desk" element={<MorningDesk />} />
+              <Route path="/explainer-studio/:id?" element={<ExplainerStudio />} />
               <Route path="/new" element={<Navigate to="/morning-desk" replace />} />
               <Route path="/planning" element={<Navigate to="/morning-desk" replace />} />
               <Route path="/tasks/:id" element={<TaskDetail />} />
