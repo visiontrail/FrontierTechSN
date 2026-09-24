@@ -16,6 +16,14 @@ from backend.pipeline import collage_broll, composer, footage, web_footage
 from backend.pipeline.video_format import resolve_frame_spec, resolve_render_spec
 
 
+def test_render_failure_keeps_cause_before_long_browser_diagnostics():
+    cause = "[Parallel] Capture failed: Worker 0: Runtime.callFunctionOn timed out."
+    output = "\x1b[2K  Failed: " + cause + "; diagnostics: " + "net::ERR_ABORTED " * 100
+    output += "\nTry --docker for containerized rendering"
+    assert composer._render_failure_summary(output) == cause
+    assert composer._render_failure_summary("encoder failed\nInvalid codec") == "encoder failed\nInvalid codec"
+
+
 @pytest.mark.parametrize("orientation,size", [
     ("landscape", (3840, 2160)), ("portrait", (2160, 3840)),
 ])
@@ -57,6 +65,7 @@ def test_resolution_change_invalidates_review_checkpoint_and_extends_timeout(mon
 
 def test_uhd_encoder_and_quiet_deadlines_cover_long_episodes(monkeypatch):
     monkeypatch.setenv("FFMPEG_ENCODE_TIMEOUT_MS", "600000")
+    monkeypatch.setenv("PRODUCER_ENABLE_BROWSER_POOL", "true")
     monkeypatch.setenv("RENDER_ENV_INHERITANCE_TEST", "preserved")
     hd = replace(resolve_render_spec(), width=1920, height=1080, fps=30)
     uhd = replace(hd, width=3840, height=2160)
@@ -66,6 +75,7 @@ def test_uhd_encoder_and_quiet_deadlines_cover_long_episodes(monkeypatch):
     assert stall_timeout > composer._render_stall_timeout(600, hd)
     assert composer._render_stall_timeout(600, replace(uhd, fps=60)) > stall_timeout
     env = composer._render_environment(timeout, stall_timeout)
+    assert env["PRODUCER_ENABLE_BROWSER_POOL"] == "false"
     assert int(env["FFMPEG_ENCODE_TIMEOUT_MS"]) == stall_timeout * 1000
     assert int(env["FFMPEG_PROCESS_TIMEOUT_MS"]) == stall_timeout * 1000
     assert int(env["FFMPEG_STREAMING_TIMEOUT_MS"]) == timeout * 1000

@@ -113,6 +113,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 echo "=== Starting FrontierTechSN ==="
+node "$PROJECT_ROOT/hyperframe/scripts/patch-media-server.mjs"
 echo "Run log: $LOG_FILE"
 echo "Latest log: $LATEST_LOG"
 if [ -n "${YTDLP_JS_RUNTIME:-}" ]; then

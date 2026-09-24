@@ -1032,10 +1032,24 @@ def _render_environment(timeout: int, stall_timeout: int) -> dict[str, str]:
     """
     return {
         **os.environ,
+        # Pooled workers become hidden tabs in the same Chrome window. On
+        # macOS Chrome 154, img.decode() can wait forever in the hidden tab,
+        # even with background timer throttling disabled. Each worker needs
+        # its own visible headless page/browser during screenshot capture.
+        "PRODUCER_ENABLE_BROWSER_POOL": "false",
         "FFMPEG_ENCODE_TIMEOUT_MS": str(stall_timeout * 1000),
         "FFMPEG_PROCESS_TIMEOUT_MS": str(stall_timeout * 1000),
         "FFMPEG_STREAMING_TIMEOUT_MS": str(timeout * 1000),
     }
+
+
+def _render_failure_summary(output: str) -> str:
+    """Keep the causal error instead of the tail of browser diagnostics."""
+    clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    for line in reversed(clean.splitlines()):
+        if "[Parallel] Capture failed:" in line:
+            return line[line.index("[Parallel] Capture failed:"):].split("; diagnostics:", 1)[0][:700]
+    return clean.strip()[-700:]
 
 
 def _build_render_command(
@@ -2166,7 +2180,7 @@ async def compose_video(
 
     if returncode != 0:
         staged_video_path.unlink(missing_ok=True)
-        raise RuntimeError(f"Video render failed (exit {returncode}): {output[-500:]}")
+        raise RuntimeError(f"Video render failed (exit {returncode}): {_render_failure_summary(output)}")
 
     if not staged_video_path.exists():
         raise RuntimeError("Video render produced no output file")
