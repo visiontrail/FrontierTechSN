@@ -214,8 +214,8 @@ def defaults() -> dict:
     base = Style().model_dump()
     technical = {**base, "background_color": "#F5F3EA", "accent_color": "#427A83",
                  "visual_direction": "Warm off-white paper, charcoal hand-drawn characters, slate teal accents. Clean diagrams, modest arrows and recognizable objects explain a concrete mechanism. Minimal visual clutter, precise cause-and-effect, no logos, no photorealism or glossy 3D."}
-    data["presets"] = [{"id": "warm-line", "label": "暖纸手绘", "style": base},
-                       {"id": "clear-mechanism", "label": "理性图解", "style": technical}]
+    data["presets"] = [{"id": "warm-line", "label": "Warm hand-drawn", "style": base},
+                       {"id": "clear-mechanism", "label": "Clear diagrams", "style": technical}]
     data["tts_models"] = [{"id": key, "label": f"{value.get('provider', '')} · {value['label']}",
                            "language": tts_language(key),
                            "voices": list(config.voices_for_model(key))}

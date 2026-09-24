@@ -20,7 +20,7 @@ type Theme = 'light' | 'dark'
 
 const NAV = [
   { to: '/morning-desk', label: 'Morning Desk', hint: 'Daily tech briefing', Icon: IconSun, end: false },
-  { to: '/explainer-studio', label: '长篇图解', hint: 'Research to video', Icon: IconAtlas, end: false },
+  { to: '/explainer-studio', label: 'Explainer Studio', hint: 'Research to video', Icon: IconAtlas, end: false },
   { to: '/', label: 'Tasks', hint: 'Pipeline queue', Icon: IconTasks, end: true },
   { to: '/settings', label: 'Admin', hint: 'Models & prompts', Icon: IconAdmin, end: false },
 ]
@@ -36,7 +36,7 @@ type PageMeta = {
 }
 
 function pageMeta(pathname: string): PageMeta {
-  if (pathname.startsWith('/explainer-studio')) return { title: '长篇图解', sub: 'Research to video', full: true, chrome: false }
+  if (pathname.startsWith('/explainer-studio')) return { title: 'Explainer Studio', sub: 'Research to video', full: true, chrome: false }
   if (pathname === '/') return { title: 'Tasks', sub: 'Every podcast render in the pipeline', full: true, chrome: false }
   if (pathname === '/morning-desk' || pathname === '/new' || pathname === '/planning') {
     return { title: 'Morning Desk', sub: 'Daily frontier-tech briefing automation', full: true, chrome: false }

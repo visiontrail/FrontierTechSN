@@ -81,8 +81,8 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
     const payload = await response.json().catch(() => null)
     const detail = payload?.detail
     const message = typeof detail === 'string' ? detail
-      : Array.isArray(detail) ? detail.map((item: { msg?: string }) => item.msg ?? 'Invalid input').join('；')
-      : `请求失败 (${response.status})`
+      : Array.isArray(detail) ? detail.map((item: { msg?: string }) => item.msg ?? 'Invalid input').join('; ')
+      : `Request failed (${response.status})`
     throw new ExplainerApiError(message, response.status)
   }
   return response.json() as Promise<T>
