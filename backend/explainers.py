@@ -56,8 +56,8 @@ class Defaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
     language: Literal["en", "zh"] = "en"
     target_minutes: int = Field(default=12, ge=1, le=60)
-    tts_model: str = Field(default_factory=lambda: config.TTS_DEFAULT_MODEL, max_length=100)
-    voice: str = Field(default_factory=lambda: config.TTS_DEFAULT_VOICE_1, max_length=100)
+    tts_model: str = Field(default_factory=lambda: config.EXPLAINER_TTS_DEFAULT_MODEL, max_length=100)
+    voice: str = Field(default_factory=lambda: config.EXPLAINER_TTS_DEFAULT_VOICE, max_length=100)
     captions_enabled: bool = False
     style: Style = Field(default_factory=Style)
 
@@ -207,10 +207,7 @@ def defaults() -> dict:
     if path.exists():
         data = Defaults.model_validate_json(path.read_text(encoding="utf-8")).model_dump()
     else:
-        model_id = config.TTS_DEFAULT_MODEL
-        voices = config.voices_for_model(model_id)
-        voice = config.TTS_DEFAULT_VOICE_1 if config.TTS_DEFAULT_VOICE_1 in voices else next(iter(voices))
-        data = Defaults(tts_model=model_id, voice=voice).model_dump()
+        data = Defaults().model_dump()
     base = Style().model_dump()
     technical = {**base, "background_color": "#F5F3EA", "accent_color": "#427A83",
                  "visual_direction": "Warm off-white paper, charcoal hand-drawn characters, slate teal accents. Clean diagrams, modest arrows and recognizable objects explain a concrete mechanism. Minimal visual clutter, precise cause-and-effect, no logos, no photorealism or glossy 3D."}

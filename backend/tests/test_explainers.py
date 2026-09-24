@@ -32,14 +32,20 @@ class ExplainerStoreTests(unittest.TestCase):
         self.addCleanup(self.patch.stop)
 
     def test_defaults_are_snapshots_and_edits_clear_delivery(self):
-        original = studio.create_project(project_input(scenes=[scene()]))
+        with patch.object(config, "TTS_DEFAULT_MODEL", "vibevoice-0.5b"), patch.object(config, "TTS_DEFAULT_VOICE_1", "Carter"):
+            defaults = studio.defaults()
+        self.assertEqual((defaults["tts_model"], defaults["voice"]), ("pocket-tts-en", "alba"))
+        original = studio.create_project(studio.ProjectInput(title="How practice works", scenes=[scene()]))
         studio.save_defaults(studio.Defaults(tts_model="orpheus-en", voice="tara", style=studio.Style(accent_color="#112233")))
-        self.assertNotEqual(studio.read_project(original["id"])["style"]["accent_color"], "#112233")
+        snapshot = studio.read_project(original["id"])
+        self.assertNotEqual(snapshot["style"]["accent_color"], "#112233")
+        self.assertEqual((snapshot["tts_model"], snapshot["voice"]), ("pocket-tts-en", "alba"))
         finished = studio.patch_project(original["id"], {"status": "completed", "artifacts": {"video_path": "final.mp4"}})
         edited = studio.update_project(original["id"], studio.ProjectUpdate(**project_input(scenes=[scene(narration="A changed sentence.")]).model_dump(), revision=finished["revision"]))
         self.assertEqual(edited["status"], "script_ready")
         self.assertEqual(edited["artifacts"], {})
         self.assertEqual(studio.defaults()["style"]["accent_color"], "#112233")
+        self.assertEqual((studio.defaults()["tts_model"], studio.defaults()["voice"]), ("orpheus-en", "tara"))
 
     def test_rejects_stale_edits_and_running_edits(self):
         original = studio.create_project(project_input())
@@ -90,9 +96,12 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
 
     async def test_api_roundtrip_revision_and_missing_resources(self):
-        response = await self.client.post("/api/explainers", json=project_input().model_dump())
+        defaults = (await self.client.get("/api/explainers/defaults")).json()
+        self.assertEqual((defaults["tts_model"], defaults["voice"]), ("pocket-tts-en", "alba"))
+        response = await self.client.post("/api/explainers", json=project_input().model_dump(exclude={"tts_model", "voice"}))
         self.assertEqual(response.status_code, 201)
         data = response.json()
+        self.assertEqual((data["tts_model"], data["voice"]), ("pocket-tts-en", "alba"))
         saved = await self.client.put(f"/api/explainers/{data['id']}", json={**project_input(scenes=[scene()]).model_dump(), "revision": data["revision"]})
         self.assertEqual(saved.status_code, 200)
         stale = await self.client.put(f"/api/explainers/{data['id']}", json={**project_input().model_dump(), "revision": data["revision"]})

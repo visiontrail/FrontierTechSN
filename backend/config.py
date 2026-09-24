@@ -311,6 +311,11 @@ TTS_DEFAULT_MODEL = os.getenv("TTS_DEFAULT_MODEL", "vibevoice-0.5b")
 TTS_DEFAULT_VOICE_1 = os.getenv("TTS_DEFAULT_VOICE_1", "Carter")
 TTS_DEFAULT_VOICE_2 = os.getenv("TTS_DEFAULT_VOICE_2", "Alice")
 
+# Explainer Studio has its own defaults, independent of the news workflow.
+# Users can override them through the studio's saved defaults.
+EXPLAINER_TTS_DEFAULT_MODEL = "pocket-tts-en"
+EXPLAINER_TTS_DEFAULT_VOICE = "alba"
+
 # Remote Orpheus service. The key is intentionally blank in source and is
 # managed as a masked secret by Admin -> System (or seeded through .env).
 ORPHEUS_TTS_URL = os.getenv("ORPHEUS_TTS_URL", "http://10.60.11.3:8088").rstrip("/")

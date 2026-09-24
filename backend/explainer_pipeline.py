@@ -250,8 +250,8 @@ def _srt_time(value: float) -> str:
 
 
 async def _audio(scene: dict, project: dict, root: Path, log: Log) -> tuple[Path, dict]:
-    model = project.get("tts_model") or config.TTS_DEFAULT_MODEL
-    voice = project.get("voice") or config.TTS_DEFAULT_VOICE_1
+    model = project.get("tts_model") or config.EXPLAINER_TTS_DEFAULT_MODEL
+    voice = project.get("voice") or config.EXPLAINER_TTS_DEFAULT_VOICE
     provider_model = config.TTS_MODELS.get(model) or {}
     requires_labels = bool(provider_model.get("requires_speaker_labels"))
     inputs = {"version": CONTRACT_VERSION, "narration": scene["narration"], "model": model,
