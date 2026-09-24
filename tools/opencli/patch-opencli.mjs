@@ -1045,6 +1045,90 @@ chatgptUtils = replaceOnce(
 )
 const modelSignature = 'export async function selectChatGPTModel(page, model) {'
 const toolSignature = 'export async function getCurrentChatGPTTool(page) {'
+const chatgptModelComposerReadiness = `export async function waitForChatGPTModelComposer(page, {
+    deadline = Date.now() + 30000,
+    now = Date.now,
+    recovery = { refreshed: false },
+} = {}) {
+    let state;
+    const refreshAt = Math.min(deadline, now() + 10000);
+    // This runs only during model preflight, before a review prompt is sent.
+    // A signed-in home shell can mount before its real editable composer.
+    // Initial navigation and any preference-API reload share a 30s budget;
+    // existing browser and subprocess deadlines still bound model actions.
+    while (true) {
+        state = await getPageState(page);
+        if (!state.isLoggedIn || state.hasLoginGate) {
+            throw new AuthRequiredError(CHATGPT_DOMAIN,
+                'ChatGPT model selection requires a logged-in ChatGPT session.');
+        }
+        if (state.hasComposer) return state;
+        if (now() >= deadline) break;
+        if (!recovery.refreshed && now() >= refreshAt) {
+            let freshHome = false;
+            try {
+                const url = new URL(state.url);
+                freshHome = url.origin === CHATGPT_URL
+                    && ['/', '/new'].includes(url.pathname);
+            } catch { /* Unknown page identity cannot authorize a refresh. */ }
+            if (!freshHome) break;
+            // Navigating to the same URL can retain a stalled application
+            // shell. Reload only this empty model-preflight home, never a chat.
+            await page.evaluate('(() => { window.location.reload(); return true; })()');
+            recovery.refreshed = true;
+            await page.wait(Math.max(0, Math.min(2, (deadline - now()) / 1000)));
+        } else {
+            await page.wait(Math.max(0, Math.min(0.5, (deadline - now()) / 1000)));
+        }
+    }
+    throw new CommandExecutionError(
+        'CHATGPT_COMPOSER_NOT_READY: ChatGPT model composer did not become visible '
+        + 'after bounded readiness checks (url=' + (state?.url || 'unknown')
+        + '; title=' + (state?.title || 'unknown') + '; refreshed=' + recovery.refreshed + ').',
+    );
+}
+
+`
+const oldComposerReadinessStart = chatgptUtils.indexOf('export async function waitForChatGPTModelComposer(')
+if (oldComposerReadinessStart >= 0) {
+  const end = chatgptUtils.indexOf('function requireKnownChatGPTModel(model) {', oldComposerReadinessStart)
+  if (end < 0) throw new Error('ChatGPT model composer readiness end boundary was not found')
+  chatgptUtils = chatgptUtils.slice(0, oldComposerReadinessStart) + chatgptUtils.slice(end)
+}
+chatgptUtils = replaceOnce(
+  chatgptUtils,
+  'function requireKnownChatGPTModel(model) {',
+  chatgptModelComposerReadiness + 'function requireKnownChatGPTModel(model) {',
+  'ChatGPT model composer hydration and home-shell recovery',
+)
+{
+  const start = chatgptUtils.indexOf(modelSignature)
+  const end = chatgptUtils.indexOf(toolSignature, start)
+  if (start < 0 || end < 0) throw new Error('ChatGPT model readiness boundary was not found')
+  const section = chatgptUtils.slice(start, end)
+  const before = "await ensureChatGPTComposer(page, 'ChatGPT model selection requires a logged-in ChatGPT session with a visible composer.');"
+  const after = 'await waitForChatGPTModelComposer(page, modelComposerReadiness);'
+  const previous = 'await waitForChatGPTModelComposer(page, { deadline: modelComposerDeadline });'
+  if (!section.includes(before) && !section.includes(after) && !section.includes(previous)) {
+    throw new Error('ChatGPT model readiness call anchor was not found')
+  }
+  chatgptUtils = chatgptUtils.slice(0, start) + section.replaceAll(before, after).replaceAll(previous, after)
+    .replace('    const modelComposerDeadline = Date.now() + 30000;\n', '') + chatgptUtils.slice(end)
+}
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  modelSignature,
+  toolSignature,
+  '    await ensureOnChatGPT(page);',
+  '    const modelComposerReadiness = { deadline: Date.now() + 30000, recovery: { refreshed: false } };\n    await ensureOnChatGPT(page);',
+  'ChatGPT shared model composer readiness deadline',
+)
+chatgptUtils = replaceOnce(
+  chatgptUtils,
+  `const COMPOSER_WAIT_SELECTOR = '#prompt-textarea, [data-testid="prompt-textarea"]';`,
+  `const COMPOSER_WAIT_SELECTOR = COMPOSER_SELECTORS.join(', ');`,
+  'ChatGPT semantic composer readiness selector',
+)
 const upstreamChatgptModelRoute = [
   '    if (!currentUrl.startsWith(`${CHATGPT_URL}/new`)) {',
   "        await page.goto(`${CHATGPT_URL}/new`, { waitUntil: 'none' });",

@@ -84,6 +84,23 @@ The September 13 composer splits the version and effort into adjacent elements
 so these labels retain word boundaries instead of becoming `6Pro`. The existing
 five-position slider can then move from Pro to Medium and verify the result.
 
+The September 24 homepage can display the signed-in account and a
+`pending-home-input` placeholder before the real composer mounts. A correct URL
+or a visible placeholder does not prove that model selection is ready. Model
+preflight gives composer readiness a shared 30-second budget and can refresh
+the incomplete homepage once before reporting `CHATGPT_COMPOSER_NOT_READY`.
+Composer waits use the same
+selectors as composer detection, including the semantic editable textbox used
+by the current UI without the legacy `prompt-textarea` ID. The pending-home
+textarea is not accepted as a ready composer.
+
+A readiness failure retries in a fresh owned preflight session, up to the
+existing three-attempt limit. All retry sessions are released, and only the
+successful session is reused for the review request. Actual login gates and
+provider access limits remain distinct failures; missing composer errors never
+become thinking-effort preference fallbacks. This recovery is confined to
+preflight and does not refresh or replay an already submitted review prompt.
+
 ## Partial ChatGPT answers and recovery
 
 ChatGPT now also renders conversation turns as `section` elements. Generation

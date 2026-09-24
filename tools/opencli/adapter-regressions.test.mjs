@@ -7,7 +7,7 @@ import vm from 'node:vm'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { isGenerating, getCurrentChatGPTModel, selectChatGPTModel, uploadChatGPTImages, startNewChat, getVisibleMessages } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { isGenerating, getCurrentChatGPTModel, selectChatGPTModel, uploadChatGPTImages, startNewChat, getVisibleMessages, getPageState, waitForChatGPTModelComposer, __test__ as chatgptTest } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
 import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
@@ -2319,6 +2319,137 @@ test('Gemini clears partial fill text before native typing the exact prompt once
   assert.deepEqual(actions, ['fillText', 'nativeType'])
   assert.equal(prepareCalls, 2)
   assert.equal(submittedText, 'hello world')
+})
+
+for (const scenario of ['delayed', 'reload', 'stalled', 'conversation', 'blank']) {
+test(`ChatGPT model waits for a real composer and bounds home-shell recovery: ${scenario}`, async () => {
+  let clock = 0
+  let reloads = 0
+  const url = scenario === 'conversation' ? 'https://chatgpt.com/c/owned'
+    : scenario === 'blank' ? 'about:blank' : 'https://chatgpt.com/'
+  const page = {
+    async wait(seconds) { clock += seconds * 1000 },
+    async evaluate(script) {
+      if (script.includes('window.location.reload()')) { reloads++; return true }
+      assert.match(script, /hasLoginGate/)
+      return { url, title: 'ChatGPT', isLoggedIn: true, hasLoginGate: false,
+        hasComposer: scenario === 'delayed' ? clock >= 4000 : scenario === 'reload' && reloads === 1 && clock >= 26000 }
+    },
+  }
+  const readiness = () => waitForChatGPTModelComposer(page, { deadline: 30000, now: () => clock })
+  if (['delayed', 'reload'].includes(scenario)) assert.equal((await readiness()).hasComposer, true)
+  else await assert.rejects(readiness(), error => error.code === 'COMMAND_EXEC'
+    && /CHATGPT_COMPOSER_NOT_READY/.test(error.message) && error.message.includes(url))
+  assert.equal(reloads, ['reload', 'stalled'].includes(scenario) ? 1 : 0)
+  assert.equal(clock, { delayed: 4000, reload: 26000, stalled: 30000, conversation: 10000, blank: 10000 }[scenario])
+})
+}
+
+test('ChatGPT composer checks after preference reload use the remaining model budget', async () => {
+  let clock = 0
+  let visible = false
+  let reloads = 0
+  const page = {
+    async wait(seconds) { clock += seconds * 1000 },
+    async evaluate(script) {
+      if (script.includes('window.location.reload()')) { reloads++; return true }
+      return { url: 'https://chatgpt.com/', title: 'ChatGPT', isLoggedIn: true,
+        hasLoginGate: false, hasComposer: visible || (clock >= 26000 && clock < 27000) }
+    },
+  }
+  const options = { deadline: 30000, now: () => clock, recovery: { refreshed: false } }
+  await waitForChatGPTModelComposer(page, options)
+  assert.equal(clock, 26000)
+  clock = 28000 // The preference API reload consumed two more seconds.
+  await assert.rejects(waitForChatGPTModelComposer(page, options), /CHATGPT_COMPOSER_NOT_READY/)
+  assert.equal(clock, 30000)
+  assert.equal(reloads, 1)
+  visible = true
+  assert.equal((await waitForChatGPTModelComposer(page, options)).hasComposer, true)
+})
+
+test('ChatGPT model readiness refreshes at most once across initial and preference-API checks', async () => {
+  let clock = 0
+  let reads = 0
+  let reloads = 0
+  const page = {
+    async wait(seconds) { clock += seconds * 1000 },
+    async evaluate(script) {
+      if (script.includes('window.location.reload()')) { reloads++; return true }
+      reads++
+      return { url: 'https://chatgpt.com/', isLoggedIn: true, hasLoginGate: false,
+        hasComposer: reloads === 1 && clock === 12000 }
+    },
+  }
+  const options = { deadline: 30000, now: () => clock, recovery: { refreshed: false } }
+  await waitForChatGPTModelComposer(page, options)
+  assert.equal(clock, 12000)
+  clock = 14000
+  await assert.rejects(waitForChatGPTModelComposer(page, options), /CHATGPT_COMPOSER_NOT_READY/)
+  assert.equal(clock, 30000)
+  assert.equal(reloads, 1)
+  assert.ok(reads > 2)
+})
+
+for (const failure of ['login', 'rate-limit', 'transport']) {
+test(`ChatGPT composer readiness preserves ${failure} failures without reloading`, async () => {
+  let clock = 0
+  let reads = 0
+  const providerError = new Error(failure === 'rate-limit' ? 'CHATGPT_RATE_LIMITED: stop browser requests' : 'bridge disconnected')
+  const page = {
+    async wait(seconds) { clock += seconds * 1000 },
+    async evaluate(script) {
+      assert.doesNotMatch(script, /window.location.reload\(\)/)
+      reads++
+      if (reads === 2 && failure !== 'login') throw providerError
+      return { url: 'https://chatgpt.com/', hasComposer: false,
+        isLoggedIn: reads < 2, hasLoginGate: reads === 2 }
+    },
+  }
+  await assert.rejects(waitForChatGPTModelComposer(page, { deadline: 30000, now: () => clock }),
+    error => failure === 'login' ? error.code === 'AUTH_REQUIRED' : error === providerError)
+  assert.equal(reads, 2)
+  assert.equal(clock, 500)
+})
+}
+
+test('ChatGPT accepts the id-less ProseMirror composer while excluding the pending home textarea', async () => {
+  class Element {
+    constructor(editable) { this.isContentEditable = editable; this.attributes = new Map() }
+    getBoundingClientRect() { return { width: 500, height: 80 } }
+    getAttribute(name) { return this.attributes.get(name) || null }
+    setAttribute(name, value) { this.attributes.set(name, value) }
+    removeAttribute(name) { this.attributes.delete(name) }
+  }
+  const composer = new Element(true)
+  const pending = new Element(false)
+  let hydrated = false
+  const context = {
+    HTMLElement: Element,
+    window: { location: { href: 'https://chatgpt.com/' }, getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+    document: {
+      title: 'ChatGPT', body: { innerText: 'Loading profile' },
+      querySelector: () => null,
+      querySelectorAll(selector) {
+        if (selector === '[contenteditable="true"][role="textbox"]') return hydrated ? [composer] : []
+        if (selector === '#pending-home-input') return hydrated ? [] : [pending]
+        if (selector === '[data-opencli-chatgpt-composer]') return hydrated ? [composer] : []
+        return []
+      },
+    },
+  }
+  const page = { async evaluate(script) { return vm.runInNewContext(script, context) } }
+  const locate = () => vm.runInNewContext(`(() => { ${chatgptTest.buildComposerLocatorScript()} return findComposer(); })()`, context)
+  assert.equal((await getPageState(page)).hasComposer, false)
+  assert.equal(locate(), null)
+  hydrated = true
+  assert.equal((await getPageState(page)).hasComposer, true)
+  assert.equal(locate(), composer)
+  assert.equal(composer.getAttribute('data-opencli-chatgpt-composer'), '1')
+  await startNewChat({ ...page, async goto() {}, async wait({ selector }) {
+    assert.ok(selector.includes('[contenteditable="true"][role="textbox"]'))
+    assert.ok(!selector.includes('pending-home-input'))
+  } })
 })
 
 test('ChatGPT model navigates a fresh lease before evaluating the page', async () => {

@@ -119,6 +119,21 @@ def _observed_chatgpt_review_level(value: str) -> str | None:
     return _CHATGPT_OBSERVED_LEVELS.get(key)
 
 
+def _chatgpt_preflight_readiness_failure(error: Exception) -> str:
+    """Keep page access failures separate from an optional effort preference."""
+    message = str(error).casefold()
+    if "auth_required" in message:
+        return "authentication"
+    if (
+        "chatgpt_composer_not_ready" in message
+        # Older adapters combined readiness and authentication in this message.
+        # Without an explicit auth code, retry only the owned preflight page.
+        or "requires a logged-in chatgpt session with a visible composer" in message
+    ):
+        return "composer"
+    return ""
+
+
 def _normalized_review_token(text: str) -> str:
     """Normalize only known UI wrappers while preserving exact-token safety."""
     clean = unicodedata.normalize("NFKC", str(text or ""))
@@ -1381,10 +1396,17 @@ async def _web_story_review_in_session(
         except Exception as exc:  # noqa: BLE001 - bounded model preflight recovery
             chatgpt_model_policy_error = exc
             policy_attempt += 1
+            readiness_failure = _chatgpt_preflight_readiness_failure(exc)
             raw_attempts.append(
                 f"[CHATGPT MODEL POLICY ERROR {policy_attempt}/"
                 f"{chatgpt_model_policy_attempts}]\n{exc}"
             )
+            if readiness_failure and review_session_namespace not in retry_sessions:
+                retry_sessions.append(review_session_namespace)
+            if readiness_failure == "authentication":
+                # A confirmed login gate cannot be repaired by changing the
+                # thinking effort or opening more tabs. Never reach ask here.
+                break
             if policy_attempt < chatgpt_model_policy_attempts and log:
                 log(
                     "ChatGPT fact-check model policy check attempt "
@@ -1392,14 +1414,17 @@ async def _web_story_review_in_session(
                     f"retrying: {exc}"
                 )
             if policy_attempt < chatgpt_model_policy_attempts:
-                if any(marker in str(exc).lower() for marker in (
-                    "stale page identity", "page not found:", "timed out",
-                    "session_busy", "timeout",
-                )):
-                    # A killed CLI can leave both a daemon lease and a browser
-                    # operation alive. Do not force-unlock or drive that tab on
-                    # retry. No audit prompt has been sent during model preflight,
-                    # so a fresh owned session is safe here (never replay ask).
+                if readiness_failure == "composer" or any(
+                    marker in str(exc).lower()
+                    for marker in (
+                        "stale page identity", "page not found:", "timed out",
+                        "session_busy", "timeout",
+                    )
+                ):
+                    # The adapter has exhausted its in-page composer recovery,
+                    # or a killed CLI left an operation/lease alive. No audit
+                    # prompt has been sent in preflight, so a fresh owned
+                    # session is safe here (never replay ask for this reason).
                     if review_session_namespace not in retry_sessions:
                         retry_sessions.append(review_session_namespace)
                     review_session_namespace = f"frontiertechsn-model-{uuid4().hex}"
@@ -1409,25 +1434,39 @@ async def _web_story_review_in_session(
                 await asyncio.sleep(_MODEL_SELECTION_RETRY_DELAY_SECONDS)
 
     if chatgpt_model_policy_error is not None:
+        readiness_failure = _chatgpt_preflight_readiness_failure(chatgpt_model_policy_error)
         failed_after = (
             f"{chatgpt_model_rate_limit_attempts} access-limit cooldowns"
             if rate_limit_exhausted
-            else f"{chatgpt_model_policy_attempts} attempts"
+            else f"{policy_attempt} attempts"
         )
-        failure_message = (
-            "ChatGPT fact-check current model could not be verified within the "
-            f"allowed {config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
-            f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} range after {failed_after} "
-            f"({chatgpt_model_policy_error})"
-        )
+        if readiness_failure == "authentication":
+            failure_message = (
+                "ChatGPT fact-check authentication is required before submission "
+                f"({chatgpt_model_policy_error})"
+            )
+        elif readiness_failure == "composer":
+            failure_message = (
+                "ChatGPT fact-check page did not become ready with a visible "
+                f"composer after {failed_after} ({chatgpt_model_policy_error})"
+            )
+        else:
+            failure_message = (
+                "ChatGPT fact-check current model could not be verified within the "
+                f"allowed {config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
+                f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} range after {failed_after} "
+                f"({chatgpt_model_policy_error})"
+            )
         # Thinking effort is a preference after bounded attempts. Transport,
         # login, and provider access failures still cannot authorize submission.
-        preference_failure = isinstance(chatgpt_model_policy_error, ValueError) or any(
-            marker in str(chatgpt_model_policy_error).lower()
-            for marker in (
-                "chatgpt model selector", "chatgpt model did not switch",
-                "outside allowed range", "chatgpt did not expose a usable",
-                "could not click the chatgpt",
+        preference_failure = not readiness_failure and (
+            isinstance(chatgpt_model_policy_error, ValueError) or any(
+                marker in str(chatgpt_model_policy_error).lower()
+                for marker in (
+                    "chatgpt model selector", "chatgpt model did not switch",
+                    "outside allowed range", "chatgpt did not expose a usable",
+                    "could not click the chatgpt",
+                )
             )
         )
         if rate_limit_exhausted or not preference_failure:

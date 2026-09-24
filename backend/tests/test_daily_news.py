@@ -1988,6 +1988,91 @@ def test_model_preflight_recovers_stale_page_then_timeout_in_fresh_sessions(term
     assert all(call.kwargs["sites"] == ("chatgpt",) for call in close.await_args_list)
 
 
+@pytest.mark.parametrize("terminal_failure", [False, True])
+@pytest.mark.parametrize("readiness_error", [
+    "CHATGPT_COMPOSER_NOT_READY: Could not find the ChatGPT model selector "
+    "because the visible composer did not mount",
+    "ChatGPT model selection requires a logged-in ChatGPT session with a visible composer.",
+])
+def test_model_preflight_recovers_unmounted_composer_in_fresh_sessions(
+    terminal_failure, readiness_error,
+):
+    sessions = []
+    asks = []
+    messages = []
+
+    async def command(args, **kwargs):
+        namespace = kwargs["site_session_namespace"]
+        if args[:2] == ["chatgpt", "model"]:
+            sessions.append(namespace)
+            if len(sessions) < 3 or terminal_failure:
+                raise OpenCLIError(readiness_error)
+            return OpenCLIResult(tuple(args), 0, '[{"Model":"Medium"}]', "")
+        if args[:2] == ["chatgpt", "ask"]:
+            asks.append(namespace)
+            return OpenCLIResult(tuple(args), 0, '[{"response":"W1P2P"}]', "")
+        raise AssertionError(args)
+
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review.asyncio, "sleep", AsyncMock()) as sleep,
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()) as close,
+    ):
+        coroutine = review._web_story_review(
+            "audit", story_numbers=[1, 2], log=messages.append,
+            site_session_namespace="frontiertechsn-review-original",
+        )
+        if terminal_failure:
+            with pytest.raises(RuntimeError, match="visible composer after 3 attempts"):
+                asyncio.run(coroutine)
+            assert asks == []
+        else:
+            payload, raw, _, _ = asyncio.run(coroutine)
+            assert payload["approved"] is True
+            assert asks == [sessions[-1]]
+            assert "[CHATGPT MODEL PREFERENCE FALLBACK]" not in raw
+
+    assert len(sessions) == len(set(sessions)) == 3
+    assert sessions[0] == "frontiertechsn-review-original"
+    assert sleep.await_count == 2
+    assert [call.args[0] for call in close.await_args_list] == sessions
+    assert all(call.kwargs["sites"] == ("chatgpt",) for call in close.await_args_list)
+    assert not any("continuing fact check with the current model" in message for message in messages)
+
+
+@pytest.mark.parametrize("composer_failure_first", [False, True])
+@pytest.mark.parametrize("error_class", [OpenCLIError, ValueError])
+def test_model_preflight_authentication_failure_never_falls_back_or_submits(
+    composer_failure_first, error_class,
+):
+    sessions = []
+
+    async def command(args, **kwargs):
+        assert args[:2] == ["chatgpt", "model"]
+        sessions.append(kwargs["site_session_namespace"])
+        if composer_failure_first and len(sessions) == 1:
+            raise OpenCLIError("CHATGPT_COMPOSER_NOT_READY: composer did not mount")
+        # Access failure takes precedence even if the message also matches an
+        # optional model-preference failure, or the error is a ValueError.
+        raise error_class("AUTH_REQUIRED: Could not find the ChatGPT model selector")
+
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review.asyncio, "sleep", AsyncMock()) as sleep,
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()) as close,
+        pytest.raises(RuntimeError, match="authentication is required before submission"),
+    ):
+        asyncio.run(review._web_story_review(
+            "audit", story_numbers=[1, 2], log=None,
+            site_session_namespace="frontiertechsn-review-original",
+        ))
+
+    assert len(sessions) == len(set(sessions)) == (2 if composer_failure_first else 1)
+    assert sleep.await_count == int(composer_failure_first)
+    assert [call.args[0] for call in close.await_args_list] == sessions
+    assert all(call.kwargs["sites"] == ("chatgpt",) for call in close.await_args_list)
+
+
 @pytest.mark.parametrize("outside_level", ["Instant", "Pro", "", "selector_missing", "switch_failed"])
 def test_chatgpt_fact_check_continues_after_model_preference_retries(
     outside_level: str,
