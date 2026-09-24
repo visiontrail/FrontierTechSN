@@ -130,6 +130,31 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
             await studio._jobs[project["id"]]
         self.assertEqual(studio.read_project(project["id"])["status"], "script_ready")
 
+    async def test_watermark_settings_migrate_persist_and_validate_via_api(self):
+        project = studio.create_project(project_input())
+        path = studio.project_dir(project["id"]) / "project.json"
+        legacy = json.loads(path.read_text())
+        legacy["style"].pop("gemini_watermark_removal")
+        legacy["style"].pop("gemini_watermark_region")
+        path.write_text(json.dumps(legacy))
+        url = f"/api/explainers/{project['id']}"
+        loaded = (await self.client.get(url)).json()
+        self.assertTrue(loaded["style"]["gemini_watermark_removal"])
+        values = {key: loaded[key] for key in studio.ProjectInput.model_fields}
+        values["style"]["gemini_watermark_removal"] = False
+        values["style"]["gemini_watermark_region"]["x"] = 86
+        saved = await self.client.put(url, json={**values, "revision": loaded["revision"]})
+        self.assertEqual(saved.status_code, 200)
+        reloaded = (await self.client.get(url)).json()
+        self.assertFalse(reloaded["style"]["gemini_watermark_removal"])
+        self.assertEqual(reloaded["style"]["gemini_watermark_region"]["x"], 86)
+        defaults = {key: values[key] for key in studio.Defaults.model_fields}
+        self.assertEqual((await self.client.put("/api/explainers/defaults", json=defaults)).status_code, 200)
+        self.assertFalse((await self.client.get("/api/explainers/defaults")).json()["style"]["gemini_watermark_removal"])
+        values["style"]["gemini_watermark_region"]["x"] = 99
+        rejected = await self.client.put(url, json={**values, "revision": reloaded["revision"]})
+        self.assertEqual(rejected.status_code, 422)
+
     async def test_failure_retains_existing_script_and_surfaces_error(self):
         project = studio.create_project(project_input(scenes=[scene()]))
         with patch.object(studio, "write_script", AsyncMock(side_effect=RuntimeError("Provider offline"))):

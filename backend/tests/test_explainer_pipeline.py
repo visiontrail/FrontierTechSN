@@ -158,6 +158,77 @@ def test_changed_narration_invalidates_only_its_scene(tmp_path, providers):
     asyncio.run(run())
 
 
+def test_watermark_repair_pixels_retry_and_cache_preserve_provider_media(tmp_path, providers, monkeypatch):
+    async def marked_motion(_prompt, _first, _last, stage, _frame):
+        providers.motion_calls.append(_prompt)
+        target = stage / "provider.mp4"
+        await pipeline._command([
+            "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+            "color=c=0x405060:s=640x360:r=30:d=0.4",
+            "-vf", "drawbox=x=568:y=288:w=24:h=24:color=white:t=fill",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(target),
+        ])
+        return target, "https://gemini.google.com/app/test"
+
+    monkeypatch.setattr(pipeline, "_generate_video", marked_motion)
+    real_command = pipeline._command
+
+    async def run():
+        project = _project()
+        project["scenes"] = project["scenes"][:1]
+        project["scenes"][0]["motion"] = True
+        project["captions_enabled"] = False
+        project["style"].update(motion_mode="gemini", gemini_watermark_removal=False)
+        original = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        before = original["scene_artifacts"][0]
+        source = tmp_path / before["motion_path"]
+        source_sha = pipeline._sha(source)
+
+        async def fail_repair(args, **kwargs):
+            if any("delogo=" in arg for arg in args):
+                raise RuntimeError("delogo unavailable")
+            return await real_command(args, **kwargs)
+
+        project["style"]["gemini_watermark_removal"] = True
+        monkeypatch.setattr(pipeline, "_command", fail_repair)
+        with pytest.raises(RuntimeError, match="delogo unavailable"):
+            await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        assert json.loads((tmp_path / "manifest.json").read_text())["status"] == "failed"
+        assert len(list(tmp_path.glob("artifacts/scene-001/render/*/complete.json"))) == 1
+        monkeypatch.setattr(pipeline, "_command", real_command)
+
+        repaired = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        after = repaired["scene_artifacts"][0]
+        assert after["render_hash"] != before["render_hash"]
+        assert after["motion_path"] == before["motion_path"]
+        assert after["audio_sha256"] == before["audio_sha256"]
+        assert after["watermark_repair"]["source_dimensions"] == [640, 360]
+        assert pipeline._sha(source) == source_sha
+        assert repaired["duration_seconds"] == original["duration_seconds"]
+
+        async def pixel(artifact, x, y):
+            return await real_command([
+                "ffmpeg", "-v", "error", "-i", str(tmp_path / artifact["clip_path"]),
+                "-vf", f"crop=4:4:{x}:{y},scale=1:1", "-frames:v", "1",
+                "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
+            ])
+
+        assert min(await pixel(before, 1740, 900)) > 240
+        assert max(await pixel(after, 1740, 900)) < 110
+        # Pixels outside the repair retain the scene; the title overlay is unchanged.
+        assert max(abs(a - b) for a, b in zip(await pixel(before, 200, 300), await pixel(after, 200, 300))) < 5
+        assert pipeline._sha((tmp_path / before["clip_path"]).with_name("overlay.png")) == pipeline._sha((tmp_path / after["clip_path"]).with_name("overlay.png"))
+        assert await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None) == repaired
+        project["style"]["gemini_watermark_region"] = {"x": 87, "y": 77, "width": 7, "height": 12}
+        adjusted = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        assert adjusted["scene_artifacts"][0]["render_hash"] != after["render_hash"]
+        project["style"]["gemini_watermark_removal"] = False
+        assert await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None) == original
+        assert len(providers.audio_calls) == len(providers.image_calls) == len(providers.motion_calls) == 1
+
+    asyncio.run(run())
+
+
 def test_dialogue_tts_labels_are_provider_metadata_only(tmp_path, providers):
     async def run():
         project = _project()

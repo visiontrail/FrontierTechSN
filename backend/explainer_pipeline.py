@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from backend import config
 from backend.pipeline.collage_broll import _generate_still, _generate_video
+from backend.pipeline.gemini_watermark import repair_plan
 from backend.pipeline.opencli_session import owned_media_session
 from backend.pipeline.tts import generate_tts
 from backend.pipeline.video_format import LANDSCAPE
@@ -361,14 +362,22 @@ async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Pa
 async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | None,
                         audio: dict, root: Path) -> tuple[Path, dict]:
     style = project.get("style") or {}
-    key = _hash({"version": CONTRACT_VERSION, "image": _sha(image), "motion": _sha(motion) if motion else None,
+    motion_probe = await _probe(motion) if motion else None
+    watermark_repair = None
+    if motion and style.get("gemini_watermark_removal", True):
+        stream = next(s for s in motion_probe["streams"] if s.get("codec_type") == "video")
+        watermark_repair = repair_plan(stream["width"], stream["height"], style.get("gemini_watermark_region"))
+    render_inputs = {"version": CONTRACT_VERSION, "image": _sha(image), "motion": _sha(motion) if motion else None,
                  "motion_playback_version": 2 if motion else 1,
                  "frames": audio["frames"], "mode": style.get("motion_mode", "none"),
                  "captions": project.get("captions_enabled", False), "text": scene["narration"],
                  "title": scene.get("on_screen_text"), "language": project.get("language"),
                  "background": style.get("background_color", "#F4EBDD"),
                  "ink": style.get("ink_color", "#302A25"),
-                 "accent": style.get("accent_color", "#C56545")})
+                 "accent": style.get("accent_color", "#C56545")}
+    if watermark_repair:
+        render_inputs["watermark_repair"] = watermark_repair
+    key = _hash(render_inputs)
     stage = _stage(root, scene["id"], "render", key)
     cached = _cached(stage, key, root)
     if cached:
@@ -376,11 +385,15 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     _overlay(scene, project, stage / "overlay.png")
     color = style.get("background_color", "#F4EBDD").replace("#", "0x")
     base = f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color={color},setsar=1"
+    if watermark_repair:
+        # Repair at native resolution before scaling, padding, titles or captions.
+        # Fold it into the existing encode; keep the downloaded motion untouched.
+        base = watermark_repair["filter"] + "," + base
     args = ["ffmpeg", "-y", "-v", "error"]
     motion_playback = None
     if motion:
         args += ["-i", str(motion)]
-        source_duration = _duration(await _probe(motion), "video")
+        source_duration = _duration(motion_probe, "video")
         target_duration = audio["duration_seconds"]
         rate = max(1.0, source_duration / target_duration)
         motion_playback = {
@@ -410,7 +423,7 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     final = stage / "clip.mp4"
     (stage / "clip.partial.mp4").replace(final)
     return final, _complete(stage, key, [final, stage / "overlay.png"], root,
-                            motion_playback=motion_playback)
+                            motion_playback=motion_playback, watermark_repair=watermark_repair)
 
 
 def _validate(project: dict, root: Path) -> list[dict]:
@@ -483,6 +496,8 @@ async def render_project(project: dict, project_dir: Path,
                 motion_path, motion = await _motion(scene, style, image_path, root)
             completed += 1
             progress("rendering", f"{prefix}: composing measured narration and illustration")
+            if motion_path and style.get("gemini_watermark_removal", True):
+                log(f"{prefix}: repairing visible Gemini watermark locally before titles and captions")
             clip, render = await _render_scene(scene, project, image_path, motion_path, audio, root)
             completed += 1
             item = {"id": scene["id"], "chapter": scene.get("chapter", ""), "narration": scene["narration"],
@@ -498,6 +513,8 @@ async def render_project(project: dict, project_dir: Path,
                     "motion_playback": render.get("motion_playback"),
                     "image_source_url": illustration.get("conversation_url"),
                     "motion_source_url": motion.get("conversation_url") if motion else None}
+            if render.get("watermark_repair"):
+                item["watermark_repair"] = render["watermark_repair"]
             artifacts.append(item)
             current_frame += audio["frames"]
             save_manifest("rendering")

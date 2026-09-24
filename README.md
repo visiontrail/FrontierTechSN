@@ -293,6 +293,29 @@ publications/manifest.json            discovered platform identity and lifecycle
 video.mp4                              final rendered program
 ```
 
+## Explainer animation watermark repair
+
+In the explainer studio, open **Pacing & motion**, select **Gemini animation**,
+and enable **Remove visible Gemini watermark locally** (on by default, including
+older projects). Save the project and render again to repair an existing video;
+completed narration, illustrations and Gemini downloads are reused. Saving as
+defaults also preserves this choice for new projects.
+
+The local FFmpeg `delogo` filter interpolates the selected area from surrounding
+pixels before scaling, padding, titles and captions. It runs in the existing
+render pass, leaves the original download intact, and preserves narration timing
+and delivery dimensions. FFmpeg must include the `delogo` filter; a processing
+error fails the render visibly, retaining completed source media for retry.
+
+**Watermark area** accepts left/top/width/height percentages of the original
+animation. The default covers the lower-right star in the measured 1280×720
+Gemini explainer sample (roughly x=1120, y=560, 80×81 pixels). Adjust it for a
+different placement; this is a fixed region repair, not automatic detection.
+Fine detail inside that region may soften. Disable it for unmarked clips.
+Changing the toggle or area invalidates only the affected scene renders and final
+delivery. Each repaired scene records its method and source-pixel region in the
+manifest and timeline. Still scenes and public-footage news videos are unaffected.
+
 ## Development
 
 For incident diagnosis, shared contracts, generated invariant tests and runtime

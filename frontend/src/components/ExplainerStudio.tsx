@@ -303,7 +303,21 @@ export default function ExplainerStudio() {
                 <div><label htmlFor="explainer-motion">Motion style</label><select id="explainer-motion" value={form.style.motion_mode} onChange={(e) => patchStyle('motion_mode', e.target.value as ExplainerStyle['motion_mode'])}><option value="none">Still illustrations</option><option value="subtle">Gentle pan & zoom</option><option value="gemini">Gemini animation</option></select></div>
                 <div><label htmlFor="explainer-spacing">Animate every N scenes (0 = manual)</label><input id="explainer-spacing" type="number" min={0} max={100} value={form.style.motion_every_n_scenes} onChange={(e) => patchStyle('motion_every_n_scenes', Number(e.target.value))} /></div>
                 <div><label htmlFor="explainer-seconds">Target seconds per scene</label><input id="explainer-seconds" type="number" min={2} max={45} value={form.style.seconds_per_scene} onChange={(e) => patchStyle('seconds_per_scene', Number(e.target.value))} /></div>
-              </div><p className="explainer-field-help">Target seconds guide script segmentation. Each scene lasts until its narration ends. You can select individual scenes for Gemini animation in the storyboard.</p></details>
+              </div><p className="explainer-field-help">Target seconds guide script segmentation. Each scene lasts until its narration ends. You can select individual scenes for Gemini animation in the storyboard.</p>
+                {form.style.motion_mode === 'gemini' && <div>
+                  <label className="explainer-check"><input type="checkbox" checked={form.style.gemini_watermark_removal ?? true} onChange={(e) => patchStyle('gemini_watermark_removal', e.target.checked)} /><span>Remove visible Gemini watermark locally</span></label>
+                  <p className="explainer-field-help">Repairs the corner using surrounding pixels before adding titles and captions. Original downloads are kept. Render again to apply this to an existing video.</p>
+                  {(form.style.gemini_watermark_removal ?? true) && <details><summary>Watermark area</summary>
+                    <p className="explainer-field-help">Percentages of the original animation, measured from its top-left corner. Adjust if the mark appears elsewhere. Repair may soften detail inside this area.</p>
+                    <div className="explainer-settings-row">
+                      {(['x', 'y', 'width', 'height'] as const).map((key) => {
+                        const region = form.style.gemini_watermark_region ?? defaults?.style.gemini_watermark_region
+                        return <div key={key}><label htmlFor={`explainer-watermark-${key}`}>{({ x: 'Left', y: 'Top', width: 'Width', height: 'Height' })[key]} (%)</label><input id={`explainer-watermark-${key}`} type="number" min={0.01} max={99.99} step={0.01} value={region?.[key] ?? ''} onChange={(e) => region && patchStyle('gemini_watermark_region', { ...region, [key]: Number(e.target.value) })} /></div>
+                      })}
+                    </div>
+                  </details>}
+                </div>}
+              </details>
               <div className="explainer-generate-row"><p>Research → Full narration + Storyboard</p><button type="button" className="explainer-button is-primary" disabled={!form.title.trim() || form.research.trim().length < 40 || invalidScenes} onClick={() => void act('script')}>{form.scenes.length ? 'Regenerate script ↗' : 'Generate script ↗'}</button></div>
             </section>
 

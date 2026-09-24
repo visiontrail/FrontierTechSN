@@ -6,6 +6,8 @@ export interface ExplainerStyle {
   visual_direction: string
   writing_tone: string
   motion_mode: 'none' | 'subtle' | 'gemini'
+  gemini_watermark_removal: boolean
+  gemini_watermark_region: { x: number; y: number; width: number; height: number }
   motion_every_n_scenes: number
   seconds_per_scene: number
 }

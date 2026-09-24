@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend import config
+from backend.pipeline.gemini_watermark import WatermarkRegion
 
 logger = logging.getLogger(__name__)
 ACTIVE = {"writing_script", "generating_audio", "generating_images", "generating_motion", "rendering"}
@@ -38,6 +39,8 @@ class Style(BaseModel):
     visual_direction: str = Field(default="Warm textured paper, imperfect hand-drawn charcoal outlines, restrained terracotta, slate blue and olive accents, generous negative space. One concrete visual metaphor per scene, a few meaningful props, thoughtful and approachable. No photorealism, no glossy 3D, no channel logos or copied characters.", min_length=8, max_length=4000)
     writing_tone: str = Field(default="Clear, curious, evidence-aware and practical. Start from a recognizable situation, explain the mechanism with concrete examples, distinguish observation from inference, avoid inflated promises and generic motivational filler.", min_length=8, max_length=3000)
     motion_mode: Literal["none", "subtle", "gemini"] = "none"
+    gemini_watermark_removal: bool = True
+    gemini_watermark_region: WatermarkRegion = Field(default_factory=WatermarkRegion)
     motion_every_n_scenes: int = Field(default=0, ge=0, le=100)
     seconds_per_scene: int = Field(default=4, ge=2, le=45)
 
@@ -134,7 +137,10 @@ def read_project(project_id: str) -> dict:
     with _lock:
         path = project_dir(project_id) / "project.json"
         _safe(path)
-        return json.loads(path.read_text(encoding="utf-8"))
+        project = json.loads(path.read_text(encoding="utf-8"))
+        # Older saved projects acquire the same defaults as new projects.
+        project["style"] = Style.model_validate(project.get("style") or {}).model_dump()
+        return project
 
 
 def list_projects() -> list[dict]:
