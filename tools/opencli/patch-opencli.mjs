@@ -1791,6 +1791,32 @@ chatgptUtils = replaceWithinFunction(chatgptUtils,
 )
 chatgptUtils = replaceWithinFunction(chatgptUtils,
   'export async function isGenerating(page) {', 'export async function getChatGPTVisibleImageUrls(page) {',
+  `            if (document.querySelector('[data-testid="stop-button"]')) return true;`,
+  `            if (document.querySelector('[data-testid="stop-button"]')) return true;
+            // The current composer calls its generation control simply Stop.
+            // Keep this short label scoped to a visible real composer form;
+            // arbitrary page controls or quoted messages must not block reads.
+            const isVisibleControl = (node) => {
+                if (!(node instanceof HTMLElement)) return false;
+                const style = window.getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                    && rect.width > 0 && rect.height > 0;
+            };
+            const messageScope = '.markdown, [data-message-author-role], [data-chatgpt-search-unit-key], [data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]';
+            const composerCandidates = document.querySelectorAll(\${JSON.stringify(COMPOSER_SELECTORS.join(', '))});
+            for (const candidate of composerCandidates) {
+                if (!isVisibleControl(candidate) || candidate.closest(messageScope)) continue;
+                const form = candidate.closest('form');
+                if (!form) continue;
+                for (const stop of form.querySelectorAll('button[aria-label="Stop"]')) {
+                    if (isVisibleControl(stop) && !stop.closest(messageScope)) return true;
+                }
+            }`,
+  'ChatGPT exact Stop control is scoped to the visible composer form',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function isGenerating(page) {', 'export async function getChatGPTVisibleImageUrls(page) {',
   `const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');`,
   `const turns = document.querySelectorAll('[data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]');`,
   'ChatGPT semantic message-unit generation scope',

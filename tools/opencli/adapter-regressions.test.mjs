@@ -585,6 +585,38 @@ test('ChatGPT rendered prompt matching requires exact text or the same leading r
   assert.equal(chatGPTPromptMatches('Exact   text', 'Exact text'), true)
 })
 
+for (const scenario of ['active', 'unrelated-form', 'quoted', 'hidden-stop', 'hidden-composer']) {
+test(`ChatGPT recognizes exact Stop only in the visible composer form: ${scenario}`, async () => {
+  class Element {
+    getBoundingClientRect() { return { width: 300, height: 60 } }
+    getAttribute() { return 'Stop' }
+    closest() { return null }
+  }
+  const stop = new Element()
+  const composer = new Element()
+  const form = new Element()
+  form.querySelectorAll = selector => selector === 'button[aria-label="Stop"]' && scenario !== 'unrelated-form' ? [stop] : []
+  composer.closest = selector => selector === 'form' ? form : null
+  stop.closest = selector => scenario === 'quoted' && selector.includes('[data-chatgpt-search-unit-key]') ? {} : null
+  const page = { async evaluate(script) {
+    return vm.runInNewContext(script, {
+      HTMLElement: Element,
+      window: { getComputedStyle: node => ({ visibility: 'visible', display:
+        (scenario === 'hidden-stop' && node === stop) || (scenario === 'hidden-composer' && node === composer) ? 'none' : 'block' }) },
+      document: {
+        querySelector: () => null,
+        querySelectorAll(selector) {
+          if (selector.includes('[contenteditable="true"][role="textbox"]')) return [composer]
+          if (selector === 'button, [role="button"], [aria-label]') return [stop]
+          return []
+        },
+      },
+    })
+  } }
+  assert.equal(await isGenerating(page), scenario === 'active')
+})
+}
+
 for (const scenario of ['owned', 'other-user', 'ambiguous', 'missing-id', 'off-domain', 'other-local']) {
 test(`ChatGPT resolves a stale local route only from an owned unambiguous saved identity: ${scenario}`, async () => {
   const { page, state } = modernChatgptPage()
