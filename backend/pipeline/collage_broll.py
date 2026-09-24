@@ -1267,7 +1267,7 @@ async def _render_local_still(spec: dict[str, Any], item_dir: Path, frame: Frame
     return output
 
 
-async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, frame: FrameSpec) -> tuple[Path, str]:
+async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir: Path, frame: FrameSpec) -> tuple[Path, str]:
     video_dir = item_dir / "video"
     video_dir.mkdir(parents=True, exist_ok=True)
     raw = video_dir / "gemini-web-original.mp4"
@@ -1277,7 +1277,7 @@ async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, 
         raise OpenCLIError("Gemini generation checkpoint cannot be a symlink")
     request_id = hashlib.sha256(json.dumps({
         "prompt": prompt, "aspect": frame.aspect_ratio,
-        "first": _file_sha256(first), "last": _file_sha256(last),
+        "first": _file_sha256(first), "last": _file_sha256(last) if last is not None else None,
     }, sort_keys=True).encode()).hexdigest()
     # An explicit new acquisition may retry a terminal failure; an interrupted
     # matching request instead retains its conversation and original deadline.
@@ -1285,7 +1285,7 @@ async def _generate_video(prompt: str, first: Path, last: Path, item_dir: Path, 
     args = [
         "gemini", "video", prompt,
         "--first", str(first.resolve()),
-        "--last", str(last.resolve()),
+        *(["--last", str(last.resolve())] if last is not None else []),
         "--aspect", frame.aspect_ratio,
         "--output", str(raw.resolve()),
         "--timeout", str(timeout),

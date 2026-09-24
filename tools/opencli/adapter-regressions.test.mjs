@@ -1624,6 +1624,38 @@ test('Gemini video reports a stable upload capability code only after every path
   assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
 })
 
+for (const withLast of [false, true]) {
+test(`Gemini video command supports an optional final frame: ${withLast}`, async (t) => {
+  const [first, last] = videoFrameFixture(t, ['reference.png', 'endpoint.jpg'])
+  const page = videoUploadPage({ native: 'success' })
+  const evaluateUpload = page.evaluate
+  page.goto = async url => assert.equal(url, 'https://gemini.google.com/videos')
+  page.evaluate = async script => {
+    if (script.includes('const labels =')) return { ok: false }
+    if (script.includes('const button = document.querySelector(\'button[aria-label^="Aspect ratio"]\')')) {
+      return { label: 'Aspect ratio Landscape (16:9)', expanded: 'false' }
+    }
+    if (script.includes("document.querySelectorAll('generated-video')")) return []
+    if (script === 'window.location.href') return 'https://gemini.google.com/videos'
+    if (script.includes('const composer = findComposer()')) throw new Error('stop after uploads, before prompt submission')
+    return evaluateUpload(script)
+  }
+  const kwargs = { prompt: 'A short complete gesture', first, output: path.join(path.dirname(first), 'video.mp4') }
+  if (withLast) kwargs.last = last
+  await assert.rejects(videoCommand.func(page, kwargs), /stop after uploads/)
+  const uploads = page.actions.filter(([action]) => action === 'setFileInput')
+  assert.deepEqual(uploads.map(([, files]) => files[0]), withLast ? [first, last] : [first])
+  assert.equal(page.actions.filter(([action]) => action === 'cleanup').length, withLast ? 2 : 1)
+})
+}
+
+test('Gemini optional final frame still validates an explicitly supplied missing file', async (t) => {
+  const [first] = videoFrameFixture(t, ['reference.png'])
+  await assert.rejects(videoCommand.func({}, {
+    prompt: 'A gesture', first, last: first + '.missing', output: first + '.mp4',
+  }), /--last is not a readable file/)
+})
+
 test('Gemini video independently waits for first and delayed last keyframes in order', async (t) => {
   const frames = videoFrameFixture(t, ['first-frame.png', 'last-frame.jpg'])
   const page = videoUploadPage({ native: 'success', inputReadyAfterReads: [0, 2] })

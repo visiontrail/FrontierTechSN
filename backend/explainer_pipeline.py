@@ -159,7 +159,7 @@ Draw original characters and imagery. Do not reproduce any channel logo, recogni
 
 def _motion_prompt(scene: dict, style: dict) -> str:
     return f"""Animate the supplied original line illustration as a short 16:9 explainer shot.
-Both endpoint images deliberately show the same composition. Preserve the character identity, palette, proportions, background and line weight. Begin and end with this composition. Add a single gentle expressive gesture, blink or prop movement that supports this narration: {scene['narration']}
+Use this single reference frame to preserve the character identity, palette, proportions, background and line weight. Begin with this composition. Add a single gentle expressive gesture, blink or prop movement that supports this narration: {scene['narration']}
 Visual meaning: {scene['visual_prompt']}
 Art direction: {style.get('visual_direction', '')}
 Keep the camera steady and movement subtle. Show a short, complete action with a clear settled endpoint; avoid a long buildup. Do not create a montage or new scene. No typography, subtitles, logos or audio. Play the action once, settle naturally, and hold the final pose. Never restart the action or loop."""
@@ -345,7 +345,7 @@ async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Pa
         canvas = Image.new("RGB", (1280, 720), color)
         canvas.paste(artwork, ((1280 - artwork.width) // 2, (720 - artwork.height) // 2))
         canvas.save(keyframe, quality=92)
-    raw, conversation = await _generate_video(prompt, keyframe, keyframe, stage, LANDSCAPE)
+    raw, conversation = await _generate_video(prompt, keyframe, None, stage, LANDSCAPE)
     _safe(raw, root)
     measured = _duration(await _probe(raw), "video")
     await _command(["ffmpeg", "-v", "error", "-xerror", "-i", str(raw), "-an", "-f", "null", "-"], timeout=120)

@@ -62,7 +62,7 @@ class Providers:
 
     async def motion(self, prompt, first, last, stage, frame):
         self.motion_calls.append(prompt)
-        assert first == last
+        assert first.is_file() and last is None
         if self.motion_failure:
             raise RuntimeError("Gemini unavailable: sign in")
         target = stage / "provider.mp4"

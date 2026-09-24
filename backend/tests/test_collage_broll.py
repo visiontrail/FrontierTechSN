@@ -613,14 +613,17 @@ def test_opencli_collage_operation_retries_until_success(monkeypatch):
 
 
 @pytest.mark.parametrize("with_url", [True, False])
-def test_video_transport_retry_resumes_owned_request_or_stops_uncertain_submission(tmp_path, monkeypatch, with_url):
+@pytest.mark.parametrize("with_last", [True, False])
+def test_video_transport_retry_resumes_owned_request_or_stops_uncertain_submission(tmp_path, monkeypatch, with_url, with_last):
     first, last = tmp_path / "first.png", tmp_path / "last.png"
     first.write_bytes(b"first")
     last.write_bytes(b"last")
+    last_frame = last if with_last else None
     calls = []
 
     async def run(args, **kwargs):
         calls.append((args, kwargs))
+        assert ("--last" in args) is with_last
         checkpoint = Path(args[args.index("--state-file") + 1])
         if len(calls) == 1:
             state = json.loads(checkpoint.read_text())
@@ -638,16 +641,38 @@ def test_video_transport_retry_resumes_owned_request_or_stops_uncertain_submissi
     monkeypatch.setattr(collage_broll, "run_opencli", run)
     monkeypatch.setattr(collage_broll.asyncio, "sleep", AsyncMock())
     if with_url:
-        raw, url = asyncio.run(collage_broll._generate_video("animate", first, last, tmp_path, LANDSCAPE))
+        raw, url = asyncio.run(collage_broll._generate_video("animate", first, last_frame, tmp_path, LANDSCAPE))
         assert raw.stat().st_size == 2048
         assert url.endswith("abc123")
         assert len(calls) == 2
     else:
         with pytest.raises(collage_broll.OpenCLIError, match="SUBMISSION_UNCERTAIN"):
-            asyncio.run(collage_broll._generate_video("animate", first, last, tmp_path, LANDSCAPE))
+            asyncio.run(collage_broll._generate_video("animate", first, last_frame, tmp_path, LANDSCAPE))
         assert len(calls) == 1
     assert all(call[1]["site_session_namespace"].startswith("ftsn-media-") for call in calls)
     opencli_session.close_opencli_site_sessions.assert_awaited_once()
+
+
+def test_single_reference_and_paired_video_requests_have_distinct_fingerprints(tmp_path, monkeypatch):
+    first = tmp_path / "reference.png"
+    first.write_bytes(b"reference image")
+    requests = []
+
+    async def run(args, **_kwargs):
+        requests.append(args)
+        Path(args[args.index("--output") + 1]).write_bytes(b"x" * 2048)
+        from backend.pipeline.opencli import OpenCLIResult
+        return OpenCLIResult(tuple(args), 0, '[{"link":"https://gemini.google.com/app/abc123"}]', '')
+
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    for last in (None, first):
+        asyncio.run(collage_broll._generate_video("animate", first, last, tmp_path, LANDSCAPE))
+    single, paired = requests
+    assert "--last" not in single
+    assert paired[paired.index("--last") + 1] == str(first.resolve())
+    assert single[single.index("--request-id") + 1] != paired[paired.index("--request-id") + 1]
+    checkpoint = json.loads((tmp_path / "video" / "generation-state.json").read_text())
+    assert checkpoint["request_id"] == paired[paired.index("--request-id") + 1]
 
 
 @pytest.mark.parametrize("code", ["GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT", "GEMINI_VIDEO_GENERATION_FAILED"])

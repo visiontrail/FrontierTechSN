@@ -23,7 +23,7 @@
 | --- | --- | --- |
 | 写作、结构化输出、多模型路由、重试与凭据轮转 | `pipeline/digester.py`、`agent.py`、`model_router.py`、`providers.py` | 复用配置和请求层，新增章节/分镜写作任务 |
 | ChatGPT 网页文生图与下载 | `collage_broll.py:_generate_still`、`thumbnail.py`、OpenCLI ChatGPT adapter | 按分镜生成原创手绘图；使用独立画风提示词 |
-| Gemini 参考图片生成视频 | `collage_broll.py:_generate_video`、`tools/opencli/patches/gemini-video-command.js` | 可选镜头动效；保留首帧、任务内下载和会话来源 |
+| Gemini 参考图片生成视频 | `collage_broll.py:_generate_video`、`tools/opencli/patches/gemini-video-command.js` | 可选镜头动效；支持单参考帧，保留既有双关键帧调用、任务内下载和会话来源 |
 | 请求节流、访问限流、浏览器会话隔离与回收 | `opencli.py`、`opencli_rate_limit.py`、`opencli_session.py` | 原样复用，不绕过配置或抢占其他任务会话 |
 | Orpheus、Pocket TTS、VibeVoice 配音 | `pipeline/tts.py`、`config.TTS_MODELS`、`routers/voices.py` | 单镜配音、原生语速、声音选项与既有音频完整性机制 |
 | 音频测量、FFmpeg 合成、媒体验证 | 既有媒体模块和系统 FFmpeg | 独立的确定性图片合成器，逐镜帧对齐、全片解码 |

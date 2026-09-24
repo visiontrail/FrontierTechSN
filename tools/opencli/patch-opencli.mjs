@@ -1811,15 +1811,15 @@ if (!askEntry.args.some((argument) => argument?.name === 'file')) {
 const videoEntry = {
   site: 'gemini',
   name: 'video',
-  description: 'Create a Gemini Web video from ordered first/last frames and save it locally',
+  description: 'Create a Gemini Web video from one reference frame or ordered first/last frames and save it locally',
   access: 'write',
   domain: 'gemini.google.com',
   strategy: 'cookie',
   browser: true,
   args: [
     { name: 'prompt', type: 'str', required: false, positional: true, help: 'Create Video animation prompt' },
-    { name: 'first', type: 'str', required: false, help: 'Local empty first-frame image' },
-    { name: 'last', type: 'str', required: false, help: 'Local completed last-frame image' },
+    { name: 'first', type: 'str', required: false, help: 'Local reference or first-frame image' },
+    { name: 'last', type: 'str', required: false, help: 'Optional local last-frame image; omit for a single reference frame' },
     { name: 'resume', type: 'str', required: false, help: 'Existing Gemini conversation URL to finish or download' },
     { name: 'aspect', type: 'str', default: '16:9', required: false, help: 'Final aspect ratio', choices: ['16:9', '9:16'] },
     { name: 'output', type: 'str', required: true, help: 'Local MP4 output path' },

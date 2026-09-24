@@ -823,7 +823,7 @@ export const videoCommand = cli({
     site: 'gemini',
     name: 'video',
     access: 'write',
-    description: 'Create a Gemini Web video from ordered first/last frames and save it locally',
+    description: 'Create a Gemini Web video from one reference frame or ordered first/last frames and save it locally',
     domain: GEMINI_DOMAIN,
     strategy: Strategy.COOKIE,
     browser: true,
@@ -832,8 +832,8 @@ export const videoCommand = cli({
     defaultFormat: 'plain',
     args: [
         { name: 'prompt', positional: true, help: 'Create Video animation prompt' },
-        { name: 'first', help: 'Local empty first-frame image' },
-        { name: 'last', help: 'Local completed last-frame image' },
+        { name: 'first', help: 'Local reference or first-frame image' },
+        { name: 'last', help: 'Optional local last-frame image; omit for a single reference frame' },
         { name: 'resume', help: 'Existing gemini.google.com/app conversation URL to finish or download' },
         { name: 'aspect', default: '16:9', choices: ['16:9', '9:16'], help: 'Final aspect ratio' },
         { name: 'output', required: true, help: 'Local MP4 output path' },
@@ -851,7 +851,7 @@ export const videoCommand = cli({
         }
         if (!resume && !prompt) throw new ArgumentError('video prompt is required unless --resume is used');
         const first = resume ? '' : requireFile(kwargs.first, '--first');
-        const last = resume ? '' : requireFile(kwargs.last, '--last');
+        const last = resume || !String(kwargs.last || '').trim() ? '' : requireFile(kwargs.last, '--last');
         const output = resolveOutput(kwargs.output);
         const aspect = String(kwargs.aspect || '16:9');
         if (!['16:9', '9:16'].includes(aspect)) throw new ArgumentError('--aspect must be 16:9 or 9:16');
@@ -900,7 +900,7 @@ export const videoCommand = cli({
                 await page.wait(1.5);
                 await selectAspectRatio(page, aspect);
                 checkpoint.before = await visibleVideoUrls(page);
-                await uploadFrames(page, [first, last]);
+                await uploadFrames(page, last ? [first, last] : [first]);
                 // Persist before the send: a killed command must not resubmit
                 // blindly when the provider may already have accepted it.
                 checkpoint.status = 'submitting';
