@@ -675,6 +675,43 @@ def test_single_reference_and_paired_video_requests_have_distinct_fingerprints(t
     assert checkpoint["request_id"] == paired[paired.index("--request-id") + 1]
 
 
+@pytest.mark.parametrize("status", ["stalled", "timeout", "uncertain", "saved"])
+@pytest.mark.parametrize("with_url", [False, True])
+def test_accepted_video_retry_preserves_request_or_refuses_duplicate_submission(tmp_path, monkeypatch, status, with_url):
+    first = tmp_path / "reference.png"
+    first.write_bytes(b"reference image")
+    requests = []
+
+    async def run(args, **_kwargs):
+        requests.append(args)
+        Path(args[args.index("--output") + 1]).write_bytes(b"x" * 2048)
+        from backend.pipeline.opencli import OpenCLIResult
+        return OpenCLIResult(tuple(args), 0, '[{"link":"https://gemini.google.com/app/abc123"}]', '')
+
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
+    path = tmp_path / "video" / "generation-state.json"
+    checkpoint = json.loads(path.read_text())
+    checkpoint.update(status=status, deadline=12345, totalDeadline=23456)
+    if with_url:
+        checkpoint["url"] = "https://gemini.google.com/app/abc123"
+    path.write_text(json.dumps(checkpoint))
+    requests.clear()
+    if with_url:
+        asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
+        assert len(requests) == 1
+        assert requests[0][-2:] == ["--resume", checkpoint["url"]]
+        restored = json.loads(path.read_text())
+        assert restored["deadline"] == 12345 and restored["totalDeadline"] == 23456
+        assert restored["request_id"] == checkpoint["request_id"]
+        assert restored["status"] == ("downloading" if status == "saved" else "submitted")
+    else:
+        with pytest.raises(collage_broll.OpenCLIError, match="SUBMISSION_UNCERTAIN"):
+            asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
+        assert requests == []
+        assert json.loads(path.read_text()) == checkpoint
+
+
 @pytest.mark.parametrize("code", ["GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT", "GEMINI_VIDEO_GENERATION_FAILED"])
 def test_video_terminal_generation_does_not_start_ten_more_generations(monkeypatch, code):
     run = AsyncMock(side_effect=collage_broll.OpenCLIError(code))

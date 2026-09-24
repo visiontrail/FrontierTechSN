@@ -1307,8 +1307,18 @@ async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir:
         state = state or {}
         if first_attempt:
             first_attempt = False
-            if state.get("request_id") != request_id or state.get("status") in ("failed", "stalled", "timeout", "uncertain", "saved"):
+            if state.get("request_id") != request_id or state.get("status") == "failed":
                 state = {"request_id": request_id, "status": "new"}
+                _write_json(checkpoint, state)
+            elif state.get("status") in ("stalled", "timeout", "uncertain", "saved"):
+                url = str(state.get("url") or "")
+                if not re.fullmatch(r"https://gemini\.google\.com/app/[a-zA-Z0-9]+", url):
+                    raise OpenCLIError(
+                        "GEMINI_VIDEO_SUBMISSION_UNCERTAIN: an accepted generation has no "
+                        "verified conversation URL; recover the original conversation before retrying"
+                    )
+                state["recovered_from"] = state["status"]
+                state["status"] = "downloading" if state.get("videoId") or state["recovered_from"] == "saved" else "submitted"
                 _write_json(checkpoint, state)
         if state.get("request_id") != request_id:
             raise OpenCLIError("Gemini generation checkpoint does not match its inputs")

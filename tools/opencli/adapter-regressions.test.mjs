@@ -24,6 +24,8 @@ import {
   uploadFrame,
   uploadFrames,
   submittedVideoPrompt,
+  createVideoSubmission,
+  recoverVideoConversation,
   waitForVideo,
   downloadVideo,
   videoCommand,
@@ -53,6 +55,104 @@ function videoTransferPage(payload, { failChunk = 0, httpStatus = 200 } = {}) {
     },
   }
 }
+
+test('Gemini history recovery identifies the exact new user prompt among concurrent chats', async () => {
+  const old = 'https://gemini.google.com/app/old123'
+  const concurrent = 'https://gemini.google.com/app/other123'
+  const owned = 'https://gemini.google.com/app/owned123'
+  const basePrompt = 'Animate this line character.\nComplete one small wave near the door.'
+  const submission = createVideoSubmission(basePrompt)
+  const prompt = submission.prompt
+  const concurrentPrompt = createVideoSubmission(basePrompt).prompt
+  assert.notEqual(concurrentPrompt, prompt)
+  const checkpoint = { ...submission, historyBefore: [old], deadline: 1234, totalDeadline: 5678 }
+  let current = 'https://gemini.google.com/videos'
+  const navigations = []
+  const page = { async evaluate() { return current }, async goto(url) { current = url; navigations.push(url) } }
+  const url = await recoverVideoConversation(page, checkpoint, () => {}, {
+    async listConversations() { return [{ Url: old }, { Url: concurrent }, { Url: owned }] },
+    async readTurns() { return [{ Role: 'User', Text: current === owned ? prompt.replace('\n', '  ') : concurrentPrompt }] },
+  })
+  assert.equal(url, owned)
+  assert.equal(checkpoint.url, owned)
+  assert.equal(checkpoint.urlVerifiedByPrompt, true)
+  assert.deepEqual(navigations, [concurrent, owned, owned])
+  assert.deepEqual(checkpoint.historyRecovery, { candidates: 2, matches: 1, unreadable: 0 })
+  assert.equal(checkpoint.deadline, 1234)
+  assert.equal(checkpoint.totalDeadline, 5678)
+})
+
+for (const scenario of ['no-baseline', 'empty-baseline', 'legacy-no-nonce', 'prefix-only', 'no-match', 'ambiguous', 'unreadable', 'unhydrated', 'system-only', 'multiple-user-turns']) {
+test(`Gemini history recovery refuses uncertain task ownership: ${scenario}`, async () => {
+  const submission = createVideoSubmission('A shared prompt beginning. The original scene has a specific ending.')
+  const prompt = submission.prompt
+  const checkpoint = { ...submission, historyBefore: scenario === 'no-baseline' ? null : scenario === 'empty-baseline' ? [] : ['https://gemini.google.com/app/old123'] }
+  if (scenario === 'legacy-no-nonce') delete checkpoint.submissionNonce
+  const urls = ['https://gemini.google.com/app/abc123', 'https://gemini.google.com/app/def456']
+  let current = 'https://gemini.google.com/videos'
+  let listed = false
+  const page = { async evaluate() { return current }, async goto(url) { current = url } }
+  const recovery = () => recoverVideoConversation(page, checkpoint, () => {}, {
+    async listConversations() { listed = true; return urls.map(Url => ({ Url, Title: prompt })) },
+    async readTurns() {
+      if (scenario === 'unreadable' && current === urls[1]) throw new Error('failed to read user turn')
+      if (scenario === 'unhydrated' && current === urls[1]) return []
+      if (scenario === 'system-only' && current === urls[1]) return [{ Role: 'System', Text: prompt }]
+      if (scenario === 'multiple-user-turns') return [{ Role: 'User', Text: 'An earlier video' }, { Role: 'Assistant', Text: 'Earlier video is ready' }, { Role: 'User', Text: prompt }]
+      const Text = scenario === 'prefix-only' ? prompt.slice(0, 25) : scenario === 'no-match' ? 'Other prompt' : prompt
+      return [{ Role: 'User', Text }]
+    },
+  })
+  if (scenario === 'ambiguous') await assert.rejects(recovery(), /SUBMISSION_UNCERTAIN.*multiple new conversations/)
+  else assert.equal(await recovery(), '')
+  assert.equal(checkpoint.url, undefined)
+  assert.equal(current, 'https://gemini.google.com/videos')
+  if (['no-baseline', 'empty-baseline', 'legacy-no-nonce'].includes(scenario)) assert.equal(listed, false)
+})
+}
+
+test('Gemini stale Videos surface reopens its verified chat without resetting deadlines or submitting again', async () => {
+  let clock = 1000
+  let recovered = 0
+  const checkpoint = { historyBefore: ['https://gemini.google.com/app/old123'], prompt: 'Our exact prompt', deadline: 100000, totalDeadline: 120000 }
+  const page = {
+    async wait(seconds) { clock += seconds * 1000 },
+    async evaluate() { return { text: 'Generating your video', url: checkpoint.url || 'https://gemini.google.com/videos',
+      videos: recovered ? [{ src: 'owned-video', readyState: 4 }] : [] } },
+  }
+  const ready = await waitForVideo(page, ['old-video'], 1800, {
+    checkpoint, now: () => clock, stallTimeoutSeconds: 60,
+    async recoverConversation(_page, state) { recovered++; state.url = 'https://gemini.google.com/app/abc123'; state.before = []; return state.url },
+  })
+  assert.equal(recovered, 1)
+  assert.equal(ready.src, 'owned-video')
+  assert.equal(checkpoint.videoId, 'owned-video')
+  assert.equal(checkpoint.deadline, 100000)
+  assert.equal(checkpoint.totalDeadline, 120000)
+  assert.ok(clock < 60000)
+})
+
+test('Gemini download selects the identified ready video instead of an unrelated earlier result', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-owned-video-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const payload = Buffer.alloc(2048, 37)
+  payload.write('ftyp', 4)
+  const page = videoTransferPage(payload)
+  page.context.document = {
+    querySelectorAll(selector) {
+      assert.equal(selector, 'generated-video')
+      return ['other', 'owned'].map(id => ({ id, closest() { return null }, querySelector() { return { currentSrc: `https://example.test/${id}.mp4` } } }))
+    },
+  }
+  page.context.fetch = async url => {
+    assert.equal(url, 'https://example.test/owned.mp4')
+    return { ok: true, async blob() { return new Blob([payload]) } }
+  }
+  const output = path.join(directory, 'video.mp4')
+  await downloadVideo(page, output, 30, 'owned')
+  assert.deepEqual(fs.readFileSync(output), payload)
+  await assert.rejects(downloadVideo(page, output, 30, 'missing'), /source URL is missing/)
+})
 
 test('Gemini video downloads bytes directly into the task directory across multiple bridge chunks', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-task-download-'))
@@ -1640,12 +1740,19 @@ test(`Gemini video command supports an optional final frame: ${withLast}`, async
     if (script.includes('const composer = findComposer()')) throw new Error('stop after uploads, before prompt submission')
     return evaluateUpload(script)
   }
-  const kwargs = { prompt: 'A short complete gesture', first, output: path.join(path.dirname(first), 'video.mp4') }
+  const stateFile = path.join(path.dirname(first), 'generation-state.json')
+  const kwargs = { prompt: 'A short complete gesture', first, output: path.join(path.dirname(first), 'video.mp4'),
+    'state-file': stateFile, 'request-id': 'a'.repeat(64) }
   if (withLast) kwargs.last = last
   await assert.rejects(videoCommand.func(page, kwargs), /stop after uploads/)
   const uploads = page.actions.filter(([action]) => action === 'setFileInput')
   assert.deepEqual(uploads.map(([, files]) => files[0]), withLast ? [first, last] : [first])
   assert.equal(page.actions.filter(([action]) => action === 'cleanup').length, withLast ? 2 : 1)
+  const checkpoint = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+  assert.equal(checkpoint.status, 'submitting')
+  assert.match(checkpoint.submissionNonce, /^[a-f0-9-]{36}$/)
+  assert.ok(checkpoint.prompt.startsWith(kwargs.prompt + '\n\nRequest reference: '))
+  assert.ok(checkpoint.prompt.includes(checkpoint.submissionNonce))
 })
 }
 

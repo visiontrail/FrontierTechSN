@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
-import { sendGeminiMessage } from './utils.js';
+import { getGeminiConversationList, getGeminiVisibleTurns, sendGeminiMessage } from './utils.js';
 
 const GEMINI_DOMAIN = 'gemini.google.com';
 const GEMINI_VIDEOS_URL = 'https://gemini.google.com/videos';
@@ -656,8 +656,74 @@ async function visibleVideoUrls(page) {
     return Array.isArray(value) ? value : [];
 }
 
+const conversationUrl = (value) => /^https:\/\/gemini\.google\.com\/app\/[a-z0-9]+$/i.test(String(value || ''));
+const normalizePrompt = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+
+export function createVideoSubmission(prompt) {
+    const submissionNonce = randomUUID();
+    return {
+        submissionNonce,
+        prompt: `${prompt}\n\nRequest reference: ${submissionNonce}. This is request metadata only; never render it as image text or speech.`,
+    };
+}
+
+export async function recoverVideoConversation(page, checkpoint, save = () => {}, {
+    listConversations = getGeminiConversationList, readTurns = getGeminiVisibleTurns,
+} = {}) {
+    // A title or common prompt prefix cannot establish ownership. Only a new
+    // sidebar conversation containing the exact submitted user turn qualifies.
+    if (!Array.isArray(checkpoint.historyBefore) || checkpoint.historyBefore.length === 0
+        || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(String(checkpoint.submissionNonce || ''))
+        || !String(checkpoint.prompt || '').includes(`Request reference: ${checkpoint.submissionNonce}.`)) return '';
+    const before = new Set(checkpoint.historyBefore);
+    const rows = await listConversations(page);
+    const candidates = [...new Set(rows.map(row => row.Url).filter(url => conversationUrl(url) && !before.has(url)))];
+    if (candidates.length > 6) {
+        throw new CommandExecutionError('GEMINI_VIDEO_SUBMISSION_UNCERTAIN: too many new conversations to identify the submitted video safely');
+    }
+    const originalUrl = String(unwrap(await page.evaluate('window.location.href')) || '');
+    const matches = [];
+    let unreadable = 0;
+    for (const url of candidates) {
+        try {
+            await page.goto(url, { waitUntil: 'load', settleMs: 2500 });
+            if (String(unwrap(await page.evaluate('window.location.href'))) !== url) {
+                unreadable += 1;
+                continue;
+            }
+            const turns = await readTurns(page);
+            const userTurns = turns.filter(turn => String(turn.Role).toLowerCase() === 'user' && normalizePrompt(turn.Text));
+            // Multiple user turns can contain another video's output before
+            // our prompt. Without response-bound media scoping they are not
+            // safe recovery candidates, even when one turn matches exactly.
+            if (userTurns.length !== 1) unreadable += 1;
+            else if (normalizePrompt(userTurns[0].Text) === normalizePrompt(checkpoint.prompt)) matches.push(url);
+        } catch {
+            unreadable += 1;
+        }
+    }
+    checkpoint.historyRecovery = { candidates: candidates.length, matches: matches.length, unreadable };
+    if (matches.length === 1 && unreadable === 0) {
+        checkpoint.url = matches[0];
+        checkpoint.urlVerifiedByPrompt = true;
+        checkpoint.before = [];
+        save();
+        await page.goto(matches[0], { waitUntil: 'load', settleMs: 2500 });
+        return matches[0];
+    }
+    save();
+    if (candidates.length && /^https:\/\/gemini\.google\.com\/(?:videos|app(?:\/[a-z0-9]+)?)\/?$/i.test(originalUrl)) {
+        await page.goto(originalUrl, { waitUntil: 'load', settleMs: 2500 });
+    }
+    if (matches.length > 1) {
+        throw new CommandExecutionError('GEMINI_VIDEO_SUBMISSION_UNCERTAIN: multiple new conversations contain the same prompt; refusing to choose another task');
+    }
+    return '';
+}
+
 export async function waitForVideo(page, before, timeoutSeconds, {
     stallTimeoutSeconds = 600, checkpoint = {}, save = () => {}, now = Date.now,
+    recoverConversation = recoverVideoConversation,
 } = {}) {
     const baseline = new Set(before);
     const deadline = Math.min(now() + timeoutSeconds * 1000, checkpoint.deadline || Infinity);
@@ -682,7 +748,12 @@ export async function waitForVideo(page, before, timeoutSeconds, {
         })()`));
         const videos = Array.isArray(state?.videos) ? state.videos : [];
         const ready = videos.find(video => !baseline.has(video.src) && video.readyState >= 2);
-        if (ready) return ready;
+        if (ready) {
+            if (conversationUrl(state?.url)) checkpoint.url = state.url;
+            checkpoint.videoId = ready.src;
+            save();
+            return ready;
+        }
         // Spinner frames, sidebar changes and the submitted prompt are not
         // generation progress. Only the current response and video state count.
         const nextSignature = JSON.stringify({
@@ -710,6 +781,20 @@ export async function waitForVideo(page, before, timeoutSeconds, {
         if (/could not generate|generation failed|try again|unable to create/i.test(String(state?.text || ''))) {
             throw new CommandExecutionError(`GEMINI_VIDEO_GENERATION_FAILED: Gemini Create Video reported a generation failure: ${String(state.text).slice(-500)}`);
         }
+        // The Videos surface can stop refreshing while the accepted job has
+        // already completed in its saved chat. Reopen only a prompt-verified
+        // new conversation; preserve both original time budgets throughout.
+        const recoveryInterval = Math.min(60000, stallTimeoutSeconds * 500);
+        if (!checkpoint.url && Array.isArray(checkpoint.historyBefore) && checkpoint.historyBefore.length && checkpoint.prompt
+            && now() - lastProgressAt >= recoveryInterval
+            && now() - (checkpoint.historyCheckedAt || 0) >= recoveryInterval) {
+            checkpoint.historyCheckedAt = now();
+            save();
+            if (await recoverConversation(page, checkpoint, save)) {
+                baseline.clear();
+                continue;
+            }
+        }
         if (now() - lastProgressAt >= stallTimeoutSeconds * 1000) {
             throw new CommandExecutionError(
                 `GEMINI_VIDEO_GENERATION_STALLED: no response progress for ${stallTimeoutSeconds}s; conversation=${checkpoint.url || 'unknown'}; response=${String(state?.text || '').slice(-300)}`
@@ -719,7 +804,7 @@ export async function waitForVideo(page, before, timeoutSeconds, {
     throw new CommandExecutionError(`GEMINI_VIDEO_GENERATION_TIMEOUT: no completed video within the original generation deadline; conversation=${checkpoint.url || 'unknown'}`);
 }
 
-export async function downloadVideo(page, outputPath, timeoutSeconds) {
+export async function downloadVideo(page, outputPath, timeoutSeconds, videoId = '') {
     const transferKey = `__opencliGeminiVideo_${randomUUID().replaceAll('-', '')}`;
     const output = path.resolve(outputPath);
     const partial = `${output}.${randomUUID()}.part`;
@@ -731,7 +816,10 @@ export async function downloadVideo(page, outputPath, timeoutSeconds) {
         // the bridge to the requested task path. Never use the browser's
         // download manager or change a shared browser download directory.
         const started = unwrap(await page.evaluate(`(() => {
-          const video = document.querySelector('generated-video video');
+          const targetId = ${JSON.stringify(videoId)};
+          const target = targetId ? Array.from(document.querySelectorAll('generated-video')).find((node, index) =>
+            (node.id || node.closest('model-response')?.id || 'generated-video-' + index) === targetId) : null;
+          const video = targetId ? target?.querySelector('video') : document.querySelector('generated-video video');
           const source = String(video?.currentSrc || video?.src || '');
           if (!source) return { ok: false, reason: 'generated video source URL is missing' };
           const transfer = { pending: true, controller: new AbortController() };
@@ -900,12 +988,18 @@ export const videoCommand = cli({
                 await page.wait(1.5);
                 await selectAspectRatio(page, aspect);
                 checkpoint.before = await visibleVideoUrls(page);
+                Object.assign(checkpoint, createVideoSubmission(prompt));
+                // History is best-effort, but an unavailable snapshot never
+                // authorizes choosing an arbitrary old or concurrent chat.
+                checkpoint.historyBefore = await getGeminiConversationList(page)
+                    .then(rows => rows.map(row => row.Url).filter(conversationUrl))
+                    .then(urls => urls.length ? urls : null).catch(() => null);
                 await uploadFrames(page, last ? [first, last] : [first]);
                 // Persist before the send: a killed command must not resubmit
                 // blindly when the provider may already have accepted it.
                 checkpoint.status = 'submitting';
                 save();
-                await submitVideoPrompt(page, prompt);
+                await submitVideoPrompt(page, checkpoint.prompt);
                 checkpoint.status = 'submitted';
                 const url = String(unwrap(await page.evaluate('window.location.href')) || '');
                 if (/^https:\/\/gemini\.google\.com\/app\/[a-z0-9]+$/i.test(url)) checkpoint.url = url;
@@ -920,7 +1014,7 @@ export const videoCommand = cli({
             if (downloadSeconds <= 0) {
                 throw new CommandExecutionError('GEMINI_VIDEO_GENERATION_TIMEOUT: original download deadline has elapsed');
             }
-            await downloadVideo(page, output, downloadSeconds);
+            await downloadVideo(page, output, downloadSeconds, checkpoint.videoId || '');
             const link = String(unwrap(await page.evaluate('window.location.href')) || GEMINI_VIDEOS_URL);
             Object.assign(checkpoint, { status: 'saved', url: link });
             save();
@@ -931,6 +1025,7 @@ export const videoCommand = cli({
                 ['GEMINI_VIDEO_GENERATION_STALLED', 'stalled'],
                 ['GEMINI_VIDEO_GENERATION_TIMEOUT', 'timeout'],
                 ['GEMINI_VIDEO_GENERATION_FAILED', 'failed'],
+                ['GEMINI_VIDEO_SUBMISSION_UNCERTAIN', 'uncertain'],
             ]) {
                 if (message.includes(code)) Object.assign(checkpoint, { status, error: message });
             }
