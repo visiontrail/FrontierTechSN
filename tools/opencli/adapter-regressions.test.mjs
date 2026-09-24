@@ -7,11 +7,12 @@ import vm from 'node:vm'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { isGenerating, getCurrentChatGPTModel, selectChatGPTModel, uploadChatGPTImages, startNewChat, getVisibleMessages, getPageState, waitForChatGPTModelComposer, __test__ as chatgptTest } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
+import { isGenerating, getCurrentChatGPTModel, selectChatGPTModel, uploadChatGPTImages, startNewChat, getVisibleMessages, getPageState, waitForChatGPTModelComposer, chatGPTPromptMatches, resolveChatGPTConversationIdentity, waitForChatGPTResponse, getChatGPTResponsePairCounts, __test__ as chatgptTest } from './node_modules/@jackwener/opencli/clis/chatgpt/utils.js'
 import { detailCommand as chatgptDetailCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/detail.js'
 import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/model.js'
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
 import { askCommand as chatgptAskCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/ask.js'
+import { readCommand as chatgptReadCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/read.js'
 import {
   attachGeminiFile,
   sendGeminiMessage,
@@ -497,7 +498,7 @@ test('ChatGPT reads section turns and full collapsed prompts without UI labels',
   const page = { async evaluate(script) {
     return vm.runInNewContext(script, { HTMLElement: Element,
       window: { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
-      document: { querySelectorAll: selector => selector === '[data-message-author-role], [data-testid^="conversation-turn-"]' ? [user, assistant] : [] },
+      document: { querySelectorAll: selector => selector === '[data-message-author-role], [data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]' ? [user, assistant] : [] },
     })
   } }
   const rows = await getVisibleMessages(page, { textOnly: true })
@@ -505,6 +506,180 @@ test('ChatGPT reads section turns and full collapsed prompts without UI labels',
   assert.equal(rows[0].Role, 'User'); assert.equal(rows[0].Text, prompt.textContent)
   assert.equal(rows[1].Role, 'Assistant'); assert.equal(rows[1].Text, answer.textContent)
 })
+
+const modernReviewNonce = 'b9873a9038ef4cca87c7e6025e79e471'
+const modernSavedChatId = '6ab4dd9c-8d38-83ec-b954-14085c8ba0b6'
+const modernLocalChatUrl = 'https://chatgpt.com/c/local-chatgpt%3A5a445fbe-4e97-4097-8cc8-7a65077b6233'
+
+function modernChatgptPage() {
+  class Element {
+    constructor(text = '', attrs = {}) {
+      this.textContent = text; this.innerText = text; this.innerHTML = text
+      this.attrs = attrs; this.children = []
+    }
+    getBoundingClientRect() { return { width: 600, height: 200 } }
+    getAttribute(name) { return this.attrs[name] || null }
+    querySelector() { return null }
+    querySelectorAll() { return [] }
+    closest() { return null }
+  }
+  const prompt = new Element(`REVIEW_REQUEST_ID:${modernReviewNonce}. Rendered headline`)
+  const answer = new Element('W1P;2B@2.3')
+  answer.closest = selector => selector.includes('data-markdown-text-style') ? {} : null
+  const user = new Element('You said: Show more', { 'data-chatgpt-search-unit-key': 'fallback-turn-0:0:user' })
+  const assistant = new Element('ChatGPT said: Copy', { 'data-chatgpt-search-unit-key': 'fallback-turn-0:2:assistant' })
+  const reasoning = new Element('Thinking', { 'data-chatgpt-search-unit-key': 'fallback-turn-0:1:assistant' })
+  const status = new Element('')
+  user.querySelector = selector => selector.includes('data-markdown-text-tone="user-message"') ? prompt : null
+  assistant.querySelector = selector => selector.includes('data-markdown-text-style="assistant-message"') ? answer : null
+  assistant.children = [status, answer]
+  assistant.querySelectorAll = selector => selector === '*' ? [status, answer] : []
+  const state = { url: modernLocalChatUrl, ids: [modernSavedChatId], prompt, answer, status, units: [user, reasoning, assistant], sleeps: 0 }
+  const context = {
+    HTMLElement: Element,
+    window: { location: { get href() { return state.url } }, getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+    document: {
+      querySelector: () => null,
+      querySelectorAll(selector) {
+        if (selector.includes('[data-chatgpt-search-unit-key]')) return state.units
+        if (selector.includes('[data-chatgpt-selection-conversation-id]')) return state.ids.map(id => new Element('', { 'data-chatgpt-selection-conversation-id': id }))
+        return []
+      },
+    },
+  }
+  const page = {
+    async evaluate(script) {
+      if (script === 'window.location.href') return state.url
+      if (script.includes('hasLoginGate')) return { hasComposer: true, isLoggedIn: true, hasLoginGate: false }
+      return vm.runInNewContext(script, context)
+    },
+    async goto() { throw new Error('Must preserve the submitted local conversation') },
+    async sleep() { state.sleeps++ },
+    async wait() {},
+  }
+  return { page, state }
+}
+
+test('ChatGPT reads current semantic units without speaker, collapsed controls, or reasoning text', async () => {
+  const { page, state } = modernChatgptPage()
+  const rows = await getVisibleMessages(page, { textOnly: true })
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].Role, 'User')
+  assert.equal(rows[0].Text, state.prompt.textContent)
+  assert.equal(rows[1].Role, 'Assistant')
+  assert.equal(rows[1].Text, 'W1P;2B@2.3')
+  state.status.textContent = 'Thinking'
+  assert.equal(await isGenerating(page), true)
+  state.status.textContent = ''
+  state.answer.textContent = 'An answer mentioning Thinking'
+  assert.equal(await isGenerating(page), false)
+})
+
+test('ChatGPT rendered prompt matching requires exact text or the same leading review nonce', () => {
+  const expected = `REVIEW_REQUEST_ID:${modernReviewNonce}. **Rendered headline**`
+  assert.equal(chatGPTPromptMatches(`REVIEW_REQUEST_ID:${modernReviewNonce}. Rendered headline`, expected), true)
+  assert.equal(chatGPTPromptMatches(`REVIEW_REQUEST_ID:${'a'.repeat(32)}. Rendered headline`, expected), false)
+  assert.equal(chatGPTPromptMatches(`Quoted ${expected}`, expected), false)
+  assert.equal(chatGPTPromptMatches(`REVIEW_REQUEST_ID:${modernReviewNonce}a. Rendered headline`, expected), false)
+  assert.equal(chatGPTPromptMatches('Rendered headline', '**Rendered headline**'), false)
+  assert.equal(chatGPTPromptMatches('Exact   text', 'Exact text'), true)
+})
+
+for (const scenario of ['owned', 'other-user', 'ambiguous', 'missing-id', 'off-domain', 'other-local']) {
+test(`ChatGPT resolves a stale local route only from an owned unambiguous saved identity: ${scenario}`, async () => {
+  const { page, state } = modernChatgptPage()
+  const prompt = `REVIEW_REQUEST_ID:${modernReviewNonce}. **Rendered headline**`
+  if (scenario === 'other-user') state.prompt.textContent = `REVIEW_REQUEST_ID:${'a'.repeat(32)}. Another request`
+  if (scenario === 'ambiguous') state.ids.push('11111111-2222-3333-4444-555555555555')
+  if (scenario === 'missing-id') state.ids = []
+  if (scenario === 'off-domain') state.url = state.url.replace('chatgpt.com', 'other.example')
+  if (scenario === 'other-local') state.url = 'https://chatgpt.com/c/local-unknown%3A12345678'
+  const identity = await resolveChatGPTConversationIdentity(page, prompt)
+  if (scenario === 'owned') assert.deepEqual(identity, { conversationId: modernSavedChatId,
+    conversationUrl: `https://chatgpt.com/c/${modernSavedChatId}`, localConversationUrl: modernLocalChatUrl })
+  else assert.equal(identity, null)
+})
+}
+
+test('ChatGPT response polling preserves the owned local route and waits through generation', async () => {
+  const { page, state } = modernChatgptPage()
+  const prompt = `REVIEW_REQUEST_ID:${modernReviewNonce}. **Rendered headline**`
+  const identity = await resolveChatGPTConversationIdentity(page, prompt)
+  page.sleep = async () => { state.sleeps++; state.status.textContent = state.sleeps <= 3 ? 'Thinking' : '' }
+  const response = await waitForChatGPTResponse(page, 0, prompt, 30, { ...identity, baselinePairCounts: new Map() })
+  assert.equal(response, 'W1P;2B@2.3')
+  assert.equal(state.sleeps, 6)
+  state.url = 'https://chatgpt.com/c/another-conversation'
+  await assert.rejects(waitForChatGPTResponse(page, 0, prompt, 30, identity), /navigated away/)
+})
+
+test('ChatGPT owned prompt pairing never consumes the next user request answer', () => {
+  const prompt = `REVIEW_REQUEST_ID:${modernReviewNonce}. Original prompt`
+  const messages = [{ Role: 'User', Text: prompt }, { Role: 'User', Text: 'Different request' }, { Role: 'Assistant', Text: 'W1P;2P' }]
+  assert.equal(getChatGPTResponsePairCounts(messages, prompt).size, 0)
+})
+
+for (const generating of [false, true]) {
+test(`ChatGPT same-session read exposes generation metadata without navigating: ${generating}`, async () => {
+  const { page, state } = modernChatgptPage()
+  state.status.textContent = generating ? 'Thinking' : ''
+  const rows = await chatgptReadCommand.func(page, {})
+  assert.equal(rows.length, 2)
+  assert.ok(rows.every(row => row.Generating === generating))
+  assert.equal(rows[1].Text, 'W1P;2B@2.3')
+})
+}
+
+for (const outcome of ['success', 'missing-id', 'response-timeout', 'rate-limit']) {
+test(`ChatGPT ask never replays a submitted local-route turn after ${outcome}`, async (t) => {
+  let clock = 0
+  let submissions = 0
+  const prompt = `REVIEW_REQUEST_ID:${modernReviewNonce}. **Rendered headline**`
+  t.mock.method(Date, 'now', () => clock)
+  const page = {
+    async wait(seconds) { clock += Number(seconds) * 1000 },
+    async sleep(seconds) { clock += seconds * 1000 },
+    async nativeClick() {},
+    async nativeType(text) { assert.equal(text, prompt) },
+    async goto() { throw new Error('Must not navigate away or replay') },
+    async evaluate(script) {
+      if (script === 'window.location.href') return submissions ? modernLocalChatUrl : 'https://chatgpt.com/'
+      if (script.includes('hasLoginGate')) return { hasComposer: true, isLoggedIn: true, hasLoginGate: false }
+      if (script.includes('stop-button')) {
+        if (submissions && outcome === 'rate-limit') throw new Error('CHATGPT_RATE_LIMITED: provider cooling down')
+        return submissions > 0 && outcome === 'response-timeout'
+      }
+      if (script.includes('const roleOf')) return submissions ? [
+        { role: 'User', text: `REVIEW_REQUEST_ID:${modernReviewNonce}. Rendered headline` },
+        { role: 'Assistant', text: 'W1P;2B@2.3' },
+      ] : []
+      if (script.includes('data-map-composer-conversation')) return outcome === 'missing-id' ? [] : [modernSavedChatId]
+      if (script.includes('const closeBtn')) return undefined
+      if (script.includes('const composer = findComposer()')) return { ready: true, contentEditable: false, x: 10, y: 10 }
+      if (script.includes('sendBtnFound')) return { sendBtnFound: true }
+      if (script.includes('if (sendBtn) sendBtn.click()')) { submissions++; return undefined }
+      throw new Error(`Unexpected ask script ${script.slice(0, 100)}`)
+    },
+  }
+  const run = () => chatgptAskCommand.func(page, { prompt, timeout: outcome === 'response-timeout' ? 2 : 30 })
+  if (outcome === 'success') {
+    assert.deepEqual(await run(), [{ conversationId: modernSavedChatId,
+      conversationUrl: `https://chatgpt.com/c/${modernSavedChatId}`, tool: '', response: 'W1P;2B@2.3' }])
+  } else {
+    await assert.rejects(run(), error => {
+      assert.match(error.message, /CHATGPT_TURN_PENDING/)
+      assert.ok(error.message.includes(modernLocalChatUrl))
+      if (outcome !== 'missing-id') {
+        assert.ok(error.message.includes(`https://chatgpt.com/c/${modernSavedChatId}`))
+        assert.ok(error.cause)
+      }
+      if (outcome === 'rate-limit') assert.match(error.message, /CHATGPT_RATE_LIMITED/)
+      return true
+    })
+  }
+  assert.equal(submissions, 1)
+})
+}
 
 for (const outcome of ['loaded', 'blank', 'login', 'conversation']) {
 test(`ChatGPT new chat distinguishes stalled navigation from login: ${outcome}`, async () => {
@@ -551,7 +726,7 @@ test('reapplying browser patches keeps every adapter byte-identical and recovery
   const apply = () => execFileSync(process.execPath, [path.join(root, 'patch-opencli.mjs')])
   const adapters = ['clis/gemini/ask.js', 'clis/gemini/utils.js', 'clis/gemini/models.js',
     'clis/gemini/video.js', 'clis/chatgpt/ask.js', 'clis/chatgpt/utils.js',
-    'clis/chatgpt/model.js', 'clis/chatgpt/detail.js', 'dist/src/execution.js', 'cli-manifest.json']
+    'clis/chatgpt/model.js', 'clis/chatgpt/detail.js', 'clis/chatgpt/read.js', 'dist/src/execution.js', 'cli-manifest.json']
   // Simulate the installed adapter before these two provider errors were
   // recognized. Upgrading must extend its helper rather than insert it twice.
   const utilsPath = path.join(root, packagePath, 'clis/gemini/utils.js')
@@ -594,7 +769,7 @@ test('ChatGPT generation includes status outside the message in a section turn',
         document: {
           querySelector() { return null },
           querySelectorAll(selector) {
-            if (selector === '[data-testid^="conversation-turn-"]') return [section]
+            if (selector === '[data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]') return [section]
             if (selector === '[data-message-author-role]') return [answer]
             return []
           },
@@ -2984,11 +3159,11 @@ for (const generating of [false, true]) {
   })
 }
 
-for (const quoted of [false, true]) {
+for (const quoted of [false, true, 'modern']) {
   test(`ChatGPT detects the screenshot limit modal but ignores quoted content: ${quoted}`, async () => {
     class Element {
       textContent = 'Too many requests. You’re making requests too quickly. We’ve temporarily limited access to your conversations to protect your data.'
-      closest() { return quoted ? {} : null }
+      closest(selector) { return quoted === 'modern' ? (selector.includes('[data-chatgpt-search-unit-key]') ? {} : null) : quoted ? {} : null }
       getBoundingClientRect() { return { width: 500, height: 200 } }
     }
     const dialog = new Element()

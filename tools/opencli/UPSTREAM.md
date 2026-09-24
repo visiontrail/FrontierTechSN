@@ -101,6 +101,18 @@ provider access limits remain distinct failures; missing composer errors never
 become thinking-effort preference fallbacks. This recovery is confined to
 preflight and does not refresh or replay an already submitted review prompt.
 
+The same UI also renders message turns with `data-chatgpt-search-unit-key` and
+separate user/assistant Markdown content attributes. Reading and generation
+checks must recognize these turns as well as the older message attributes.
+The review request's exact nonce binds a rendered user turn to its assistant
+response even when the UI changes Markdown formatting.
+
+After submission, a tab may retain a `local-chatgpt%3A...` address while the
+conversation is already saved under a canonical ID. A local address must never
+be truncated into `/c/local-chatgpt` or treated as evidence that submission
+failed. Recover the existing owned turn, use a verified canonical identity when
+available, and preserve pending/generating state instead of replaying the prompt.
+
 ## Partial ChatGPT answers and recovery
 
 ChatGPT now also renders conversation turns as `section` elements. Generation

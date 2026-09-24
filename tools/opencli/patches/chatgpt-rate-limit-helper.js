@@ -4,7 +4,7 @@ export function chatgptRateLimitGuardScript() {
         const limitSurfaces = document.querySelectorAll('dialog, [role="dialog"], [role="alertdialog"], [role="alert"], h1, h2, h3');
         for (const surface of limitSurfaces) {
             if (!(surface instanceof HTMLElement)) continue;
-            if (surface.closest('.markdown, [data-message-author-role], #prompt-textarea')) continue;
+            if (surface.closest('.markdown, [data-message-author-role], [data-chatgpt-search-unit-key], [data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"], #prompt-textarea')) continue;
             const style = window.getComputedStyle(surface);
             const rect = surface.getBoundingClientRect();
             if (style.display === 'none' || style.visibility === 'hidden' || !rect.width || !rect.height) continue;

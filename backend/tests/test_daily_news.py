@@ -2189,6 +2189,104 @@ def test_chatgpt_fact_check_recovers_target_conversation_after_route_drift():
     assert detail.kwargs["timeout"] == review.config.DAILY_NEWS_WEB_REVIEW_TIMEOUT + 15
 
 
+@pytest.mark.parametrize("signal", [
+    "typed", "legacy", "local_error", "local_result",
+    "transport_timeout", "cli_timeout", "python_timeout",
+])
+@pytest.mark.parametrize("unresolved", [None, "unowned", "generating", "unknown_generation"])
+def test_pending_local_chatgpt_turn_is_read_in_place_without_duplicate_submission(
+    signal, unresolved,
+):
+    local_url = "https://chatgpt.com/c/local-chatgpt%3A5a445fbe-4e97-4097-8cc8-7a65077b6233"
+    prompt = ""
+    calls = []
+    reads = 0
+    messages = []
+
+    async def command(args, **kwargs):
+        nonlocal prompt, reads
+        calls.append(args)
+        assert kwargs["site_session_namespace"] == "frontiertechsn-review-pending"
+        if args[:2] == ["chatgpt", "model"]:
+            rows = [{"Model": "Medium"}]
+        elif args[:2] == ["chatgpt", "ask"]:
+            prompt = args[2]
+            if signal == "typed":
+                raise OpenCLIError("CHATGPT_TURN_PENDING: submitted turn is not saved yet")
+            if signal == "legacy":
+                raise OpenCLIError(
+                    "ChatGPT did not create a conversation URL after sending the message."
+                )
+            if signal == "local_error":
+                raise OpenCLIError("Conversation is pending at " + local_url)
+            if signal == "transport_timeout":
+                raise OpenCLIError("OpenCLI command timed out after 105s: chatgpt ask " + prompt)
+            if signal == "cli_timeout":
+                raise OpenCLIError(
+                    "OpenCLI chatgpt ask failed with exit 1: TimeoutError: command exceeded runtime"
+                )
+            if signal == "python_timeout":
+                raise TimeoutError()
+            # Even a valid-looking protocol on the transient route needs an
+            # explicitly settled, request-owned read before it can be accepted.
+            rows = [{"response": "W1P;2B@2.3", "conversationUrl": local_url}]
+        else:
+            assert args[:2] == ["chatgpt", "read"]
+            assert "--refresh" not in args
+            reads += 1
+            generating = unresolved == "generating" or reads < 4
+            rows = [
+                {"Role": "User", "Text": (
+                    "REVIEW_REQUEST_ID:" + "0" * 32 if unresolved == "unowned" else prompt
+                ), "Generating": generating},
+                {"Role": "Assistant", "Text": "W1P;2B@2.3", "Generating": generating},
+            ]
+            if unresolved == "unknown_generation":
+                for row in rows:
+                    row.pop("Generating")
+        return OpenCLIResult(tuple(args), 0, json.dumps(rows), "")
+
+    with (
+        patch.object(review, "run_opencli", AsyncMock(side_effect=command)),
+        patch.object(review, "_target_recovery_poll_delays", return_value=(0,) * 5),
+        patch.object(review.asyncio, "sleep", AsyncMock()),
+    ):
+        coroutine = review._web_story_review(
+            "audit", story_numbers=[1, 2], log=messages.append,
+            claim_catalog={1: {"1.1": "First claim"}, 2: {"2.3": "Incorrect number"}},
+            site_session_namespace="frontiertechsn-review-pending",
+        )
+        if unresolved:
+            with pytest.raises(review._WebStoryReviewError, match="after 1 attempt") as error:
+                asyncio.run(coroutine)
+            assert "no duplicate prompt was submitted" in error.value.attempt_log
+            assert reads == 6
+        else:
+            payload, raw, url, provider = asyncio.run(coroutine)
+            assert payload["approved"] is False
+            assert payload["issues"][0]["claim_ids"] == ["2.3"]
+            assert provider == "chatgpt"
+            assert url == ""
+            assert "[CHATGPT RECOVERY]\nW1P;2B@2.3" in raw
+            assert reads == 4
+
+    assert len([args for args in calls if args[:2] == ["chatgpt", "ask"]]) == 1
+    assert any("pending owned browser turn" in message for message in messages)
+
+
+def test_chatgpt_target_url_does_not_truncate_local_routes():
+    saved_url = "https://chatgpt.com/c/6ab4dd9c-8d38-83ec-b954-14085c8ba0b6"
+    for local_url in (
+        "https://chatgpt.com/c/local-chatgpt%3A5a445fbe-4e97-4097-8cc8-7a65077b6233",
+        "https://chatgpt.com/c/local-chatgpt:5a445fbe-4e97-4097-8cc8-7a65077b6233",
+    ):
+        assert review._CHATGPT_CONVERSATION_URL_RE.search(local_url) is None
+        match = review._CHATGPT_CONVERSATION_URL_RE.search(
+            f"Transient route: {local_url}; saved target: ({saved_url})"
+        )
+        assert match.group(0) == saved_url
+
+
 def test_chatgpt_fact_check_retries_target_until_protocol_is_stable():
     chatgpt_prompt = ""
     detail_reads = 0
@@ -2322,7 +2420,12 @@ def test_chatgpt_fact_check_waits_for_slow_target_conversation_convergence():
     assert any("rereading its target conversation" in message for message in messages)
 
 
-def test_chatgpt_fact_check_retries_submission_without_using_gemini():
+@pytest.mark.parametrize("submission_error", [
+    "ChatGPT composer submission failed",
+    "AUTH_REQUIRED: ChatGPT login readiness timed out before sending",
+    "CHATGPT_COMPOSER_NOT_READY: visible composer wait timed out before sending",
+])
+def test_chatgpt_fact_check_retries_submission_without_using_gemini(submission_error):
     chatgpt_asks = 0
 
     async def command(args, **kwargs):
@@ -2334,7 +2437,7 @@ def test_chatgpt_fact_check_retries_submission_without_using_gemini():
         if args[:2] == ["chatgpt", "ask"]:
             chatgpt_asks += 1
             if chatgpt_asks == 1:
-                raise OpenCLIError("ChatGPT composer submission failed")
+                raise OpenCLIError(submission_error)
             return OpenCLIResult(tuple(args), 0, '[{"response":"W1P2P"}]', "")
         if args[:2] == ["chatgpt", "read"]:
             return OpenCLIResult(tuple(args), 0, "[]", "")

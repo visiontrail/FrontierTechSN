@@ -34,6 +34,7 @@ const modelsPath = path.join(geminiDir, 'models.js')
 const chatgptUtilsPath = path.join(chatgptDir, 'utils.js')
 const chatgptModelPath = path.join(chatgptDir, 'model.js')
 const chatgptDetailPath = path.join(chatgptDir, 'detail.js')
+const chatgptReadPath = path.join(chatgptDir, 'read.js')
 const executionPath = path.join(
   runtimeDir,
   'node_modules',
@@ -1033,8 +1034,10 @@ for (const [anchor, label] of [
 }
 chatgptUtils = replaceOnce(
   chatgptUtils,
-  `            const turns = document.querySelectorAll('article[data-testid*="conversation-turn"]');`,
-  `            const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');`,
+  chatgptUtils.includes(`            const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');`)
+    ? `            const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');`
+    : `            const turns = document.querySelectorAll('article[data-testid*="conversation-turn"]');`,
+  `            const turns = document.querySelectorAll('[data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]');`,
   'ChatGPT section generation status scope',
 )
 chatgptUtils = replaceOnce(
@@ -1741,11 +1744,141 @@ chatgptUtils = replaceWithinFunction(chatgptUtils,
             return '';`,
   'ChatGPT current section speaker roles',
 )
+if (!chatgptUtils.includes(`const contentNode = node.querySelector('[data-markdown-text-tone="user-message"]')`)) {
 chatgptUtils = replaceOnce(chatgptUtils,
   `            const contentNode = node.querySelector('[data-message-author-role] .markdown')`,
   `            const contentNode = node.querySelector('[data-testid="collapsible-user-message-content"]')
                 || node.querySelector('[data-message-author-role] .markdown')`,
   'ChatGPT collapsed prompt content without speaker or toggle controls',
+)
+}
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getVisibleMessages(', 'function formatChatGPTDetailMessages(',
+  `            const attr = node.getAttribute('data-message-author-role') || node.getAttribute('data-author') || '';`,
+  `            const unitKey = node.getAttribute('data-chatgpt-search-unit-key') || '';
+            if (/:assistant$/.test(unitKey)) return 'Assistant';
+            if (/:user$/.test(unitKey)) return 'User';
+            const attr = node.getAttribute('data-message-author-role') || node.getAttribute('data-author') || '';`,
+  'ChatGPT semantic message-unit speaker roles',
+)
+chatgptUtils = replaceOnce(chatgptUtils,
+  `let nodes = Array.from(document.querySelectorAll('[data-message-author-role], [data-testid^="conversation-turn-"]'));`,
+  `let nodes = Array.from(document.querySelectorAll('[data-message-author-role], [data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]'));`,
+  'ChatGPT semantic message-unit extraction',
+)
+chatgptUtils = replaceOnce(chatgptUtils,
+  `const CONVERSATION_MESSAGE_SELECTOR = '[data-message-author-role], [data-testid^="conversation-turn-"]';`,
+  `const CONVERSATION_MESSAGE_SELECTOR = '[data-message-author-role], [data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]';`,
+  'ChatGPT semantic message-unit readiness',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getVisibleMessages(', 'function formatChatGPTDetailMessages(',
+  `            const contentNode = node.querySelector('[data-testid="collapsible-user-message-content"]')`,
+  `            const contentNode = node.querySelector('[data-markdown-text-tone="user-message"]')
+                || node.querySelector('[data-markdown-text-style="assistant-message"]')
+                || node.querySelector('[data-testid="collapsible-user-message-content"]')`,
+  'ChatGPT semantic message content without speaker or controls',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getVisibleMessages(', 'function formatChatGPTDetailMessages(',
+  `            const html = includeHtml && contentNode instanceof HTMLElement ? (contentNode.innerHTML || '') : '';`,
+  `            // Reasoning/status units are not answer text. Modern units must
+            // expose their actual Markdown content before becoming a message.
+            if (node.getAttribute('data-chatgpt-search-unit-key')
+                && !node.querySelector('[data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]')) continue;
+            const html = includeHtml && contentNode instanceof HTMLElement ? (contentNode.innerHTML || '') : '';`,
+  'ChatGPT semantic status units are not assistant answers',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function isGenerating(page) {', 'export async function getChatGPTVisibleImageUrls(page) {',
+  `const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');`,
+  `const turns = document.querySelectorAll('[data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]');`,
+  'ChatGPT semantic message-unit generation scope',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function isGenerating(page) {', 'export async function getChatGPTVisibleImageUrls(page) {',
+  `if (el.closest('.markdown, pre, code')) continue;`,
+  `if (el.closest('.markdown, pre, code, [data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]')) continue;`,
+  'ChatGPT generation ignores quoted semantic message content',
+)
+const chatgptOwnedTurnHelpers = `export function chatGPTPromptMatches(actual, expected) {
+    const actualText = cleanPromptText(actual);
+    const expectedText = cleanPromptText(expected);
+    if (!expectedText) return false;
+    if (actualText === expectedText) return true;
+    // The rendered Markdown prompt may differ from its input bytes. Only the
+    // pipeline's unique, leading request nonce authorizes this alternate match.
+    const marker = /^REVIEW_REQUEST_ID:([0-9a-f]{32})(?=[^0-9a-f]|$)/i;
+    const expectedMarker = expectedText.match(marker)?.[1];
+    const actualMarker = actualText.match(marker)?.[1];
+    return !!expectedMarker && !!actualMarker
+        && expectedMarker.toLowerCase() === actualMarker.toLowerCase();
+}
+
+export async function resolveChatGPTConversationIdentity(page, prompt = '') {
+    const currentUrl = await currentChatGPTUrl(page);
+    try {
+        return { conversationId: parseChatGPTConversationId(currentUrl), conversationUrl: currentUrl };
+    } catch { /* A submitted chat can retain its local route after saving. */ }
+    let local;
+    try {
+        local = new URL(currentUrl);
+        if (local.origin !== CHATGPT_URL
+            || !/^\\/c\\/local-chatgpt(?::|%3a)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(local.pathname)) return null;
+    } catch { return null; }
+    const messages = await getVisibleMessages(page, { textOnly: true });
+    const latestUser = [...messages].reverse().find(message => message.Role === 'User');
+    if (!latestUser || !chatGPTPromptMatches(latestUser.Text, prompt)) return null;
+    const ids = requireArrayEvaluateResult(unwrapEvaluateResult(await page.evaluate(\`(() => {
+        const values = [];
+        for (const node of document.querySelectorAll('[data-chatgpt-selection-conversation-id], [data-map-composer-conversation]')) {
+            for (const attr of ['data-chatgpt-selection-conversation-id', 'data-map-composer-conversation']) {
+                const value = node.getAttribute(attr);
+                if (value && /^[A-Za-z0-9_-]{8,}$/.test(value)) values.push(value);
+            }
+        }
+        return [...new Set(values)];
+    })()\`)), 'chatgpt saved conversation identity');
+    if (ids.length !== 1) return null;
+    const conversationId = parseChatGPTConversationId(ids[0]);
+    return { conversationId, conversationUrl: CHATGPT_URL + '/c/' + conversationId,
+        localConversationUrl: currentUrl };
+}
+
+`
+chatgptUtils = replaceOnce(chatgptUtils,
+  'function cleanPromptText(str) {',
+  chatgptOwnedTurnHelpers + 'function cleanPromptText(str) {',
+  'ChatGPT owned rendered prompt and local-to-saved conversation identity',
+)
+chatgptUtils = chatgptUtils.replaceAll(
+  "user?.Role !== 'User' || cleanPromptText(user.Text) !== promptKey",
+  "user?.Role !== 'User' || !chatGPTPromptMatches(user.Text, promptKey)",
+)
+chatgptUtils = replaceOnce(chatgptUtils,
+  `        const assistant = messages.slice(index + 1).find((message) => message?.Role === 'Assistant');`,
+  `        const nextUser = messages.findIndex((message, position) => position > index && message?.Role === 'User');
+        const assistant = messages.slice(index + 1, nextUser < 0 ? undefined : nextUser)
+            .find((message) => message?.Role === 'Assistant');`,
+  'ChatGPT response pairs never cross the next user turn',
+)
+chatgptUtils = replaceOnce(chatgptUtils,
+  `        const assistantIndex = messages.findIndex((message, candidateIndex) => (
+            candidateIndex > index
+            && message?.Role === 'Assistant'`,
+  `        const nextUser = messages.findIndex((message, position) => position > index && message?.Role === 'User');
+        const assistantIndex = messages.findIndex((message, candidateIndex) => (
+            candidateIndex > index
+            && (nextUser < 0 || candidateIndex < nextUser)
+            && message?.Role === 'Assistant'`,
+  'ChatGPT owned response never crosses the next user turn',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function waitForChatGPTResponse(', 'export async function getConversationList(page) {',
+  `            if (currentUrl && !isSameChatGPTConversation(currentUrl, options.conversationUrl)) {`,
+  `            if (currentUrl && !isSameChatGPTConversation(currentUrl, options.conversationUrl)
+                && !(options.localConversationUrl && isSameChatGPTConversation(currentUrl, options.localConversationUrl))) {`,
+  'ChatGPT response polling preserves the verified local route alias',
 )
 fs.writeFileSync(chatgptUtilsPath, chatgptUtils)
 
@@ -1823,6 +1956,88 @@ fs.writeFileSync(askPath, ask)
 
 const chatgptAskPath = path.join(chatgptDir, 'ask.js')
 let chatgptAsk = fs.readFileSync(chatgptAskPath, 'utf8')
+chatgptAsk = chatgptAsk.replaceAll('CHATGPT_SUBMISSION_UNCERTAIN:', 'CHATGPT_TURN_PENDING:')
+chatgptAsk = replaceOnce(chatgptAsk,
+  '    parseChatGPTConversationId,',
+  '    parseChatGPTConversationId,\n    resolveChatGPTConversationIdentity,',
+  'ChatGPT ask saved conversation identity import',
+)
+chatgptAsk = replaceOnce(chatgptAsk,
+  `async function waitForConversationUrl(page, timeoutSeconds = 30) {`,
+  `async function waitForConversationUrl(page, timeoutSeconds = 30, prompt = '') {`,
+  'ChatGPT ask conversation identity prompt ownership',
+)
+chatgptAsk = replaceOnce(chatgptAsk,
+  `        const conversationUrl = await currentChatGPTUrl(page);
+        try {
+            const conversationId = parseChatGPTConversationId(conversationUrl);
+            return { conversationId, conversationUrl };
+        } catch {
+            await page.wait(1);
+        }`,
+  `        const identity = await resolveChatGPTConversationIdentity(page, prompt);
+        if (identity) return identity;
+        await page.wait(1);`,
+  'ChatGPT ask canonical identity from the owned local-route turn',
+)
+chatgptAsk = replaceOnce(chatgptAsk,
+  `    throw new CommandExecutionError('ChatGPT did not create a conversation URL after sending the message.');`,
+  `    throw new CommandExecutionError('CHATGPT_TURN_PENDING: ChatGPT did not expose a saved conversation identity after sending; preserve the submitted turn and do not replay the prompt. Current URL: ' + await currentChatGPTUrl(page));`,
+  'ChatGPT submitted turn identity failure is not a safe replay',
+)
+if (!chatgptAsk.includes('        let submittedIdentity;')) {
+chatgptAsk = replaceOnce(chatgptAsk,
+  `        const { conversationId, conversationUrl } = await waitForConversationUrl(page);`,
+  `        const { conversationId, conversationUrl, localConversationUrl } = await waitForConversationUrl(page, 30, prompt);`,
+  'ChatGPT ask preserves the local route alias',
+)
+chatgptAsk = replaceOnce(chatgptAsk,
+  `            baselinePairCounts,
+            conversationUrl,`,
+  `            baselinePairCounts,
+            conversationUrl,
+            localConversationUrl,`,
+  'ChatGPT ask response polling accepts its owned local alias',
+)
+chatgptAsk = replaceOnce(chatgptAsk,
+  `        const { conversationId, conversationUrl, localConversationUrl } = await waitForConversationUrl(page, 30, prompt);
+        if (!shouldWait) {
+            return [{ conversationId, conversationUrl, tool: selectedTool?.Tool ?? '', response: '' }];
+        }
+        const response = await waitForChatGPTResponse(page, baseline, prompt, timeout, {
+            baselinePairCounts,
+            conversationUrl,
+            localConversationUrl,
+        });
+        return [{ conversationId, conversationUrl, tool: selectedTool?.Tool ?? '', response }];`,
+  `        let submittedIdentity;
+        try {
+            submittedIdentity = await waitForConversationUrl(page, 30, prompt);
+            const { conversationId, conversationUrl, localConversationUrl } = submittedIdentity;
+            if (!shouldWait) {
+                return [{ conversationId, conversationUrl, tool: selectedTool?.Tool ?? '', response: '' }];
+            }
+            const response = await waitForChatGPTResponse(page, baseline, prompt, timeout, {
+                baselinePairCounts,
+                conversationUrl,
+                localConversationUrl,
+            });
+            return [{ conversationId, conversationUrl, tool: selectedTool?.Tool ?? '', response }];
+        } catch (error) {
+            if (String(error?.message || error).includes('CHATGPT_TURN_PENDING:')) throw error;
+            const currentUrl = await currentChatGPTUrl(page);
+            const pending = new CommandExecutionError(
+                'CHATGPT_TURN_PENDING: The prompt was submitted; preserve its owned turn and do not replay. '
+                + 'Saved conversation: ' + (submittedIdentity?.conversationUrl || 'unresolved')
+                + '; current URL: ' + (currentUrl || submittedIdentity?.localConversationUrl || 'unknown')
+                + '; cause: ' + String(error?.message || error),
+            );
+            pending.cause = error;
+            throw pending;
+        }`,
+  'ChatGPT all post-submission failures preserve the owned turn',
+)
+}
 chatgptAsk = replaceOnce(chatgptAsk, '    sendChatGPTMessage,', '    sendChatGPTMessage,\n    uploadChatGPTImages,', 'ChatGPT ask image upload import')
 chatgptAsk = replaceOnce(chatgptAsk,
   "        { name: 'prompt', positional: true, required: true, help: 'Prompt to send' },",
@@ -1840,12 +2055,35 @@ chatgptAsk = replaceOnce(chatgptAsk,
 )
 fs.writeFileSync(chatgptAskPath, chatgptAsk)
 
+let chatgptRead = fs.readFileSync(chatgptReadPath, 'utf8')
+chatgptRead = replaceOnce(chatgptRead,
+  '    getVisibleMessages,', '    getVisibleMessages,\n    isGenerating,',
+  'ChatGPT read generation-state import',
+)
+chatgptRead = replaceOnce(chatgptRead,
+  "    columns: ['Index', 'Role', 'Text'],", "    columns: ['Index', 'Role', 'Text', 'Generating'],",
+  'ChatGPT read generation-state column',
+)
+chatgptRead = replaceOnce(chatgptRead,
+  '        const messages = await getVisibleMessages(page);',
+  '        const messages = await getVisibleMessages(page);\n        const generating = await isGenerating(page);',
+  'ChatGPT read checks generation after extracting the response',
+)
+chatgptRead = replaceOnce(chatgptRead,
+  '            Role: message.Role,', '            Role: message.Role,\n            Generating: generating,',
+  'ChatGPT read exposes generation metadata for owned recovery',
+)
+fs.writeFileSync(chatgptReadPath, chatgptRead)
+
 fs.copyFileSync(
   path.join(runtimeDir, 'patches', 'gemini-video-command.js'),
   videoPath,
 )
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+const chatgptReadEntry = manifest.find(entry => entry?.site === 'chatgpt' && entry?.name === 'read')
+if (!chatgptReadEntry?.columns) throw new Error('ChatGPT read manifest entry not found')
+if (!chatgptReadEntry.columns.includes('Generating')) chatgptReadEntry.columns.push('Generating')
 const chatgptAskEntry = manifest.find(entry => entry?.site === 'chatgpt' && entry?.name === 'ask')
 if (!chatgptAskEntry?.args) throw new Error('ChatGPT ask manifest entry not found')
 if (!chatgptAskEntry.args.some(arg => arg.name === 'file')) {

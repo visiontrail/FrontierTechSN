@@ -26,6 +26,7 @@ from backend.daily_news.scriptwriter import (
     script_contract_report,
 )
 from backend.pipeline.opencli import (
+    OpenCLIError,
     OpenCLIRateLimitError,
     close_opencli_site_sessions,
     first_json,
@@ -36,8 +37,11 @@ LogCallback = Callable[[str], None]
 
 _REVIEW_REQUEST_RE = re.compile(r"REVIEW_REQUEST_ID:([0-9a-f]{32})", re.I)
 _CHATGPT_CONVERSATION_URL_RE = re.compile(
-    r"https://chatgpt\.com/c/[0-9a-z-]+",
+    r"https://chatgpt\.com/c/(?!local-chatgpt)[0-9a-z-]+(?=$|[\s/?#)'\"<>,.;])",
     re.I,
+)
+_CHATGPT_LOCAL_CONVERSATION_URL_RE = re.compile(
+    r"https://chatgpt\.com/c/local-chatgpt(?:%3a|:)", re.I,
 )
 _RECOVERY_POLL_INTERVAL_SECONDS = 1.0
 _TARGET_RECOVERY_MAX_POLL_INTERVAL_SECONDS = 30.0
@@ -132,6 +136,36 @@ def _chatgpt_preflight_readiness_failure(error: Exception) -> str:
     ):
         return "composer"
     return ""
+
+
+def _chatgpt_turn_pending(message: str) -> bool:
+    """A submitted local turn must be read in place, never replayed as ask."""
+    return (
+        "chatgpt_turn_pending" in message.casefold()
+        or "did not create a conversation url after sending the message" in message.casefold()
+        or bool(_CHATGPT_LOCAL_CONVERSATION_URL_RE.search(message))
+    )
+
+
+def _chatgpt_ask_timeout(error: Exception) -> bool:
+    """A killed ask may have submitted before losing its result or diagnostics."""
+    if isinstance(error, OpenCLIRateLimitError) or _chatgpt_preflight_readiness_failure(error):
+        return False
+    return isinstance(error, TimeoutError) or (
+        isinstance(error, OpenCLIError)
+        and bool(re.search(r"\b(?:timed\s+out|timeout(?:error)?)\b", str(error), re.I))
+    )
+
+
+def _chatgpt_messages_settled(messages: list[dict[str, Any]]) -> bool:
+    return bool(messages) and all(
+        any(
+            str(key).casefold() == "generating"
+            and (value is False or str(value).casefold() == "false")
+            for key, value in row.items()
+        )
+        for row in messages
+    )
 
 
 def _normalized_review_token(text: str) -> str:
@@ -1159,6 +1193,7 @@ async def _web_story_review_in_session(
         *,
         conversation_url: str = "",
         after_rate_limit: bool = False,
+        pending_turn: bool = False,
     ) -> tuple[dict[str, Any], str]:
         if provider == "chatgpt" and conversation_url:
             command = [
@@ -1190,12 +1225,13 @@ async def _web_story_review_in_session(
         # research and citation hydration are still settling. When ask gives us
         # the exact conversation URL, keep polling that owned conversation for
         # up to two review-timeout windows instead of submitting the
-        # expensive prompt again. Active-page recovery has no such immutable
-        # target, so retain the short bounded poll there to avoid accepting an
-        # unrelated turn.
+        # expensive prompt again. A submitted local turn needs the same grace
+        # period, but must be read in place: navigating its transient route can
+        # discard it. Every result still requires this request's user marker.
+        # Unconfirmed submission failures retain the short active-page poll.
         poll_delays = (
             _target_recovery_poll_delays()
-            if provider == "chatgpt" and conversation_url
+            if provider == "chatgpt" and (conversation_url or pending_turn)
             else (_RECOVERY_POLL_INTERVAL_SECONDS,) * 2
         )
         recovery_attempts = len(poll_delays) + 1
@@ -1239,6 +1275,8 @@ async def _web_story_review_in_session(
                     )
                 if any(_field(row, "Generating").casefold() == "true" for row in messages):
                     raise ValueError("owned review response is still generating")
+                if pending_turn and not _chatgpt_messages_settled(messages):
+                    raise ValueError("pending owned review response is not explicitly settled")
                 payload = parse_response(assistant_text)
                 raw_attempts.append(
                     f"[{provider.upper()} RECOVERY]\n{assistant_text}"
@@ -1256,14 +1294,7 @@ async def _web_story_review_in_session(
                 # Re-reading a frozen DOM cannot recover its server-saved final
                 # answer. Require two identical, explicitly settled owned reads
                 # before one refresh; missing metadata never authorizes a reload.
-                settled = bool(messages) and all(
-                    any(
-                        str(key).casefold() == "generating"
-                        and (value is False or str(value).casefold() == "false")
-                        for key, value in row.items()
-                    )
-                    for row in messages
-                )
+                settled = _chatgpt_messages_settled(messages)
                 if conversation_url and assistant_text and settled and not refresh_used:
                     refresh_pending = assistant_text == previous_settled_invalid
                     previous_settled_invalid = assistant_text
@@ -1271,10 +1302,14 @@ async def _web_story_review_in_session(
                     previous_settled_invalid = ""
                 if recovery_attempt < recovery_attempts:
                     delay = poll_delays[recovery_attempt - 1]
-                    if log and conversation_url:
+                    if log and (conversation_url or pending_turn):
+                        recovery_target = (
+                            "target conversation" if conversation_url
+                            else "pending owned browser turn"
+                        )
                         log(
                             f"ChatGPT {review_label} response is not yet a valid "
-                            "final protocol token; rereading its target conversation "
+                            f"final protocol token; rereading its {recovery_target} "
                             f"after {delay:.0f}s ({recovery_attempt}/"
                             f"{recovery_attempts - 1})"
                         )
@@ -1484,6 +1519,7 @@ async def _web_story_review_in_session(
     chatgpt_attempts = 2
     for chatgpt_attempt in range(1, chatgpt_attempts + 1):
         conversation_url = ""
+        pending_turn = False
         try:
             chatgpt_args = [
                 "chatgpt",
@@ -1514,7 +1550,7 @@ async def _web_story_review_in_session(
                 (_field(row, "response") for row in rows if _field(row, "response")),
                 "",
             )
-            conversation_url = next(
+            reported_conversation_url = next(
                 (
                     _field(row, "conversationUrl")
                     for row in rows
@@ -1522,11 +1558,16 @@ async def _web_story_review_in_session(
                 ),
                 "",
             )
+            pending_turn = _chatgpt_turn_pending(reported_conversation_url)
+            conversation_match = _CHATGPT_CONVERSATION_URL_RE.search(reported_conversation_url)
+            conversation_url = conversation_match.group(0) if conversation_match else ""
             raw_attempts.append(
                 f"[CHATGPT {chatgpt_attempt}]\n{response or '[EMPTY]'}"
             )
             if conversation_url:
                 raw_attempts.append(f"[CHATGPT CONVERSATION]\n{conversation_url}")
+            if pending_turn:
+                raise ValueError("ChatGPT submitted turn is still on a transient local route")
             if not response or "[NO RESPONSE]" in response.upper():
                 raise ValueError("ChatGPT ask returned no completed assistant response")
             payload = parse_response(response)
@@ -1540,6 +1581,9 @@ async def _web_story_review_in_session(
             )
         except Exception as exc:  # noqa: BLE001 - target-specific recovery below
             chatgpt_error = exc
+            pending_turn = (
+                pending_turn or _chatgpt_turn_pending(str(exc)) or _chatgpt_ask_timeout(exc)
+            )
             if isinstance(exc, OpenCLIRateLimitError) and log:
                 log(
                     "ChatGPT has limited conversation access. All project browser "
@@ -1553,6 +1597,7 @@ async def _web_story_review_in_session(
                     "chatgpt",
                     conversation_url=target_url,
                     after_rate_limit=isinstance(exc, OpenCLIRateLimitError),
+                    pending_turn=pending_turn,
                 )
                 payload, _ = recovered
                 if log:
@@ -1571,6 +1616,16 @@ async def _web_story_review_in_session(
                 chatgpt_error = RuntimeError(
                     f"ask failed ({exc}); owned-turn recovery failed ({recovery_exc})"
                 )
+            if pending_turn:
+                message = (
+                    f"ChatGPT {review_label} turn is still unresolved after "
+                    "bounded owned-turn recovery; no duplicate prompt was submitted. "
+                    f"{chatgpt_error}"
+                )
+                raw_attempts.append(f"[CHATGPT SUBMITTED TURN RECOVERY EXHAUSTED]\n{message}")
+                if log:
+                    log(message)
+                break
             if chatgpt_attempt < chatgpt_attempts and log:
                 log(
                     f"ChatGPT {review_label} fact-check attempt {chatgpt_attempt}/"
@@ -1582,7 +1637,8 @@ async def _web_story_review_in_session(
         "ChatGPT current-model "
         f"{config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL}.."
         f"{config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL} {review_label} fact check "
-        f"failed after {chatgpt_attempts} attempts ({chatgpt_error})",
+        f"failed after {chatgpt_attempt} attempt{'s' if chatgpt_attempt != 1 else ''} "
+        f"({chatgpt_error})",
         "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
     ) from chatgpt_error
 
