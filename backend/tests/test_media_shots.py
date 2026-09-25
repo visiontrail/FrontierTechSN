@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import subprocess
 from unittest.mock import AsyncMock, patch
@@ -7,6 +8,60 @@ import pytest
 
 from backend.pipeline import media_shots as ms, scene_kit, composer
 from PIL import Image
+
+
+def test_reviewed_wrong_media_is_replaced_by_complete_editorial_shots(tmp_path):
+    (tmp_path / "compositions").mkdir()
+    asset = tmp_path / "historical.jpg"
+    Image.new("RGB", (160, 90)).save(asset)
+    rejection = {"src": "../historical.jpg", "sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+                 "rendered_video_sha256": "reviewed-candidate", "issues": ["Wrong event"]}
+    plan = {"id": "scene-02", "headline": "Current event", "archetype": "news_image",
+            "news_image_src": "historical.jpg", "review_rejected_media": [rejection]}
+    scene = {"id": "scene-02", "duration": 19.7, "text": "The current event has been reported."}
+    assert ms.inventory(plan, tmp_path) == []
+    assert ms.inventory({**plan, "review_rejected_media": []}, tmp_path)
+    # Even a provider outage must not bring the rejected required asset back.
+    with patch("backend.pipeline.digester._resolve_provider", AsyncMock(side_effect=RuntimeError("offline"))):
+        report = asyncio.run(ms.plan_media_shots([plan], {"scenes": [scene]}, tmp_path))
+    assert report["scenes"][0]["review_rejected_media"] == [rejection]
+    assert sum(ms.ticks(shot["duration"]) for shot in plan["media_shots"]) == 1970
+    assert all(shot["kind"] == "editorial" for shot in plan["media_shots"])
+    kit = scene_kit.ScenePlan.from_dict(plan, duration=19.7, scene_id="scene-02")
+    html = scene_kit.render_scene(kit)
+    output = tmp_path / "compositions" / "scene-02.html"
+    output.write_text(html)
+    composer._assert_locked_visual_assets(tmp_path, [plan])
+    assert "historical.jpg" not in html
+    output.write_text(html + '<img src="../historical.jpg">')
+    with pytest.raises(RuntimeError, match="rejected media still rendered"):
+        composer._assert_locked_visual_assets(tmp_path, [plan])
+    # A replacement at the same path is new evidence, not permanently banned.
+    Image.new("RGB", (160, 90), color="red").save(asset)
+    assert ms.inventory(plan, tmp_path)
+    assert ms.review_rejected_sources(plan, tmp_path) == {}
+
+
+def test_final_footage_audit_distinguishes_review_rejection_from_delivery(tmp_path):
+    asset = tmp_path / "wrong.mp4"
+    asset.write_bytes(b"historical event")
+    plan = {"id": "scene-02", "archetype": "footage", "footage_src": "wrong.mp4",
+            "media_shots": [{"kind": "editorial", "duration": 10}],
+            "review_rejected_media": [{"src": "../wrong.mp4",
+                "sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+                "rendered_video_sha256": "candidate", "issues": ["Wrong event"]}]}
+    manifest = {"requested_clip_count": 1, "clips": [{"id": "clip-01", "path": str(asset)}]}
+    composer._require_public_footage_placement([plan], manifest, tmp_path, rendered_shots=True)
+    report = json.loads((tmp_path / "footage-placement.json").read_text())
+    assert report["passed"] and report["placed"] == 0 and report["review_rejected"] == 1
+    assert report["clips"][0]["review_rejected"][0]["scene_id"] == "scene-02"
+    plan["media_shots"].append({"kind": "public_footage", "src": "../wrong.mp4"})
+    with pytest.raises(RuntimeError, match="delivery blocked"):
+        composer._require_public_footage_placement([plan], manifest, tmp_path, rendered_shots=True)
+    plan["media_shots"].pop()
+    asset.write_bytes(b"changed bytes")
+    with pytest.raises(RuntimeError, match="delivery blocked"):
+        composer._require_public_footage_placement([plan], manifest, tmp_path, rendered_shots=True)
 
 
 @pytest.mark.parametrize("size,orientation,expected", [

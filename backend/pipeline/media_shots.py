@@ -160,7 +160,23 @@ def inventory(plan: dict, task_dir: Path) -> list[dict]:
         ))
     if plan.get("news_webpage_src"):
         assets.append(_asset(task_dir, plan["news_webpage_src"], "article", credit=plan.get("news_webpage_source", "")))
+    rejected = {(item["src"], item["sha256"]) for item in plan.get("review_rejected_media", [])}
+    assets = [asset for asset in assets if (asset["src"], asset["sha256"]) not in rejected]
     return [{"id": f"asset-{i + 1}", **asset} for i, asset in enumerate(assets)]
+
+
+def review_rejected_sources(plan: dict, task_dir: Path) -> dict:
+    """Exempt only the exact source bytes rejected by a rendered-frame review."""
+    rejected = {}
+    for item in plan.get("review_rejected_media", []):
+        path = (task_dir / "compositions" / item["src"]).resolve()
+        if not path.is_relative_to(task_dir.resolve()) or not path.is_file():
+            continue
+        with path.open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if digest == item["sha256"]:
+            rejected[item["src"]] = item
+    return rejected
 
 
 def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict]) -> list[dict]:
@@ -283,7 +299,7 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
             continue
         plan = by_id[scene["id"]]
         assets = inventory(plan, task_dir)
-        if not assets:
+        if not assets and not plan.get("review_rejected_media"):
             continue
         contexts.append({"id": scene["id"], "duration": ticks(scene["duration"]) / 100,
                          "text": scene["text"], "lines": scene.get("lines", []),
@@ -313,6 +329,7 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
             **selected, "shots": shots, "planner": planner,
             "input_sha256": scene["input_sha256"], "validation_errors": failures[scene["id"]],
             "duration": scene["duration"], "coverage": 1.0, "passed": True,
+            "review_rejected_media": by_id[scene["id"]].get("review_rejected_media", []),
         }
         checkpoint.write_text(json.dumps({"input_sha256": fingerprint, "passed": False,
                                           "scenes": list(results.values())}, indent=2, ensure_ascii=False))

@@ -405,6 +405,49 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
         return "", []
 
 
+def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> dict:
+    """Quarantine only the asset visible in a hash-bound mismatching sample.
+
+    A copy repair cannot fix the wrong person/event in required footage. Keep
+    that source on disk, but remove these exact bytes from this scene's next
+    shot inventory. Editorial samples and unavailable/stale reviews grant no
+    exemption from the normal required-asset contract.
+    """
+    try:
+        report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
+        if report.get("rendered_video_sha256") != source_hash:
+            return {}
+        rendered = _strict_json_loads((output_dir / "visual_plan.json").read_bytes())
+        plans = {plan["id"]: plan for plan in rendered}
+        scenes = {scene["id"]: scene for scene in board["scenes"]}
+        rejected = {}
+        for review in report.get("multimodal", {}).get("scenes", []):
+            scene_id = review["id"]
+            if review.get("passed") is not False or review.get("verdict") != "mismatch":
+                continue
+            local_time = float(review["timestamp"]) - float(scenes[scene_id]["start"])
+            for shot in plans[scene_id].get("media_shots", []):
+                if not (float(shot["start"]) <= local_time < float(shot["start"]) + float(shot["duration"])):
+                    continue
+                src, digest = shot.get("src"), shot.get("sha256")
+                if not src or not digest or shot.get("kind") not in {"public_footage", "paper_collage", "image", "article"}:
+                    continue
+                path = (output_dir / "compositions" / src).resolve()
+                if not path.is_relative_to(output_dir.resolve()) or not path.is_file() or _sha256_path(path) != digest:
+                    continue
+                prior = plans[scene_id].get("review_rejected_media", [])
+                if any(item.get("src") == src and item.get("sha256") == digest for item in prior):
+                    continue
+                rejected[scene_id] = [*prior, {
+                    "src": src, "sha256": digest, "kind": shot["kind"],
+                    "rendered_video_sha256": source_hash,
+                    "timestamp": review["timestamp"], "issues": review.get("issues") or [],
+                }]
+        return rejected
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
 async def _load_or_plan_scene_visuals(
     output_dir: Path,
     board: dict,
@@ -420,16 +463,29 @@ async def _load_or_plan_scene_visuals(
         source_hash, feedback = _pending_visual_repairs(output_dir, plans)
         if feedback:
             failed_ids = {row["id"] for row in feedback}
-            repair_scenes = [scene for scene in board["scenes"] if scene["id"] in failed_ids]
+            rejected = _review_rejected_media(output_dir, board, source_hash)
+            media_repairs = [
+                {**plan, "review_rejected_media": rejected[plan["id"]]}
+                for plan in plans if plan["id"] in failed_ids and plan["id"] in rejected
+            ]
+            for plan in media_repairs:
+                log(f"Visual plan {plan['id']}: excluding reviewed mismatching media; retaining grounded copy")
+            repair_ids = failed_ids - {plan["id"] for plan in media_repairs}
+            repair_scenes = [scene for scene in board["scenes"] if scene["id"] in repair_ids]
             log(f"Visual plan: repairing {len(repair_scenes)} failed scene(s) from rendered-frame feedback")
             repaired = await visual_plan.plan_scene_visuals(
                 {**board, "scenes": repair_scenes, "scene_count": len(repair_scenes),
-                 "visual_review_feedback": feedback},
+                 "visual_review_feedback": [row for row in feedback if row["id"] in repair_ids]},
                 ai_endpoint=ai_endpoint,
                 ai_model=ai_model,
                 provider_id=provider_id,
                 log=log,
-            )
+            ) if repair_scenes else []
+            previous_by_id = {plan["id"]: plan for plan in plans}
+            for plan in repaired:
+                if previous_by_id.get(plan["id"], {}).get("review_rejected_media"):
+                    plan["review_rejected_media"] = previous_by_id[plan["id"]]["review_rejected_media"]
+            repaired.extend(media_repairs)
             by_id = {plan["id"]: plan for plan in repaired}
             if set(by_id) != failed_ids:
                 raise RuntimeError("Visual review repair did not return every failed scene")
@@ -445,7 +501,7 @@ async def _load_or_plan_scene_visuals(
                 )
             unchanged = [
                 row["id"] for row in feedback
-                if all(by_id[row["id"]].get(key) == value
+                if row["id"] not in rejected and all(by_id[row["id"]].get(key) == value
                        for key, value in row["previous_copy"].items())
             ]
             if unchanged:
@@ -1276,6 +1332,11 @@ def _assert_locked_visual_assets(output_dir: Path, plans: list[dict]) -> None:
                 failures.append(f"{scene_id}: {exc}")
             # The shot renderer canonicalizes project-relative asset paths.
             required = [value if value.startswith("../") else "../" + value for value in required]
+            rejected = media_shots.review_rejected_sources(plan, output_dir)
+            required = [value for value in required if value not in rejected]
+            for value in rejected:
+                if re.search(r'(?:src|poster)\s*=\s*[\"\']' + re.escape(value) + r'[\"\']', html):
+                    failures.append(f"{scene_id}: rejected media still rendered: {value}")
         missing = [source for source in required if f'src="{source}"' not in html]
         if missing:
             failures.append(f"{scene_id}: missing {', '.join(missing)}")
@@ -1415,21 +1476,30 @@ def _retain_bookend_review_feedback(staged: dict, previous: dict) -> dict:
     return staged
 
 
-def _require_public_footage_placement(plans: list[dict], manifest: dict | None, task_dir: Path) -> None:
+def _require_public_footage_placement(
+    plans: list[dict], manifest: dict | None, task_dir: Path, *, rendered_shots: bool = False,
+) -> None:
     """Fail before expensive downstream generation and name every missing clip."""
     requested = int((manifest or {}).get("requested_clip_count") or 0)
     if not requested:
         return
     clips = (manifest or {}).get("clips") or []
     placements: dict[str, list[str]] = {}
+    rejections: dict[str, list[dict]] = {}
     for plan in plans:
         if plan.get("archetype") != "footage":
             continue
         sequence = plan.get("footage_sequence") or (
             [{"src": plan.get("footage_src")}] if not plan.get("collage_broll") else []
         )
+        if rendered_shots and plan.get("media_shots"):
+            sequence = [shot for shot in plan["media_shots"] if shot.get("kind") == "public_footage"]
+            for src, rejection in media_shots.review_rejected_sources(plan, task_dir).items():
+                rejections.setdefault(src.removeprefix("../"), []).append({
+                    **rejection, "scene_id": plan["id"],
+                })
         for item in sequence:
-            placements.setdefault(str(item.get("src") or ""), []).append(plan["id"])
+            placements.setdefault(str(item.get("src") or "").removeprefix("../"), []).append(plan["id"])
     results = []
     for clip in clips:
         source = Path(clip.get("local_path") or clip.get("path") or "")
@@ -1440,10 +1510,14 @@ def _require_public_footage_placement(plans: list[dict], manifest: dict | None, 
             relative = ""
         scenes = placements.get(relative, [])
         results.append({"id": clip.get("id"), "query": clip.get("query"),
-                        "src": relative, "scene_ids": scenes, "placed": len(scenes) == 1})
+                        "src": relative, "scene_ids": scenes, "placed": len(scenes) == 1,
+                        "review_rejected": rejections.get(relative, [])})
     delivered = sum(item["placed"] for item in results)
+    excluded = sum(bool(item["review_rejected"]) and not item["scene_ids"] for item in results)
     report = {"requested": requested, "acquired": len(clips), "placed": delivered,
-              "passed": delivered == requested and len(clips) == requested, "clips": results}
+              "review_rejected": excluded, "rendered_shots": rendered_shots,
+              "passed": delivered + excluded == requested and len(clips) == requested
+              and all(not item["scene_ids"] for item in results if item["review_rejected"]), "clips": results}
     (task_dir / "footage-placement.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     if not report["passed"]:
         missing = "; ".join(f"{item['id']} ({item['query']})" for item in results if not item["placed"])
@@ -1846,6 +1920,7 @@ async def compose_video(
         plans, board, output_dir_path, provider_id=provider_id,
         ai_endpoint=ai_endpoint, ai_model=ai_model, log=emit,
     )
+    _require_public_footage_placement(plans, manifest, output_dir_path, rendered_shots=True)
     scene_plans = list(plans)
     visual_grounding = visual_plan.visual_grounding_report(scene_plans, board)
     quality_report = {
