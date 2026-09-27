@@ -1092,6 +1092,7 @@ FULL STORY EVIDENCE
             payload, raw, url, provider = await _web_story_review(
                 prompt, story_numbers=numbers, claim_catalog=claims,
                 site_session_namespace=review_session_namespace, log=log, diagnostic=True,
+                recovery_dir=output_dir / "review" / "browser-turns",
             )
     except _WebStoryReviewError as exc:
         prefix.with_suffix(".failure.txt").write_text(exc.attempt_log, encoding="utf-8")
@@ -1185,6 +1186,7 @@ async def _web_story_review(
     site_session_namespace: str | None = None,
     log: LogCallback | None,
     diagnostic: bool = False,
+    recovery_dir: Path | None = None,
 ) -> tuple[dict[str, Any], str, str, str]:
     retry_sessions: list[str] = []
     try:
@@ -1197,6 +1199,7 @@ async def _web_story_review(
             log=log,
             retry_sessions=retry_sessions,
             diagnostic=diagnostic,
+            recovery_dir=recovery_dir,
         )
     finally:
         for namespace in retry_sessions:
@@ -1218,6 +1221,7 @@ async def _web_story_review_in_session(
     log: LogCallback | None,
     retry_sessions: list[str],
     diagnostic: bool = False,
+    recovery_dir: Path | None = None,
 ) -> tuple[dict[str, Any], str, str, str]:
     if (story_number is None) == (story_numbers is None):
         raise ValueError("exactly one of story_number or story_numbers is required")
@@ -1245,6 +1249,30 @@ async def _web_story_review_in_session(
     review_session_namespace = site_session_namespace or (
         f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{request_id}"
     )
+    # Bind durable ownership to the exact semantic prompt and review policy,
+    # not the audit-round filename (which can change when a task resumes).
+    binding = hashlib.sha256(json.dumps([
+        prompt, diagnostic, config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL,
+        config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL,
+    ]).encode()).hexdigest()
+    checkpoint_path = recovery_dir / f"{binding}.json" if recovery_dir is not None else None
+    checkpoint = None
+    if checkpoint_path is not None and checkpoint_path.exists():
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if (
+            checkpoint.get("binding") != binding
+            or not re.fullmatch(r"[0-9a-f]{32}", str(checkpoint.get("request_id", "")))
+            or checkpoint.get("state") not in {"pending", "complete"}
+            or not checkpoint.get("session_namespace")
+            or (checkpoint.get("conversation_url") and not _CHATGPT_CONVERSATION_URL_RE.fullmatch(
+                checkpoint["conversation_url"]
+            ))
+        ):
+            raise RuntimeError("Invalid saved ChatGPT review ownership; refusing to replay")
+        request_id = checkpoint["request_id"]
+        review_session_namespace = checkpoint["session_namespace"]
+        if review_session_namespace not in retry_sessions:
+            retry_sessions.append(review_session_namespace)
     browser_prompt = " ".join(prompt.split())
     if diagnostic:
         # Keep output serialization separate from the saved semantic prompt so
@@ -1258,7 +1286,24 @@ async def _web_story_review_in_session(
         f"REVIEW_REQUEST_ID:{request_id}. This marker identifies the browser turn; "
         f"do not include it in the answer. {browser_prompt}"
     )
-    raw_attempts: list[str] = []
+    raw_attempts: list[str] = list(checkpoint.get("raw_attempts", [])) if checkpoint else []
+
+    def save_checkpoint(state: str, conversation_url: str = "", response: str = "") -> None:
+        if checkpoint_path is None:
+            return
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = checkpoint_path.with_suffix(f".{uuid4().hex}.tmp")
+        temporary.write_text(json.dumps({
+            "binding": binding, "request_id": request_id,
+            "session_namespace": review_session_namespace,
+            "state": state, "conversation_url": conversation_url,
+            "response": response, "raw_attempts": raw_attempts,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(checkpoint_path)
+
+    def completed(payload: dict[str, Any], response: str, url: str):
+        save_checkpoint("complete", url, response)
+        return payload, "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts), url, "chatgpt"
 
     async def recover_current(
         provider: str,
@@ -1331,7 +1376,7 @@ async def _web_story_review_in_session(
                     if log:
                         log(
                             f"ChatGPT {review_label}: reloading the settled owned "
-                            "conversation to recover stale partial text"
+                            "conversation to recover missing or stale message text"
                         )
                 read_result = await run_opencli(
                     read_command,
@@ -1356,6 +1401,19 @@ async def _web_story_review_in_session(
                 return payload, assistant_text
             except Exception as exc:  # noqa: BLE001 - bounded late-response poll
                 last_error = exc
+                raw_attempts.append(
+                    f"[{provider.upper()} RECOVERY STATE {recovery_attempt}/{recovery_attempts}]\n"
+                    + json.dumps({
+                        "request_id": request_id, "conversation_url": conversation_url,
+                        "error": str(exc), "messages": [{
+                            "role": _field(row, "Role"),
+                            "text_sha256": hashlib.sha256(_field(row, "Text").encode()).hexdigest(),
+                            "request_ids": _REVIEW_REQUEST_RE.findall(_field(row, "Text")),
+                            "generating": next((value for key, value in row.items()
+                                                if str(key).casefold() == "generating"), None),
+                        } for row in messages],
+                    })
+                )
                 if isinstance(exc, OpenCLIRateLimitError):
                     after_rate_limit = True
                 if assistant_text:
@@ -1364,12 +1422,17 @@ async def _web_story_review_in_session(
                         f"{recovery_attempt}/{recovery_attempts}]\n{assistant_text}"
                     )
                 # Re-reading a frozen DOM cannot recover its server-saved final
-                # answer. Require two identical, explicitly settled owned reads
-                # before one refresh; missing metadata never authorizes a reload.
+                # answer or its owning prompt. Two identical, explicitly settled
+                # snapshots authorize one reload of the exact saved target only.
+                # Ownership and protocol validation still apply after reloading;
+                # never reload a transient route or an active/unknown generation.
                 settled = _chatgpt_messages_settled(messages)
-                if conversation_url and assistant_text and settled and not refresh_used:
-                    refresh_pending = assistant_text == previous_settled_invalid
-                    previous_settled_invalid = assistant_text
+                if conversation_url and settled and not refresh_used:
+                    snapshot = json.dumps([
+                        [_field(row, "Role"), _field(row, "Text")] for row in messages
+                    ])
+                    refresh_pending = snapshot == previous_settled_invalid
+                    previous_settled_invalid = snapshot
                 else:
                     previous_settled_invalid = ""
                 if recovery_attempt < recovery_attempts:
@@ -1388,6 +1451,28 @@ async def _web_story_review_in_session(
                     await asyncio.sleep(delay)
         assert last_error is not None
         raise last_error
+
+    if checkpoint is not None:
+        target_url = checkpoint.get("conversation_url", "")
+        if checkpoint["state"] == "complete":
+            payload = parse_response(checkpoint["response"])
+            if log:
+                log(f"Reusing exact prompt-matched durable ChatGPT {review_label} verdict")
+            return completed(payload, checkpoint["response"], target_url)
+        if log:
+            log(f"Resuming saved ChatGPT {review_label} turn without submitting a new prompt")
+        try:
+            payload, response = await recover_current(
+                "chatgpt", conversation_url=target_url, pending_turn=True,
+            )
+        except Exception as exc:
+            save_checkpoint("pending", target_url)
+            raise _WebStoryReviewError(
+                f"Saved ChatGPT {review_label} turn remains unresolved; no duplicate prompt "
+                f"was submitted ({exc})",
+                "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
+            ) from exc
+        return completed(payload, response, target_url)
 
     chatgpt_model_policy_error: Exception | None = None
     chatgpt_model_policy_attempts = 3
@@ -1612,6 +1697,9 @@ async def _web_story_review_in_session(
                 "-f",
                 "json",
             ]
+            # Persist before submission so a server restart cannot lose the
+            # nonce and turn an uncertain send into another ask --new.
+            save_checkpoint("pending")
             result = await run_opencli(
                 chatgpt_args,
                 timeout=timeout + 20,
@@ -1645,12 +1733,7 @@ async def _web_story_review_in_session(
             payload = parse_response(response)
             if log:
                 log(f"ChatGPT completed {review_label} fact check")
-            return (
-                payload,
-                "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
-                conversation_url,
-                "chatgpt",
-            )
+            return completed(payload, response, conversation_url)
         except Exception as exc:  # noqa: BLE001 - target-specific recovery below
             chatgpt_error = exc
             pending_turn = (
@@ -1664,6 +1747,7 @@ async def _web_story_review_in_session(
                 )
             target_match = _CHATGPT_CONVERSATION_URL_RE.search(str(exc))
             target_url = conversation_url or (target_match.group(0) if target_match else "")
+            save_checkpoint("pending", target_url)
             try:
                 recovered = await recover_current(
                     "chatgpt",
@@ -1671,19 +1755,14 @@ async def _web_story_review_in_session(
                     after_rate_limit=isinstance(exc, OpenCLIRateLimitError),
                     pending_turn=pending_turn,
                 )
-                payload, _ = recovered
+                payload, response = recovered
                 if log:
                     recovery_source = "target conversation" if target_url else "owned browser turn"
                     log(
                         f"Recovered completed ChatGPT {review_label} fact check from "
                         f"its {recovery_source}"
                     )
-                return (
-                    payload,
-                    "\n\n--- PROVIDER ATTEMPT ---\n\n".join(raw_attempts),
-                    target_url,
-                    "chatgpt",
-                )
+                return completed(payload, response, target_url)
             except Exception as recovery_exc:  # noqa: BLE001 - preserve both failures
                 chatgpt_error = RuntimeError(
                     f"ask failed ({exc}); owned-turn recovery failed ({recovery_exc})"
@@ -1695,9 +1774,12 @@ async def _web_story_review_in_session(
                     f"{chatgpt_error}"
                 )
                 raw_attempts.append(f"[CHATGPT SUBMITTED TURN RECOVERY EXHAUSTED]\n{message}")
+                save_checkpoint("pending", target_url)
                 if log:
                     log(message)
                 break
+            if checkpoint_path is not None:
+                checkpoint_path.unlink(missing_ok=True)
             if chatgpt_attempt < chatgpt_attempts and log:
                 log(
                     f"ChatGPT {review_label} fact-check attempt {chatgpt_attempt}/"
@@ -1878,6 +1960,7 @@ async def _review_daily_script(
                         claim_catalog={number: claims[number] for number in story_numbers},
                         site_session_namespace=review_session_namespace,
                         log=log,
+                        recovery_dir=review_dir / "browser-turns",
                     )
                 except _WebStoryReviewError as exc:
                     failure_path = review_dir / (

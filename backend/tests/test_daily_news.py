@@ -2982,7 +2982,7 @@ def test_chatgpt_refresh_is_bounded_and_cannot_approve_invalid_or_unowned_verdic
             'audit', story_numbers=[5, 6],
             claim_catalog={5: {'5.1': 'Claim'}, 6: {'6.1': 'Claim'}}, log=None,
         ))
-    assert refreshes == (2 if owned else 0)  # At most once per submission.
+    assert refreshes == 2  # At most once per submission, still never accepts an unowned answer.
 
 
 def test_rate_limit_recovers_the_owned_turn_without_resubmitting():
