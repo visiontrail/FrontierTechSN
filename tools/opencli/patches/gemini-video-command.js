@@ -244,8 +244,9 @@ export async function uploadFrame(
     } = {},
 ) {
     const fileName = path.basename(filePath);
+    const fileBytes = fs.readFileSync(filePath);
     const payload = {
-        base64: fs.readFileSync(filePath).toString('base64'),
+        base64: fileBytes.toString('base64'),
         fileName,
         mimeType: fileName.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg',
     };
@@ -508,18 +509,34 @@ export async function uploadFrame(
         // disguised by a second upload mechanism.
         if (!method) {
             let fallback;
+            // The daemon caps each command body at 1 MiB. A detailed second
+            // keyframe can exceed that after Base64 encoding even when the
+            // small first frame succeeds. Transfer chunks without changing
+            // the image bytes or weakening the ordered attachment checks.
+            const uploadKey = '__opencliGeminiVideoUpload_' + marker;
             try {
+                await page.evaluate(`globalThis[${JSON.stringify(uploadKey)}] = []; true`);
+                for (let offset = 0; offset < payload.base64.length; offset += 64 * 1024) {
+                    const index = offset / (64 * 1024);
+                    await page.evaluate(`globalThis[${JSON.stringify(uploadKey)}][${index}] = ${JSON.stringify(payload.base64.slice(offset, offset + 64 * 1024))}; true`);
+                }
                 fallback = unwrap(await page.evaluate(`(() => {
                   const input = document.querySelector(${JSON.stringify(selected.selector)});
                   if (!input || input.disabled || !input.isConnected) {
                     return { ok: false, reason: 'marked Filedata input disappeared' };
                   }
+                  const chunks = globalThis[${JSON.stringify(uploadKey)}];
+                  if (!Array.isArray(chunks) || chunks.length !== ${Math.ceil(payload.base64.length / (64 * 1024))}) {
+                    return { ok: false, reason: 'Gemini keyframe transfer is incomplete' };
+                  }
+                  const binary = atob(chunks.join(''));
+                  if (binary.length !== ${fileBytes.length}) {
+                    return { ok: false, reason: 'Gemini keyframe transfer size mismatch' };
+                  }
                   const transfer = new DataTransfer();
-                  const item = ${JSON.stringify(payload)};
-                  const binary = atob(item.base64);
                   const bytes = new Uint8Array(binary.length);
                   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-                  transfer.items.add(new File([bytes], item.fileName, { type: item.mimeType }));
+                  transfer.items.add(new File([bytes], ${JSON.stringify(fileName)}, { type: ${JSON.stringify(payload.mimeType)} }));
                   const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files');
                   if (!descriptor?.set) return { ok: false, reason: 'native files setter unavailable' };
                   descriptor.set.call(input, transfer.files);
@@ -529,6 +546,8 @@ export async function uploadFrame(
                 })()`));
             } catch (error) {
                 fallback = { ok: false, reason: String(error?.message || error) };
+            } finally {
+                await page.evaluate(`delete globalThis[${JSON.stringify(uploadKey)}]; true`).catch(() => undefined);
             }
             if (!fallback?.ok || Number(fallback.fileCount || 0) < 1) {
                 throw uploadFailure(expectedCount, 'data_transfer_fallback', {

@@ -1401,6 +1401,7 @@ function videoUploadPage({
         if (!clear) attachments += 1
         return { ok: true, bytes: 7, fileCount: 1 }
       }
+      if (script.includes('__opencliGeminiVideoUpload_')) return true
       if (script.includes("removeAttribute('data-opencli-video-upload-target')")) {
         actions.push(['cleanup', selector])
         return true
@@ -1888,6 +1889,65 @@ test('Gemini video falls back to DataTransfer only when native injection fails',
   assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
   assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
 })
+
+for (const defect of ['', 'interrupted', 'missing-chunk', 'detached-input']) {
+test(`Gemini second video keyframe uses bounded lossless transfer and cleans state: ${defect || 'success'}`, async (t) => {
+  const [frame] = videoFrameFixture(t, ['last-frame.jpg'])
+  const bytes = Buffer.alloc(1_023_616)
+  for (let index = 0; index < bytes.length; index++) bytes[index] = index % 251
+  fs.writeFileSync(frame, bytes)
+  const events = []
+  class Input {
+    isConnected = true
+    disabled = false
+    get files() { return this.value || [] }
+    set files(value) { this.value = value }
+    dispatchEvent(event) { events.push(event.type) }
+  }
+  const input = new Input()
+  const context = vm.createContext({
+    document: { querySelector: () => input }, atob, Uint8Array, File, Event,
+    HTMLInputElement: Input,
+    DataTransfer: class {
+      files = []
+      items = { add: file => this.files.push(file) }
+    },
+  })
+  const page = videoUploadPage({ native: 'error', cdp: 'error', initialAttachments: 1 })
+  const originalEvaluate = page.evaluate
+  let chunks = 0
+  page.evaluate = async script => {
+    // Includes the full encoded command envelope, not just the image size.
+    assert.ok(Buffer.byteLength(JSON.stringify({ action: 'exec', code: script })) < 1024 * 1024)
+    if (!script.includes('__opencliGeminiVideoUpload_')) return originalEvaluate(script)
+    if (/^globalThis\[.*\]\[\d+\] = /.test(script)) {
+      chunks++
+      if (chunks === 2 && defect === 'interrupted') throw new Error('Transfer interrupted')
+      if (chunks === 2 && defect === 'missing-chunk') return true
+    }
+    if (defect === 'detached-input' && script.includes('const transfer = new DataTransfer()')) input.isConnected = false
+    const value = vm.runInContext(script, context)
+    if (value?.ok && script.includes('const transfer = new DataTransfer()')) await originalEvaluate(script)
+    return value
+  }
+  if (defect) {
+    await assert.rejects(uploadFrame(page, frame, 2, { attachmentTimeoutMs: 1000 }),
+      /Transfer interrupted|transfer size mismatch|marked Filedata input disappeared/)
+    assert.equal(input.files.length, 0)
+    assert.deepEqual(events, [])
+  } else {
+    const uploaded = await uploadFrame(page, frame, 2, { attachmentTimeoutMs: 1000 })
+    assert.equal(uploaded.state.attachments, 2)
+    assert.equal(uploaded.method, 'DataTransfer')
+    assert.ok(chunks > 1)
+    assert.equal(input.files[0].name, 'last-frame.jpg')
+    assert.equal(input.files[0].type, 'image/jpeg')
+    assert.deepEqual(Buffer.from(await input.files[0].arrayBuffer()), bytes)
+    assert.deepEqual(events, ['input', 'change'])
+  }
+  assert.equal(Object.keys(context).some(key => key.startsWith('__opencliGeminiVideoUpload_')), false)
+})
+}
 
 test('Gemini video fails closed with substep and input state when the UI clears a native upload', async (t) => {
   const [frame] = videoFrameFixture(t)
