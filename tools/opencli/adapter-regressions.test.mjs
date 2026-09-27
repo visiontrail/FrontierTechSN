@@ -247,6 +247,47 @@ test('Gemini response progress resets the stall timer and a completed video wins
   assert.equal((await waitForVideo(page, [], 1800, { now: () => clock, stallTimeoutSeconds: 60 })).src, 'new')
 })
 
+test('Gemini video treats the observed unfulfilled-request reply as failure without waiting for a stall', async () => {
+  for (const text of [
+    "Gemini said\n\nI'm having a hard time fulfilling your request. Can I help you with something else instead?",
+    'I’m having a hard time fulfilling your request. Can I help you with something else instead?',
+  ]) {
+    let clock = 1000
+    let reads = 0
+    const checkpoint = {}
+    const page = {
+      async wait(seconds) { clock += seconds * 1000 },
+      async evaluate(script) {
+        new vm.Script(script)
+        reads++
+        return { videos: [], text, url: 'https://gemini.google.com/app/abc123' }
+      },
+    }
+    await assert.rejects(waitForVideo(page, [], 1800, {
+      now: () => clock, checkpoint,
+    }), /GEMINI_VIDEO_GENERATION_FAILED:.*hard time fulfilling/s)
+    assert.equal(reads, 1)
+    assert.equal(clock, 6000)
+    assert.equal(checkpoint.url, 'https://gemini.google.com/app/abc123')
+  }
+})
+
+test('Gemini video preserves ordinary text mentioning a failure reply and accepts completed media first', async () => {
+  const failure = "I'm having a hard time fulfilling your request. Can I help you with something else instead?"
+  let reads = 0
+  const page = {
+    async wait() {},
+    async evaluate() {
+      reads++
+      return reads === 1
+        ? { text: `The character says: ${failure} Rendering the requested video.`, videos: [] }
+        : { text: `Gemini said ${failure}`, videos: [{ src: 'owned-video', readyState: 4 }] }
+    },
+  }
+  assert.equal((await waitForVideo(page, [], 60)).src, 'owned-video')
+  assert.equal(reads, 2)
+})
+
 test('Gemini resume preserves the original total and no-progress deadlines', async () => {
   let clock = 60000
   const checkpoint = { deadline: 70000, lastProgressAt: 1000,

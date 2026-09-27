@@ -797,7 +797,9 @@ export async function waitForVideo(page, before, timeoutSeconds, {
                 'GEMINI_VIDEO_GENERATION_FAILED: Gemini Create Video returned to an empty home composer; the submitted conversation is no longer available'
             );
         }
-        if (/could not generate|generation failed|try again|unable to create/i.test(String(state?.text || ''))) {
+        const responseText = String(state?.text || '').replace(/\s+/g, ' ').trim();
+        const unfulfilledRequest = /^(?:Gemini said\s+)?I['’]m having a hard time fulfilling your request\. Can I help you with something else instead\?$/i.test(responseText);
+        if (unfulfilledRequest || /could not generate|generation failed|try again|unable to create/i.test(responseText)) {
             throw new CommandExecutionError(`GEMINI_VIDEO_GENERATION_FAILED: Gemini Create Video reported a generation failure: ${String(state.text).slice(-500)}`);
         }
         // The Videos surface can stop refreshing while the accepted job has
