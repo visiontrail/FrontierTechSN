@@ -139,6 +139,11 @@ verified word for word. Rendering accepts every generated part covered by the
 `asr_advisory` manifest while preserving script/audio hashes, natural speed,
 WAV decoding, duration, and physical continuity checks. Genuine audio failures
 still retry with cached valid parts and complete sentence boundaries.
+Pocket pause checks allow up to 0.20 seconds of word-timestamp drift when
+identifying a sentence boundary; the 0.80-second internal and 1.20-second
+sentence-boundary pause ceilings remain unchanged. Sentence recovery includes
+closing quotes and brackets, and revalidates cached audio only when its source,
+voice, deployment revision, and waveform hashes still match.
 
 For YouTube/X media upload, open `chrome://extensions`, select **Details** for the ChatGPT browser extension, and enable **Allow access to file URLs**. Before creating a remote post, the publication adapter checks this permission and reports how to fix it if it is missing.
 

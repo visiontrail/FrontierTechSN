@@ -41,6 +41,7 @@ SPEAKER_LINE_RE = re.compile(
     r"^\s*(Speaker\s*\d+\s*[:：\-—–])\s*(.*)$", re.IGNORECASE
 )
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?。！？])\s+")
+POCKET_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?。！？])[\"'”’\)\]]*\s+")
 
 # Orpheus emits seven LM tokens for every 2,048 PCM samples at 24 kHz. This is
 # the model's actual codec geometry, not a heuristic. It lets us turn the
@@ -102,7 +103,7 @@ ORPHEUS_INTEGRITY_VERIFIER_VERSION = 34
 POCKET_TTS_MAX_INTEGRITY_ATTEMPTS = 5
 # Pocket TTS shares WAV validation and advisory ASR inspection; its cache
 # identity is independent so provider changes invalidate only Pocket audio.
-POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 16
+POCKET_TTS_INTEGRITY_VERIFIER_VERSION = 17
 ASR_ADVISORY_POLICY = "asr_advisory"
 POCKET_TTS_INTERNAL_MAX_TOKENS = 50
 POCKET_TTS_EDGE_SILENCE_DBFS = -42.0
@@ -110,6 +111,9 @@ POCKET_TTS_SILENCE_WINDOW_MS = 10
 POCKET_TTS_LONG_SILENCE_SECONDS = 0.5
 POCKET_TTS_MAX_INTERNAL_SILENCE_SECONDS = 0.8
 POCKET_TTS_MAX_SENTENCE_BOUNDARY_SILENCE_SECONDS = 1.2
+# Whisper word ends can extend slightly into waveform silence. This margin
+# identifies the adjacent word; it does not extend either pause ceiling.
+POCKET_TTS_WORD_BOUNDARY_TOLERANCE_SECONDS = 0.2
 ORPHEUS_NAME_RECHECK_SPEEDS = (0.8, 0.7)
 ORPHEUS_NAME_RECHECK_TOKENS = {"qwen", "qianwen", "qbitai"}
 ORPHEUS_NAME_RECHECK_SPELLINGS = {
@@ -1350,7 +1354,7 @@ def _split_pocket_tts_text(text: str, max_words: int) -> list[str]:
         # Keeping an ambiguous abbreviation with the next sentence is safer
         # than cutting a spoken name in half; max_words is a soft target.
         boundaries = [0]
-        for match in SENTENCE_BOUNDARY_RE.finditer(line):
+        for match in POCKET_SENTENCE_BOUNDARY_RE.finditer(line):
             if re.search(r"\b(?:(?:[A-Z]\.)+|[A-Z]{2,5}\.|(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Inc|Ltd|Corp|Co|vs|etc|e\.g|i\.e)\.)$", line[:match.start()]):
                 continue
             boundaries.append(match.end())
@@ -1721,7 +1725,9 @@ def _pocket_internal_silence_report(
         preceding = [
             word
             for word in words
-            if float(word.get("end") or 0) <= run_start
+            if float(word.get("start") or 0) < run_start
+            and float(word.get("end") or 0)
+            <= run_start + POCKET_TTS_WORD_BOUNDARY_TOLERANCE_SECONDS
         ]
         following = [
             word
@@ -1744,8 +1750,9 @@ def _pocket_internal_silence_report(
         sentence_boundary = bool(
             previous_word
             and next_word
-            and re.search(r"[.!?][\"')\]]*$", previous_text)
-            and 0 <= run_start - previous_end <= 0.6
+            and re.search(r"[.!?][\"'”’)\]]*$", previous_text)
+            and run_start - 0.6 <= previous_end
+            <= run_start + POCKET_TTS_WORD_BOUNDARY_TOLERANCE_SECONDS
             and run_start <= next_start <= run_end + 0.6
         )
         allowed_seconds = (
@@ -4283,6 +4290,28 @@ async def _recover_pocket_part(
     """Recover a complete Pocket WAV left between download and sidecar write."""
     if not path.is_file():
         return None
+    # A sentence-boundary fix can assign an existing filename to new text.
+    # Advisory ASR cannot establish cache identity: only revalidate a stale
+    # sidecar when it still describes this exact source, voice and waveform.
+    metadata_path = _part_metadata_path(path)
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            expected = {
+                "provider": "pocket-tts",
+                "model_revision": config.POCKET_TTS_MODEL_REVISION,
+                "voice": voice,
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "audio_sha256": _file_sha256(path),
+            }
+            if not isinstance(metadata, dict) or any(
+                metadata.get(key) != value for key, value in expected.items()
+            ):
+                emit("Pocket TTS recovery: cached identity changed; regenerating this part")
+                return None
+        except (OSError, ValueError):
+            emit("Pocket TTS recovery: unreadable cache identity; regenerating this part")
+            return None
     try:
         _validate_wav_part(path, text)
         integrity = await _verify_orpheus_part(
