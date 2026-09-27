@@ -922,6 +922,66 @@ def _protocol_payload(text: str) -> dict[str, Any]:
     }
 
 
+def _diagnostic_prose_json(text: str) -> dict[str, Any]:
+    """Recover quote escapes lost from rendered diagnostic prose only.
+
+    A bare JSON answer is rendered as Markdown, which can consume ``\"``
+    escapes. Require the complete requested schema and field order before
+    touching the two free-text values; never repair evidence or verdict data.
+    """
+    envelope = re.fullmatch(
+        r'\s*\{\s*"web_verified"\s*:\s*(?:true|false)\s*,\s*'
+        r'"findings"\s*:\s*\[(?P<findings>.*)\]\s*\}\s*', text, re.S,
+    )
+    if not envelope:
+        raise ValueError("Freshness diagnosis has malformed JSON structure")
+    string = r'"(?:\\.|[^"\\])*"'
+    strings = rf'\[\s*(?:{string}(?:\s*,\s*{string})*)?\s*\]'
+    finding = re.compile(
+        r'\s*\{\s*"story_number"\s*:\s*-?\d+\s*,\s*'
+        rf'"claim_ids"\s*:\s*{strings}\s*,\s*'
+        r'"reason"\s*:\s*"(?P<reason>.*?)"\s*,\s*'
+        r'"correction"\s*:\s*"(?P<correction>.*?)"\s*,\s*'
+        rf'"source_urls"\s*:\s*{strings}\s*\}}\s*', re.S,
+    )
+    body = envelope.group("findings")
+    position = 0
+    replacements: list[tuple[int, int, str]] = []
+    while True:
+        match = finding.match(body, position)
+        if not match:
+            raise ValueError("Freshness diagnosis has malformed finding structure")
+        for key in ("reason", "correction"):
+            prose = match.group(key)
+            # Do not swallow a duplicate/unknown member as apparent prose.
+            if re.search(r'"\s*,?\s*"(?:\\.|[^"\\])*"\s*:', prose):
+                raise ValueError("Freshness diagnosis has ambiguous prose boundaries")
+            escaped: list[str] = []
+            index = 0
+            while index < len(prose):
+                character = prose[index]
+                if character == "\\":
+                    escaped.append(prose[index:index + 2])
+                    index += 2
+                    continue
+                escaped.append('\\"' if character == '"' else character)
+                index += 1
+            replacements.append((
+                envelope.start("findings") + match.start(key),
+                envelope.start("findings") + match.end(key),
+                "".join(escaped),
+            ))
+        position = match.end()
+        if position == len(body):
+            break
+        if body[position] != ",":
+            raise ValueError("Freshness diagnosis has malformed finding separator")
+        position += 1
+    for start, end, replacement in reversed(replacements):
+        text = text[:start] + replacement + text[end:]
+    return json.loads(text, strict=False)
+
+
 def _diagnostic_payload(text, numbers, claims):
     """Diagnostic context cannot approve a script or replace its Web verdict."""
     try:
@@ -930,7 +990,11 @@ def _diagnostic_payload(text, numbers, claims):
         # Browser-rendered JSON can expose literal newlines inside prose strings.
         # Preserve that text; keep all evidence/coverage checks below mandatory.
         start, end = text.find("{"), text.rfind("}")
-        payload = json.loads(text[start:end + 1], strict=False)
+        candidate = text[start:end + 1]
+        try:
+            payload = json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            payload = _diagnostic_prose_json(candidate)
     if not isinstance(payload, dict):
         raise ValueError("Freshness diagnosis must be a JSON object")
     if payload.get("web_verified") is not True:
@@ -1182,6 +1246,14 @@ async def _web_story_review_in_session(
         f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{request_id}"
     )
     browser_prompt = " ".join(prompt.split())
+    if diagnostic:
+        # Keep output serialization separate from the saved semantic prompt so
+        # exact-prompt diagnostic recovery remains valid across this change.
+        browser_prompt += (
+            " Output formatting: put the requested JSON alone inside one fenced "
+            "json code block so Markdown preserves JSON string escapes. Escape "
+            "double quotes and control characters inside every JSON string."
+        )
     owned_prompt = (
         f"REVIEW_REQUEST_ID:{request_id}. This marker identifies the browser turn; "
         f"do not include it in the answer. {browser_prompt}"

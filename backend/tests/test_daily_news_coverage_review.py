@@ -73,6 +73,87 @@ def test_diagnostic_preserves_browser_rendered_newline_without_relaxing_web_gate
         review._diagnostic_payload(raw.replace('true', 'false'), [7], claims)
 
 
+def _rendered_diagnostic():
+    payload = {"web_verified": True, "findings": [{
+        "story_number": 7, "claim_ids": ["7.0", "7.2"],
+        "reason": 'The figure is titled "Number of data centers, 2025": old data.\n'
+                  'Keep the escaped "quotation" and path C:\\reports.',
+        "correction": 'Describe "data centers" as background; retain the new reporting.',
+        "source_urls": ["https://example.com/original"],
+    }]}
+    raw = json.dumps(payload).replace(
+        r'\"Number of data centers, 2025\"', '"Number of data centers, 2025"',
+    ).replace(r'\"data centers\"', '"data centers"').replace(r'\n', '\n')
+    return raw, payload
+
+
+def test_diagnostic_recovers_only_rendered_prose_quotes_and_preserves_escapes(coverage_case):
+    raw, expected = _rendered_diagnostic()
+    result = review._diagnostic_payload(raw, [7], coverage_case[2])
+    assert result == {"approved": False, "findings": expected["findings"]}
+    # The tolerant path never becomes a general JSON or fact-verdict parser.
+    with pytest.raises(json.JSONDecodeError):
+        review._json_object(raw)
+    with pytest.raises(ValueError):
+        review._batch_payload(raw, [7], claim_catalog=coverage_case[2], require_web=True)
+
+
+@pytest.mark.parametrize("before,after", [
+    ('"web_verified": true', '"web_verified": false'),
+    ('"web_verified": true', '"web_verified": "true"'),
+    ('"story_number": 7', '"story_number": "7"'),
+    ('"story_number": 7', '"story_number": 8'),
+    ('"7.2"', '"8.2"'),
+    ('"7.2"', '7.2'),
+    ('"7.2"', '"7.2'),
+    ('"correction":', '"extra": true, "correction":'),
+    ('"reason": "', '"reason": "Good" "reason": "'),
+    ('"reason": "', '"reason": "Good" "unknown": "'),
+    ('"correction": "', '"correction": "Good" "correction": "'),
+    (', "correction":', ' "correction":'),
+    ('"source_urls": [', '"source_urls": [' + '"https://bad.example/"quoted", '),
+    ('https://example.com/original', 'javascript:alert(1)'),
+    (']}', ']} garbage'),
+])
+def test_diagnostic_prose_recovery_keeps_structure_and_evidence_strict(coverage_case, before, after):
+    raw, _ = _rendered_diagnostic()
+    assert before in raw
+    with pytest.raises(ValueError):
+        review._diagnostic_payload(raw.replace(before, after), [7], coverage_case[2])
+
+
+def test_saved_quote_damaged_diagnosis_recovers_only_exact_prompt_and_claims(coverage_case, tmp_path):
+    prefix = tmp_path / "freshness-diagnosis-3"
+    prefix.with_suffix(".prompt.txt").write_text("exact semantic prompt")
+    raw, expected = _rendered_diagnostic()
+    prefix.with_suffix(".failure.txt").write_text(
+        '[CHATGPT RECOVERY INVALID 11/11]\n' + raw,
+    )
+    cached = review._cached_freshness_diagnosis(prefix, "exact semantic prompt", [7], coverage_case[2])
+    assert cached[0] == {"approved": False, "findings": expected["findings"]}
+    assert review._cached_freshness_diagnosis(prefix, "changed prompt", [7], coverage_case[2]) is None
+    assert review._cached_freshness_diagnosis(prefix, "exact semantic prompt", [8], coverage_case[2]) is None
+
+
+def test_diagnostic_submission_requests_fenced_json_without_changing_verdict(coverage_case):
+    _, payload = _rendered_diagnostic()
+    async def command(args, **kwargs):
+        if args[:2] == ["chatgpt", "model"]:
+            rows = [{"Model": "Medium"}]
+        else:
+            assert args[:2] == ["chatgpt", "ask"]
+            assert "one fenced json code block" in args[2]
+            rows = [{"response": '```json\n' + json.dumps(payload) + '\n```'}]
+        return OpenCLIResult(tuple(args), 0, json.dumps(rows), "")
+    with patch.object(review, "run_opencli", AsyncMock(side_effect=command)) as run:
+        result, _, _, _ = asyncio.run(review._web_story_review(
+            "exact semantic prompt", story_numbers=[7], claim_catalog=coverage_case[2],
+            log=None, diagnostic=True,
+        ))
+    assert result == {"approved": False, "findings": payload["findings"]}
+    assert run.await_count == 2
+
+
 def test_saved_diagnosis_requires_exact_prompt_and_valid_owned_response(coverage_case, tmp_path):
     _, _, claims = coverage_case
     prefix = tmp_path / "freshness-diagnosis-1"
