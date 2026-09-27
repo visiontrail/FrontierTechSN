@@ -447,7 +447,7 @@ def test_quality_retry_stops_before_rendering_unchanged_scene_again(tmp_path, mo
         ))
 
 
-def _mismatching_media_candidate(root):
+def _mismatching_media_candidate(root, verdict="mismatch"):
     board = {**_cache_board(), "scene_count": 2}
     plans = _cache_plans()
     asset = root / "historical.jpg"
@@ -461,16 +461,17 @@ def _mismatching_media_candidate(root):
     digest = _failed_visual_candidate(root)
     (root / "av_sync_report.next.json").write_text(json.dumps({
         "rendered_video_sha256": digest, "multimodal": {"scenes": [{
-            "id": "scene-02", "passed": False, "verdict": "mismatch",
+            "id": "scene-02", "passed": False, "verdict": verdict,
             "timestamp": 9.0, "issues": ["Wrong historical event"],
         }]},
     }))
     return board, digest
 
 
-def test_quality_retry_removes_sampled_wrong_media_without_rewriting_correct_copy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("verdict", ["mismatch", "partial"])
+def test_quality_retry_removes_sampled_wrong_media_without_rewriting_correct_copy(tmp_path, monkeypatch, verdict):
     from unittest.mock import AsyncMock
-    board, digest = _mismatching_media_candidate(tmp_path)
+    board, digest = _mismatching_media_candidate(tmp_path, verdict)
     before = composer._load_cached_scene_plans(tmp_path, board)
     planner = AsyncMock(side_effect=AssertionError("copy already describes the right event"))
     monkeypatch.setattr(visual_plan, "plan_scene_visuals", planner)
@@ -486,10 +487,11 @@ def test_quality_retry_removes_sampled_wrong_media_without_rewriting_correct_cop
     assert (tmp_path / "historical.jpg").read_bytes() == b"wrong historical event"
 
 
-@pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "editorial_sample", "match", "outside_sample", "unavailable"])
-def test_media_exclusion_requires_current_mismatching_sample(tmp_path, monkeypatch, mutation):
+@pytest.mark.parametrize("verdict", ["mismatch", "partial"])
+@pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "editorial_sample", "match", "passed_partial", "unknown_verdict", "outside_sample", "unavailable"])
+def test_media_exclusion_requires_current_mismatching_sample(tmp_path, monkeypatch, mutation, verdict):
     from unittest.mock import AsyncMock
-    board, digest = _mismatching_media_candidate(tmp_path)
+    board, digest = _mismatching_media_candidate(tmp_path, verdict)
     path = tmp_path / "av_sync_report.next.json"
     report = json.loads(path.read_text())
     review = report["multimodal"]["scenes"][0]
@@ -500,6 +502,8 @@ def test_media_exclusion_requires_current_mismatching_sample(tmp_path, monkeypat
         plans[1]["media_shots"][0]["kind"] = "editorial"
         composer._write_visual_plan_checkpoint(tmp_path, board, plans)
     if mutation == "match": review.update(passed=True, verdict="match")
+    if mutation == "passed_partial": review.update(passed=True, verdict="partial")
+    if mutation == "unknown_verdict": review["verdict"] = "unknown"
     if mutation == "outside_sample": review["timestamp"] = 100
     path.write_text(json.dumps(report))
     if mutation == "unavailable":

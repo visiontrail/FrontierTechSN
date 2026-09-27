@@ -406,12 +406,13 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
 
 
 def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> dict:
-    """Quarantine only the asset visible in a hash-bound mismatching sample.
+    """Quarantine only the asset visible in a hash-bound failed media sample.
 
     A copy repair cannot fix the wrong person/event in required footage. Keep
     that source on disk, but remove these exact bytes from this scene's next
-    shot inventory. Editorial samples and unavailable/stale reviews grant no
-    exemption from the normal required-asset contract.
+    shot inventory. A partial verdict can still reject the media when its
+    overlaid copy matches. Editorial samples and unavailable/stale reviews
+    grant no exemption from the normal required-asset contract.
     """
     try:
         report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
@@ -423,7 +424,7 @@ def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> d
         rejected = {}
         for review in report.get("multimodal", {}).get("scenes", []):
             scene_id = review["id"]
-            if review.get("passed") is not False or review.get("verdict") != "mismatch":
+            if review.get("passed") is not False or review.get("verdict") not in {"mismatch", "partial"}:
                 continue
             local_time = float(review["timestamp"]) - float(scenes[scene_id]["start"])
             for shot in plans[scene_id].get("media_shots", []):
