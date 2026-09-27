@@ -51,6 +51,10 @@ CLOSE_ADAPTER_SESSIONS_SCRIPT = (
 class OpenCLIError(RuntimeError):
     """An OpenCLI command could not produce a usable result."""
 
+    def __init__(self, message: str, *, result: OpenCLIResult | None = None):
+        super().__init__(message)
+        self.result = result
+
 
 class OpenCLIRateLimitError(OpenCLIError):
     """Provider UI explicitly blocked access; all project calls must cool down."""
@@ -134,6 +138,10 @@ async def run_opencli(
         arg == "--file" or arg.startswith("--file=") for arg in args[2:]
     ):
         command_timeout += 180
+    elif args[:2] == ["chatgpt", "image"]:
+        # Image generation has its own response deadline. Reserve the same
+        # setup/export allowance as the project-local browser adapter.
+        command_timeout += 180
     binary = Path(config.OPENCLI_BIN)
     if not binary.is_file():
         raise OpenCLIError(
@@ -199,18 +207,27 @@ async def run_opencli(
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=True,
                 )
+                communication = asyncio.create_task(process.communicate())
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                        process.communicate(), timeout=command_timeout
+                        asyncio.shield(communication), timeout=command_timeout
                     )
                 except TimeoutError as exc:
-                    await _stop_command(process)
+                    stdout_bytes, stderr_bytes = await _stop_command(process, communication)
+                    result = OpenCLIResult(
+                        args=tuple(args),
+                        returncode=process.returncode or -1,
+                        stdout=stdout_bytes.decode("utf-8", errors="replace").strip(),
+                        stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
+                    )
+                    detail = (result.stderr or result.stdout)[-1600:]
                     raise OpenCLIError(
                         f"OpenCLI command timed out after {command_timeout}s: "
-                        f"{' '.join(args[:3])}"
+                        f"{' '.join(args[:2])}" + (f"\n{detail}" if detail else ""),
+                        result=result,
                     ) from exc
                 except asyncio.CancelledError:
-                    await _stop_command(process)
+                    await _stop_command(process, communication)
                     raise
 
             result = OpenCLIResult(
@@ -227,12 +244,14 @@ async def run_opencli(
                 )[-1600:]
                 raise OpenCLIRateLimitError(
                     f"ChatGPT conversation access is rate limited; all browser operations "
-                    f"are paused until Unix time {until:.0f}. {detail}"
+                    f"are paused until Unix time {until:.0f}. {detail}",
+                    result=result,
                 )
             if check and result.returncode != 0:
                 detail = (result.stderr or result.stdout or "unknown OpenCLI failure")[-1200:]
                 raise OpenCLIError(
-                    f"OpenCLI {' '.join(args[:2])} failed with exit {result.returncode}: {detail}"
+                    f"OpenCLI {' '.join(args[:2])} failed with exit {result.returncode}: {detail}",
+                    result=result,
                 )
             return result
 
@@ -240,13 +259,18 @@ async def run_opencli(
         raise OpenCLIError(str(exc)) from exc
 
 
-async def _stop_command(process: asyncio.subprocess.Process) -> None:
+async def _stop_command(
+    process: asyncio.subprocess.Process,
+    communication: asyncio.Task | None = None,
+) -> tuple[bytes, bytes]:
     """Reap this command and its children before a caller can retry."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    await process.communicate()
+    # Keep the original readers alive through timeout/cancellation: restarting
+    # communicate() loses bytes already consumed by its cancelled readers.
+    return await communication if communication is not None else await process.communicate()
 
 
 async def run_opencli_with_retries(

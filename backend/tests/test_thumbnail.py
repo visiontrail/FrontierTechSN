@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import tempfile
 import unittest
@@ -6,18 +7,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+from PIL import Image
+
 from backend import config, prompts_registry
 from backend.models import TaskConfig, TaskResponse
-from backend.pipeline.opencli import OpenCLIResult
+from backend.pipeline.opencli import OpenCLIError, OpenCLIResult
 from backend.pipeline import orchestrator, thumbnail
 
 
-PNG_FIXTURE = (
-    b"\x89PNG\r\n\x1a\n"
-    b"\x00\x00\x00\rIHDR"
-    b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
-    b"\x00\x00\x00\x00"
-)
+_png = io.BytesIO()
+Image.new("RGB", (16, 9), "navy").save(_png, format="PNG")
+PNG_FIXTURE = _png.getvalue()
 
 
 class ThumbnailPromptTests(unittest.IsolatedAsyncioTestCase):
@@ -106,7 +107,88 @@ class ThumbnailGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manifest["status"], "ready")
             self.assertEqual(manifest["conversation_url"], "https://chatgpt.com/c/thumbnail-test")
             self.assertEqual(captured_args[:2], ["chatgpt", "image"])
+            self.assertEqual(captured_args[captured_args.index("--site-session") + 1], "ephemeral")
+            self.assertEqual(captured_args[captured_args.index("--keep-tab") + 1], "false")
             self.assertNotIn("tts", " ".join(captured_args).lower())
+
+
+@pytest.mark.parametrize("output", ["malformed", "timeout", "export_failure"])
+def test_completed_download_survives_missing_json_or_command_failure(tmp_path, output):
+    script = tmp_path / "script.txt"
+    script.write_text("Final narration")
+
+    async def command(args, **kwargs):
+        image_dir = Path(args[args.index("--op") + 1])
+        (image_dir / "finished.png").write_bytes(PNG_FIXTURE)
+        result = OpenCLIResult(
+            tuple(args), 0 if output == "malformed" else 1, "not JSON",
+            '[chatgpt/image] {"stage":"download","conversation_url":"https://chatgpt.com/c/owned"}',
+        )
+        if output != "malformed":
+            raise OpenCLIError(output, result=result)
+        return result
+
+    runner = AsyncMock(side_effect=command)
+    with (
+        patch.object(thumbnail, "generate_thumbnail_prompt", AsyncMock(return_value="Draw a cover")),
+        patch.object(thumbnail, "run_opencli", runner),
+    ):
+        artifact = asyncio.run(thumbnail.generate_thumbnail(
+            task_id="recovery", task_dir=tmp_path, title="Title", script_path=script,
+        ))
+    assert Path(artifact.image_path).read_bytes() == PNG_FIXTURE
+    assert artifact.conversation_url == "https://chatgpt.com/c/owned"
+    manifest = json.loads(Path(artifact.manifest_path).read_text())
+    assert manifest["status"] == "ready"
+    assert manifest["last_stage"] == "download"
+    assert bool(manifest.get("recovered_download")) == (output != "malformed")
+    runner.assert_awaited_once()  # Recovery must never send the paid prompt again.
+
+
+@pytest.mark.parametrize("invalid", ["missing", "truncated", "old", "outside", "symlink"])
+def test_failed_generation_retains_diagnostics_and_rejects_unusable_downloads(tmp_path, invalid):
+    script = tmp_path / "script.txt"
+    script.write_text("Final narration")
+    image_dir = tmp_path / "thumbnail" / "images"
+    image_dir.mkdir(parents=True)
+    stale = image_dir / "old.png"
+    stale.write_bytes(PNG_FIXTURE)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(PNG_FIXTURE)
+
+    async def command(args, **kwargs):
+        file = image_dir / "new.png"
+        if invalid == "truncated":
+            file.write_bytes(PNG_FIXTURE[:40])
+        elif invalid == "old":
+            file = stale
+        elif invalid == "outside":
+            file = outside
+        elif invalid == "symlink":
+            file.symlink_to(outside)
+        result = OpenCLIResult(
+            tuple(args), 1, json.dumps([{"file": str(file)}]),
+            '[chatgpt/image] {"stage":"waiting","conversation_url":"https://chatgpt.com/c/owned"}',
+        )
+        raise OpenCLIError("generation timed out", result=result)
+
+    runner = AsyncMock(side_effect=command)
+    with (
+        patch.object(thumbnail, "generate_thumbnail_prompt", AsyncMock(return_value="Draw a cover")),
+        patch.object(thumbnail, "run_opencli", runner),
+        pytest.raises(OpenCLIError, match="generation timed out"),
+    ):
+        asyncio.run(thumbnail.generate_thumbnail(
+            task_id="failed", task_dir=tmp_path, title="Title", script_path=script,
+        ))
+    manifest = json.loads((tmp_path / "thumbnail" / "manifest.json").read_text())
+    assert manifest["status"] == "failed"
+    assert manifest["image_path"] == ""
+    assert manifest["conversation_url"] == "https://chatgpt.com/c/owned"
+    assert manifest["last_stage"] == "waiting"
+    assert manifest["command_returncode"] == 1
+    assert stale.read_bytes() == PNG_FIXTURE
+    runner.assert_awaited_once()
 
 
 class ThumbnailPipelineOrderTests(unittest.IsolatedAsyncioTestCase):

@@ -758,7 +758,8 @@ test('reapplying browser patches keeps every adapter byte-identical and recovery
   const apply = () => execFileSync(process.execPath, [path.join(root, 'patch-opencli.mjs')])
   const adapters = ['clis/gemini/ask.js', 'clis/gemini/utils.js', 'clis/gemini/models.js',
     'clis/gemini/video.js', 'clis/chatgpt/ask.js', 'clis/chatgpt/utils.js',
-    'clis/chatgpt/model.js', 'clis/chatgpt/detail.js', 'clis/chatgpt/read.js', 'dist/src/execution.js', 'cli-manifest.json']
+    'clis/chatgpt/model.js', 'clis/chatgpt/detail.js', 'clis/chatgpt/read.js', 'clis/chatgpt/image.js',
+    'dist/src/execution.js', 'cli-manifest.json']
   // Simulate the installed adapter before these two provider errors were
   // recognized. Upgrading must extend its helper rather than insert it twice.
   const utilsPath = path.join(root, packagePath, 'clis/gemini/utils.js')

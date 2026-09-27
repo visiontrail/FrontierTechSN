@@ -113,6 +113,37 @@ be truncated into `/c/local-chatgpt` or treated as evidence that submission
 failed. Recover the existing owned turn, use a verified canonical identity when
 available, and preserve pending/generating state instead of replaying the prompt.
 
+## Thumbnail image response deadlines
+
+The image adapter now measures its response wait by elapsed time, including
+Browser Bridge reads. The prior poll-count limit excluded those reads and
+periodic page reloads, so a 360-second wait could still be running when the
+405-second Python limit killed it. Image polling no longer reloads an idle
+conversation every five polls or navigates away from a live local route.
+Canonical/local aliases are preserved; adopting a newly saved route requires
+the exact submitted prompt. An unrelated conversation fails explicitly.
+
+The response budget remains `THUMBNAIL_CHATGPT_TIMEOUT`. Both the OpenCLI
+execution layer and Python caller add a separate 180-second setup/export
+allowance. Concise `[chatgpt/image]` JSON diagnostics record the stage and
+conversation URL on stderr without including prompt content. Image generation
+does not automatically resubmit after a timeout.
+
+`node --test tools/opencli/thumbnail-adapter.test.mjs` applies the patch twice
+to a disposable adapter tree, checks deadline/route/error behavior with a
+simulated clock and page, and verifies installed adapter files are unchanged.
+This can run while another media task is active. Full adapter regressions for
+an undeployed patch should also run in a copied runtime, not after patching the
+installed package.
+
+The September 27 thumbnail fix is source-only until activated. Do not run
+`npm install`, `npm ci`, or `node tools/opencli/patch-opencli.mjs` against the
+installed runtime while media tasks are active: subsequent OpenCLI subprocesses
+would load changed adapters even without restarting the application. After the
+active tasks finish, apply the patch and restart the backend only during a
+user-authorized maintenance window. A backend restart alone does not apply
+changes to the installed OpenCLI package.
+
 ## Partial ChatGPT answers and recovery
 
 ChatGPT now also renders conversation turns as `section` elements. Generation

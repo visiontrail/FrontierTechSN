@@ -5,7 +5,7 @@
   "description": "Project-local OpenCLI runtime for the FrontierTechSN daily news pipeline.",
   "scripts": {
     "postinstall": "node patch-opencli.mjs",
-    "test:adapter": "node --test adapter-regressions.test.mjs"
+    "test:adapter": "node --test adapter-regressions.test.mjs thumbnail-adapter.test.mjs"
   },
   "dependencies": {
     "@jackwener/opencli": "git+https://github.com/jackwener/OpenCLI.git#8271afc67e8504bda94c147f446ee29775d08274"

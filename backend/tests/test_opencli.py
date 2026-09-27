@@ -51,8 +51,10 @@ class OpenCLIProcessLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 child = Path(directory) / "child.py"
                 child.write_text(
                     "import fcntl, time\n"
+                    "import sys\n"
                     f"handle = open({str(lock)!r}, 'w')\n"
                     "fcntl.flock(handle, fcntl.LOCK_EX)\n"
+                    "print('[chatgpt/image] {\"stage\":\"download\"}', file=sys.stderr, flush=True)\n"
                     f"open({str(ready)!r}, 'w').close()\n"
                     "time.sleep(30)\n"
                 )
@@ -80,8 +82,10 @@ class OpenCLIProcessLifecycleTests(unittest.IsolatedAsyncioTestCase):
                             with self.assertRaises(asyncio.CancelledError):
                                 await task
                         else:
-                            with self.assertRaisesRegex(OpenCLIError, "timed out"):
+                            with self.assertRaisesRegex(OpenCLIError, "timed out") as caught:
                                 await task
+                            self.assertIn('"stage":"download"', caught.exception.result.stderr)
+                            self.assertIn('"stage":"download"', str(caught.exception))
                     finally:
                         if not task.done():
                             task.cancel()
@@ -421,12 +425,14 @@ class OpenCLIRateLimitTests(unittest.TestCase):
 
 
 class OpenCLIRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_gemini_image_setup_budget_matches_adapter_without_affecting_other_calls(self):
+    async def test_image_setup_budget_matches_adapter_without_affecting_other_calls(self):
         for args, expected in [
             (["gemini", "ask", "Review", "--file", "sheet.jpg"], 360),
             (["gemini", "ask", "Review", "--file=sheet.jpg"], 360),
             (["gemini", "ask", "Review"], 180),
             (["chatgpt", "ask", "Review", "--file", "sheet.jpg"], 180),
+            (["chatgpt", "image", "Draw a cover"], 360),
+            (["gemini", "image", "Draw a cover"], 180),
         ]:
             process = AsyncMock(returncode=0)
             process.communicate.return_value = (b"ok", b"")

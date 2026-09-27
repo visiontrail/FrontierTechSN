@@ -16,9 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from backend import config
 from backend.pipeline.digester import _chat, _resolve_provider
-from backend.pipeline.opencli import OpenCLIError, first_json, run_opencli
+from backend.pipeline.opencli import OpenCLIError, OpenCLIResult, first_json, run_opencli
 
 logger = logging.getLogger(__name__)
 LogCallback = Callable[[str], None]
@@ -81,21 +83,34 @@ def _field(row: dict[str, Any], name: str) -> str:
 
 
 def _looks_like_image(path: Path) -> bool:
-    if not path.is_file() or path.stat().st_size < 32:
+    try:
+        if not path.is_file() or path.stat().st_size < 32:
+            return False
+        with path.open("rb") as handle:
+            header = handle.read(12)
+        if not (header.startswith(_IMAGE_SIGNATURES) or (
+            header.startswith(b"RIFF") and header[8:12] == b"WEBP"
+        )):
+            return False
+        # A timeout can leave a valid header followed by incomplete image data.
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            image.load()
+        return True
+    except (OSError, ValueError, SyntaxError):
         return False
-    with path.open("rb") as handle:
-        header = handle.read(12)
-    return header.startswith(_IMAGE_SIGNATURES) or (
-        header.startswith(b"RIFF") and header[8:12] == b"WEBP"
-    )
 
 
 def _new_image_files(image_dir: Path, before: set[Path]) -> list[Path]:
+    root = image_dir.resolve()
     candidates = [
         path.resolve()
         for path in image_dir.iterdir()
         if path.is_file()
+        and not path.is_symlink()
         and path.suffix.lower() in _IMAGE_SUFFIXES
+        and root in path.resolve().parents
         and path.resolve() not in before
         and _looks_like_image(path)
     ]
@@ -116,6 +131,24 @@ def _reported_image_files(rows: list[dict[str, Any]], image_dir: Path) -> list[P
         if (resolved == root or root in resolved.parents) and _looks_like_image(resolved):
             files.append(resolved)
     return files
+
+
+def _record_command_diagnostics(manifest: dict[str, Any], result: OpenCLIResult) -> None:
+    manifest["command_returncode"] = result.returncode
+    manifest["command_diagnostics"] = result.stderr[-8000:]
+    for line in result.stderr.splitlines():
+        if not line.startswith("[chatgpt/image] "):
+            continue
+        try:
+            progress = json.loads(line.removeprefix("[chatgpt/image] "))
+        except ValueError:
+            continue
+        if not isinstance(progress, dict):
+            continue
+        if progress.get("stage"):
+            manifest["last_stage"] = str(progress["stage"])
+        if progress.get("conversation_url"):
+            manifest["conversation_url"] = str(progress["conversation_url"])
 
 
 def _write_manifest(path: Path, data: dict[str, Any]) -> None:
@@ -211,8 +244,9 @@ async def generate_thumbnail(
             if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES
         }
         timeout = config.THUMBNAIL_CHATGPT_TIMEOUT
-        result = await run_opencli(
-            [
+        command_error: OpenCLIError | None = None
+        try:
+            result = await run_opencli([
                 "chatgpt",
                 "image",
                 prompt,
@@ -223,27 +257,46 @@ async def generate_thumbnail(
                 "--window",
                 "background",
                 "--site-session",
-                "persistent",
+                "ephemeral",
                 "--keep-tab",
                 "false",
                 "-f",
                 "json",
-            ],
-            timeout=timeout + 45,
+            ], timeout=timeout + 45)
+        except OpenCLIError as exc:
+            # The process is reaped before run_opencli raises. A completed file
+            # can survive a timeout during export/cleanup; never submit again.
+            command_error = exc
+            result = exc.result
+        parsed_rows = []
+        if result is not None:
+            _record_command_diagnostics(manifest, result)
+            try:
+                parsed_rows = _rows(first_json(result.stdout))
+            except OpenCLIError:
+                pass  # A fresh, fully decoded local image is sufficient proof.
+        conversation_url = next(
+            (_field(row, "link") for row in parsed_rows if _field(row, "link")),
+            manifest["conversation_url"],
         )
-        parsed_rows = _rows(first_json(result.stdout))
+        manifest["conversation_url"] = conversation_url
         reported = _reported_image_files(parsed_rows, image_dir)
         created = _new_image_files(image_dir, before)
-        images = list(dict.fromkeys([*reported, *created]))
+        # Output may mention an older cover or a symlink; only accept files
+        # freshly downloaded into this task's image directory by this attempt.
+        reported_new = [path for path in reported if path in created]
+        images = list(dict.fromkeys([*reported_new, *created]))
         if not images:
+            if command_error is not None:
+                raise command_error
             raise OpenCLIError(
                 "ChatGPT Web completed without a valid downloaded image in the task thumbnail directory"
             )
+        if command_error is not None:
+            manifest["recovered_download"] = True
+            manifest["command_warning"] = str(command_error)
+            _log(log, "Thumbnail: recovered a complete downloaded image after a command failure")
 
-        conversation_url = next(
-            (_field(row, "link") for row in parsed_rows if _field(row, "link")),
-            "",
-        )
         artifact = ThumbnailArtifact(
             prompt_path=str(prompt_path.resolve()),
             image_path=str(images[0]),

@@ -35,6 +35,7 @@ const chatgptUtilsPath = path.join(chatgptDir, 'utils.js')
 const chatgptModelPath = path.join(chatgptDir, 'model.js')
 const chatgptDetailPath = path.join(chatgptDir, 'detail.js')
 const chatgptReadPath = path.join(chatgptDir, 'read.js')
+const chatgptImagePath = path.join(chatgptDir, 'image.js')
 const executionPath = path.join(
   runtimeDir,
   'node_modules',
@@ -100,6 +101,12 @@ execution = replaceOnce(
   ].join('\n'),
   'persistent site-session namespace',
 )
+// Upgrade the previously installed Gemini-only allowance without changing
+// already running adapters; this script runs only at the next installation.
+execution = execution.replace(
+  "const attachmentSetupSeconds = cmd.site === 'gemini' && cmd.name === 'ask' && kwargs.file ? 180 : 0;",
+  "const attachmentSetupSeconds = ((cmd.site === 'gemini' && cmd.name === 'ask' && kwargs.file)\n                        || (cmd.site === 'chatgpt' && cmd.name === 'image')) ? 180 : 0;",
+)
 execution = replaceOnce(
   execution,
   `                    const browserTimeout = userTimeoutSec !== null
@@ -107,11 +114,12 @@ execution = replaceOnce(
                         : DEFAULT_BROWSER_COMMAND_TIMEOUT;`,
   `                    // Attachment preparation precedes the provider response timer.
                     // Include the same bounded setup allowance as the Python caller.
-                    const attachmentSetupSeconds = cmd.site === 'gemini' && cmd.name === 'ask' && kwargs.file ? 180 : 0;
+                    const attachmentSetupSeconds = ((cmd.site === 'gemini' && cmd.name === 'ask' && kwargs.file)
+                        || (cmd.site === 'chatgpt' && cmd.name === 'image')) ? 180 : 0;
                     const browserTimeout = (userTimeoutSec !== null
                         ? userTimeoutSec + RUNTIME_TIMEOUT_PADDING_SECONDS
                         : DEFAULT_BROWSER_COMMAND_TIMEOUT) + attachmentSetupSeconds;`,
-  'Gemini attachment setup timeout budget',
+  'Gemini attachment and ChatGPT image setup/export timeout budgets',
 )
 fs.writeFileSync(executionPath, execution)
 
@@ -1906,7 +1914,91 @@ chatgptUtils = replaceWithinFunction(chatgptUtils,
                 && !(options.localConversationUrl && isSameChatGPTConversation(currentUrl, options.localConversationUrl))) {`,
   'ChatGPT response polling preserves the verified local route alias',
 )
+{
+  const start = chatgptUtils.indexOf('export async function waitForChatGPTImages(')
+  const end = chatgptUtils.indexOf('export async function getProjectList(page) {', start)
+  if (start < 0 || end < 0) throw new Error('ChatGPT image wait patch boundaries were not found')
+  const imageWait = fs.readFileSync(path.join(runtimeDir, 'patches', 'chatgpt-image-wait.js'), 'utf8')
+  chatgptUtils = chatgptUtils.slice(0, start) + imageWait + '\n\n' + chatgptUtils.slice(end)
+}
 fs.writeFileSync(chatgptUtilsPath, chatgptUtils)
+
+let chatgptImage = fs.readFileSync(chatgptImagePath, 'utf8')
+chatgptImage = replaceOnce(chatgptImage,
+  'clearChatGPTDraft, getChatGPTVisibleImageUrls,',
+  'clearChatGPTDraft, resolveChatGPTConversationIdentity, getChatGPTVisibleImageUrls,',
+  'ChatGPT image owned conversation identity import',
+)
+chatgptImage = replaceOnce(chatgptImage,
+  '        const prompt = kwargs.prompt;',
+  `        const prompt = kwargs.prompt;
+        const report = (stage, conversation_url = '') => {
+            console.error('[chatgpt/image] ' + JSON.stringify({ stage, conversation_url }));
+        };
+        report('preparing');`,
+  'ChatGPT image stage diagnostics',
+)
+chatgptImage = replaceOnce(chatgptImage,
+  '        const sent = await sendChatGPTMessage(page, buildPrompt(prompt, imagePaths.length));',
+  '        const submittedPrompt = buildPrompt(prompt, imagePaths.length);\n        const sent = await sendChatGPTMessage(page, submittedPrompt);',
+  'ChatGPT image retain exact submitted prompt for ownership',
+)
+chatgptImage = replaceOnce(chatgptImage,
+  `        // ChatGPT briefly navigates to /c/{id} after sending, then may
+        // redirect back to the home page. Poll until we capture the /c/ URL.
+        let convUrl = '';
+        for (let ci = 0; ci < 10; ci++) {
+            const url = await currentChatGPTLink(page);
+            if (url.includes('/c/')) { convUrl = url; break; }
+            await page.sleep(2);
+        }
+        if (!convUrl) {
+            convUrl = await currentChatGPTLink(page);
+        }
+
+        const urls = await waitForChatGPTImages(page, beforeUrls, timeout, convUrl);
+        const link = convUrl;`,
+  `        report('prompt_submitted');
+        // Resolve the saved ID without navigating away from a live local route.
+        let convUrl = '';
+        let localConversationUrl = '';
+        for (let ci = 0; ci < 10; ci++) {
+            const identity = await resolveChatGPTConversationIdentity(page, submittedPrompt);
+            if (identity) {
+                convUrl = identity.conversationUrl;
+                localConversationUrl = identity.localConversationUrl || '';
+                break;
+            }
+            const url = await currentChatGPTLink(page);
+            if (url.includes('/c/')) { convUrl = url; break; }
+            await page.sleep(2);
+        }
+        if (!convUrl) convUrl = await currentChatGPTLink(page);
+        report('waiting', convUrl);
+        let urls;
+        try {
+            urls = await waitForChatGPTImages(page, beforeUrls, timeout, convUrl, {
+                prompt: submittedPrompt, localConversationUrl,
+                onProgress(stage, url) { convUrl = url; report(stage, url); },
+            });
+        } catch (error) {
+            report('image_wait_failed', convUrl);
+            throw error;
+        }
+        const link = convUrl;`,
+  'ChatGPT image preserve submitted route and report progress',
+)
+chatgptImage = replaceOnce(chatgptImage,
+  '        const assets = await getChatGPTImageAssets(page, urls);',
+  "        report('exporting', link);\n        const assets = await getChatGPTImageAssets(page, urls);",
+  'ChatGPT image export diagnostics',
+)
+chatgptImage = replaceOnce(chatgptImage,
+  '        return results;',
+  "        report('saved', link);\n        return results;",
+  'ChatGPT image saved diagnostics',
+)
+fs.writeFileSync(chatgptImagePath, chatgptImage)
 
 let ask = fs.readFileSync(askPath, 'utf8')
 ask = replaceOnce(
