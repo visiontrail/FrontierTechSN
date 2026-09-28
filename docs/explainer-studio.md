@@ -45,6 +45,12 @@ Gemini 新请求保存独立提交标识和完整提示词。当 Videos 页面�
 
 本机 FFmpeg 没有 libass，因此字幕和关键词用 Pillow 生成透明文字层再合成。字幕按整个镜头显示，不是逐字卡拉 OK 字幕。开启字幕时过长的一段会要求拆镜头，以免文字溢出。
 
+### English sample project copy
+
+The English interface displays saved project titles and research verbatim. Earlier validation samples retained Chinese titles after the interface was translated. To translate those specific samples, preview the changes with `.venv/bin/python scripts/translate_explainer_samples.py`, then apply them with `--apply`. The script targets the known sample IDs and original text only; it does not translate arbitrary user content or change the selected narration language.
+
+Original project JSON is backed up under `outputs/explainer-validation/` before replacement. The cleanup preserves completed status, generated assets, progress, scene content and timestamps, and increments the revision to reject stale saves. It also translates the old sample title embedded in research and the DeepSeek display name in the sample run log. Active projects are rejected. The running service reads these files on each request, so the library updates without rebuilding or restarting the service.
+
 ## 耗时与运行约束
 
 ChatGPT 生成沿用现有 10—30 分钟请求间隔（当前配置 600 秒），Gemini 沿用 60—120 秒随机间隔。180 张全新插图仅请求间隔下限就约 29.8 小时，尚未计入图像生成和配音。工作台会显示实际镜头数对应的下限。较长的每镜时长可减少图量，但会改变参考视频的快切节奏；缓存可减少重试成本。
