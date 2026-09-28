@@ -480,6 +480,18 @@ export async function uploadFrame(
     const nativeErrors = [];
     let method = '';
     try {
+        // Discovery cancels Gemini's first picker click so it does not leave
+        // an unmanaged native dialog open. The bridge's set-file-input action
+        // now owns the chooser: it clicks this marked input and waits for
+        // Page.fileChooserOpened. Keeping discovery active cancels that click
+        // too, forcing every upload into the compatibility fallback.
+        await page.evaluate(`(() => {
+          const marker = ${JSON.stringify(marker)};
+          const listener = window[marker];
+          if (listener) document.removeEventListener('click', listener, true);
+          delete window[marker];
+          return true;
+        })()`);
         // Prefer the Browser Bridge's native file-input action. It delegates to
         // Chrome's file-input machinery and remains observable by Gemini even
         // when synthetic DataTransfer change events are ignored.

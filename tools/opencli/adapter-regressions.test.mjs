@@ -1466,6 +1466,10 @@ function videoUploadPage({
         actions.push(['cleanup', selector])
         return true
       }
+      if (script.includes("document.removeEventListener('click', listener, true)")) {
+        actions.push(['stopInputDiscovery', selector])
+        return true
+      }
       throw new Error(`Unexpected Gemini video upload script: ${String(script).slice(0, 120)}`)
     },
   }
@@ -1499,6 +1503,19 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0], reuseInput 
   let uploadClicks = 0
   let inputSerial = 0
   const clickListeners = new Set()
+  const clickInput = (input, origin) => {
+    const event = {
+      target: input,
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true
+        actions.push(['preventChooser', origin])
+      },
+    }
+    for (const listener of clickListeners) listener(event)
+    actions.push(['inputClick', origin, input.id, event.defaultPrevented, clickListeners.size])
+    return event
+  }
 
   const addInput = (name, prefix = 'input') => {
     const attributes = new Map()
@@ -1589,8 +1606,7 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0], reuseInput 
       uploadClicks += 1
       if (reuseInput) {
         const input = inputs.find(candidate => candidate.name === 'Filedata') || addInput('Filedata', 'reused')
-        const event = { target: input, preventDefault() { actions.push(['preventChooser']) } }
-        for (const listener of clickListeners) listener(event)
+        clickInput(input, 'discovery')
         return
       }
       const delay = Number(newInputDelays[uploadClicks - 1] ?? 0)
@@ -1616,6 +1632,12 @@ function vmUploadDomPage({ initialInputs = [], newInputDelays = [0], reuseInput 
       if (!input) throw new Error(`target input not found: ${selector}`)
       selectedInputIds.push(input.id)
       actions.push(['setFileInput', files, selector, input.id])
+      // Browser Bridge intercepts the native chooser, then clicks the marked
+      // input and waits for Page.fileChooserOpened before injecting the file.
+      // A lingering discovery listener cancels that click and prevents upload.
+      if (clickInput(input, 'native').defaultPrevented) {
+        throw new Error('Page.fileChooserOpened not received within 5s — input click was canceled')
+      }
       attachmentCount += 1
       input.files = []
     },
@@ -1710,6 +1732,7 @@ test('Gemini video cleans baseline and target markers when discovery wait reject
     assert.equal(input.getAttribute('data-opencli-video-upload-baseline'), null)
     assert.equal(input.getAttribute('data-opencli-video-upload-target'), null)
   }
+  assert.equal(page.clickListeners.size, 0)
 })
 
 test('Gemini video inner discovery selects distinct new inputs for ordered frames', async (t) => {
@@ -1736,6 +1759,39 @@ test('Gemini video reuses the input activated by its control without leaving nat
   assert.equal(page.selectedInputIds[0], page.selectedInputIds[1])
   assert.match(page.selectedInputIds[0], /^reused-/)
   assert.equal(page.actions.filter(([action]) => action === 'preventChooser').length, 2)
+  const clicks = page.actions.filter(([action]) => action === 'inputClick')
+  assert.deepEqual(clicks.map(([, origin, , canceled, listeners]) => [origin, canceled, listeners]), [
+    ['discovery', true, 1],
+    ['native', false, 0],
+    ['discovery', true, 1],
+    ['native', false, 0],
+  ])
+  assert.equal(page.clickListeners.size, 0)
+  for (const input of page.inputs) {
+    assert.equal(input.getAttribute('data-opencli-video-upload-target'), null)
+    assert.equal(input.getAttribute('data-opencli-video-upload-baseline'), null)
+  }
+})
+
+test('Gemini video cleans reused input markers and listeners when attachment waiting fails', async (t) => {
+  const [frame] = videoFrameFixture(t)
+  const page = vmUploadDomPage({ initialInputs: ['Filedata'], reuseInput: true })
+  const wait = page.wait
+  page.wait = async seconds => {
+    if (page.actions.some(([action]) => action === 'setFileInput')) {
+      throw new Error('browser bridge disconnected after native upload')
+    }
+    return wait(seconds)
+  }
+
+  await assert.rejects(
+    uploadFrame(page, frame, 1, { attachmentTimeoutMs: 1000 }),
+    /browser bridge disconnected after native upload/,
+  )
+
+  const nativeClick = page.actions.find(([action, origin]) => action === 'inputClick' && origin === 'native')
+  assert.equal(nativeClick[3], false)
+  assert.equal(nativeClick[4], 0)
   assert.equal(page.clickListeners.size, 0)
   for (const input of page.inputs) {
     assert.equal(input.getAttribute('data-opencli-video-upload-target'), null)
