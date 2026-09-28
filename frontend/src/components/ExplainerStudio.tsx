@@ -8,6 +8,7 @@ import {
 } from '../explainerApi'
 import type { ExplainerForm, ExplainerProject, ExplainerScene, ExplainerStatus, ExplainerStyle } from '../explainerApi'
 import ExplainerStylePreview from './ExplainerStylePreview'
+import ExplainerProjectHistory from './ExplainerProjectHistory'
 import './ExplainerStudio.css'
 
 const STATUS: Record<ExplainerStatus, string> = {
@@ -198,26 +199,23 @@ export default function ExplainerStudio() {
 
   return <div className="explainer-studio">
     <header className="explainer-header">
-      <div><p className="explainer-eyebrow">EXPLAINER STUDIO / 01</p><h1>Explainer Studio<span>Turn research into a story.</span></h1>
-        <p className="explainer-intro">Turn your research into a long-form video with line illustrations, narration and occasional animation, all in your own style.</p></div>
-      <Link to="/explainer-studio" className="explainer-button explainer-new">+ New project</Link>
+      <div><p className="explainer-eyebrow">RESEARCH → STORY → VIDEO</p><h1>Explainer Studio</h1>
+        <p className="explainer-intro">A place for your research to become an illustrated story.</p></div>
+      <div className="explainer-header-actions">
+        <ExplainerProjectHistory projects={library?.projects} error={!!libraryError} currentId={id} statusLabels={STATUS} onRetry={() => { void reloadLibrary() }} />
+        <Link to="/explainer-studio" className="explainer-button explainer-new">+ New project</Link>
+      </div>
     </header>
 
-    <div className="explainer-workspace">
-      <aside className="explainer-library" aria-label="Explainer projects">
-        <div className="explainer-library-heading"><h2>My explainers</h2><span>{library?.projects.length ?? '—'}</span></div>
-        {libraryError && <p className="explainer-small-error" role="alert">Could not load projects.</p>}
-        {!library && !libraryError && <p className="explainer-muted">Loading projects…</p>}
-        {library?.projects.length === 0 && <p className="explainer-library-empty">Your first explainer starts<br /> with a piece of research.</p>}
-        <nav aria-label="Select an explainer project">
-          {library?.projects.map((item) => <Link key={item.id} to={`/explainer-studio/${item.id}`} className={`explainer-project-link${id === item.id ? ' is-selected' : ''}`} aria-current={id === item.id ? 'page' : undefined}>
-            <span className={`explainer-status-dot${isExplainerRunning(item.status) ? ' is-running' : ''}`} />
-            <span><strong>{item.title}</strong><small>{STATUS[item.status] ?? item.status} · {new Date(item.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</small></span>
-          </Link>)}
-        </nav>
-        <div className="explainer-workflow-note"><span>WORKFLOW</span><p>Research → Script & storyboard<br />→ Images & audio → Video</p></div>
-      </aside>
+    <nav className="explainer-workflow" aria-label="Studio sections">
+      {([['source', 'Research & direction', 'Start with your sources'], ['style', 'Make it your own', 'Artwork, tone & motion'], ['storyboard', 'Narration & visuals', 'Review and generate']] as const).map(([section, title, hint], index) => <button key={section} type="button" disabled={!form} onClick={() => {
+        const target = document.getElementById(`explainer-${section}-section`)
+        target?.scrollIntoView({ block: 'start' })
+        target?.focus({ preventScroll: true })
+      }}><span>{String(index + 1).padStart(2, '0')}</span><span><strong>{title}</strong><small>{hint}</small></span><span aria-hidden="true">↓</span></button>)}
+    </nav>
 
+    <div className="explainer-workspace">
       <div className="explainer-editor">
         {(error || loadError) && <div className="explainer-alert is-error" role="alert"><p>{error ?? (loadError instanceof Error ? loadError.message : String(loadError))}</p>
           {conflict && <><p>The server version has changed. Your local edits are preserved. Copy anything you want to keep before reloading the server version.</p><button type="button" onClick={() => { setOverride(null); try { localStorage.removeItem(storageKey(id)) } catch { /* no-op */ } setError(null); setConflict(false); void queryClient.invalidateQueries({ queryKey: ['explainer', id] }) }}>Discard local edits and reload</button></>}
@@ -228,8 +226,9 @@ export default function ExplainerStudio() {
         {!form && !projectLoading && !loadError && <div className="explainer-loading">Preparing the studio…</div>}
 
         {form && <>
-          <div className="explainer-project-bar"><span className="explainer-badge">{project ? STATUS[project.status] : 'New project'}</span>
-            <span className="explainer-save-state">{dirty ? 'Draft kept locally · Not yet saved to project' : project ? 'Saved to project' : 'Start with your research'}</span>
+          <div className="explainer-project-bar">
+            <div className="explainer-project-identity"><strong>{form.title.trim() || 'Untitled explainer'}</strong><span className="explainer-save-state">{dirty ? 'Draft kept locally · Not yet saved to project' : project ? 'Saved to project' : 'Start with your research'} · {form.scenes.length} {form.scenes.length === 1 ? 'scene' : 'scenes'}</span></div>
+            <span className="explainer-badge">{project ? STATUS[project.status] : 'New project'}</span>
             <button type="button" onClick={() => void act('save')} disabled={locked || (!!project && !dirty) || !form.title.trim()}>{pending === 'save' ? 'Saving…' : 'Save project'}</button>
           </div>
 
@@ -253,7 +252,7 @@ export default function ExplainerStudio() {
           </section>}
 
           <fieldset disabled={locked} className="explainer-fieldset">
-            <section className="explainer-section">
+            <section id="explainer-source-section" tabIndex={-1} className="explainer-section">
               <div className="explainer-section-heading"><div><p className="explainer-eyebrow">01 / THE SOURCE</p><h2>Research & direction</h2></div><span className="explainer-section-aside">Give your story a source</span></div>
               <label htmlFor="explainer-title">Video title / working title</label><input id="explainer-title" value={form.title} onChange={(e) => patch('title', e.target.value)} placeholder="Why do we mistake being busy for making progress?" maxLength={200} />
               <div className="explainer-research-heading"><label htmlFor="explainer-research">Research, arguments & sources</label><button type="button" onClick={() => fileRef.current?.click()}>Import TXT / Markdown</button></div>
@@ -272,7 +271,7 @@ export default function ExplainerStudio() {
               <label className="explainer-check"><input type="checkbox" checked={form.captions_enabled} onChange={(e) => patch('captions_enabled', e.target.checked)} /><span>Show narration captions in the finished video</span></label>
             </section>
 
-            <section className="explainer-section">
+            <section id="explainer-style-section" tabIndex={-1} className="explainer-section">
               <div className="explainer-section-heading"><div><p className="explainer-eyebrow">02 / VISUAL LANGUAGE</p><h2>Make it your own</h2></div><button type="button" onClick={() => void act('defaults')}>{pending === 'defaults' ? 'Saving…' : 'Save as defaults'}</button></div>
               <div className="explainer-style-grid">
                 <div><div className="explainer-presets" aria-label="Style presets">{defaults?.presets.map((preset) => <button key={preset.id} type="button" onClick={() => patch('style', { ...preset.style })}>{preset.label}</button>)}</div>
@@ -307,7 +306,7 @@ export default function ExplainerStudio() {
               <div className="explainer-generate-row"><p>Research → Full narration + Storyboard</p><button type="button" className="explainer-button is-primary" disabled={!form.title.trim() || form.research.trim().length < 40 || invalidScenes} onClick={() => void act('script')}>{form.scenes.length ? 'Regenerate script ↗' : 'Generate script ↗'}</button></div>
             </section>
 
-            <section className="explainer-section explainer-script">
+            <section id="explainer-storyboard-section" tabIndex={-1} className="explainer-section explainer-script">
               <div className="explainer-section-heading"><div><p className="explainer-eyebrow">03 / STORYBOARD</p><h2>Narration & visuals</h2></div><button type="button" disabled={form.scenes.length === 0} onClick={downloadScript}>Export narration ↓</button></div>
               <div className="explainer-script-summary"><span>{form.scenes.length} scenes</span><span>{count.toLocaleString('en-US')} {form.language === 'zh' ? 'characters' : 'words'}</span><span>Estimated narration: {estimate.toFixed(1)} min</span><span>Target: {form.target_minutes} min</span></div>
               <p className="explainer-render-estimate">{form.scenes.length > 0 && imageInterval ? `${form.scenes.length} images. With the current ${Math.round(imageInterval / 60)}-minute request interval, generating all images from scratch adds at least about ${imageWaitHours.toFixed(1)} hours of waiting, plus generation and rendering time. Reusing existing assets can shorten this.` : 'The current image request interval applies. Increase scene duration to reduce the number of images.'}</p>

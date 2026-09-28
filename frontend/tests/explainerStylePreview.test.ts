@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ExplainerProject, ExplainerStyle } from '../src/explainerApi.ts'
-import { selectStylePreviews, sameExplainerVisualStyle } from '../src/explainerStylePreview.ts'
+import { selectStylePreviews, selectStyleVideoPreviews, sameExplainerVisualStyle } from '../src/explainerStylePreview.ts'
 
 const style: ExplainerStyle = {
   background_color: '#F4EBDD', ink_color: '#302A25', accent_color: '#C56545',
@@ -127,4 +127,69 @@ test('missing and duplicate image paths do not produce candidates', () => {
     { id: 'scene-003', image_path: 'image.png' },
   ] } })
   assert.deepEqual(selectStylePreviews(style, saved).map((item) => item.sceneId), ['scene-002'])
+})
+
+function videoProject(id: string, motion: ExplainerStyle['motion_mode'] = 'none', changes: Partial<ExplainerProject> = {}) {
+  return project(id, {
+    style: { ...style, motion_mode: motion },
+    artifacts: { video_url: `/api/explainers/${encodeURIComponent(id)}/assets/renders/hash/video.mp4` },
+    ...changes,
+  })
+}
+
+test('completed videos are grouped by still and animated motion without sample-specific IDs', () => {
+  const still = videoProject('my-video')
+  const animated = videoProject('animation', 'gemini')
+  const pan = videoProject('pan-and-zoom', 'subtle')
+  assert.deepEqual(selectStyleVideoPreviews(style, animated, [still, pan, animated]).map((item) => ({
+    id: item.projectId, kind: item.kind, current: item.isCurrentProject,
+  })), [
+    { id: 'animation', kind: 'animated', current: true },
+    { id: 'my-video', kind: 'still', current: false },
+    { id: 'pan-and-zoom', kind: 'animated', current: false },
+  ])
+})
+
+test('video previews require a completed delivery and matching visual style', () => {
+  assert.deepEqual(selectStyleVideoPreviews(style, undefined, [
+    videoProject('draft', 'none', { status: 'draft' }),
+    videoProject('running', 'gemini', { status: 'rendering' }),
+    videoProject('failed', 'none', { status: 'failed' }),
+    videoProject('cleared', 'none', { artifacts: {} }),
+    videoProject('different', 'none', { style: { ...style, accent_color: '#000000' } }),
+  ]), [])
+  for (const field of ['background_color', 'ink_color', 'accent_color', 'character_description', 'visual_direction'] as const) {
+    assert.deepEqual(selectStyleVideoPreviews({ ...style, [field]: `${style[field]} changed` }, videoProject('current')), [], field)
+  }
+})
+
+test('video selection never revives stale current-project delivery artifacts', () => {
+  const stale = videoProject('current')
+  assert.deepEqual(selectStyleVideoPreviews(style, videoProject('current', 'none', { artifacts: {} }), [stale]), [])
+  assert.deepEqual(selectStyleVideoPreviews(style, undefined, [stale], 'current'), [])
+})
+
+test('video URLs must belong to the same project and contain a safe MP4 asset path', () => {
+  for (const url of [
+    'https://example.com/video.mp4', '//example.com/video.mp4',
+    '/api/explainers/other/assets/video.mp4', '/api/explainers/current/assets/../video.mp4',
+    '/api/explainers/current/assets/renders/%2e%2e/video.mp4',
+    '/api/explainers/current/assets/renders//video.mp4', '/api/explainers/current/assets/./video.mp4',
+    '/api/explainers/current/assets/renders/%00/video.mp4',
+    '/api/explainers/current/assets/renders%5cvideo.mp4', '/api/explainers/current/assets/renders/%invalid/video.mp4',
+    '/api/explainers/current/assets/video.mp4?download=1', '/api/explainers/current/assets/video.mp4#clip.mp4',
+    '/api/explainers/current/assets/image.png',
+  ]) {
+    const saved = videoProject('current', 'none', { artifacts: { video_url: url } })
+    assert.deepEqual(selectStyleVideoPreviews(style, saved), [], url)
+  }
+})
+
+test('video URLs retain safely encoded filenames and duplicate deliveries are omitted', () => {
+  const url = '/api/explainers/project%20id/assets/renders/scene%20%231/%E8%A7%86%E9%A2%91%20100%25.mp4'
+  const saved = videoProject('project id', 'none', { artifacts: { video_url: url } })
+  const selected = selectStyleVideoPreviews(style, undefined, [saved, saved])
+  assert.equal(selected.length, 1)
+  assert.equal(selected[0].videoUrl, url)
+  assert.equal(selected[0].projectTitle, saved.title)
 })
