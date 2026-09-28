@@ -22,10 +22,10 @@ test('queue eligibility protects incomplete stories while leaving them available
 })
 
 function project(id: string, changes: Partial<ExplainerProject> = {}): ExplainerProject {
-  return { ...research, id, status: 'draft', updated_at: '2026-09-28T01:00:00Z', ...changes } as ExplainerProject
+  return { ...research, id, status: 'draft', logs: [], artifacts: {}, progress: { completed: 0, total: 0, message: '' }, updated_at: '2026-09-28T01:00:00Z', ...changes } as ExplainerProject
 }
 
-test('topic plans include unfinished saved work and exclude running, queued, and delivered videos', () => {
+test('topic plans contain only unsubmitted drafts and exclude production tasks', () => {
   const projects = [
     project('old', { updated_at: '2026-09-27T01:00:00Z' }), project('new'),
     project('script', { status: 'script_ready' }), project('retry', { status: 'failed' }),
@@ -34,7 +34,7 @@ test('topic plans include unfinished saved work and exclude running, queued, and
     project('complete', { status: 'completed' }),
   ]
   const originalOrder = projects.map((item) => item.id)
-  assert.deepEqual(selectTopicPlans(projects).map((item) => item.id), ['new', 'script', 'retry', 'cancel', 'interrupt', 'old'])
+  assert.deepEqual(selectTopicPlans(projects).map((item) => item.id), ['new', 'script', 'old'])
   assert.deepEqual(projects.map((item) => item.id), originalOrder)
   assert.deepEqual(selectTopicPlans(), [])
 })

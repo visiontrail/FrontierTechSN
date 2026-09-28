@@ -115,7 +115,7 @@ export default function App() {
               to={to}
               end={end}
               title={label}
-              className={({ isActive }) => `nav-item${isActive ? ' is-active' : ''}`}
+              className={({ isActive }) => `nav-item${isActive || (to === '/' && location.pathname.startsWith('/tasks/')) ? ' is-active' : ''}`}
             >
               <span className="nav-icon"><Icon /></span>
               <span className="nav-text">
@@ -207,6 +207,7 @@ export default function App() {
               <Route path="/explainer-studio/:id?" element={<ExplainerStudio />} />
               <Route path="/new" element={<Navigate to="/morning-desk" replace />} />
               <Route path="/planning" element={<Navigate to="/morning-desk" replace />} />
+              <Route path="/tasks/explainers/:id" element={<ExplainerStudio taskDetail />} />
               <Route path="/tasks/:id" element={<TaskDetail />} />
               <Route path="/account-operations/*" element={<Navigate to="/morning-desk" replace />} />
               <Route path="/settings" element={<SettingsPage />} />

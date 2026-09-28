@@ -1,0 +1,59 @@
+.tasks-load-error {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.tasks-load-error button {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.source-glyph.explainer {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  color: var(--accent);
+}
+
+.task-status-cell {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-status-cell .badge {
+  max-width: 100%;
+  white-space: normal;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.task-status-cell small {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--text-faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-status-cell .badge:is(.writing_script, .generating_audio, .generating_images, .generating_motion, .rendering) {
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.task-status-cell .badge:is(.draft, .script_ready, .cancelled, .interrupted) {
+  border-color: color-mix(in srgb, var(--accent-yellow) 34%, transparent);
+  background: color-mix(in srgb, var(--accent-yellow) 13%, transparent);
+  color: var(--accent-yellow);
+}

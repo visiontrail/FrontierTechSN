@@ -1,4 +1,5 @@
 import type { ExplainerForm, ExplainerProject } from './explainerApi'
+import { isExplainerTask } from './explainerTasks.ts'
 
 export function canQueueExplainer(form: Pick<ExplainerForm, 'title' | 'research' | 'scenes' | 'target_minutes'>) {
   return !!form.title.trim()
@@ -8,7 +9,7 @@ export function canQueueExplainer(form: Pick<ExplainerForm, 'title' | 'research'
 }
 
 export function selectTopicPlans(projects: ExplainerProject[] = []) {
-  return projects.filter((project) => ['draft', 'script_ready', 'failed', 'cancelled', 'interrupted'].includes(project.status))
+  return projects.filter((project) => !isExplainerTask(project))
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
 }
 
