@@ -143,15 +143,20 @@ function uploadFailure(expectedCount, substep, diagnostic) {
     const nativeErrors = Array.isArray(diagnostic?.nativeErrors) ? diagnostic.nativeErrors : [];
     const nativeDenied = nativeErrors.some(error =>
         error?.method === 'page.setFileInput'
-        && /-32000|not allowed/i.test(String(error?.error || ''))
+        && /-32000|not allowed|Page\.fileChooserOpened[^\n]*not received/i.test(String(error?.error || ''))
     );
     const directCdpDenied = nativeErrors.some(error =>
         error?.method === 'DOM.setFileInputFiles'
         && /CDP method not permitted[\s\S]*Runtime\.evaluate/i.test(String(error?.error || ''))
     );
     const inputFiles = diagnostic?.state?.inputFiles;
+    const attachments = diagnostic?.state?.attachments;
+    const clearedIdleLimit = diagnostic?.clearedIdleLimit;
     const syntheticCleared = diagnostic?.method === 'DataTransfer'
-        && Number(diagnostic?.state?.attachments || 0) === 0
+        && diagnostic?.state?.busy === false
+        && Number.isInteger(attachments) && attachments >= 0 && attachments < expectedCount
+        && Number.isFinite(clearedIdleLimit) && clearedIdleLimit > 0
+        && Number(diagnostic?.clearedIdleSamples || 0) >= clearedIdleLimit
         && Array.isArray(inputFiles)
         && inputFiles.length > 0
         && inputFiles.every(files => Array.isArray(files) && files.length === 0);
@@ -612,6 +617,7 @@ export async function uploadFrame(
             selectedInput: selected.selected,
             nativeErrors,
             clearedIdleSamples,
+            clearedIdleLimit: Math.max(1, clearedIdleLimit),
             state,
         });
     } finally {

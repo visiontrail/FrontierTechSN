@@ -1346,6 +1346,7 @@ for (const scenario of ['ready', 'busy', 'unrelated-preview', 'disabled-send']) 
 
 function videoUploadPage({
   native = 'success',
+  nativeError = 'Not allowed',
   cdp = false,
   clear = false,
   busyReads = 0,
@@ -1476,7 +1477,7 @@ function videoUploadPage({
   if (native) {
     page.setFileInput = async (files, target) => {
       actions.push(['setFileInput', files, target])
-      if (native === 'error') throw new Error('Not allowed')
+      if (native === 'error') throw new Error(nativeError)
       if (!clear) attachments += 1
     }
   }
@@ -2084,12 +2085,17 @@ test('Gemini video fails closed with substep and input state when the UI clears 
   assert.equal(page.actions.some(([action]) => action === 'DataTransfer'), false)
 })
 
-test('Gemini video reports a stable upload capability code only after every path is blocked', async (t) => {
+for (const expectedCount of [1, 2]) {
+for (const nativeError of ['Not allowed', 'Page.fileChooserOpened not received within 5s']) {
+test(`Gemini video reports exhausted upload capability for keyframe ${expectedCount}: ${nativeError}`, async (t) => {
   const [frame] = videoFrameFixture(t)
-  const page = videoUploadPage({ native: 'error', cdp: 'error', clear: true })
+  const page = videoUploadPage({
+    native: 'error', nativeError, cdp: 'error', clear: true,
+    initialAttachments: expectedCount - 1,
+  })
 
   await assert.rejects(
-    uploadFrame(page, frame, 1, { attachmentTimeoutMs: 1000, clearedIdleLimit: 2 }),
+    uploadFrame(page, frame, expectedCount, { attachmentTimeoutMs: 1000, clearedIdleLimit: 2 }),
     (error) => {
       assert.match(
         error.message,
@@ -2097,15 +2103,62 @@ test('Gemini video reports a stable upload capability code only after every path
       )
       assert.match(error.message, /"method":"DataTransfer"/)
       assert.match(error.message, /"method":"page\.setFileInput"/)
-      assert.match(error.message, /-32000|Not allowed/i)
+      assert.ok(error.message.includes(nativeError))
       assert.match(error.message, /CDP method not permitted: Runtime\.evaluate/)
-      assert.match(error.message, /"attachments":0/)
+      assert.ok(error.message.includes(`"attachments":${expectedCount - 1}`))
       assert.match(error.message, /"inputFiles":\[\[\]\]/)
+      assert.match(error.message, /"clearedIdleSamples":2/)
+      assert.match(error.message, /"clearedIdleLimit":2/)
       return true
     },
   )
   assert.equal(page.actions.filter(([action]) => action === 'DataTransfer').length, 1)
 })
+}
+}
+
+for (const scenario of ['native-timeout-only', 'unrelated-native-error', 'generic-timeout', 'busy', 'files-remain', 'single-empty-sample', 'incomplete-idle-budget']) {
+test(`Gemini video keeps upload capability retryable without complete evidence: ${scenario}`, async (t) => {
+  const [frame] = videoFrameFixture(t)
+  let now = 0
+  t.mock.method(Date, 'now', () => now)
+  const nativeError = scenario === 'unrelated-native-error' ? 'Browser target crashed'
+    : scenario === 'generic-timeout' ? 'Native command timed out'
+    : 'Page.fileChooserOpened not received within 5s'
+  const page = videoUploadPage({
+    native: 'error', nativeError,
+    cdp: scenario === 'native-timeout-only' ? false : 'error',
+    clear: true, initialAttachments: 1,
+  })
+  const evaluate = page.evaluate
+  page.evaluate = async script => {
+    const result = await evaluate(script)
+    if (script.includes('const attachmentsInComposer')) {
+      if (scenario === 'busy') return { ...result, busy: true, busyCount: 1 }
+      if (scenario === 'files-remain') return { ...result, inputFiles: [[{ name: 'frame.png' }]] }
+    }
+    return result
+  }
+  page.wait = async seconds => { now += seconds * 1000 }
+  const attachmentTimeoutMs = scenario === 'single-empty-sample' ? 500
+    : scenario === 'incomplete-idle-budget' ? 1500 : 2000
+  const clearedIdleLimit = scenario === 'incomplete-idle-budget' ? 8 : 2
+
+  await assert.rejects(
+    uploadFrame(page, frame, 2, { attachmentTimeoutMs, clearedIdleLimit }),
+    error => {
+      assert.match(error.message, /keyframe 2 upload failed at wait_for_attachment/)
+      assert.doesNotMatch(error.message, /OPENCLI_CAPABILITY_UNAVAILABLE/)
+      if (scenario === 'single-empty-sample') assert.match(error.message, /"clearedIdleSamples":1/)
+      if (scenario === 'incomplete-idle-budget') {
+        assert.match(error.message, /"clearedIdleSamples":2/)
+        assert.match(error.message, /"clearedIdleLimit":8/)
+      }
+      return true
+    },
+  )
+})
+}
 
 for (const withLast of [false, true]) {
 test(`Gemini video command supports an optional final frame: ${withLast}`, async (t) => {
