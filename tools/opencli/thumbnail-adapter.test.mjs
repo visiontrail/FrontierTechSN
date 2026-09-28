@@ -247,7 +247,7 @@ test('image timeout checkpoint recovers the original prompt without a second sen
     async resolveChatGPTConversationIdentity() { return { conversationUrl: savedUrl } },
     async getVisibleMessages() { return [{ Role: 'User', Text: sends[0] }] },
     chatGPTPromptMatches: (a, b) => a === b,
-    isSameChatGPTConversation: (a, b) => a === b,
+    parseChatGPTConversationId: url => url.split('/c/')[1],
     async waitForChatGPTImages() {
       if (++waits === 1) throw new AdapterError('response timeout')
       return [imageUrl]

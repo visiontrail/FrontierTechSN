@@ -1948,6 +1948,8 @@ chatgptUtils = replaceWithinFunction(chatgptUtils,
 fs.writeFileSync(chatgptUtilsPath, chatgptUtils)
 
 let chatgptImage = fs.readFileSync(chatgptImagePath, 'utf8')
+chatgptImage = chatgptImage.replace('chatGPTPromptMatches, isSameChatGPTConversation,',
+  'chatGPTPromptMatches, parseChatGPTConversationId,')
 if (!chatgptImage.includes('const priorRequest = requestState.prior;')) {
 chatgptImage = replaceOnce(chatgptImage,
   'clearChatGPTDraft, getChatGPTVisibleImageUrls,',
@@ -2026,7 +2028,7 @@ chatgptImage = replaceOnce(chatgptImage,
 }
 chatgptImage = replaceOnce(chatgptImage,
   'clearChatGPTDraft, resolveChatGPTConversationIdentity, getChatGPTVisibleImageUrls,',
-  'clearChatGPTDraft, resolveChatGPTConversationIdentity, getVisibleMessages, chatGPTPromptMatches, isSameChatGPTConversation, getChatGPTVisibleImageUrls,',
+  'clearChatGPTDraft, resolveChatGPTConversationIdentity, getVisibleMessages, chatGPTPromptMatches, parseChatGPTConversationId, getChatGPTVisibleImageUrls,',
   'ChatGPT image recovery ownership imports',
 )
 chatgptImage = replaceOnce(chatgptImage,

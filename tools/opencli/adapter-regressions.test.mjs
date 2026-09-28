@@ -13,6 +13,7 @@ import { modelCommand as chatgptModelCommand } from './node_modules/@jackwener/o
 import { askCommand as geminiAskCommand } from './node_modules/@jackwener/opencli/clis/gemini/ask.js'
 import { askCommand as chatgptAskCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/ask.js'
 import { readCommand as chatgptReadCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/read.js'
+import { imageCommand as chatgptImageCommand } from './node_modules/@jackwener/opencli/clis/chatgpt/image.js'
 import {
   attachGeminiFile,
   sendGeminiMessage,
@@ -56,6 +57,11 @@ function videoTransferPage(payload, { failChunk = 0, httpStatus = 200 } = {}) {
     },
   }
 }
+
+test('installed ChatGPT image adapter loads its recovery dependencies and state argument', () => {
+  assert.equal(chatgptImageCommand.name, 'image')
+  assert.ok(chatgptImageCommand.args.some(arg => arg.name === 'state-file'))
+})
 
 test('Gemini history recovery identifies the exact new user prompt among concurrent chats', async () => {
   const old = 'https://gemini.google.com/app/old123'

@@ -34,7 +34,8 @@ export async function recoverChatGPTImageRequest(page, prior, prompt, timeout) {
                 throw new CommandExecutionError('CHATGPT_IMAGE_TURN_PENDING: recovery prompt mismatch; original request was not replayed');
             }
             const identity = await resolveChatGPTConversationIdentity(page, prompt);
-            if (identity && isSameChatGPTConversation(identity.conversationUrl, prior.conversationUrl)) return identity;
+            if (identity && parseChatGPTConversationId(identity.conversationUrl)
+                === parseChatGPTConversationId(prior.conversationUrl)) return identity;
             throw new CommandExecutionError('CHATGPT_IMAGE_TURN_PENDING: recovery conversation mismatch');
         }
         await page.sleep(Math.min(3, Math.max(0, (deadline - Date.now()) / 1000)));
