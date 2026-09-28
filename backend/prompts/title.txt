@@ -8,6 +8,7 @@ Requirements:
 - Preserve the script's numerical values, currencies, units, attribution and uncertainty. For example, twenty-three point five billion Hong Kong dollars is HK$23.5 billion, never 235 billion. Do not convert from an earlier source-language headline or infer a company commitment from a reported proposal.
 - Make the title readable at a glance. Never exceed 100 characters, including spaces.
 - Do not use clickbait that the narration does not substantiate.
-- Do not add a label, explanation, alternatives, quotation marks, Markdown, or a trailing period.
+- For daily news briefings, include the format cue and edition-date suffix required by the shared title strategy. The full title, including that suffix, must fit the 100-character limit.
+- Do not add a response label such as "Title:", explanation, alternatives, quotation marks, Markdown, or a trailing period. The required daily-brief suffix is part of the title, not a response label.
 
 Output exactly one title on one line.
