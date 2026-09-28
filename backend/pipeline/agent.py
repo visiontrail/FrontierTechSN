@@ -64,6 +64,7 @@ def _provider_outage(error: Exception) -> bool:
         "too many requests", "rate limit", "request queue is full",
         "gateway time-out", "gateway timeout", "service unavailable",
         "temporarily unavailable", "agent_turn_timeout",
+        "upstream error", "server_error", "http 500", "http 502", "bad gateway",
     ))
 
 

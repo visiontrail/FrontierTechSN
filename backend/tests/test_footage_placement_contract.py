@@ -40,6 +40,12 @@ def save_manifest(root):
         (root / clip["local_path"]).write_bytes(body)
         clip["sha256"] = hashlib.sha256(body).hexdigest()
         clip["acquisition_profile"] = footage.acquisition_profile()
+        clip["analysis"] = {
+            "analyzer": "gemini-web-contact-sheet", "image_received": True,
+            "suitable": True, "confidence": .95, "visible_content": clip["title"],
+            "approved_clip_sha256": clip["sha256"],
+            "review_binding": {key: clip[key] for key in ("query", "purpose", "script_excerpt")},
+        }
     manifest = {
         "provider_id": "hybrid-youtube", "orientation": "landscape", "selection_mode": "ai",
         "binding_version": 2, "status": "ready", "requested_clip_count": 2,

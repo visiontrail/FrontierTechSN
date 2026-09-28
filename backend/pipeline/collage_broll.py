@@ -460,6 +460,43 @@ def _clear_downstream_stage(item_dir: Path) -> None:
         _remove_owned_path(path)
 
 
+def _video_request_id(prompt: str, first: Path, last: Path | None, frame: FrameSpec) -> str:
+    return hashlib.sha256(json.dumps({
+        "prompt": prompt, "aspect": frame.aspect_ratio,
+        "first": _file_sha256(first), "last": _file_sha256(last) if last is not None else None,
+    }, sort_keys=True).encode()).hexdigest()
+
+
+def _load_pending_video_frames(
+    item_dir: Path, *, motion_prompt: str, frame: FrameSpec,
+) -> tuple[Path, Path] | None:
+    """Keep an unfinished acquisition owned by the exact prompt and frame bytes.
+
+    Called only after the still contract is verified. Missing final QA evidence
+    must not erase the submission checkpoint before _generate_video can resume
+    it or refuse a duplicate submission.
+    """
+    checkpoint = item_dir / "video" / "generation-state.json"
+    if not checkpoint.exists() or not _prompt_file_matches(
+        item_dir / "video-prompt.txt", motion_prompt
+    ):
+        return None
+    state = _read_contract(checkpoint)
+    first = item_dir / "frames" / "first-frame.png"
+    last = item_dir / "frames" / "last-frame.jpg"
+    if state is None or not first.is_file() or not last.is_file():
+        raise OpenCLIError(
+            "GEMINI_VIDEO_SUBMISSION_UNCERTAIN: preserve the existing checkpoint; "
+            "its original keyframes or request metadata are unreadable"
+        )
+    if state.get("request_id") != _video_request_id(motion_prompt, first, last, frame):
+        raise OpenCLIError(
+            "GEMINI_VIDEO_SUBMISSION_UNCERTAIN: preserve the existing checkpoint; "
+            "its keyframe bytes no longer match the recorded request"
+        )
+    return first, last
+
+
 def _clear_all_stages(item_dir: Path) -> None:
     _clear_downstream_stage(item_dir)
     for path in (
@@ -1060,12 +1097,20 @@ def _is_gemini_video_upload_capability_failure(error: Exception) -> bool:
 def _gemini_video_input_hydration_stuck_signature(
     error: Exception,
 ) -> str | None:
-    """Return the adapter's canonical stuck-state fingerprint, if present."""
+    """Recognize repeated upload stalls without treating transient errors as final."""
     message = str(error)
-    if GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE not in message:
-        return None
-    match = re.search(r'"stuckSignature":"([^"]+)"', message)
-    return match.group(1) if match else None
+    if GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE in message:
+        match = re.search(r'"stuckSignature":"([^"]+)"', message)
+        return match.group(1) if match else None
+    compact = re.sub(r"\s+", "", message).casefold()
+    keyframe = re.search(r"geminikeyframe([12])uploadfailedatdata_transfer_fallback:", compact)
+    if keyframe and all(token in compact for token in (
+        "page.setfileinput", "page.filechooseropened", "notreceivedwithin",
+        "dom.setfileinputfiles", "cdpmethodnotpermitted:runtime.evaluate",
+        '"fallback":{"ok":false,"reason":"sendcommand:maxattemptsexhausted"}',
+    )):
+        return f"keyframe={keyframe[1]};native=blocked;data_transfer=transport_exhausted"
+    return None
 
 
 def _chatgpt_image_composer_not_ready_signature(
@@ -1279,10 +1324,23 @@ async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir:
     checkpoint = video_dir / "generation-state.json"
     if checkpoint.is_symlink():
         raise OpenCLIError("Gemini generation checkpoint cannot be a symlink")
-    request_id = hashlib.sha256(json.dumps({
-        "prompt": prompt, "aspect": frame.aspect_ratio,
-        "first": _file_sha256(first), "last": _file_sha256(last) if last is not None else None,
-    }, sort_keys=True).encode()).hexdigest()
+    request_id = _video_request_id(prompt, first, last, frame)
+    checkpoint_state = _read_contract(checkpoint) or {}
+    acquisition_path = video_dir / "acquisition-contract.json"
+    acquisition = _read_contract(acquisition_path) or {}
+    cached_raw = _resolve_contract_artifact(
+        item_dir, acquisition.get("artifact_path"), owned_root=video_dir,
+        suffixes={".mp4"},
+    )
+    if (
+        checkpoint_state.get("status") == "saved"
+        and checkpoint_state.get("request_id") == request_id
+        and acquisition.get("request_id") == request_id
+        and cached_raw == raw.resolve()
+        and raw.stat().st_size >= 1024
+        and acquisition.get("artifact_sha256") == _file_sha256(raw)
+    ):
+        return raw, str(acquisition.get("conversation_url") or "")
     # An explicit new acquisition may retry a terminal failure; an interrupted
     # matching request instead retains its conversation and original deadline.
     first_attempt = True
@@ -1354,6 +1412,12 @@ async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir:
         raise OpenCLIError("Gemini Web Create Video produced no downloaded MP4")
     rows = _rows(first_json(result.stdout))
     conversation = next((_field(row, "link") for row in rows if _field(row, "link")), "")
+    _write_json(acquisition_path, {
+        "request_id": request_id,
+        "artifact_path": str(raw.relative_to(item_dir)),
+        "artifact_sha256": _file_sha256(raw),
+        "conversation_url": conversation,
+    })
     return raw, conversation
 
 
@@ -1821,6 +1885,25 @@ async def generate_collage_broll(
                 expected=still_bindings,
                 still_prompt=still_prompt,
             )
+            pending_frames = (
+                _load_pending_video_frames(item_dir, motion_prompt=motion_prompt, frame=frame)
+                if cached_still is not None else None
+            )
+            pending_state = _read_contract(item_dir / "video" / "generation-state.json") or {}
+            if gemini_video_upload_unavailable and (
+                pending_frames is None or pending_state.get("status") in ("new", "failed")
+            ):
+                error_code = str(
+                    manifest["gemini_video_upload_capability"].get("error_code")
+                    or GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE
+                )
+                raise GeminiVideoUploadCapabilityError(
+                    "Gemini video upload capability is unavailable for this compose. "
+                    "Skipped new still acquisition because model-generated Paper-Collage "
+                    "motion is required; procedural animation fallback is disabled.",
+                    error_code=error_code,
+                )
+
             still_stage_present = _still_stage_has_content(item_dir)
             downstream_stage_present = _downstream_stage_has_content(item_dir)
             if cached_still is None and still_stage_present:
@@ -1828,7 +1911,7 @@ async def generate_collage_broll(
                 # artifact. Remove only this item's owned pipeline stages.
                 _clear_all_stages(item_dir)
                 downstream_stage_present = False
-            elif downstream_stage_present:
+            elif downstream_stage_present and pending_frames is None:
                 # Missing, mismatched, incomplete, or QA-failed final evidence
                 # invalidates frames/video, but an independently valid still
                 # remains reusable.
@@ -1867,7 +1950,9 @@ async def generate_collage_broll(
                     item["still_provider"] = "deterministic_local_paper_collage"
                 _assert_item_stage_paths_safe(item_dir)
                 still = _materialize_still(still, item_dir)
-            first, last = await _prepare_frames(still, item_dir, spec["background_hex"], frame)
+            first, last = pending_frames or await _prepare_frames(
+                still, item_dir, spec["background_hex"], frame
+            )
             _assert_item_stage_paths_safe(item_dir)
             if cached_still is None:
                 # Frame preparation is the still decode gate. Commit the proof
@@ -1879,17 +1964,6 @@ async def generate_collage_broll(
                 f"Collage B-roll {index}/{len(specs)}: animating {scene_id} once for "
                 f"{target_duration:.3f}s in Gemini Web Create Video",
             )
-            if gemini_video_upload_unavailable:
-                error_code = str(
-                    manifest["gemini_video_upload_capability"].get("error_code")
-                    or GEMINI_VIDEO_UPLOAD_CAPABILITY_CODE
-                )
-                raise GeminiVideoUploadCapabilityError(
-                    "Gemini video upload capability is unavailable for this compose. "
-                    "Model-generated Paper-Collage motion is required; procedural "
-                    "animation fallback is disabled.",
-                    error_code=error_code,
-                )
             try:
                 raw, gemini_url = await _generate_video(
                     motion_prompt, first, last, item_dir, frame

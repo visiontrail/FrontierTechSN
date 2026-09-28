@@ -10,6 +10,19 @@ from backend import config
 from backend.pipeline import footage
 
 
+def reviewed_commons_analysis(shot, digest):
+    return {
+        "analyzer": "gemini-web-contact-sheet", "image_received": True,
+        "suitable": True, "confidence": .95, "visible_content": "The planned object in view",
+        "approved_clip_sha256": digest,
+        "review_binding": {key: str(shot.get(key) or "") for key in ("query", "purpose", "script_excerpt")},
+    }
+
+
+async def fake_commons_review(candidate, shot, source, task_dir, *, log):
+    return source, reviewed_commons_analysis(shot, "")
+
+
 def wikimedia_page(*, license_name="CC BY-SA 4.0", license_code="cc-by-sa-4.0", size=2_000_000):
     return {
         "title": "File:City cyclists.webm",
@@ -392,6 +405,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(footage, "search_wikimedia", fake_search),
                 patch.object(footage, "_download_candidate", fake_download),
                 patch.object(footage, "_normalize_render_clip", fake_normalize),
+                patch.object(footage, "_review_commons_source", fake_commons_review),
             ):
                 manifest = await footage.acquire_public_footage(
                     task_id="task-demo",
@@ -480,6 +494,11 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                                 "source_page_url": "https://commons.wikimedia.org/wiki/File:First.webm",
                                 "local_path": "footage/clip-01.webm",
                                 "sha256": first_sha,
+                                "render_safe": True,
+                                "render_metadata_version": 1,
+                                "analysis": reviewed_commons_analysis(
+                                    {"query": "visual stories", "purpose": "Two visual stories."}, first_sha,
+                                ),
                                 "acquisition_profile": footage.acquisition_profile(),
                             }
                         ],
@@ -493,6 +512,7 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(footage, "search_wikimedia", fake_search),
                 patch.object(footage, "_download_candidate", fake_download),
                 patch.object(footage, "_normalize_render_clip", fake_normalize),
+                patch.object(footage, "_review_commons_source", fake_commons_review),
             ):
                 manifest = await footage.acquire_public_footage(
                     task_id="task-rescout",
@@ -574,6 +594,9 @@ class AcquireFootageTests(unittest.IsolatedAsyncioTestCase):
                         "source_page_url": f"https://commons.example/{index}",
                         "local_path": f"footage/clip-{index:02d}.mp4",
                         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        "analysis": reviewed_commons_analysis(
+                            {"query": query, "purpose": purpose}, hashlib.sha256(path.read_bytes()).hexdigest(),
+                        ),
                     }
                 )
             previous = {

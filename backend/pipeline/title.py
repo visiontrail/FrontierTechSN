@@ -122,8 +122,10 @@ async def generate_title(
                 model=model,
                 endpoint=endpoint,
                 api_key=api_key,
-                # Allow reasoning headroom before the one-line response.
-                max_tokens=1024,
+                # Recent reasoning gateways exhausted 1024 even with thinking
+                # disabled. Reserve headroom before the one-line response so
+                # every title does not need a discarded first attempt.
+                max_tokens=4096,
                 enable_skills=False,
                 disable_thinking=True,
                 log=log,

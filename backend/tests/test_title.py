@@ -89,7 +89,7 @@ class TitleAgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manifest["executor"], "claude_agent_sdk")
             self.assertEqual(manifest["title"], artifact.title)
             self.assertEqual(complete.await_args.kwargs["label"], "Title agent")
-            self.assertEqual(complete.await_args.kwargs["max_tokens"], 1024)
+            self.assertEqual(complete.await_args.kwargs["max_tokens"], 4096)
             self.assertFalse(complete.await_args.kwargs["enable_skills"])
             self.assertTrue(complete.await_args.kwargs["disable_thinking"])
             payload = json.loads(complete.await_args.args[1])

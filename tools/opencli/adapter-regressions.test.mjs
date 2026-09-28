@@ -921,12 +921,26 @@ test(`ChatGPT selects the active image callback instead of the first generic fil
     { accept: 'image/*', __reactProps$x: { onChange: hydrated ? () => {} : null } },
   ].map((input, index) => ({ ...input, disabled: false, setAttribute() { selected = index } }))
   const scope = { querySelectorAll: () => inputs }
-  const composer = { closest: () => ({ parentElement: scope }) }
+  class Element {
+    isContentEditable = true
+    closest() { return { parentElement: scope } }
+    getBoundingClientRect() { return { width: 500, height: 80 } }
+    setAttribute() {}
+  }
+  const composer = new Element()
   const page = {
     async sleep() {},
     async setFileInput(_files, selector) { nativeCalls++; assert.equal(selected, 1); assert.match(selector, /data-opencli-chatgpt-image-input/); throw new Error('fileChooserOpened not received') },
     async evaluate(script) {
-      if (script.includes('const reactiveInputs')) return vm.runInNewContext(script, { document: { querySelector: () => composer, querySelectorAll: () => [] } })
+      if (script.includes('const reactiveInputs')) return vm.runInNewContext(script, {
+        HTMLElement: Element,
+        window: { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+        document: {
+          // The current home composer has no prompt-textarea id.
+          querySelector: () => null,
+          querySelectorAll: selector => selector === '[contenteditable="true"][role="textbox"]' ? [composer] : [],
+        },
+      })
       if (script.includes('const dt = new DataTransfer()')) return { ok: true }
       if (script.includes('matchedNames')) return true
       throw new Error('Unexpected upload operation')
@@ -1225,7 +1239,7 @@ test('Gemini image commands reserve setup time without extending other commands'
   }
 })
 
-for (const scenario of ['ready', 'unready', 'unsupported', 'interrupted']) {
+for (const scenario of ['ready', 'unready', 'unsupported', 'ignored', 'interrupted']) {
   test(`Gemini pastes verified image bytes without using the document picker: ${scenario}`, async (t) => {
     const [image] = videoFrameFixture(t, ['contact-sheet.jpg'])
     const payload = Buffer.alloc(160000, 37)
@@ -1241,7 +1255,15 @@ for (const scenario of ['ready', 'unready', 'unsupported', 'interrupted']) {
       },
     }
     const context = vm.createContext({
-      document: { querySelector: selector => selector.includes('contenteditable') ? composer : null },
+      document: { querySelector: selector => {
+        if (selector.includes('contenteditable')) return composer
+        if (selector === 'input-container') return { querySelectorAll: () => (
+          pasted.length && scenario !== 'ignored'
+            ? [{ getBoundingClientRect: () => ({ width: 100, height: 100 }) }] : []
+        ) }
+        return null
+      } },
+      getComputedStyle: () => ({ visibility: 'visible' }),
       atob, Uint8Array, File,
       ClipboardEvent: class extends Event {
         constructor(type, options) { super(type, options); this.clipboardData = options.clipboardData }
@@ -1252,7 +1274,7 @@ for (const scenario of ['ready', 'unready', 'unsupported', 'interrupted']) {
     const originalEvaluate = page.evaluate
     let chunks = 0
     page.evaluate = async script => {
-      if (script.includes('pasteSupported') || script.includes('__opencliGeminiPaste_')) {
+      if (script.includes('pasteSupported') || script.includes('__opencliGeminiPaste_') || script.includes('return Array.from(scope.querySelectorAll(')) {
         if (script.includes('.push(') && ++chunks === 2 && scenario === 'interrupted') throw new Error('bridge disconnected')
         return vm.runInContext(script, context)
       }
@@ -1267,7 +1289,7 @@ for (const scenario of ['ready', 'unready', 'unsupported', 'interrupted']) {
       assert.equal(pasted[0].type, 'image/jpeg')
       assert.deepEqual(Buffer.from(await pasted[0].arrayBuffer()), payload)
     }
-    assert.equal(page.actions.some(([action]) => action === 'click'), scenario === 'unsupported')
+    assert.equal(page.actions.some(([action]) => action === 'click'), ['unsupported', 'ignored'].includes(scenario))
     assert.equal(Object.keys(context).some(key => key.startsWith('__opencliGeminiPaste_')), false)
   })
 }

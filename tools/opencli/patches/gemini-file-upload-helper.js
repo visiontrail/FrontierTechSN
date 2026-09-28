@@ -301,8 +301,31 @@ async function pasteGeminiImage(page, absPath, fileSize) {
             composer.dispatchEvent(event);
             return { accepted: event.defaultPrevented || !!document.querySelector('input-container gem-media-attachment') };
         })()`);
-        if (result?.accepted) console.error('[gemini/upload] Image accepted by composer paste; waiting for attachment readiness');
-        return result?.accepted === true;
+        if (result?.accepted !== true) return false;
+        // preventDefault only acknowledges the paste handler, not an upload.
+        // The current composer sometimes swallows the synthetic event without
+        // creating an attachment. Use the native picker in that case, but never
+        // upload again while an attachment chip or upload spinner is present.
+        for (let attempt = 0; attempt < 10; attempt++) {
+            await page.wait(0.5);
+            const pasteStarted = await page.evaluate(`(() => {
+                const scope = document.querySelector('input-container');
+                if (!scope) return false;
+                return Array.from(scope.querySelectorAll(
+                    'gem-media-attachment, uploader-file-preview, [data-test-id*="attachment"], [class*="attachment"], [class*="file-chip"], [class*="upload-preview"], [role="progressbar"], mat-progress-spinner'
+                )).some(node => {
+                    const rect = node.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0
+                        && getComputedStyle(node).visibility !== 'hidden';
+                });
+            })()`);
+            if (pasteStarted === true) {
+                console.error('[gemini/upload] Image paste created an attachment; waiting for attachment readiness');
+                return true;
+            }
+        }
+        console.error('[gemini/upload] Paste created no attachment; using the native file picker');
+        return false;
     } finally {
         await page.evaluate(`delete globalThis[${JSON.stringify(key)}]; true`).catch(() => undefined);
     }

@@ -32,10 +32,9 @@ LogCallback = Callable[[str], None]
 # Scenes per model call. Large enough that the model can shape an arc across a
 # stretch of the episode, small enough to stay inside a single response.
 PLAN_BATCH_SIZE = 12
-# Thinking providers need room for both internal reasoning and the JSON plan.
-# The default 4,096-token ceiling was exhausted before message content on the
-# full 12-scene batches exercised by a ten-minute composition.
-VISUAL_PLAN_MAX_TOKENS = 8192
+# Recent batches exhausted 8192 before producing the JSON plan; reasoning
+# still consumes the allowance on gateways that ignore thinking=disabled.
+VISUAL_PLAN_MAX_TOKENS = 16384
 
 # Accent rotation used by the fallback and as a sanity default. Consecutive
 # scenes never share an accent, which alone gives the video a sense of movement.

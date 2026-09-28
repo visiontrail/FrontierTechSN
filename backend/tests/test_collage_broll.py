@@ -154,6 +154,115 @@ def test_quality_repair_reuses_failed_acquisition_but_normal_retry_recovers(tmp_
     assert harness.calls["video"] == 1
 
 
+@pytest.mark.parametrize("with_url", [False, True])
+def test_compose_resume_keeps_submitted_checkpoint_and_original_frames(tmp_path, with_url):
+    generate_video = collage_broll._generate_video
+    requests = []
+    url = "https://gemini.google.com/app/abc123"
+
+    async def browser(args, **_kwargs):
+        requests.append(args)
+        checkpoint = Path(args[args.index("--state-file") + 1])
+        state = json.loads(checkpoint.read_text())
+        if len(requests) == 1:
+            state.update(status="stalled", deadline=12345)
+            if with_url:
+                state["url"] = url
+            checkpoint.write_text(json.dumps(state))
+            raise collage_broll.OpenCLIError("GEMINI_VIDEO_GENERATION_STALLED")
+        assert args[-2:] == ["--resume", url]
+        assert state["deadline"] == 12345
+        state["status"] = "saved"
+        checkpoint.write_text(json.dumps(state))
+        Path(args[args.index("--output") + 1]).write_bytes(b"v" * 2048)
+        from backend.pipeline.opencli import OpenCLIResult
+        return OpenCLIResult(tuple(args), 0, json.dumps([{"link": url}]), "")
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        with (
+            patch.object(collage_broll, "_generate_video", generate_video),
+            patch.object(collage_broll, "run_opencli", browser),
+        ):
+            first = harness.run(_board(1))
+            checkpoint = tmp_path / "collage_broll/01-scene-01/video/generation-state.json"
+            preserved = checkpoint.read_bytes()
+            second = harness.run(_board(1))
+    assert first["status"] == "failed"
+    assert harness.calls["still"] == harness.calls["frames"] == 1
+    if with_url:
+        assert second["status"] == "ready"
+        assert len(requests) == 2
+    else:
+        assert second["status"] == "failed"
+        assert "SUBMISSION_UNCERTAIN" in second["items"][0]["error"]
+        assert checkpoint.read_bytes() == preserved
+        assert len(requests) == 1
+
+
+@pytest.mark.parametrize("tamper_raw", [False, True])
+def test_post_download_repair_reuses_verified_raw_or_resumes_same_generation(tmp_path, tamper_raw):
+    generate_video = collage_broll._generate_video
+    requests = []
+    url = "https://gemini.google.com/app/abc123"
+
+    async def browser(args, **_kwargs):
+        requests.append(args)
+        if len(requests) > 1:
+            assert args[-2:] == ["--resume", url]
+        checkpoint = Path(args[args.index("--state-file") + 1])
+        state = json.loads(checkpoint.read_text())
+        state.update(status="saved", url=url, videoId="generated-video-0")
+        checkpoint.write_text(json.dumps(state))
+        Path(args[args.index("--output") + 1]).write_bytes(b"v" * 2048)
+        from backend.pipeline.opencli import OpenCLIResult
+        return OpenCLIResult(tuple(args), 0, json.dumps([{"link": url}]), "")
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        with (
+            patch.object(collage_broll, "_generate_video", generate_video),
+            patch.object(collage_broll, "run_opencli", browser),
+        ):
+            with patch.object(collage_broll, "_normalize_video", AsyncMock(side_effect=RuntimeError("encoder interrupted"))):
+                first = harness.run(_board(1))
+            if tamper_raw:
+                (tmp_path / "collage_broll/01-scene-01/video/gemini-web-original.mp4").write_bytes(b"changed" * 512)
+            second = harness.run(_board(1))
+    assert first["status"] == "failed"
+    assert second["status"] == "ready"
+    assert len(requests) == (2 if tamper_raw else 1)
+    assert harness.calls["still"] == harness.calls["frames"] == 1
+    assert harness.calls["probe"] == 1
+
+
+@pytest.mark.parametrize("damage", ["frame", "checkpoint"])
+def test_compose_preserves_unreadable_pending_request_without_regeneration(tmp_path, damage):
+    async def pending(prompt, first, last, item_dir, frame):
+        checkpoint = item_dir / "video/generation-state.json"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text(json.dumps({
+            "request_id": collage_broll._video_request_id(prompt, first, last, frame),
+            "status": "submitted", "url": "https://gemini.google.com/app/abc123",
+        }))
+        raise collage_broll.OpenCLIError("GEMINI_VIDEO_GENERATION_STALLED")
+
+    with _CollageCacheHarness(tmp_path) as harness:
+        with patch.object(collage_broll, "_generate_video", pending):
+            harness.run(_board(1))
+        item = tmp_path / "collage_broll/01-scene-01"
+        checkpoint = item / "video/generation-state.json"
+        if damage == "frame":
+            (item / "frames/last-frame.jpg").write_bytes(b"changed")
+        else:
+            checkpoint.write_text("truncated json")
+        preserved = checkpoint.read_bytes()
+        resumed = harness.run(_board(1))
+    assert resumed["status"] == "failed"
+    assert "SUBMISSION_UNCERTAIN" in resumed["items"][0]["error"]
+    assert checkpoint.read_bytes() == preserved
+    assert harness.calls["still"] == harness.calls["frames"] == 1
+    assert harness.calls["video"] == 0
+
+
 @pytest.mark.parametrize("change", ["narration", "prompt", "fingerprint", "duplicate", "missing_error", "incomplete"])
 def test_quality_repair_does_not_reuse_changed_or_unproven_failure(tmp_path: Path, change: str):
     storyboard = _board(1)
@@ -696,6 +805,8 @@ def test_accepted_video_retry_preserves_request_or_refuses_duplicate_submission(
     if with_url:
         checkpoint["url"] = "https://gemini.google.com/app/abc123"
     path.write_text(json.dumps(checkpoint))
+    # Exercise browser recovery when the download has not survived locally.
+    (tmp_path / "video" / "gemini-web-original.mp4").unlink()
     requests.clear()
     if with_url:
         asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
@@ -794,6 +905,57 @@ def test_opencli_collage_operation_does_not_retry_stable_upload_capability_failu
 def test_upload_classifier_recognizes_current_file_chooser_failure():
     assert collage_broll._is_gemini_video_upload_capability_failure(
         _blocked_gemini_file_chooser_error()
+    )
+
+
+def _exhausted_keyframe_transport_error(keyframe=2, selector="first-attempt"):
+    return collage_broll.OpenCLIError(
+        f'Gemini keyframe {keyframe} upload failed at data_transfer_fallback: '
+        f'{{"selector":"{selector}","nativeErrors":['
+        '{"method":"page.setFileInput","error":"Page.fileChooserOpened '
+        'not received within 5s — the input may not have opened a file chooser"},'
+        '{"method":"DOM.setFileInputFiles","error":"CDP method not permitted: '
+        'Runtime.evaluate"}],"fallback":{"ok":false,"reason":'
+        '"sendCommand: max attempts exhausted"}}'
+    )
+
+
+@pytest.mark.parametrize("repeated", [False, True])
+def test_video_upload_transport_exhaustion_allows_recovery_but_not_ten_repeats(tmp_path, monkeypatch, repeated):
+    first = tmp_path / "first.png"
+    first.write_bytes(b"first")
+    attempts = 0
+
+    async def browser(args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if repeated or attempts == 1:
+            raise _exhausted_keyframe_transport_error(selector=f"dynamic-attempt-{attempts}")
+        Path(args[args.index("--output") + 1]).write_bytes(b"v" * 2048)
+        from backend.pipeline.opencli import OpenCLIResult
+        return OpenCLIResult(tuple(args), 0, "[]", "")
+
+    monkeypatch.setattr(collage_broll, "run_opencli", browser)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 10)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", AsyncMock())
+    if repeated:
+        with pytest.raises(collage_broll.GeminiVideoUploadCapabilityError, match="repeated the same stable failure"):
+            asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
+    else:
+        raw, _ = asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
+        assert raw.is_file()
+    assert attempts == 2
+
+
+def test_video_upload_transport_signature_needs_all_failed_mechanisms():
+    message = str(_exhausted_keyframe_transport_error())
+    assert collage_broll._gemini_video_input_hydration_stuck_signature(
+        collage_broll.OpenCLIError(message.replace("CDP method not permitted", "temporary transport issue"))
+    ) is None
+    assert collage_broll._gemini_video_input_hydration_stuck_signature(
+        _exhausted_keyframe_transport_error(1)
+    ) != collage_broll._gemini_video_input_hydration_stuck_signature(
+        _exhausted_keyframe_transport_error(2)
     )
 
 
@@ -1363,7 +1525,7 @@ def test_generate_reuses_upload_failure_without_creating_procedural_videos(
             collage_broll,
             "_generate_still",
             AsyncMock(return_value=(still, "https://chatgpt.com/c/test")),
-        ),
+        ) as generate_still,
         patch.object(collage_broll, "_prepare_frames", frames),
         patch.object(collage_broll, "_generate_video", generate_video),
         patch.object(collage_broll, "_normalize_video", normalize),
@@ -1377,6 +1539,7 @@ def test_generate_reuses_upload_failure_without_creating_procedural_videos(
     assert manifest["status"] == "failed"
     assert manifest["ready_count"] == 0
     assert generate_video.await_count == 1
+    assert generate_still.await_count == 1
     assert normalize.await_count == 0
     assert [item["status"] for item in manifest["items"]] == ["failed"] * 3
     assert all("video_provider" not in item for item in manifest["items"])

@@ -142,7 +142,7 @@ async def _generate(task: TaskResponse, previous: dict) -> None:
             # transport own timeouts and primary/backup retry policy.
             raw = await _chat(
                 system, json.dumps(payload, ensure_ascii=False), endpoint=endpoint,
-                model=model, api_key=api_key, max_tokens=16384, enable_skills=False,
+                model=model, api_key=api_key, max_tokens=32768, enable_skills=False,
                 disable_thinking=True, label="Social copy · Humanizer",
             )
             try:

@@ -568,7 +568,7 @@ async def plan_footage_queries(
             api_key,
             log,
             "Footage plan",
-            max_tokens=2400,
+            max_tokens=8192,
             enable_skills=False,
             disable_thinking=True,
         )
@@ -935,6 +935,161 @@ def _commons_narration_rejection(clip: dict, script: str) -> str:
     return ""
 
 
+def _commons_visual_rejection(clip: dict) -> str:
+    """Open reuse rights and matching metadata do not establish visible content."""
+    if clip.get("provider_id") != "wikimedia" and clip.get("provider") != "Wikimedia Commons":
+        return ""
+    from backend.pipeline.web_footage import analysis_rejection
+
+    analysis = clip.get("analysis") or {}
+    if (analysis.get("analyzer") != "gemini-web-contact-sheet"
+            or analysis.get("image_received") is not True
+            or analysis.get("suitable") is not True
+            or not analysis.get("visible_content")
+            or analysis.get("approved_clip_sha256") != clip.get("sha256")
+            or analysis.get("review_binding") != {
+                key: str(clip.get(key) or "") for key in ("query", "purpose", "script_excerpt")
+            }):
+        return "Commons footage requires actual downloaded-frame review for this artifact and narration"
+    return analysis_rejection(analysis)
+
+
+async def _review_commons_source(
+    candidate: dict, shot: dict, source: Path, task_dir: Path, *, log: LogCallback | None,
+) -> tuple[Path, dict]:
+    from backend.pipeline.web_footage import _analyze_candidate_preview, analysis_rejection
+
+    analysis = await _analyze_candidate_preview(
+        {**candidate, "visual_query": shot["query"], "visual_purpose": shot.get("purpose", "")},
+        str(shot.get("script_excerpt") or ""), task_dir, source_path=source, log=log,
+    )
+    reason = analysis_rejection(analysis)
+    if reason:
+        raise RuntimeError(f"Commons preview visual review rejected: {reason}")
+    reviewed = (task_dir / str(analysis.get("reviewed_preview_path") or "")).resolve()
+    if (task_dir.resolve() not in reviewed.parents or not reviewed.is_file()
+            or _file_sha256(reviewed) != analysis.get("reviewed_preview_sha256")):
+        raise RuntimeError("Commons reviewed preview failed its path/checksum check")
+    analysis["review_binding"] = {
+        key: str(shot.get(key) or "") for key in ("query", "purpose", "script_excerpt")
+    }
+    return reviewed, analysis
+
+
+def _pending_commons_sources(task_dir: Path, previous: dict | None) -> list[dict]:
+    """Retain complete original downloads, never migrate an old approval."""
+    previous = previous or {}
+    pending = {item.get("source_page_url"): dict(item)
+               for item in previous.get("pending_reviews", []) if isinstance(item, dict)}
+    for clip in [*previous.get("clips", []), *previous.get("invalidated_clips", [])]:
+        if (not isinstance(clip, dict)
+                or (clip.get("provider_id") != "wikimedia" and clip.get("provider") != "Wikimedia Commons")
+                or not _is_open_license(str(clip.get("license") or ""))
+                or not _commons_visual_rejection(clip)):
+            continue
+        candidate = {key: value for key, value in clip.items()
+                     if key not in {"analysis", "invalidation_reason"}}
+        candidate["duration_seconds"] = clip.get("source_duration_seconds") or clip.get("duration_seconds")
+        pending.setdefault(clip.get("source_page_url"), {
+            "source_page_url": clip.get("source_page_url"),
+            "source_local_path": clip.get("source_local_path"),
+            "source_sha256": clip.get("source_sha256"),
+            "query": str(clip.get("plan_query") or clip.get("query") or ""),
+            "candidate": candidate,
+        })
+    verified = []
+    for item in pending.values():
+        path = (task_dir / str(item.get("source_local_path") or "")).resolve()
+        if (item.get("source_page_url") and task_dir.resolve() in path.parents
+                and path.is_file() and 0 < path.stat().st_size <= config.FOOTAGE_MAX_BYTES
+                and item.get("source_sha256") and _file_sha256(path) == item["source_sha256"]):
+            verified.append(item)
+    return verified
+
+
+def _reviewed_commons_entry(
+    *, candidate: dict, shot: dict, clip_id: str, source: Path, source_bytes: int,
+    source_sha256: str, destination: Path, normalized: dict, analysis: dict, task_dir: Path,
+) -> dict:
+    analysis["approved_clip_sha256"] = normalized["sha256"]
+    return {
+        **candidate,
+        "id": clip_id, "query": shot["query"], "plan_query": shot["query"],
+        "purpose": shot.get("purpose") or "", "script_excerpt": shot.get("script_excerpt") or "",
+        "source_duration_seconds": candidate.get("duration_seconds"),
+        **{key: normalized[key] for key in (
+            "duration_seconds", "width", "height", "render_metadata_version", "bytes", "sha256",
+            "render_profile", "acquisition_profile",
+        )},
+        "source_bytes": source_bytes, "source_sha256": source_sha256,
+        "source_local_path": source.relative_to(task_dir).as_posix(),
+        "local_path": destination.relative_to(task_dir).as_posix(),
+        "render_safe": True, "status": "downloaded", "analysis": analysis,
+    }
+
+
+async def _review_retained_commons(
+    task_dir: Path, manifest: dict, query_plan: list[dict], script: str, *, log: LogCallback | None,
+) -> None:
+    """Review original local Commons sources before searching for replacements."""
+    from backend.pipeline.opencli import OpenCLIError
+    from backend.pipeline.web_footage import WebFootageReviewUnavailable
+
+    occupied = {str(clip.get("plan_query") or clip.get("query") or "").casefold()
+                for clip in manifest["clips"]}
+    used_sources = {clip.get("source_page_url") for clip in manifest["clips"]}
+    by_query = {shot["query"].casefold(): shot for shot in query_plan
+                if shot["query"].casefold() not in occupied}
+    for item in list(manifest.get("pending_reviews", [])):
+        shot = by_query.get(str(item.get("query") or "").casefold())
+        candidate = item.get("candidate")
+        if (not shot or not isinstance(candidate, dict) or item["source_page_url"] in used_sources
+                or not _is_open_license(str(candidate.get("license") or ""))
+                or candidate.get("source_page_url") != item["source_page_url"]):
+            continue
+        if (_commons_narration_rejection({**candidate, **shot}, script)
+                or not _candidate_query_is_specific(candidate, shot["query"])):
+            continue
+        if any(rejected.get("source_page_url") == item["source_page_url"]
+               and rejected.get("query") == shot["query"]
+               and rejected.get("script_excerpt") == shot.get("script_excerpt", "")
+               for rejected in manifest.get("rejected_candidates", [])):
+            continue
+        source = (task_dir / item["source_local_path"]).resolve()
+        clip_id = _next_clip_id(task_dir / "footage", manifest["clips"])
+        destination = task_dir / "footage" / f"{clip_id}-render.mp4"
+        try:
+            reviewed, analysis = await _review_commons_source(candidate, shot, source, task_dir, log=log)
+            normalized = await _normalize_render_clip(reviewed, destination)
+        except (WebFootageReviewUnavailable, OpenCLIError) as exc:
+            manifest.update(status="review_unavailable", updated_at=_now())
+            manifest.setdefault("errors", []).append({"query": shot["query"], "stage": "commons-review",
+                                                      "pending_source_page_url": item["source_page_url"],
+                                                      "message": str(exc)})
+            _write_manifest(task_dir, manifest)
+            raise
+        except Exception as exc:
+            manifest.setdefault("errors", []).append({"query": shot["query"], "stage": "commons-review",
+                                                      "source_page_url": item["source_page_url"], "message": str(exc)})
+            if "review rejected" in str(exc).casefold():
+                manifest.setdefault("rejected_candidates", []).append({
+                    "query": shot["query"], "script_excerpt": shot.get("script_excerpt", ""),
+                    "source_page_url": item["source_page_url"], "reason": str(exc),
+                })
+            _write_manifest(task_dir, manifest)
+            continue
+        manifest["clips"].append(_reviewed_commons_entry(
+            candidate=candidate, shot=shot, clip_id=clip_id, source=source,
+            source_bytes=source.stat().st_size, source_sha256=item["source_sha256"],
+            destination=destination, normalized=normalized, analysis=analysis, task_dir=task_dir,
+        ))
+        manifest["pending_reviews"].remove(item)
+        by_query.pop(shot["query"].casefold())
+        used_sources.add(item["source_page_url"])
+        _write_manifest(task_dir, manifest)
+        _emit(log, f"Public footage: reviewed retained Commons source for '{shot['query']}' without downloading again")
+
+
 def acquisition_is_complete(task_dir: Path, manifest: dict | None, script: str) -> bool:
     """An absent ledger is not an AI decision to request zero clips."""
     if not isinstance(manifest, dict):
@@ -961,7 +1116,7 @@ def acquisition_is_complete(task_dir: Path, manifest: dict | None, script: str) 
             return False
         if _file_sha256(path) != clip["sha256"]:
             return False
-        if _commons_narration_rejection(clip, script):
+        if _commons_narration_rejection(clip, script) or _commons_visual_rejection(clip):
             return False
     return True
 
@@ -1046,6 +1201,8 @@ def _reusable_manifest_clips(
         if digest.hexdigest() != expected_sha256:
             continue
         clip = dict(raw)
+        if _commons_visual_rejection({**clip, "provider_id": "wikimedia"}):
+            continue
         if str(clip.get("purpose") or "") in {"", USER_QUERY_PURPOSE}:
             grounded_purpose = _script_purpose_for_query(
                 str(clip.get("query") or ""),
@@ -1147,6 +1304,8 @@ async def acquire_public_footage(
         "queries": [],
         "clips": preserved_clips,
         "errors": [],
+        "pending_reviews": _pending_commons_sources(task_dir, previous),
+        "rejected_candidates": list((previous or {}).get("rejected_candidates") or []),
         "reserved_collage_purposes": reserved_purposes,
         "occupied_scene_purposes": occupied_purposes,
     }
@@ -1211,6 +1370,11 @@ async def acquire_public_footage(
             for item in candidates:
                 if item["source_page_url"] in used_sources or not _candidate_query_is_specific(item, query):
                     continue
+                if any(rejected.get("source_page_url") == item["source_page_url"]
+                       and rejected.get("query") == query
+                       and rejected.get("script_excerpt") == (shot.get("script_excerpt") or "")
+                       for rejected in manifest["rejected_candidates"]):
+                    continue
                 reason = _commons_narration_rejection({
                     **item, "provider_id": "wikimedia", "query": query,
                     "purpose": shot.get("purpose") or "",
@@ -1236,57 +1400,84 @@ async def acquire_public_footage(
                 _emit(log, f"No eligible open-license footage found for '{query}'")
                 continue
 
-            clip_id = _next_clip_id(footage_dir, manifest["clips"])
             downloaded = None
             for candidate in available[:4]:
+                clip_id = _next_clip_id(footage_dir, manifest["clips"])
                 extension = _extension_for(candidate)
                 source_destination = footage_dir / f"source-{clip_id}{extension}"
                 destination = footage_dir / f"{clip_id}-render.mp4"
+                source_sha256 = ""
                 try:
-                    source_bytes, source_sha256 = await _download_candidate(
-                        client,
-                        candidate=candidate,
-                        destination=source_destination,
+                    retained = next((item for item in manifest["pending_reviews"]
+                                     if item.get("source_page_url") == candidate["source_page_url"]), None)
+                    retained_path = (task_dir / str((retained or {}).get("source_local_path") or "")).resolve()
+                    if (retained and task_dir.resolve() in retained_path.parents
+                            and retained_path.is_file()
+                            and _file_sha256(retained_path) == retained.get("source_sha256")):
+                        source_destination = retained_path
+                        source_bytes, source_sha256 = retained_path.stat().st_size, retained["source_sha256"]
+                    else:
+                        source_bytes, source_sha256 = await _download_candidate(
+                            client,
+                            candidate=candidate,
+                            destination=source_destination,
+                        )
+                    pending = {"source_page_url": candidate["source_page_url"],
+                               "source_local_path": source_destination.relative_to(task_dir).as_posix(),
+                               "source_sha256": source_sha256,
+                               "query": query, "candidate": candidate}
+                    manifest["pending_reviews"] = [item for item in manifest["pending_reviews"]
+                                                   if item.get("source_page_url") != candidate["source_page_url"]]
+                    manifest["pending_reviews"].append(pending)
+                    _write_manifest(task_dir, manifest)
+                    reviewed, analysis = await _review_commons_source(
+                        candidate, shot, source_destination, task_dir, log=log,
                     )
                     normalized = await _normalize_render_clip(
-                        source_destination,
+                        reviewed,
                         destination,
                     )
                 except Exception as exc:
-                    source_destination.unlink(missing_ok=True)
+                    from backend.pipeline.opencli import OpenCLIError
+                    from backend.pipeline.web_footage import WebFootageReviewUnavailable
+
                     destination.unlink(missing_ok=True)
+                    if not source_sha256:
+                        # Only an incomplete download is disposable. Complete
+                        # sources survive rejection, outages and normalization failures.
+                        source_destination.unlink(missing_ok=True)
+                    if isinstance(exc, (WebFootageReviewUnavailable, OpenCLIError)):
+                        manifest.update(status="review_unavailable", updated_at=_now())
+                        manifest["errors"].append({"query": query, "stage": "commons-review",
+                                                   "pending_source_page_url": candidate["source_page_url"],
+                                                   "message": str(exc)})
+                        _write_manifest(task_dir, manifest)
+                        raise
+                    if "review rejected" in str(exc).casefold():
+                        manifest["rejected_candidates"].append({
+                            "query": query, "script_excerpt": shot.get("script_excerpt") or "",
+                            "source_page_url": candidate["source_page_url"], "reason": str(exc),
+                        })
+                        manifest["pending_reviews"] = [item for item in manifest["pending_reviews"]
+                                                       if item.get("source_page_url") != candidate["source_page_url"]]
                     manifest["errors"].append(
                         {
                             "query": query,
-                            "stage": "download",
+                            "stage": "commons-review" if "review" in str(exc).casefold() else "download",
                             "source_page_url": candidate["source_page_url"],
                             "message": str(exc),
                         }
                     )
+                    _write_manifest(task_dir, manifest)
                     continue
 
-                downloaded = {
-                    "id": clip_id,
-                    "query": query,
-                    "purpose": shot.get("purpose") or "",
-                    "script_excerpt": shot.get("script_excerpt") or "",
-                    **candidate,
-                    "source_duration_seconds": candidate.get("duration_seconds"),
-                    "duration_seconds": normalized["duration_seconds"],
-                    "width": normalized["width"],
-                    "height": normalized["height"],
-                    "render_metadata_version": normalized["render_metadata_version"],
-                    "source_bytes": source_bytes,
-                    "source_sha256": source_sha256,
-                    "source_local_path": source_destination.relative_to(task_dir).as_posix(),
-                    "bytes": normalized["bytes"],
-                    "sha256": normalized["sha256"],
-                    "local_path": destination.relative_to(task_dir).as_posix(),
-                    "render_safe": True,
-                    "render_profile": normalized["render_profile"],
-                    "acquisition_profile": normalized["acquisition_profile"],
-                    "status": "downloaded",
-                }
+                manifest["pending_reviews"] = [item for item in manifest["pending_reviews"]
+                                               if item.get("source_page_url") != candidate["source_page_url"]]
+                downloaded = _reviewed_commons_entry(
+                    candidate=candidate, shot=shot, clip_id=clip_id, source=source_destination,
+                    source_bytes=source_bytes, source_sha256=source_sha256, destination=destination,
+                    normalized=normalized, analysis=analysis, task_dir=task_dir,
+                )
                 break
 
             if downloaded is None:
@@ -1415,13 +1606,14 @@ def _resume_web_manifest(
         elif not _is_open_license(str(clip.get("license") or "")):
             reason = "Missing open-license evidence"
         if not reason:
-            reason = _commons_narration_rejection(clip, script)
+            reason = _commons_narration_rejection(clip, script) or _commons_visual_rejection(clip)
         if reason:
             invalidated.append({**clip, "invalidation_reason": reason})
         else:
             reusable.append({**clip, "plan_query": shot["query"]})
             used_sources.add(source)
             used_queries.add(shot["query"])
+    previous["pending_reviews"] = _pending_commons_sources(task_dir, previous)
     previous.setdefault("invalidated_clips", []).extend(invalidated)
     previous.update(
         clips=reusable, queries=plan, script_sha256=digest, binding_version=2,
@@ -1584,6 +1776,7 @@ async def acquire_footage(
             clip_count=clip_count,
         )
         if resumed is not None:
+            await _review_retained_commons(task_dir, resumed, resumed["queries"], script, log=log)
             fulfilled = {clip["plan_query"].casefold() for clip in resumed["clips"]}
             pending = [shot for shot in resumed["queries"] if shot["query"].casefold() not in fulfilled]
             _emit(log, f"Public footage resume: reused {len(resumed['clips'])} verified clips; {len(pending)} planned shots remain")

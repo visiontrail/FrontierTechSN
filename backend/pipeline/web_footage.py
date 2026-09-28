@@ -518,6 +518,15 @@ def _youtube_format() -> str:
     return f"bestvideo[width<={edge}][height<={edge}]/best[width<={edge}][height<={edge}]"
 
 
+def _youtube_source_unavailable(error: Exception) -> bool:
+    """Source-level failures cannot be repaired by a different downloader."""
+    return bool(re.search(
+        r"(?:this video is not available|video unavailable|private video|"
+        r"video has been (?:removed|deleted)|account .* terminated)",
+        str(error), re.I,
+    ))
+
+
 async def _download_youtube(
     candidate: dict,
     raw_dir: Path,
@@ -527,7 +536,11 @@ async def _download_youtube(
     if (candidate.get("is_live") is True or candidate.get("is_upcoming") is True
             or candidate.get("live_status") in {"is_live", "is_upcoming", "post_live"}):
         raise WebFootageError("Live or unfinished broadcast cannot be acquired as B-roll")
-    sectioned = float(candidate.get("duration_seconds") or 0) > 0
+    source_duration = float(candidate.get("duration_seconds") or 0)
+    # Download a short source directly. Routing a nine-second source through
+    # FFmpeg's remote section downloader bought no useful byte reduction but
+    # could consume two complete timeout windows before native download.
+    sectioned = source_duration > config.FOOTAGE_RENDER_MAX_SECONDS
     command = [
         _yt_dlp_bin(),
         *_yt_dlp_common_args(include_cookies=False),
@@ -557,6 +570,8 @@ async def _download_youtube(
     try:
         await _run_command(command, timeout=config.WEB_FOOTAGE_DOWNLOAD_TIMEOUT)
     except WebFootageError as section_error:
+        if _youtube_source_unavailable(section_error):
+            raise
         if not sectioned:
             embedded_command = [
                 _yt_dlp_bin(),
@@ -856,14 +871,18 @@ async def _prepare_candidate_preview(
     })
     intervals: list[dict] = []
     sheets: list[Path] = []
+    full_source = source_path
     for index, start in enumerate(starts):
         window = folder / f"window-{index}"
         window.mkdir(exist_ok=True)
         interval = {**proposal, "start_seconds": start, "end_seconds": start + length}
         raw, sectioned = (
-            (source_path, False) if source_path is not None
+            (full_source, False) if full_source is not None
             else await _download_youtube(candidate, window, interval)
         )
+        if not sectioned:
+            # A full-download fallback already contains every later window.
+            full_source = raw
         media = await _probe(raw)
         if not sectioned:
             interval = _fit_analysis_to_media(interval, media["duration_seconds"])
@@ -920,6 +939,9 @@ async def _analyze_prepared_preview(
         "Contextual B-roll illustrates a narrated object or action; it need not visually prove "
         "spoken statistics or funding claims. It must still match the planned visual subject "
         "and the narration, and must not substitute a different named product or event. "
+        "Check visible signage, logos and overlays: reject intervals prominently identifying an "
+        "unrelated company, product or event (for example, an exchange floor displaying a different "
+        "company's listing during narration about an AI IPO). "
         "Mere theme or keyword overlap is insufficient: for example, synthetic political "
         "or religious memes do not depict government AI policy. Do not treat invented "
         "events as real-world context. Reject unrelated footage and text-only/talking-head filler. "
@@ -1139,6 +1161,8 @@ async def _analyze_preview_batch(
         "is insufficient. Contextual B-roll illustrates a narrated object or action and the planned "
         "visual subject; it need not prove spoken metrics or funding claims. Never substitute a "
         "different named product or event. "
+        "Check visible signage, logos and overlays; reject intervals prominently identifying an "
+        "unrelated company, product or event, including a different company's exchange listing. "
         "Unrelated visuals, invented events, text-only and talking-head filler must be rejected. "
         "If an image is missing, unreadable or insufficient to establish relevance, suitable must be false. "
         "Return ONLY one complete JSON object {\"results\":[{\"candidate_id\":0,\"image_received\":true,\"suitable\":false,"

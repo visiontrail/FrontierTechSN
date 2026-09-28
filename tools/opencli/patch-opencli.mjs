@@ -961,7 +961,7 @@ chatgptUtils = chatgptUtils.replace(
                 && !(role === 'User' && node.querySelector('[data-user-message-bubble] [data-search-result-target]'))) continue;`,
   `&& !node.querySelector('[data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]')) continue;`,
 )
-chatgptUtils = replaceWithinFunction(
+if (!chatgptUtils.includes('const imageInputSelector =')) chatgptUtils = replaceWithinFunction(
   chatgptUtils,
   'export async function uploadChatGPTImages(page, imagePaths) {',
   'export async function isGenerating(page) {',
@@ -988,6 +988,14 @@ chatgptUtils = replaceWithinFunction(
     }
     if (!imageInputReady) return { ok: false, reason: 'ChatGPT composer image input did not hydrate' };`,
   'ChatGPT image upload selects the hydrated composer input',
+)
+chatgptUtils = replaceWithinFunction(
+  chatgptUtils,
+  'export async function uploadChatGPTImages(page, imagePaths) {',
+  'export async function isGenerating(page) {',
+  "            const composer = document.querySelector('#prompt-textarea');",
+  '            ${buildComposerLocatorScript()}\n            const composer = findComposer();',
+  'ChatGPT image upload locates the current id-less composer',
 )
 chatgptUtils = replaceWithinFunction(chatgptUtils,
   'export async function uploadChatGPTImages(page, imagePaths) {', 'export async function isGenerating(page) {',
