@@ -107,6 +107,10 @@ class ThumbnailGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manifest["status"], "ready")
             self.assertEqual(manifest["conversation_url"], "https://chatgpt.com/c/thumbnail-test")
             self.assertEqual(captured_args[:2], ["chatgpt", "image"])
+            self.assertEqual(
+                captured_args[captured_args.index("--state-file") + 1],
+                manifest["request_state_path"],
+            )
             self.assertEqual(captured_args[captured_args.index("--site-session") + 1], "ephemeral")
             self.assertEqual(captured_args[captured_args.index("--keep-tab") + 1], "false")
             self.assertNotIn("tts", " ".join(captured_args).lower())
@@ -191,6 +195,219 @@ def test_failed_generation_retains_diagnostics_and_rejects_unusable_downloads(tm
     runner.assert_awaited_once()
 
 
+def test_retry_reuses_prompt_and_checkpoint_then_completed_call_is_idempotent(tmp_path):
+    script = tmp_path / "script.txt"
+    script.write_text("Final narration")
+    checkpoints = []
+
+    async def command(args, **kwargs):
+        checkpoint = Path(args[args.index("--state-file") + 1])
+        checkpoints.append(checkpoint)
+        assert args[2] == "Original cover"
+        if len(checkpoints) == 1:
+            checkpoint.write_text(json.dumps({
+                "prompt": "Generate an image of: Original cover",
+                "stage": "waiting", "conversationUrl": "https://chatgpt.com/c/owned1234",
+                "beforeUrls": [],
+            }))
+            raise OpenCLIError("response timed out")
+        assert json.loads(checkpoint.read_text())["conversationUrl"].endswith("owned1234")
+        image = Path(args[args.index("--op") + 1]) / "recovered.png"
+        image.write_bytes(PNG_FIXTURE)
+        return OpenCLIResult(tuple(args), 0, json.dumps([{"file": str(image)}]), "")
+
+    director = AsyncMock(return_value="Original cover")
+    runner = AsyncMock(side_effect=command)
+    arguments = dict(task_id="retry", task_dir=tmp_path, title="Title", script_path=script)
+    with (
+        patch.object(thumbnail, "generate_thumbnail_prompt", director),
+        patch.object(thumbnail, "run_opencli", runner),
+    ):
+        with pytest.raises(OpenCLIError, match="response timed out"):
+            asyncio.run(thumbnail.generate_thumbnail(**arguments))
+        artifact = asyncio.run(thumbnail.generate_thumbnail(**arguments))
+        again = asyncio.run(thumbnail.generate_thumbnail(**arguments))
+    assert artifact == again
+    assert checkpoints[0] == checkpoints[1]
+    director.assert_awaited_once()
+    assert runner.await_count == 2
+
+
+@pytest.mark.parametrize("changed", ["script", "title"])
+def test_changed_source_uses_a_new_request_and_preserves_the_old_checkpoint(tmp_path, changed):
+    script = tmp_path / "script.txt"
+    script.write_text("Original narration")
+    checkpoints = []
+
+    async def command(args, **kwargs):
+        checkpoint = Path(args[args.index("--state-file") + 1])
+        assert not checkpoint.exists()
+        checkpoint.write_text(args[2])
+        checkpoints.append(checkpoint)
+        image = Path(args[args.index("--op") + 1]) / f"cover{len(checkpoints)}.png"
+        image.write_bytes(PNG_FIXTURE)
+        return OpenCLIResult(tuple(args), 0, json.dumps([{"file": str(image)}]), "")
+
+    director = AsyncMock(side_effect=["Original cover", "Revised cover"])
+    with (
+        patch.object(thumbnail, "generate_thumbnail_prompt", director),
+        patch.object(thumbnail, "run_opencli", command),
+    ):
+        first = asyncio.run(thumbnail.generate_thumbnail(
+            task_id="changed", task_dir=tmp_path, title="Original title", script_path=script,
+        ))
+        if changed == "script":
+            script.write_text("Revised narration")
+        second = asyncio.run(thumbnail.generate_thumbnail(
+            task_id="changed", task_dir=tmp_path,
+            title="Revised title" if changed == "title" else "Original title", script_path=script,
+        ))
+    assert first.image_path != second.image_path
+    assert checkpoints[0] != checkpoints[1]
+    assert checkpoints[0].read_text() == "Original cover"
+    assert director.await_count == 2
+
+
+def test_legacy_failure_requires_explicit_recovery_and_keeps_original_prompt(tmp_path):
+    script = tmp_path / "script.txt"
+    script.write_text("Final narration")
+    directory = tmp_path / "thumbnail"
+    directory.mkdir()
+    (directory / "prompt.txt").write_text("Original legacy cover\n")
+    original_manifest = {
+        "task_id": "legacy", "status": "failed", "source_script": str(script),
+        "conversation_url": "https://chatgpt.com/c/local-chatgpt%3Aunsaved",
+    }
+    manifest_path = directory / "manifest.json"
+    manifest_path.write_text(json.dumps(original_manifest))
+    arguments = dict(task_id="legacy", task_dir=tmp_path, title="Title", script_path=script)
+    director = AsyncMock()
+
+    async def command(args, **kwargs):
+        assert args[2] == "Original legacy cover"
+        state = json.loads(Path(args[args.index("--state-file") + 1]).read_text())
+        assert state == {
+            "prompt": "Generate an image of: Original legacy cover",
+            "stage": "recovery_requested",
+            "conversationUrl": "https://chatgpt.com/c/verified1234",
+            "beforeUrls": [],
+        }
+        image = Path(args[args.index("--op") + 1]) / "legacy.png"
+        image.write_bytes(PNG_FIXTURE)
+        return OpenCLIResult(tuple(args), 0, json.dumps([{"file": str(image)}]), "")
+
+    runner = AsyncMock(side_effect=command)
+    with (
+        patch.object(thumbnail, "generate_thumbnail_prompt", director),
+        patch.object(thumbnail, "run_opencli", runner),
+    ):
+        with pytest.raises(RuntimeError, match="verified resume_conversation_url"):
+            asyncio.run(thumbnail.generate_thumbnail(**arguments))
+        assert json.loads(manifest_path.read_text()) == original_manifest
+        runner.assert_not_awaited()
+        artifact = asyncio.run(thumbnail.generate_thumbnail(
+            **arguments, resume_conversation_url="https://chatgpt.com/c/verified1234",
+        ))
+    assert artifact.conversation_url == "https://chatgpt.com/c/verified1234"
+    recovered_manifest = json.loads(manifest_path.read_text())
+    assert json.loads(Path(recovered_manifest["previous_manifest_path"]).read_text()) == original_manifest
+    assert recovered_manifest["recovery_origin"]["previous_request_sha256"] is None
+    director.assert_not_awaited()
+    runner.assert_awaited_once()
+
+
+def test_intentional_legacy_regeneration_creates_new_prompt_and_preserves_history(tmp_path):
+    script = tmp_path / "script.txt"
+    script.write_text("Edited final narration")
+    directory = tmp_path / "thumbnail"
+    directory.mkdir()
+    (directory / "prompt.txt").write_text("Original legacy cover\n")
+    original_manifest = {
+        "task_id": "legacy-edit", "status": "failed", "source_script": str(script),
+        "conversation_url": "https://chatgpt.com/c/original1234",
+    }
+    manifest_path = directory / "manifest.json"
+    manifest_path.write_text(json.dumps(original_manifest))
+
+    async def command(args, **kwargs):
+        assert args[2] == "New cover from edited narration"
+        state_path = Path(args[args.index("--state-file") + 1])
+        assert not state_path.exists()  # OpenCLI must create a fresh request checkpoint.
+        state_path.write_text(json.dumps({
+            "prompt": "Generate an image of: New cover from edited narration",
+            "stage": "saved", "conversationUrl": "https://chatgpt.com/c/newcover1234",
+        }))
+        image = Path(args[args.index("--op") + 1]) / "new-cover.png"
+        image.write_bytes(PNG_FIXTURE)
+        return OpenCLIResult(tuple(args), 0, json.dumps([
+            {"file": str(image), "link": "https://chatgpt.com/c/newcover1234"},
+        ]), "")
+
+    director = AsyncMock(return_value="New cover from edited narration")
+    with (
+        patch.object(thumbnail, "generate_thumbnail_prompt", director),
+        patch.object(thumbnail, "run_opencli", command),
+    ):
+        artifact = asyncio.run(thumbnail.generate_thumbnail(
+            task_id="legacy-edit", task_dir=tmp_path, title="Edited title", script_path=script,
+            allow_legacy_regeneration=True,
+        ))
+    manifest = json.loads(manifest_path.read_text())
+    assert json.loads(Path(manifest["previous_manifest_path"]).read_text()) == original_manifest
+    assert Path(manifest["previous_prompt_path"]).read_text() == "Original legacy cover\n"
+    assert Path(artifact.prompt_path).read_text().strip() == "New cover from edited narration"
+    assert artifact.conversation_url == "https://chatgpt.com/c/newcover1234"
+    assert director.await_args.kwargs["script"] == "Edited final narration"
+    director.assert_awaited_once()
+
+
+@pytest.mark.parametrize("bad_url", ["https://example.com/c/verified1234", "https://chatgpt.com/new", "https://chatgpt.com/c/local-chatgpt%3A123"])
+def test_recovery_rejects_noncanonical_urls_before_modifying_evidence(tmp_path, bad_url):
+    script = tmp_path / "script.txt"
+    script.write_text("Final narration")
+    directory = tmp_path / "thumbnail"
+    directory.mkdir()
+    (directory / "prompt.txt").write_text("Original cover")
+    (directory / "manifest.json").write_text('{"status":"failed"}')
+    with pytest.raises(ValueError, match="canonical"):
+        asyncio.run(thumbnail.generate_thumbnail(
+            task_id="bad-url", task_dir=tmp_path, title="Title", script_path=script,
+            resume_conversation_url=bad_url,
+        ))
+    assert (directory / "manifest.json").read_text() == '{"status":"failed"}'
+
+
+def test_concurrent_generation_is_rejected_without_submitting_a_second_request(tmp_path):
+    script = tmp_path / "script.txt"
+    script.write_text("Final narration")
+    arguments = dict(task_id="busy", task_dir=tmp_path, title="Title", script_path=script)
+
+    async def exercise():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def command(args, **kwargs):
+            entered.set()
+            await release.wait()
+            raise OpenCLIError("finished original request")
+
+        runner = AsyncMock(side_effect=command)
+        with (
+            patch.object(thumbnail, "generate_thumbnail_prompt", AsyncMock(return_value="Cover")),
+            patch.object(thumbnail, "run_opencli", runner),
+        ):
+            pending = asyncio.create_task(thumbnail.generate_thumbnail(**arguments))
+            await asyncio.wait_for(entered.wait(), 1)
+            with pytest.raises(RuntimeError, match="already running"):
+                await thumbnail.generate_thumbnail(**arguments)
+            release.set()
+            with pytest.raises(OpenCLIError, match="finished original request"):
+                await pending
+        runner.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
 class ThumbnailPipelineOrderTests(unittest.IsolatedAsyncioTestCase):
     async def test_frozen_script_media_overlaps_tts_and_drains_before_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -223,6 +440,7 @@ class ThumbnailPipelineOrderTests(unittest.IsolatedAsyncioTestCase):
             async def fake_thumbnail(*args, **kwargs):
                 events.append("thumbnail")
                 self.assertEqual(kwargs["title"], "A Better Video Title")
+                self.assertFalse(kwargs.get("allow_legacy_regeneration", False))
                 await asyncio.wait_for(audio_ready.wait(), 1)
                 events.append("thumbnail-finished")
 
@@ -248,6 +466,34 @@ class ThumbnailPipelineOrderTests(unittest.IsolatedAsyncioTestCase):
                 await orchestrator.run_pipeline(task)
 
             self.assertEqual(events, ["script", "title", "thumbnail", "tts", "thumbnail-finished"])
+
+    async def test_regenerate_explicitly_allows_legacy_thumbnail_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = Path(directory)
+            script_path = task_dir / "script.txt"
+            script_path.write_text("Edited narration")
+            task = TaskResponse(
+                id="regenerate-legacy-thumbnail",
+                created_at="2026-08-04T00:00:00+00:00",
+                updated_at="2026-08-04T00:00:00+00:00",
+                source_type="youtube", source_url="https://youtube.example/video",
+                status="complete", script_path=str(script_path), output_dir=str(task_dir),
+                config=TaskConfig(thumbnail_enabled=True, footage_enabled=False, auto_render=False),
+            )
+            generate = AsyncMock(return_value=thumbnail.ThumbnailArtifact(
+                str(task_dir / "prompt.txt"), str(task_dir / "cover.png"), str(task_dir / "manifest.json"),
+            ))
+            with (
+                patch.object(orchestrator, "update_task", AsyncMock()),
+                patch.object(orchestrator, "_generate_task_title", AsyncMock(return_value=SimpleNamespace(title="Edited title"))),
+                patch.object(orchestrator, "generate_thumbnail", generate),
+                patch.object(orchestrator, "generate_tts", AsyncMock(return_value=str(task_dir / "audio.wav"))),
+                patch.object(orchestrator, "_after_audio", AsyncMock()),
+            ):
+                await orchestrator.run_regenerate(task)
+            generate.assert_awaited_once()
+            self.assertTrue(generate.await_args.kwargs["allow_legacy_regeneration"])
+            self.assertEqual(generate.await_args.kwargs["title"], "Edited title")
 
 
 if __name__ == "__main__":

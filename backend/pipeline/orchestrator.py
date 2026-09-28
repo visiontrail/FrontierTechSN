@@ -177,6 +177,7 @@ async def _generate_task_thumbnail(
     task_log: LogCallback,
     *,
     title: str,
+    allow_legacy_regeneration: bool = False,
 ):
     script_path = Path(task.script_path or task_dir / "script.txt")
     artifact = await generate_thumbnail(
@@ -188,6 +189,7 @@ async def _generate_task_thumbnail(
         ai_endpoint=task.config.ai_endpoint,
         ai_model=task.config.ai_model,
         log=task_log,
+        allow_legacy_regeneration=allow_legacy_regeneration,
     )
     await update_task(task.id, thumbnail_path=artifact.image_path)
     task.thumbnail_path = artifact.image_path
@@ -511,6 +513,7 @@ async def run_regenerate(task: TaskResponse, log: LogCallback | None = None):
                 task_dir,
                 task_log,
                 title=title,
+                allow_legacy_regeneration=True,
             )
         except Exception as exc:
             task_log(f"Regenerate: Thumbnail update failed; retaining prior cover: {exc}")

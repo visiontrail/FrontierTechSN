@@ -148,13 +148,31 @@ This can run while another media task is active. Full adapter regressions for
 an undeployed patch should also run in a copied runtime, not after patching the
 installed package.
 
-The September 27 thumbnail fix is source-only until activated. Do not run
+Thumbnail requests persist their prompt and `--state-file` checkpoint under
+`thumbnail/requests/<script-and-title-hash>/`. Repeating the same request reuses
+its checkpoint, and an already completed, valid local image returns without a
+browser call. Edited scripts or titles use a separate request directory. A
+nonblocking task lock rejects overlapping thumbnail attempts.
+
+For legacy failures without a checkpoint, inspect the existing conversation
+and pass its canonical URL as `generate_thumbnail(resume_conversation_url=...)`.
+This adopts the saved prompt; the adapter must still match the exact user turn
+before downloading. It never sends a replacement prompt in recovery mode.
+The explicit edited-script regeneration path may start a new legacy request;
+ordinary retries without a checkpoint require recovery instead of blind replay.
+Confirmed recovery checkpoints skip the new-generation pacing slot while still
+honoring provider access cooldowns. Callers persist the returned `image_path`
+as the task's `thumbnail_path`; recovering a cover does not rerender the video.
+
+Installing source changes and loading them are separate steps. Do not run
 `npm install`, `npm ci`, or `node tools/opencli/patch-opencli.mjs` against the
 installed runtime while media tasks are active: subsequent OpenCLI subprocesses
-would load changed adapters even without restarting the application. After the
-active tasks finish, apply the patch and restart the backend only during a
-user-authorized maintenance window. A backend restart alone does not apply
-changes to the installed OpenCLI package.
+would load changed adapters even without restarting the application. Once the
+service is idle and maintenance is authorized, apply changed adapter patches
+and restart the backend for Python changes. Check `/api/runtime` and compare
+the installed adapter with its patch, then verify a real image download and
+the task's thumbnail endpoint. A backend restart alone does not apply changes
+to the installed OpenCLI package, and neither step fills missing task covers.
 
 ## Partial ChatGPT answers and recovery
 

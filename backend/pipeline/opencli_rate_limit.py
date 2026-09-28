@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,10 @@ GEMINI_MAX_INTERVAL_SECONDS = 120.0
 RATE_LIMITED_SITES = frozenset({"chatgpt", "gemini"})
 RATE_LIMITED_ACTIONS = frozenset({"ask", "image"})
 GENERATION_QUIET_PERIOD_ACTIONS = frozenset({("chatgpt", "model")})
+CHATGPT_IMAGE_RECOVERY_STAGES = frozenset({
+    "prompt_submitted", "waiting", "recovery_requested", "recovered", "images_detected",
+    "image_wait_timeout", "image_wait_failed", "exporting", "saved",
+})
 PROVIDER_COOLDOWN_SECONDS = 10 * 60.0
 PROVIDER_COOLDOWN_INCREMENT_SECONDS = 10 * 60.0
 MAX_PROVIDER_COOLDOWN_SECONDS = 60 * 60.0
@@ -105,15 +110,60 @@ def wait_for_opencli_cooldown(site: str) -> None:
         time.sleep(min(30.0, remaining))
 
 
+def _is_chatgpt_image_recovery(args: list[str] | tuple[str, ...]) -> bool:
+    """Recognize a submitted image checkpoint without authorizing its output.
+
+    The image adapter checks the exact prompt and conversation before recovery,
+    and never sends a new prompt when a checkpoint exists. Be conservative here:
+    malformed, incomplete, or ambiguous state still pays the generation interval.
+    """
+    if len(args) < 2 or tuple(str(arg).strip().lower() for arg in args[:2]) != (
+        "chatgpt", "image",
+    ):
+        return False
+    state_files = []
+    for index, arg in enumerate(args[2:], start=2):
+        value = str(arg)
+        if value == "--":
+            break
+        if value == "--state-file":
+            state_files.append(str(args[index + 1]) if index + 1 < len(args) else "")
+        elif value.startswith("--state-file="):
+            state_files.append(value.partition("=")[2])
+    if len(state_files) != 1 or not state_files[0]:
+        return False
+    path = Path(state_files[0])
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        prior = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(prior, dict)
+        and isinstance(prior.get("stage"), str)
+        and prior["stage"] in CHATGPT_IMAGE_RECOVERY_STAGES
+        and isinstance(prior.get("prompt"), str)
+        and bool(prior["prompt"].strip())
+        and isinstance(prior.get("conversationUrl"), str)
+        and re.fullmatch(
+            r"https://chatgpt\.com/c/[A-Za-z0-9_-]{8,}(?:[?#][^\s]*)?",
+            prior["conversationUrl"],
+        ) is not None
+    )
+
+
 def is_rate_limited_command(args: list[str] | tuple[str, ...]) -> bool:
     """Return whether an OpenCLI command starts a rate-sensitive generation.
 
-    Reads and model selection skip generation slots, but still honor the
-    separate provider access cooldown when the site explicitly limits access.
+    Reads, saved image recovery, and model selection skip generation slots,
+    but still honor the separate provider access cooldown when the site
+    explicitly limits access.
     """
     return (
         len(args) >= 2
         and str(args[0]).strip().lower() in RATE_LIMITED_SITES
+        and not _is_chatgpt_image_recovery(args)
         and (
             str(args[1]).strip().lower() in RATE_LIMITED_ACTIONS
             or (

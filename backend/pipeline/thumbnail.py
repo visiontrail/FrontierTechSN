@@ -8,9 +8,13 @@ task output directory.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import logging
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,6 +161,29 @@ def _write_manifest(path: Path, data: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+@contextmanager
+def _thumbnail_lock(directory: Path) -> Iterator[None]:
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / ".generation.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Thumbnail generation is already running for this task") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _read_manifest(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Invalid thumbnail request metadata at {path}")
+    return value
+
+
 async def generate_thumbnail_prompt(
     *,
     title: str,
@@ -197,13 +224,117 @@ async def generate_thumbnail(
     ai_endpoint: str | None = None,
     ai_model: str | None = None,
     log: LogCallback | None = None,
+    resume_conversation_url: str | None = None,
+    allow_legacy_regeneration: bool = False,
 ) -> ThumbnailArtifact:
-    """Generate, download, and provenance-log a task thumbnail without TTS."""
+    """Generate once per script/title, or recover a verified legacy conversation.
+
+    ``resume_conversation_url`` explicitly adopts the saved prompt for a legacy
+    request. OpenCLI still verifies that conversation's exact submitted prompt
+    before accepting its images; this option never submits a replacement turn.
+    Intentional script regeneration may explicitly replace an untracked legacy
+    request by setting ``allow_legacy_regeneration``.
+    """
+    with _thumbnail_lock(task_dir / "thumbnail"):
+        return await _generate_thumbnail_locked(
+            task_id=task_id, task_dir=task_dir, title=title, script_path=script_path,
+            provider_id=provider_id, ai_endpoint=ai_endpoint, ai_model=ai_model,
+            log=log, resume_conversation_url=resume_conversation_url,
+            allow_legacy_regeneration=allow_legacy_regeneration,
+        )
+
+
+async def _generate_thumbnail_locked(
+    *,
+    task_id: str,
+    task_dir: Path,
+    title: str,
+    script_path: Path,
+    provider_id: int | None,
+    ai_endpoint: str | None,
+    ai_model: str | None,
+    log: LogCallback | None,
+    resume_conversation_url: str | None,
+    allow_legacy_regeneration: bool,
+) -> ThumbnailArtifact:
     thumbnail_dir = task_dir / "thumbnail"
     image_dir = thumbnail_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = thumbnail_dir / "manifest.json"
     prompt_path = thumbnail_dir / "prompt.txt"
+    previous = _read_manifest(manifest_path)
+    script = script_path.read_text(encoding="utf-8").strip()
+    if not script:
+        raise RuntimeError(f"Thumbnail source script is empty at {script_path}")
+    request_sha256 = hashlib.sha256(json.dumps(
+        {"title": title, "script": script}, sort_keys=True, ensure_ascii=False,
+    ).encode("utf-8")).hexdigest()
+    request_dir = thumbnail_dir / "requests" / request_sha256
+    saved_prompt_path = request_dir / "prompt.txt"
+    state_path = request_dir / "image-request.json"
+    same_request = previous.get("request_sha256") == request_sha256
+
+    # A legacy failure has no content hash or submission checkpoint. Replaying
+    # it could silently create a second image; require explicit recovery first.
+    if (
+        not resume_conversation_url
+        and not allow_legacy_regeneration
+        and previous.get("status") in {"failed", "generating"}
+        and not previous.get("request_sha256")
+        and (
+            not previous.get("source_script")
+            or Path(str(previous["source_script"])).resolve() == script_path.resolve()
+        )
+        and prompt_path.is_file()
+    ):
+        raise RuntimeError(
+            "Saved legacy thumbnail request needs a verified resume_conversation_url; "
+            "the original image prompt was not replayed"
+        )
+
+    if (
+        not resume_conversation_url and same_request
+        and previous.get("status") == "ready" and saved_prompt_path.is_file()
+    ):
+        raw_image = previous.get("image_path")
+        image_path = Path(raw_image) if raw_image else None
+        if (
+            image_path is not None
+            and not image_path.is_symlink()
+            and image_dir.resolve() in image_path.resolve().parents
+            and _looks_like_image(image_path)
+        ):
+            prompt_path.write_text(saved_prompt_path.read_text(encoding="utf-8"), encoding="utf-8")
+            _log(log, f"Thumbnail: reusing completed image at {image_path}")
+            return ThumbnailArtifact(
+                str(prompt_path.resolve()), str(image_path.resolve()),
+                str(manifest_path.resolve()), str(previous.get("conversation_url") or ""),
+            )
+
+    if resume_conversation_url and not re.fullmatch(
+        r"https://chatgpt\.com/c/[A-Za-z0-9_-]{8,}", resume_conversation_url,
+    ):
+        raise ValueError("Thumbnail recovery requires a canonical ChatGPT conversation URL")
+    # Validate recovery inputs before replacing the previous failure evidence.
+    recovery_prompt = None
+    if resume_conversation_url:
+        source_prompt = saved_prompt_path if saved_prompt_path.is_file() else prompt_path
+        if not source_prompt.is_file():
+            raise RuntimeError("Thumbnail recovery requires the original saved prompt")
+        recovery_prompt = source_prompt.read_text(encoding="utf-8").strip()
+        if not recovery_prompt:
+            raise RuntimeError("Thumbnail recovery cannot use an empty saved prompt")
+        prior_state = _read_manifest(state_path)
+        submitted_prompt = f"Generate an image of: {recovery_prompt}"
+        if prior_state and prior_state.get("prompt") != submitted_prompt:
+            raise RuntimeError("Thumbnail recovery prompt differs from the saved request")
+        request_dir.mkdir(parents=True, exist_ok=True)
+        _write_manifest(state_path, {
+            "prompt": submitted_prompt,
+            "stage": "recovery_requested",
+            "conversationUrl": resume_conversation_url,
+            "beforeUrls": prior_state.get("beforeUrls", []),
+        })
     started_at = datetime.now(timezone.utc).isoformat()
 
     manifest: dict[str, Any] = {
@@ -211,30 +342,57 @@ async def generate_thumbnail(
         "status": "generating",
         "provider": "chatgpt_web",
         "source_script": str(script_path),
+        "request_sha256": request_sha256,
+        "request_state_path": str(state_path.resolve()),
         "prompt_path": str(prompt_path),
         "image_path": "",
         "image_paths": [],
-        "conversation_url": "",
+        "conversation_url": resume_conversation_url or (previous.get("conversation_url", "") if same_request else ""),
         "started_at": started_at,
         "completed_at": None,
         "error": None,
     }
+    if resume_conversation_url:
+        manifest["recovery_origin"] = {
+            "prompt_path": str(source_prompt.resolve()),
+            "previous_request_sha256": previous.get("request_sha256"),
+            "conversation_url": resume_conversation_url,
+        }
+    if previous:
+        history_dir = thumbnail_dir / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        history_path = history_dir / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S.%fZ}.json"
+        _write_manifest(history_path, previous)
+        manifest["previous_manifest_path"] = str(history_path.resolve())
+        if prompt_path.is_file():
+            history_prompt_path = history_path.with_suffix(".prompt.txt")
+            history_prompt_path.write_text(prompt_path.read_text(encoding="utf-8"), encoding="utf-8")
+            manifest["previous_prompt_path"] = str(history_prompt_path.resolve())
     _write_manifest(manifest_path, manifest)
 
     try:
-        script = script_path.read_text(encoding="utf-8").strip()
-        if not script:
-            raise RuntimeError(f"Thumbnail source script is empty at {script_path}")
-
-        _log(log, "Thumbnail: deriving a viral cover prompt from the final audio script")
-        prompt = await generate_thumbnail_prompt(
-            title=title,
-            script=script,
-            provider_id=provider_id,
-            ai_endpoint=ai_endpoint,
-            ai_model=ai_model,
-            log=log,
-        )
+        if recovery_prompt is not None:
+            prompt = recovery_prompt
+            _log(log, "Thumbnail: recovering the original saved image request")
+        elif saved_prompt_path.is_file():
+            prompt = saved_prompt_path.read_text(encoding="utf-8").strip()
+            if not prompt:
+                raise RuntimeError("Saved thumbnail prompt is empty; original request was not replayed")
+            _log(log, "Thumbnail: reusing the saved prompt and request checkpoint")
+        elif state_path.exists():
+            raise RuntimeError("Saved thumbnail request has no prompt; original request was not replayed")
+        else:
+            _log(log, "Thumbnail: deriving a viral cover prompt from the final audio script")
+            prompt = await generate_thumbnail_prompt(
+                title=title,
+                script=script,
+                provider_id=provider_id,
+                ai_endpoint=ai_endpoint,
+                ai_model=ai_model,
+                log=log,
+            )
+        request_dir.mkdir(parents=True, exist_ok=True)
+        saved_prompt_path.write_text(prompt + "\n", encoding="utf-8")
         prompt_path.write_text(prompt + "\n", encoding="utf-8")
         _log(log, f"Thumbnail: prompt saved to {prompt_path}")
 
@@ -252,6 +410,8 @@ async def generate_thumbnail(
                 prompt,
                 "--op",
                 str(image_dir.resolve()),
+                "--state-file",
+                str(state_path.resolve()),
                 "--timeout",
                 str(timeout),
                 "--window",
