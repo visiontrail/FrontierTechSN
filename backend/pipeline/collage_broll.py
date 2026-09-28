@@ -195,6 +195,8 @@ def _assert_item_stage_paths_safe(item_dir: Path) -> None:
     for path in (
         item_dir / "image-prompt.txt",
         item_dir / "image-prompt.txt.tmp",
+        item_dir / "chatgpt-image-request.json",
+        item_dir / "chatgpt-image-request.json.tmp",
         item_dir / "video-prompt.txt",
         item_dir / "video-prompt.txt.tmp",
         item_dir / "stills" / "cache-contract.json",
@@ -985,6 +987,7 @@ async def _retry_opencli_in_session(
             if any(code in str(exc) for code in (
                 "GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT",
                 "GEMINI_VIDEO_SUBMISSION_UNCERTAIN", "GEMINI_VIDEO_GENERATION_FAILED",
+                "CHATGPT_IMAGE_TURN_PENDING",
             )):
                 raise
             if non_retryable and non_retryable(exc):
@@ -1089,6 +1092,7 @@ async def _generate_still(prompt: str, item_dir: Path) -> tuple[Path, str]:
     result = await _run_opencli_retry(
         [
             "chatgpt", "image", prompt,
+            "--state-file", str((item_dir / "chatgpt-image-request.json").resolve()),
             "--op", str(still_dir.resolve()),
             "--timeout", str(timeout),
             "--window", "background",
@@ -1851,6 +1855,10 @@ async def generate_collage_broll(
                     still, chatgpt_url = await _generate_still(still_prompt, item_dir)
                     item["still_provider"] = "chatgpt_web_via_opencli"
                 except Exception as exc:  # noqa: BLE001 - local renderer preserves requested count
+                    if (item_dir / "chatgpt-image-request.json").exists():
+                        raise OpenCLIError(
+                            f"CHATGPT_IMAGE_TURN_PENDING: preserve and recover the existing still request: {exc}"
+                        ) from exc
                     warning = f"Web still unavailable ({exc}); used deterministic local paper collage"
                     item["generation_warnings"].append(warning)
                     _log(log, f"Collage B-roll {index}/{len(specs)}: {warning}")

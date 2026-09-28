@@ -123,6 +123,18 @@ conversation every five polls or navigates away from a live local route.
 Canonical/local aliases are preserved; adopting a newly saved route requires
 the exact submitted prompt. An unrelated conversation fails explicitly.
 
+Plain user bubbles now place the full prompt under
+`[data-user-message-bubble] [data-search-result-target]`, without the previous
+Markdown attributes. Read that content without the Show more/copy controls;
+an empty message read during a route transition waits within the same deadline.
+
+Collage still requests pass `--state-file` outside the disposable still directory.
+The checkpoint is written before submission and binds the exact prompt, original
+image baseline and conversation URL. Retries recover the saved conversation and
+verify its latest user prompt before exporting, without sending again. Missing
+identity or mismatched prompts retain the checkpoint and block the local-still
+fallback so an uncertain submitted request cannot be hidden or replayed.
+
 The response budget remains `THUMBNAIL_CHATGPT_TIMEOUT`. Both the OpenCLI
 execution layer and Python caller add a separate 180-second setup/export
 allowance. Concise `[chatgpt/image]` JSON diagnostics record the stage and

@@ -71,7 +71,7 @@ function waiter(source = fixedWait, options = {}) {
       return options.images?.(state) || []
     },
     async resolveChatGPTConversationIdentity() { return options.identity || null },
-    async getVisibleMessages() { return [{ Role: 'User', Text: options.actualPrompt || 'exact image prompt' }] },
+    async getVisibleMessages() { return options.messages?.(state) ?? [{ Role: 'User', Text: options.actualPrompt || 'exact image prompt' }] },
     chatGPTPromptMatches: (actual, expected) => actual === expected,
   }
   const wait = vm.runInNewContext(source + '\nwaitForChatGPTImages', context)
@@ -122,6 +122,15 @@ test('local route can naturally become saved only with the exact submitted promp
     identity: { conversationUrl: savedUrl } })
   assert.deepEqual(Array.from(await run(30, localUrl, { prompt: 'exact image prompt' })), [imageUrl])
   assert.equal(state.progress[0].url, savedUrl)
+  assert.equal(state.navigations.length, 0)
+})
+
+test('saved route waits for hydrated messages before validating the original image prompt', async () => {
+  const { run, state } = waiter(fixedWait, { images: () => [imageUrl],
+    identity: { conversationUrl: savedUrl },
+    messages: state => state.clock < 12000 ? [] : [{ Role: 'User', Text: 'exact image prompt' }] })
+  assert.deepEqual(Array.from(await run(30, localUrl, { prompt: 'exact image prompt' })), [imageUrl])
+  assert.ok(state.clock >= 15000)
   assert.equal(state.navigations.length, 0)
 })
 
@@ -222,4 +231,50 @@ test('image setup/export allowance matches Python and preserves other command bu
   assert.equal(budget({ site: 'chatgpt', name: 'image' }), 570)
   assert.equal(budget({ site: 'chatgpt', name: 'ask' }), 390)
   assert.equal(budget({ site: 'gemini', name: 'ask' }, { file: '/mock/image.jpg' }), 570)
+})
+
+test('image timeout checkpoint recovers the original prompt without a second send', async () => {
+  const stateFile = path.join(temporary, 'image-request.json')
+  const source = fs.readFileSync(path.join(copied, 'clis/chatgpt/image.js'), 'utf8')
+    .replace(/^import .*\n/gm, '').replaceAll('export ', '')
+  const sends = []; const navigations = []; let waits = 0
+  const command = vm.runInNewContext(source + '\nimageCommand', {
+    os, path, fs, Date, cli: value => value, Strategy: { COOKIE: 'cookie' },
+    ArgumentError: AdapterError, CommandExecutionError: AdapterError, EmptyResultError: AdapterError,
+    console: { error() {} }, normalizeBooleanFlag: Boolean,
+    async clearChatGPTDraft() {}, async getChatGPTVisibleImageUrls() { return [] },
+    async sendChatGPTMessage(_page, value) { sends.push(value); return true },
+    async resolveChatGPTConversationIdentity() { return { conversationUrl: savedUrl } },
+    async getVisibleMessages() { return [{ Role: 'User', Text: sends[0] }] },
+    chatGPTPromptMatches: (a, b) => a === b,
+    isSameChatGPTConversation: (a, b) => a === b,
+    async waitForChatGPTImages() {
+      if (++waits === 1) throw new AdapterError('response timeout')
+      return [imageUrl]
+    },
+  })
+  const page = { async goto(url) { navigations.push(url) } }
+  const args = { prompt: 'original still', timeout: 30, sd: true, 'state-file': stateFile }
+  await assert.rejects(command.func(page, args), /response timeout/)
+  assert.equal(JSON.parse(fs.readFileSync(stateFile)).stage, 'image_wait_failed')
+  const result = await command.func(page, args)
+  assert.equal(result[0].link, `🔗 ${savedUrl}`)
+  assert.equal(sends.length, 1)
+  assert.deepEqual(navigations, ['https://chatgpt.com/new', savedUrl])
+  await assert.rejects(command.func(page, { ...args, prompt: 'different still' }), /saved image prompt differs/)
+  const prior = JSON.parse(fs.readFileSync(stateFile))
+  fs.writeFileSync(stateFile, JSON.stringify({ ...prior, stage: 'submitting', conversationUrl: '' }))
+  await assert.rejects(command.func(page, args), /no saved conversation URL/)
+  assert.equal(sends.length, 1)
+  assert.equal(navigations.length, 2)
+})
+
+test('image recovery rejects a different visible user prompt and never submits', async () => {
+  const helper = fs.readFileSync(path.join(runtime, 'patches/chatgpt-image-request.js'), 'utf8').replaceAll('export ', '')
+  const recover = vm.runInNewContext(helper + '\nrecoverChatGPTImageRequest', {
+    Date, CommandExecutionError: AdapterError,
+    async getVisibleMessages() { return [{ Role: 'User', Text: 'someone else' }] },
+    chatGPTPromptMatches: (a, b) => a === b,
+  })
+  await assert.rejects(recover({ async goto() {} }, { conversationUrl: savedUrl }, 'owned prompt', 30), /recovery prompt mismatch/)
 })

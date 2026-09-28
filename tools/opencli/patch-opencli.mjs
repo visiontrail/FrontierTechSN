@@ -951,6 +951,16 @@ models = replaceOnce(
 fs.writeFileSync(modelsPath, models)
 
 let chatgptUtils = fs.readFileSync(chatgptUtilsPath, 'utf8')
+// Normalize the later bubble extension before replaying the legacy patches.
+chatgptUtils = chatgptUtils.replace(
+  `const contentNode = node.querySelector('[data-user-message-bubble] [data-search-result-target]')
+                || node.querySelector('[data-markdown-text-tone="user-message"]')`,
+  `const contentNode = node.querySelector('[data-markdown-text-tone="user-message"]')`,
+).replace(
+  `&& !node.querySelector('[data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]')
+                && !(role === 'User' && node.querySelector('[data-user-message-bubble] [data-search-result-target]'))) continue;`,
+  `&& !node.querySelector('[data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]')) continue;`,
+)
 chatgptUtils = replaceWithinFunction(
   chatgptUtils,
   'export async function uploadChatGPTImages(page, imagePaths) {',
@@ -1880,6 +1890,20 @@ export async function resolveChatGPTConversationIdentity(page, prompt = '') {
 }
 
 `
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getVisibleMessages(', 'function formatChatGPTDetailMessages(',
+  `            const contentNode = node.querySelector('[data-markdown-text-tone="user-message"]')`,
+  `            const contentNode = node.querySelector('[data-user-message-bubble] [data-search-result-target]')
+                || node.querySelector('[data-markdown-text-tone="user-message"]')`,
+  'ChatGPT plain user bubble complete prompt extraction',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getVisibleMessages(', 'function formatChatGPTDetailMessages(',
+  `&& !node.querySelector('[data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]')) continue;`,
+  `&& !node.querySelector('[data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]')
+                && !(role === 'User' && node.querySelector('[data-user-message-bubble] [data-search-result-target]'))) continue;`,
+  'ChatGPT plain user bubble semantic unit ownership',
+)
 chatgptUtils = replaceOnce(chatgptUtils,
   'function cleanPromptText(str) {',
   chatgptOwnedTurnHelpers + 'function cleanPromptText(str) {',
@@ -1924,6 +1948,7 @@ chatgptUtils = replaceWithinFunction(chatgptUtils,
 fs.writeFileSync(chatgptUtilsPath, chatgptUtils)
 
 let chatgptImage = fs.readFileSync(chatgptImagePath, 'utf8')
+if (!chatgptImage.includes('const priorRequest = requestState.prior;')) {
 chatgptImage = replaceOnce(chatgptImage,
   'clearChatGPTDraft, getChatGPTVisibleImageUrls,',
   'clearChatGPTDraft, resolveChatGPTConversationIdentity, getChatGPTVisibleImageUrls,',
@@ -1998,6 +2023,84 @@ chatgptImage = replaceOnce(chatgptImage,
   "        report('saved', link);\n        return results;",
   'ChatGPT image saved diagnostics',
 )
+}
+chatgptImage = replaceOnce(chatgptImage,
+  'clearChatGPTDraft, resolveChatGPTConversationIdentity, getChatGPTVisibleImageUrls,',
+  'clearChatGPTDraft, resolveChatGPTConversationIdentity, getVisibleMessages, chatGPTPromptMatches, isSameChatGPTConversation, getChatGPTVisibleImageUrls,',
+  'ChatGPT image recovery ownership imports',
+)
+chatgptImage = replaceOnce(chatgptImage,
+  "        { name: 'op', help: 'Output directory (default: ~/Pictures/chatgpt)' },",
+  "        { name: 'state-file', help: 'Durable request checkpoint; retries recover without sending again' },\n        { name: 'op', help: 'Output directory (default: ~/Pictures/chatgpt)' },",
+  'ChatGPT image durable state argument',
+)
+chatgptImage = replaceOnce(chatgptImage,
+  `        const report = (stage, conversation_url = '') => {
+            console.error('[chatgpt/image] ' + JSON.stringify({ stage, conversation_url }));
+        };`,
+  `        let requestState;
+        let beforeUrls = [];
+        const report = (stage, conversation_url = '') => {
+            if (stage !== 'preparing') requestState?.save(stage, conversation_url, beforeUrls);
+            console.error('[chatgpt/image] ' + JSON.stringify({ stage, conversation_url }));
+        };`,
+  'ChatGPT image persist progress before reporting it',
+)
+if (!chatgptImage.includes('const priorRequest = requestState.prior;')) {
+  const start = chatgptImage.indexOf('        const preparedImages =')
+  const end = chatgptImage.indexOf("        report('waiting', convUrl);", start)
+  if (start < 0 || end < 0) throw new Error('ChatGPT image request boundaries missing')
+  chatgptImage = chatgptImage.slice(0, start) + `        const submittedPrompt = buildPrompt(prompt, imagePaths.length);
+        requestState = chatGPTImageRequestState(kwargs['state-file'], submittedPrompt);
+        const priorRequest = requestState.prior;
+        let convUrl = '';
+        let localConversationUrl = '';
+        if (priorRequest) {
+            const identity = await recoverChatGPTImageRequest(page, priorRequest, submittedPrompt, Math.min(timeout, 120));
+            convUrl = identity.conversationUrl;
+            localConversationUrl = identity.localConversationUrl || '';
+            beforeUrls = priorRequest.beforeUrls || [];
+            report('recovered', convUrl);
+        } else {
+            const preparedImages = imagePaths.length ? await prepareChatGPTImagePaths(imagePaths) : { ok: true, paths: [] };
+            if (!preparedImages.ok) throw new ArgumentError(preparedImages.reason);
+            if (kwargs.project) await navigateToProject(page, kwargs.project);
+            else await page.goto(\`https://\${CHATGPT_DOMAIN}/new\`, { settleMs: 2000 });
+            await clearChatGPTDraft(page);
+            if (imagePaths.length) {
+                const upload = await uploadChatGPTImages(page, preparedImages.paths);
+                if (!upload?.ok) throw new CommandExecutionError(upload?.reason || 'Failed to upload image to ChatGPT');
+            }
+            beforeUrls = await getChatGPTVisibleImageUrls(page);
+            // Persist uncertainty before the send. Even a killed process must
+            // not turn its retry into a second generation request.
+            requestState.save('submitting', '', beforeUrls);
+            const sent = await sendChatGPTMessage(page, submittedPrompt);
+            if (!sent) throw new CommandExecutionError('Failed to send image prompt to ChatGPT',
+                \`Open \${await currentChatGPTLink(page)} and verify the composer is ready.\`);
+            report('prompt_submitted');
+            for (let ci = 0; ci < 10; ci++) {
+                const identity = await resolveChatGPTConversationIdentity(page, submittedPrompt);
+                if (identity) {
+                    convUrl = identity.conversationUrl;
+                    localConversationUrl = identity.localConversationUrl || '';
+                    break;
+                }
+                const url = await currentChatGPTLink(page);
+                if (url.includes('/c/')) { convUrl = url; break; }
+                await page.sleep(2);
+            }
+            if (!convUrl) convUrl = await currentChatGPTLink(page);
+        }
+` + chatgptImage.slice(end)
+}
+const requestHelperStart = chatgptImage.indexOf('export function chatGPTImageRequestState(')
+if (requestHelperStart >= 0) {
+  const requestHelperEnd = chatgptImage.indexOf('export const imageCommand =', requestHelperStart)
+  chatgptImage = chatgptImage.slice(0, requestHelperStart) + chatgptImage.slice(requestHelperEnd)
+}
+chatgptImage = chatgptImage.replace('export const imageCommand =',
+  fs.readFileSync(path.join(runtimeDir, 'patches', 'chatgpt-image-request.js'), 'utf8') + '\n\nexport const imageCommand =')
 fs.writeFileSync(chatgptImagePath, chatgptImage)
 
 let ask = fs.readFileSync(askPath, 'utf8')
@@ -2199,6 +2302,12 @@ fs.copyFileSync(
 )
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+const chatgptImageEntry = manifest.find(entry => entry?.site === 'chatgpt' && entry?.name === 'image')
+if (!chatgptImageEntry?.args) throw new Error('ChatGPT image manifest entry not found')
+if (!chatgptImageEntry.args.some(arg => arg.name === 'state-file')) {
+  chatgptImageEntry.args.push({ name: 'state-file', type: 'str', required: false,
+    help: 'Durable request checkpoint; retries recover without sending again' })
+}
 const chatgptReadEntry = manifest.find(entry => entry?.site === 'chatgpt' && entry?.name === 'read')
 if (!chatgptReadEntry?.columns) throw new Error('ChatGPT read manifest entry not found')
 if (!chatgptReadEntry.columns.includes('Generating')) chatgptReadEntry.columns.push('Generating')

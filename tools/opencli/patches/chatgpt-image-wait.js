@@ -34,7 +34,10 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
                 const messages = await getVisibleMessages(page, { textOnly: true });
                 if (Date.now() >= deadline) break;
                 const latestUser = [...messages].reverse().find(message => message.Role === 'User');
-                if (!latestUser || !chatGPTPromptMatches(latestUser.Text, options.prompt)) identity = null;
+                // The saved route can render before its conversation messages.
+                // An empty read is not evidence of a different request.
+                if (!latestUser) continue;
+                if (!chatGPTPromptMatches(latestUser.Text, options.prompt)) identity = null;
                 else if (identity?.localConversationUrl && !(isPending(conversationUrl)
                     && isSameChatGPTConversation(currentUrl, identity.localConversationUrl))) identity = null;
                 else if (!identity && isPending(conversationUrl) && isLocal(currentUrl)) {

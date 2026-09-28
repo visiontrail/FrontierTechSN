@@ -834,6 +834,18 @@ def test_opencli_stops_after_two_identical_input_hydration_failures(monkeypatch)
     assert sleep.await_count == 1
 
 
+def test_still_retries_reuse_one_durable_request_checkpoint(tmp_path: Path, monkeypatch):
+    run = AsyncMock(side_effect=collage_broll.OpenCLIError("response timeout after submission"))
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", AsyncMock())
+    with pytest.raises(collage_broll.OpenCLIError):
+        asyncio.run(collage_broll._generate_still("owned prompt", tmp_path))
+    for call in run.await_args_list:
+        args = call.args[0]
+        assert args[args.index("--state-file") + 1] == str(tmp_path / "chatgpt-image-request.json")
+
+
 def _stuck_chatgpt_image_composer_error() -> collage_broll.OpenCLIError:
     return collage_broll.OpenCLIError(
         "OpenCLI chatgpt image failed with exit 1: ok: false\n"
@@ -1418,6 +1430,29 @@ def test_generate_can_use_local_still_but_not_local_motion(tmp_path: Path):
         "error_code": None,
         "detected_at_scene_id": None,
     }
+
+
+def test_pending_chatgpt_image_preserves_checkpoint_without_local_fallback(tmp_path: Path):
+    specs = [collage_broll._fallback_spec(_board(1)["scenes"][0], 0)]
+    checkpoint = tmp_path / "collage_broll" / "01-scene-01" / "chatgpt-image-request.json"
+
+    async def pending(_prompt, item_dir):
+        assert item_dir == checkpoint.parent
+        checkpoint.write_text('{"stage":"submitting"}')
+        raise collage_broll.OpenCLIError("CHATGPT_IMAGE_TURN_PENDING")
+
+    with (
+        patch.object(collage_broll, "plan_specs", AsyncMock(return_value=specs)),
+        patch.object(collage_broll, "_generate_still", pending),
+        patch.object(collage_broll, "_render_local_still", AsyncMock()) as fallback,
+    ):
+        manifest = asyncio.run(collage_broll.generate_collage_broll(
+            _board(1), tmp_path, count=1, force_opening=False, frame=LANDSCAPE,
+        ))
+    fallback.assert_not_awaited()
+    assert manifest["ready_count"] == 0
+    assert "CHATGPT_IMAGE_TURN_PENDING" in manifest["items"][0]["error"]
+    assert checkpoint.is_file()
 
 
 def test_motion_probe_rejects_a_video_that_becomes_static(tmp_path: Path):

@@ -626,6 +626,18 @@ test('ChatGPT rendered prompt matching requires exact text or the same leading r
   assert.equal(chatGPTPromptMatches('Exact   text', 'Exact text'), true)
 })
 
+test('ChatGPT plain collapsed user bubble preserves the whole image prompt and excludes controls', async () => {
+  const { page, state } = modernChatgptPage()
+  state.prompt.textContent = 'Generate an image of: complete prompt\nIncluding its hidden final line.'
+  state.units[0].querySelector = selector => selector === '[data-user-message-bubble] [data-search-result-target]' ? state.prompt : null
+  const rows = await getVisibleMessages(page, { textOnly: true })
+  assert.equal(rows[0].Role, 'User')
+  assert.equal(rows[0].Text, state.prompt.textContent)
+  assert.equal(rows.length, 2)
+  const identity = await resolveChatGPTConversationIdentity(page, state.prompt.textContent)
+  assert.equal(identity.conversationUrl, `https://chatgpt.com/c/${modernSavedChatId}`)
+})
+
 for (const scenario of ['active', 'unrelated-form', 'quoted', 'hidden-stop', 'hidden-composer']) {
 test(`ChatGPT recognizes exact Stop only in the visible composer form: ${scenario}`, async () => {
   class Element {
