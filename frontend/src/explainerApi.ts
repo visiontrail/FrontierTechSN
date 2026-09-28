@@ -36,6 +36,11 @@ export interface ExplainerForm {
 export type ExplainerStatus = 'draft' | 'writing_script' | 'script_ready' | 'generating_audio'
   | 'generating_images' | 'generating_motion' | 'rendering' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 
+export interface ExplainerSceneArtifact {
+  id: string
+  image_path?: string
+}
+
 export interface ExplainerProject extends ExplainerForm {
   id: string
   status: ExplainerStatus
@@ -50,7 +55,7 @@ export interface ExplainerProject extends ExplainerForm {
     audio_url?: string
     timeline_url?: string
     duration_seconds?: number
-    scene_artifacts?: unknown[]
+    scene_artifacts?: ExplainerSceneArtifact[]
   }
 }
 

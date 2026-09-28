@@ -7,6 +7,7 @@ import {
   isExplainerRunning, runExplainer, saveExplainer, saveExplainerDefaults,
 } from '../explainerApi'
 import type { ExplainerForm, ExplainerProject, ExplainerScene, ExplainerStatus, ExplainerStyle } from '../explainerApi'
+import ExplainerStylePreview from './ExplainerStylePreview'
 import './ExplainerStudio.css'
 
 const STATUS: Record<ExplainerStatus, string> = {
@@ -42,22 +43,6 @@ function durationLabel(seconds: number) {
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`
 }
 
-function StylePreview({ style }: { style: ExplainerStyle }) {
-  return <div className="explainer-style-preview" style={{ backgroundColor: style.background_color, color: style.ink_color }}>
-    <span className="explainer-preview-caption">STYLE STUDY</span>
-    <svg viewBox="0 0 320 170" role="img" aria-label="Style preview with a line character and simple concept shapes">
-      <g fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="104" cy="53" r="20" /><path d="M102 74l-2 48m0-26l-25 15m26-18l32-15m-33 44l-19 31m19-31l23 30" />
-        <path d="M97 51h1m13-1h1m-14 10q6 4 11-1" />
-        <rect x="186" y="90" width="42" height="42" rx="3" /><path d="M207 78V65m-8 7l8-8 8 8M163 111h-17m9-7l-8 7 8 7" />
-        <circle cx="206" cy="37" r="21" stroke={style.accent_color} /><path d="M197 37l7 7 12-14" stroke={style.accent_color} />
-        <path d="M56 156h192" strokeWidth="1" opacity="0.4" />
-      </g>
-    </svg>
-    <span className="explainer-preview-footer">One scene. One clear idea.</span>
-  </div>
-}
-
 export default function ExplainerStudio() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -71,7 +56,7 @@ export default function ExplainerStudio() {
   const [notice, setNotice] = useState<string | null>(null)
   const [localSaveError, setLocalSaveError] = useState(false)
   const { data: defaults, error: defaultsError } = useQuery({ queryKey: ['explainer-defaults'], queryFn: fetchExplainerDefaults })
-  const { data: library, error: libraryError } = useQuery({ queryKey: ['explainers'], queryFn: fetchExplainers, refetchInterval: 7000 })
+  const { data: library, error: libraryError, refetch: reloadLibrary } = useQuery({ queryKey: ['explainers'], queryFn: fetchExplainers, refetchInterval: 7000 })
   const { data: project, error: projectError, isLoading: projectLoading } = useQuery({
     queryKey: ['explainer', id], queryFn: () => fetchExplainer(id!), enabled: !!id,
     refetchInterval: (query) => isExplainerRunning(query.state.data?.status) ? 2000 : 7000,
@@ -295,9 +280,10 @@ export default function ExplainerStudio() {
                   <label htmlFor="explainer-visual">Art direction</label><textarea id="explainer-visual" rows={3} value={form.style.visual_direction} onChange={(e) => patchStyle('visual_direction', e.target.value)} />
                   <label htmlFor="explainer-tone">Writing tone</label><textarea id="explainer-tone" rows={2} value={form.style.writing_tone} onChange={(e) => patchStyle('writing_tone', e.target.value)} />
                 </div>
-                <div><StylePreview style={form.style} /><div className="explainer-colors">
+                <div><ExplainerStylePreview style={form.style} project={project} projects={library?.projects} projectId={id}
+                  loading={!library && !libraryError} lookupFailed={!!libraryError} onRetryLookup={() => { void reloadLibrary() }} /><div className="explainer-colors">
                   {([['background_color', 'Background'], ['ink_color', 'Ink'], ['accent_color', 'Accent']] as const).map(([key, label]) => <label key={key}><input type="color" value={form.style[key]} onChange={(e) => patchStyle(key, e.target.value)} /><span>{label}</span></label>)}
-                </div><p className="explainer-field-help">This preview shows your palette. Generated images use the character description and each scene’s visual prompt.</p></div>
+                </div><p className="explainer-field-help">These colors guide new illustrations and video overlays. Existing artwork keeps its original colors.</p></div>
               </div>
               <details className="explainer-advanced"><summary>Pacing & motion</summary><div className="explainer-settings-row is-three">
                 <div><label htmlFor="explainer-motion">Motion style</label><select id="explainer-motion" value={form.style.motion_mode} onChange={(e) => patchStyle('motion_mode', e.target.value as ExplainerStyle['motion_mode'])}><option value="none">Still illustrations</option><option value="subtle">Gentle pan & zoom</option><option value="gemini">Gemini animation</option></select></div>
