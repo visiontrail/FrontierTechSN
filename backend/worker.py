@@ -3,7 +3,7 @@ import json
 import logging
 import traceback
 from pathlib import Path
-from backend import config
+from backend import config, explainers
 from backend.daily_news.freshness import completion_guard
 from backend.database import (
     compare_and_set_task_status,
@@ -146,6 +146,11 @@ async def _worker_loop():
         try:
             task = await get_next_queued_task()
             if not task:
+                # Both studios share this single consumer. A full explainer
+                # holds the worker through writing and rendering, while due
+                # Morning Desk jobs take priority between productions.
+                if await explainers.run_next_queued():
+                    continue
                 # Keep the clock-to-execution gap tight for scheduled plans.
                 # Due scheduled tasks are also prioritized by the database.
                 await asyncio.sleep(1)

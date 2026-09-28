@@ -19,7 +19,9 @@ def _call(function, *args):
 
 @router.get("")
 async def list_projects():
-    return {"projects": [studio.public_project(p) for p in studio.list_projects()]}
+    projects = studio.list_projects()
+    positions = studio.queue_positions(projects)
+    return {"projects": [studio.public_project(p, positions) for p in projects]}
 
 
 @router.get("/defaults")
@@ -35,6 +37,11 @@ async def save_defaults(data: studio.Defaults):
 @router.post("", status_code=201)
 async def create_project(data: studio.ProjectInput):
     return studio.public_project(_call(studio.create_project, data))
+
+
+@router.get("/queue")
+async def queue_state():
+    return await studio.queue_state()
 
 
 @router.get("/{project_id}")
@@ -55,6 +62,16 @@ async def write_script(project_id: str):
 @router.post("/{project_id}/render", status_code=202)
 async def render_project(project_id: str):
     return studio.public_project(_call(studio.start, project_id, "render"))
+
+
+@router.post("/{project_id}/queue", status_code=202)
+async def queue_project(project_id: str):
+    return studio.public_project(_call(studio.start, project_id, "full"))
+
+
+@router.post("/{project_id}/dequeue")
+async def remove_from_queue(project_id: str):
+    return studio.public_project(_call(studio.remove_from_queue, project_id))
 
 
 @router.post("/{project_id}/cancel")

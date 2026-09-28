@@ -3,18 +3,21 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from backend import config, explainers as studio
+from backend.models import TaskStatus
 from backend.routers.explainers import router
 
 
 def project_input(**changes):
-    return studio.ProjectInput(title="How practice works", research="Supplied research describes a learner recalling a concept before looking at the answer.",
-                               tts_model="orpheus-en", voice="tara", **changes)
+    return studio.ProjectInput(**{"title": "How practice works",
+                               "research": "Supplied research describes a learner recalling a concept before looking at the answer.",
+                               "tts_model": "orpheus-en", "voice": "tara", **changes})
 
 
 def scene(**changes):
@@ -78,6 +81,23 @@ class ExplainerStoreTests(unittest.TestCase):
         self.assertEqual(studio.read_project(project["id"])["status"], "interrupted")
         self.assertEqual((directory / "good.wav").read_bytes(), b"saved")
 
+    def test_queue_is_persistent_fifo_and_rejects_edits_or_duplicate_enqueue(self):
+        first = studio.create_project(project_input())
+        second = studio.create_project(project_input())
+        with patch.object(studio, "now", return_value="2026-09-28T00:00:00+00:00"):
+            queued = studio.start(first["id"], "full")
+            studio.start(second["id"], "script")
+        self.assertFalse(studio._jobs)
+        with self.assertRaises(studio.ConflictError):
+            studio.start(first["id"], "full")
+        with self.assertRaisesRegex(studio.ConflictError, "queued"):
+            studio.update_project(first["id"], studio.ProjectUpdate(**project_input().model_dump(), revision=queued["revision"]))
+        studio.recover_interrupted()
+        self.assertEqual([p["id"] for p in studio._queued_projects()], [first["id"], second["id"]])
+        public = studio.public_project(studio.read_project(second["id"]))
+        self.assertEqual(public["status"], "queued")
+        self.assertEqual(public["queue"], {"operation": "script", "enqueued_at": "2026-09-28T00:00:00+00:00", "position": 2})
+
 
 class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -111,7 +131,8 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get("/api/explainers/invalid")).status_code, 404)
         self.assertEqual((await self.client.post(f"/api/explainers/{data['id']}/render")).status_code, 202)
         cancelled = await self.client.post(f"/api/explainers/{data['id']}/cancel")
-        self.assertEqual(cancelled.json()["status"], "cancelled")
+        self.assertEqual(cancelled.json()["status"], "script_ready")
+        self.assertIsNone(cancelled.json()["queue"])
 
     async def test_generation_single_owner_cancel_and_resume(self):
         project = studio.create_project(project_input())
@@ -121,13 +142,15 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
         with patch.object(studio, "write_script", side_effect=slow):
             studio.start(project["id"], "script")
+            runner = asyncio.create_task(studio.run_next_queued())
             await started.wait()
             with self.assertRaises(studio.ConflictError):
                 studio.start(project["id"], "script")
             self.assertEqual((await studio.cancel(project["id"]))["status"], "cancelled")
+            self.assertTrue(await runner)
         with patch.object(studio, "write_script", AsyncMock(return_value=[scene()])):
             studio.start(project["id"], "script")
-            await studio._jobs[project["id"]]
+            self.assertTrue(await studio.run_next_queued())
         self.assertEqual(studio.read_project(project["id"])["status"], "script_ready")
 
     async def test_watermark_settings_migrate_persist_and_validate_via_api(self):
@@ -159,11 +182,160 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
         project = studio.create_project(project_input(scenes=[scene()]))
         with patch.object(studio, "write_script", AsyncMock(side_effect=RuntimeError("Provider offline"))):
             studio.start(project["id"], "script")
-            await studio._jobs[project["id"]]
+            await studio.run_next_queued()
         result = studio.read_project(project["id"])
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["scenes"], [scene()])
         self.assertIn("Provider offline", result["error"])
+
+    async def test_full_queue_writes_and_renders_in_fifo_order_without_overlap(self):
+        first = studio.create_project(project_input(title="First"))
+        second = studio.create_project(project_input(title="Second", scenes=[scene()]))
+        entered_script, release_script = asyncio.Event(), asyncio.Event()
+        events = []
+
+        async def write(project, *args):
+            events.append(("script", project["id"]))
+            entered_script.set()
+            await release_script.wait()
+            return [scene()]
+
+        async def render(project, *args):
+            self.assertEqual(project["scenes"], [scene()])
+            events.append(("render", project["id"]))
+            return {"video_path": "final.mp4"}
+
+        with patch.object(studio, "write_script", side_effect=write), patch("backend.explainer_pipeline.render_project", side_effect=render):
+            studio.start(first["id"], "full")
+            studio.start(second["id"], "full")
+            self.assertEqual(events, [])
+            runner = asyncio.create_task(studio.run_next_queued())
+            await entered_script.wait()
+            self.assertFalse(await studio.run_next_queued())
+            self.assertEqual(studio.read_project(second["id"])["status"], "queued")
+            release_script.set()
+            self.assertTrue(await runner)
+            self.assertEqual(studio.read_project(first["id"])["status"], "completed")
+            self.assertTrue(await studio.run_next_queued())
+            self.assertFalse(await studio.run_next_queued())
+        self.assertEqual(events, [("script", first["id"]), ("render", first["id"]), ("render", second["id"])])
+        self.assertEqual(studio.read_project(second["id"])["artifacts"], {"video_path": "final.mp4"})
+
+    async def test_dequeue_retains_delivery_and_requeue_moves_to_end(self):
+        first = studio.create_project(project_input(scenes=[scene()]))
+        prior_progress = {"completed": 1, "total": 1, "message": "Completed"}
+        studio.patch_project(first["id"], {"status": "completed", "error": None,
+                             "artifacts": {"video_path": "final.mp4"}, "progress": prior_progress})
+        second = studio.create_project(project_input())
+        studio.start(first["id"], "full")
+        studio.start(second["id"], "full")
+        response = await self.client.post(f"/api/explainers/{first['id']}/dequeue")
+        self.assertEqual(response.status_code, 200)
+        cancelled = response.json()
+        self.assertEqual(cancelled["status"], "completed")
+        self.assertEqual(cancelled["progress"], prior_progress)
+        self.assertEqual(cancelled["artifacts"]["video_path"], "final.mp4")
+        self.assertIsNone(cancelled["queue"])
+        studio.start(first["id"], "full")
+        self.assertEqual([p["id"] for p in studio._queued_projects()], [second["id"], first["id"]])
+
+    async def test_stale_dequeue_cannot_cancel_a_claimed_generation(self):
+        project = studio.create_project(project_input())
+        studio.start(project["id"], "script")
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow(*args):
+            started.set()
+            await release.wait()
+            return [scene()]
+
+        with patch.object(studio, "write_script", side_effect=slow):
+            runner = asyncio.create_task(studio.run_next_queued())
+            await started.wait()
+            job = studio._jobs[project["id"]]
+            response = await self.client.post(f"/api/explainers/{project['id']}/dequeue")
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(studio.read_project(project["id"])["status"], "writing_script")
+            self.assertFalse(job.done())
+            self.assertFalse(job.cancelling())
+            release.set()
+            self.assertTrue(await runner)
+        self.assertEqual(studio.read_project(project["id"])["status"], "script_ready")
+        self.assertEqual((await self.client.post(f"/api/explainers/{project['id']}/dequeue")).status_code, 409)
+
+    async def test_failed_job_does_not_block_next_plan(self):
+        first = studio.create_project(project_input())
+        second = studio.create_project(project_input())
+        studio.start(first["id"], "script")
+        studio.start(second["id"], "script")
+        with patch.object(studio, "write_script", AsyncMock(side_effect=[RuntimeError("Provider offline"), [scene()]])):
+            self.assertTrue(await studio.run_next_queued())
+            self.assertEqual(studio.read_project(first["id"])["status"], "failed")
+            self.assertTrue(await studio.run_next_queued())
+        self.assertEqual(studio.read_project(second["id"])["status"], "script_ready")
+
+    async def test_worker_shutdown_propagates_and_retains_waiting_plans(self):
+        first = studio.create_project(project_input())
+        second = studio.create_project(project_input())
+        studio.start(first["id"], "script")
+        studio.start(second["id"], "full")
+        started = asyncio.Event()
+
+        async def slow(*args):
+            started.set()
+            await asyncio.Event().wait()
+
+        with patch.object(studio, "write_script", side_effect=slow):
+            runner = asyncio.create_task(studio.run_next_queued())
+            await started.wait()
+            runner.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await runner
+        self.assertFalse(studio._jobs)
+        self.assertEqual(studio.read_project(first["id"])["status"], "cancelled")
+        self.assertEqual(studio.read_project(second["id"])["status"], "queued")
+
+    async def test_queue_api_reports_active_news_and_runs_full_without_existing_scenes(self):
+        project = studio.create_project(project_input())
+        response = await self.client.post(f"/api/explainers/{project['id']}/queue")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["queue"]["operation"], "full")
+        self.assertEqual((await self.client.post(f"/api/explainers/{project['id']}/queue")).status_code, 409)
+        news = SimpleNamespace(id="daily-news", status=TaskStatus.TTS,
+                               generated_title="Daily briefing", source_title="Sources")
+        with patch("backend.database.list_tasks", AsyncMock(return_value=[news])):
+            response = await self.client.get("/api/explainers/queue")
+        self.assertEqual(response.status_code, 200)
+        state = response.json()
+        self.assertEqual(state["active"], {"kind": "morning_desk", "id": "daily-news", "title": "Daily briefing"})
+        self.assertEqual([item["id"] for item in state["items"]], [project["id"]])
+        self.assertIn("Morning Desk", state["message"])
+        for inactive in [TaskStatus.QUEUED, TaskStatus.AWAITING_REVIEW, TaskStatus.COMPLETE, TaskStatus.FAILED]:
+            news.status = inactive
+            with patch("backend.database.list_tasks", AsyncMock(return_value=[news])):
+                self.assertIsNone((await studio.queue_state())["active"])
+
+    async def test_full_queue_checks_research_and_voice_before_enqueue(self):
+        empty = studio.create_project(project_input(research="Too short"))
+        response = await self.client.post(f"/api/explainers/{empty['id']}/queue")
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(studio.read_project(empty["id"])["status"], "draft")
+        mismatch = studio.create_project(project_input(language="zh"))
+        with self.assertRaisesRegex(ValueError, "language"):
+            studio.start(mismatch["id"], "full")
+
+    async def test_bulk_queue_responses_read_each_project_once(self):
+        projects = [studio.create_project(project_input(title=f"Topic {index}")) for index in range(3)]
+        for project in projects:
+            studio.start(project["id"], "full")
+        expected_positions = {project["id"]: index for index, project in enumerate(projects, start=1)}
+        with patch("backend.database.list_tasks", AsyncMock(return_value=[])):
+            for endpoint, key in [("/api/explainers", "projects"), ("/api/explainers/queue", "items")]:
+                with patch.object(studio, "read_project", wraps=studio.read_project) as read:
+                    response = await self.client.get(endpoint)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(read.call_count, len(projects))
+                self.assertEqual({project["id"]: project["queue"]["position"] for project in response.json()[key]}, expected_positions)
 
     async def test_writing_repairs_invalid_shape_and_reuses_completed_chapter(self):
         project = studio.create_project(project_input(target_minutes=1))

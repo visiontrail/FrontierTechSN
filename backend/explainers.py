@@ -1,4 +1,4 @@
-"""Independent, research-led illustrated projects; no news-worker dependencies."""
+"""Research-led illustrated projects dispatched by the shared video worker."""
 
 from __future__ import annotations
 
@@ -21,6 +21,9 @@ from backend.pipeline.gemini_watermark import WatermarkRegion
 
 logger = logging.getLogger(__name__)
 ACTIVE = {"writing_script", "generating_audio", "generating_images", "generating_motion", "rendering"}
+NEWS_ACTIVE = {"researching", "extracting", "digesting", "reviewing", "titling", "sourcing",
+               "tts", "music", "composing", "publishing"}
+Operation = Literal["script", "render", "full"]
 PROJECT_ID = re.compile(r"^exp-[0-9a-f]{24}$")
 _lock = threading.RLock()
 _jobs: dict[str, asyncio.Task] = {}
@@ -160,7 +163,7 @@ def create_project(data: ProjectInput) -> dict:
                "created_at": stamp, "updated_at": stamp,
                "status": "script_ready" if data.scenes else "draft", "error": None,
                "progress": {"completed": 0, "total": 0, "message": ""},
-               "logs": [], "artifacts": {}}
+               "logs": [], "artifacts": {}, "queue": None}
     with _lock:
         _write(project_dir(project_id) / "project.json", project)
     return project
@@ -169,6 +172,8 @@ def create_project(data: ProjectInput) -> dict:
 def update_project(project_id: str, data: ProjectUpdate) -> dict:
     with _lock:
         project = read_project(project_id)
+        if project["status"] == "queued":
+            raise ConflictError("This plan is queued. Remove it from the queue before editing.")
         if project["status"] in ACTIVE:
             raise ConflictError("Generation is running. Cancel or wait before editing.")
         if project["revision"] != data.revision:
@@ -378,11 +383,13 @@ async def _run(project_id: str, operation: str) -> None:
         project = read_project(project_id)
         directory = project_dir(project_id)
         log = lambda message: append_log(project_id, message)
-        if operation == "script":
+        if operation == "script" or (operation == "full" and not project["scenes"]):
             scenes = await write_script(project, directory, log)
-            patch_project(project_id, {"scenes": scenes, "status": "script_ready", "error": None,
-                                      "artifacts": {}, "progress": {"completed": len(scenes), "total": len(scenes), "message": "Script ready"}})
-        else:
+            project = patch_project(project_id, {"scenes": scenes,
+                                      "status": "script_ready" if operation == "script" else "generating_audio",
+                                      "error": None, "artifacts": {},
+                                      "progress": {"completed": len(scenes), "total": len(scenes), "message": "Script ready"}})
+        if operation != "script":
             from backend.explainer_pipeline import render_project
             artifacts = await render_project(project, directory, lambda changes: patch_project(project_id, changes), log)
             patch_project(project_id, {"status": "completed", "artifacts": artifacts, "error": None})
@@ -400,28 +407,120 @@ async def _run(project_id: str, operation: str) -> None:
         _jobs.pop(project_id, None)
 
 
-def start(project_id: str, operation: Literal["script", "render"]) -> dict:
+def _queued_projects(projects: list[dict] | None = None) -> list[dict]:
+    if projects is None:
+        projects = list_projects()
+    return sorted((project for project in projects
+                   if project["status"] == "queued" and project.get("queue")),
+                  key=lambda project: (project["queue"].get("sequence", 0),
+                                       project["queue"]["enqueued_at"], project["id"]))
+
+
+def queue_positions(projects: list[dict] | None = None) -> dict[str, int]:
+    return {project["id"]: index for index, project in enumerate(_queued_projects(projects), start=1)}
+
+
+def start(project_id: str, operation: Operation) -> dict:
+    """Persist a plan; only the shared worker is allowed to launch it."""
     with _lock:
         project = read_project(project_id)
-        if project_id in _jobs or project["status"] in ACTIVE:
-            raise ConflictError("Generation is already running")
+        if operation not in {"script", "render", "full"}:
+            raise ValueError("Unknown generation operation")
+        if project_id in _jobs or project["status"] in ACTIVE | {"queued"}:
+            raise ConflictError("Generation is already running or queued")
         ProjectInput.model_validate({key: project[key] for key in ProjectInput.model_fields})
-        if operation == "script" and len(project["research"].strip()) < 40:
+        needs_script = operation == "script" or (operation == "full" and not project["scenes"])
+        if needs_script and len(project["research"].strip()) < 40:
             raise ValueError("Provide at least 40 characters of research before writing a script")
-        if operation == "render":
-            if not project["scenes"]:
+        if operation in {"render", "full"}:
+            if operation == "render" and not project["scenes"]:
                 raise ValueError("Add or generate scenes before rendering")
             model_language = tts_language(project["tts_model"])
             if model_language != "multilingual" and model_language != project["language"]:
                 raise ValueError("Selected TTS model does not support the script language")
-        result = patch_project(project_id, {"status": "writing_script" if operation == "script" else "generating_audio",
-                   "error": None, "artifacts": {}, "progress": {"completed": 0, "total": len(project["scenes"]), "message": "Starting " + operation}})
-        _jobs[project_id] = asyncio.create_task(_run(project_id, operation), name=f"explainer-{project_id}")
-        return result
+        sequence = max((p["queue"].get("sequence", 0) for p in _queued_projects()), default=0) + 1
+        queue = {"operation": operation, "enqueued_at": now(), "sequence": sequence,
+                 "previous": {key: project.get(key) for key in ("status", "error", "progress")}}
+        return patch_project(project_id, {"status": "queued", "queue": queue, "error": None,
+                    "progress": {"completed": 0, "total": len(project["scenes"]), "message": "Waiting in the video queue"}})
+
+
+async def run_next_queued() -> bool:
+    """Claim and await one FIFO plan. Called only from the shared video worker."""
+    with _lock:
+        if _jobs:
+            return False
+        projects = list_projects()
+        if any(project["status"] in ACTIVE for project in projects):
+            return False
+        queued = _queued_projects(projects)
+        if not queued:
+            return False
+        project = queued[0]
+        project_id = project["id"]
+        operation = project["queue"]["operation"]
+        needs_script = operation == "script" or (operation == "full" and not project["scenes"])
+        patch_project(project_id, {"status": "writing_script" if needs_script else "generating_audio",
+                      "queue": None, "error": None, "artifacts": {},
+                      "progress": {"completed": 0, "total": len(project["scenes"]), "message": "Starting " + operation}})
+        task = asyncio.create_task(_run(project_id, operation), name=f"explainer-{project_id}")
+        _jobs[project_id] = task
+    try:
+        await task
+    except asyncio.CancelledError:
+        # Removing the active project cancels the child, but must not stop the
+        # shared worker. Cancelling the worker itself still propagates normally.
+        if asyncio.current_task().cancelling():
+            raise
+    finally:
+        # A task cancelled before its first instruction cannot run _run's cleanup.
+        _jobs.pop(project_id, None)
+        if task.cancelled() and read_project(project_id)["status"] in ACTIVE:
+            patch_project(project_id, {"status": "cancelled", "error": "Generation cancelled; artifacts retained."})
+    return True
+
+
+async def queue_state() -> dict:
+    from backend.database import list_tasks
+
+    projects = list_projects()
+    active = next(({"kind": "explainer", "id": project["id"], "title": project["title"]}
+                   for project in projects if project["status"] in ACTIVE), None)
+    if active is None:
+        active = next(({"kind": "morning_desk", "id": task.id,
+                        "title": task.generated_title or task.source_title or task.id}
+                       for task in await list_tasks() if task.status in NEWS_ACTIVE), None)
+    queued = _queued_projects(projects)
+    positions = queue_positions(queued)
+    items = [public_project(project, positions) for project in queued]
+    if active and active["kind"] == "morning_desk":
+        message = "Waiting for Morning Desk to finish. Planned videos run one at a time."
+    elif active:
+        message = "An Explainer is running. Remaining plans will follow in queue order."
+    elif items:
+        message = "Waiting for the shared worker. Ready Morning Desk tasks run first."
+    else:
+        message = "Add topic plans to generate videos one at a time."
+    return {"active": active, "items": items, "message": message}
+
+
+def remove_from_queue(project_id: str) -> dict:
+    """Remove only a waiting plan; a stale queue view must never cancel a run."""
+    with _lock:
+        project = read_project(project_id)
+        if project["status"] != "queued":
+            raise ConflictError("This plan is no longer waiting in the queue. Reload to see its current status.")
+        previous = (project.get("queue") or {}).get("previous") or {}
+        return patch_project(project_id, {"status": previous.get("status") or ("script_ready" if project["scenes"] else "draft"),
+                     "error": previous.get("error"), "queue": None,
+                     "progress": previous.get("progress") or {"completed": 0, "total": 0, "message": ""}})
 
 
 async def cancel(project_id: str) -> dict:
-    read_project(project_id)
+    with _lock:
+        project = read_project(project_id)
+        if project["status"] == "queued":
+            return remove_from_queue(project_id)
     task = _jobs.get(project_id)
     if task:
         task.cancel()
@@ -459,7 +558,7 @@ def asset_path(project_id: str, relative: str) -> Path:
     return path
 
 
-def public_project(project: dict) -> dict:
+def public_project(project: dict, positions: dict[str, int] | None = None) -> dict:
     from urllib.parse import quote
     result = dict(project)
     artifacts = dict(project.get("artifacts", {}))
@@ -468,4 +567,11 @@ def public_project(project: dict) -> dict:
         if relative:
             artifacts[key + "_url"] = f"/api/explainers/{project['id']}/assets/{quote(relative, safe='/')}"
     result["artifacts"] = artifacts
+    queue = project.get("queue")
+    result["queue"] = None
+    if project["status"] == "queued" and queue:
+        if positions is None:
+            positions = queue_positions()
+        position = positions.get(project["id"])
+        result["queue"] = {"operation": queue["operation"], "enqueued_at": queue["enqueued_at"], "position": position}
     return result

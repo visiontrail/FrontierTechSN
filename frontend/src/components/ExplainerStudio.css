@@ -18,6 +18,43 @@
 .explainer-studio .explainer-button.is-primary { color: var(--accent-foreground); background: var(--accent); border-color: var(--accent); }
 .explainer-studio .explainer-button.is-primary:hover:not(:disabled) { filter: brightness(1.08); }
 .explainer-new { white-space: nowrap; }
+.explainer-planning { display: grid; grid-template-columns: 1fr 1fr; margin: 0 0 28px; border: 1px solid var(--ex-line); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.explainer-plans-column, .explainer-queue-column { padding: 23px 25px; min-width: 0; }
+.explainer-queue-column { border-left: 1px solid var(--ex-line); background: var(--surface-muted); }
+.explainer-planning-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.explainer-planning-heading h2 { font-family: var(--font-display); font-size: 23px; font-weight: 500; margin-top: 5px; letter-spacing: -.4px; }
+.explainer-planning-heading h2 > span { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0; color: var(--text-dim); vertical-align: middle; padding: 4px 7px; margin-left: 5px; border: 1px solid var(--ex-line); border-radius: 3px; }
+.explainer-planning-jump { font-size: 10px; line-height: 1.8; text-align: right; color: var(--text-dim); }
+.explainer-planning-jump:hover { color: var(--text); }
+.explainer-planning-intro { color: var(--text-dim); font-size: 11px; line-height: 1.9; margin: 13px 0 17px; max-width: 440px; }
+.explainer-queue-order { font-family: var(--font-mono); font-size: 8px; letter-spacing: 1px; color: var(--text-dim); text-align: right; line-height: 1.8; }
+.explainer-plan-list, .explainer-queue-list { list-style: none; padding: 0; margin: 0; max-height: 265px; overflow-y: auto; scrollbar-width: thin; }
+.explainer-plan-list > li, .explainer-queue-list > li { display: flex; gap: 14px; align-items: center; padding: 12px 2px; border-top: 1px solid var(--ex-line); }
+.explainer-plan-list > li.is-current { border-left: 2px solid var(--accent); padding-left: 10px; }
+.explainer-plan-list a, .explainer-queue-list a { min-width: 0; flex: 1; padding: 2px 0; }
+.explainer-plan-list a strong, .explainer-queue-list a strong { display: block; font-size: 12px; line-height: 1.6; font-weight: 500; overflow-wrap: anywhere; }
+.explainer-plan-list a:hover strong, .explainer-queue-list a:hover strong { text-decoration: underline; text-underline-offset: 3px; }
+.explainer-plan-list small, .explainer-queue-list small { display: block; font-size: 9px; color: var(--text-dim); line-height: 1.8; margin-top: 4px; }
+.explainer-plan-list button, .explainer-queue-list button { flex-shrink: 0; font-size: 10px; min-height: 32px; padding: 5px 10px; border: 1px solid var(--ex-line); border-radius: 4px; background: transparent; }
+.explainer-plan-list button:hover:not(:disabled), .explainer-queue-list button:hover:not(:disabled) { background: var(--surface); border-color: var(--text-dim); }
+.explainer-plan-empty { margin: 20px 0 6px; padding: 18px 16px; font-size: 11px; color: var(--text-dim); line-height: 1.9; border: 1px dashed var(--ex-line); border-radius: 4px; }
+.explainer-planning-error { font-size: 11px; color: var(--accent-red); line-height: 1.8; padding: 8px 0 14px; }
+.explainer-planning-error button { background: transparent; font-size: inherit; color: inherit; text-decoration: underline; padding: 2px 5px; }
+.explainer-queue-current { display: flex; gap: 12px; padding: 15px; background: var(--surface); border: 1px solid var(--ex-line); border-radius: 5px; }
+.explainer-queue-current > div { min-width: 0; }
+.explainer-queue-current strong { font-size: 11px; font-weight: 550; line-height: 1.8; }
+.explainer-queue-current a { display: block; font-size: 12px; line-height: 1.7; margin: 5px 0 2px; overflow-wrap: anywhere; }
+.explainer-queue-current a:hover { text-decoration: underline; }
+.explainer-queue-current p { color: var(--text-dim); font-size: 10px; line-height: 1.9; margin-top: 3px; overflow-wrap: anywhere; }
+.explainer-queue-signal { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); flex-shrink: 0; margin-top: 7px; }
+.explainer-queue-current.is-active .explainer-queue-signal { background: var(--accent-green); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent-green) 12%, transparent); }
+.explainer-queue-empty { color: var(--text-dim); font-size: 10px; padding-top: 14px; }
+.explainer-queue-list { margin-top: 15px; }
+.explainer-queue-number { font-family: var(--font-mono); color: var(--text-faint); font-size: 18px; font-weight: 300; min-width: 23px; }
+.explainer-topic-actions { margin-top: 23px; padding-top: 22px; border-top: 1px solid var(--ex-line); display: flex; flex-direction: column; gap: 17px; }
+.explainer-topic-actions strong { font-size: 14px; font-weight: 500; }
+.explainer-topic-actions p { font-size: 11px; line-height: 1.9; color: var(--text-dim); margin-top: 6px; max-width: 690px; }
+.explainer-topic-actions > div:last-child { display: flex; flex-wrap: wrap; gap: 9px; }
 .explainer-workspace { padding-top: 24px; }
 .explainer-workflow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-block: 1px solid var(--ex-line); }
 .explainer-workflow button { display: flex; align-items: center; text-align: left; gap: 14px; background: transparent; border: 0; border-radius: 0; padding: 20px 16px; min-width: 0; }
@@ -166,6 +203,8 @@
   .explainer-workflow button > span:last-child { display: none; }
 }
 @media (max-width: 850px) {
+  .explainer-planning { grid-template-columns: 1fr; }
+  .explainer-queue-column { border-left: 0; border-top: 1px solid var(--ex-line); }
   .explainer-workflow small { display: none; }
   .explainer-workflow strong { font-size: 11px; line-height: 1.5; }
   .explainer-style-grid { grid-template-columns: 1fr; }
@@ -173,6 +212,9 @@
   .explainer-section-aside { display: none; }
 }
 @media (max-width: 600px) {
+  .explainer-plans-column, .explainer-queue-column { padding: 21px 16px; }
+  .explainer-planning-heading h2 { font-size: 21px; }
+  .explainer-topic-actions > div:last-child { flex-direction: column; }
   .explainer-studio { padding: 54px 16px 40px; }
   .explainer-header { flex-direction: column; gap: 18px; padding-bottom: 22px; }
   .explainer-header h1 { font-size: 36px; }

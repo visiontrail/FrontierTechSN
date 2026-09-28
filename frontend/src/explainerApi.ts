@@ -33,7 +33,7 @@ export interface ExplainerForm {
   scenes: ExplainerScene[]
 }
 
-export type ExplainerStatus = 'draft' | 'writing_script' | 'script_ready' | 'generating_audio'
+export type ExplainerStatus = 'draft' | 'queued' | 'writing_script' | 'script_ready' | 'generating_audio'
   | 'generating_images' | 'generating_motion' | 'rendering' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 
 export interface ExplainerSceneArtifact {
@@ -48,6 +48,7 @@ export interface ExplainerProject extends ExplainerForm {
   created_at: string
   updated_at: string
   error: string | null
+  queue?: { operation: 'script' | 'render' | 'full'; enqueued_at: string; position: number | null } | null
   logs: string[]
   progress: { completed: number; total: number; message: string }
   artifacts: {
@@ -57,6 +58,12 @@ export interface ExplainerProject extends ExplainerForm {
     duration_seconds?: number
     scene_artifacts?: ExplainerSceneArtifact[]
   }
+}
+
+export interface ExplainerQueue {
+  active: { kind: 'morning_desk' | 'explainer'; id: string; title: string } | null
+  items: ExplainerProject[]
+  message: string
 }
 
 export type ExplainerDefaultValues = Omit<ExplainerForm, 'title' | 'research' | 'scenes'>
@@ -96,12 +103,13 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
 }
 
 export const fetchExplainers = () => request<{ projects: ExplainerProject[] }>('')
+export const fetchExplainerQueue = () => request<ExplainerQueue>('/queue')
 export const fetchExplainerDefaults = () => request<ExplainerDefaults>('/defaults')
 export const saveExplainerDefaults = (values: ExplainerDefaultValues) => request<ExplainerDefaults>('/defaults', 'PUT', values)
 export const fetchExplainer = (id: string) => request<ExplainerProject>(`/${encodeURIComponent(id)}`)
 export const createExplainer = (form: ExplainerForm) => request<ExplainerProject>('', 'POST', form)
 export const saveExplainer = (id: string, form: ExplainerForm, revision: number) => request<ExplainerProject>(`/${encodeURIComponent(id)}`, 'PUT', { ...form, revision })
-export const runExplainer = (id: string, action: 'script' | 'render' | 'cancel') => request<ExplainerProject>(`/${encodeURIComponent(id)}/${action}`, 'POST')
+export const runExplainer = (id: string, action: 'script' | 'render' | 'queue' | 'dequeue' | 'cancel') => request<ExplainerProject>(`/${encodeURIComponent(id)}/${action}`, 'POST')
 
 export const isExplainerRunning = (status?: ExplainerStatus) => !!status && [
   'writing_script', 'generating_audio', 'generating_images', 'generating_motion', 'rendering',

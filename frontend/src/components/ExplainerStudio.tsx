@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  createExplainer, ExplainerApiError, fetchExplainer, fetchExplainerDefaults, fetchExplainers,
+  createExplainer, ExplainerApiError, fetchExplainer, fetchExplainerDefaults, fetchExplainerQueue, fetchExplainers,
   isExplainerRunning, runExplainer, saveExplainer, saveExplainerDefaults,
 } from '../explainerApi'
 import type { ExplainerForm, ExplainerProject, ExplainerScene, ExplainerStatus, ExplainerStyle } from '../explainerApi'
 import ExplainerStylePreview from './ExplainerStylePreview'
 import ExplainerProjectHistory from './ExplainerProjectHistory'
+import ExplainerTopicPlans from './ExplainerTopicPlans'
+import { canQueueExplainer } from '../explainerPlanning'
 import './ExplainerStudio.css'
 
 const STATUS: Record<ExplainerStatus, string> = {
-  draft: 'Draft', writing_script: 'Writing script', script_ready: 'Script ready', generating_audio: 'Generating audio',
+  draft: 'Draft', queued: 'Queued', writing_script: 'Writing script', script_ready: 'Script ready', generating_audio: 'Generating audio',
   generating_images: 'Generating images', generating_motion: 'Generating motion', rendering: 'Rendering video', completed: 'Completed',
   failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted',
 }
@@ -54,20 +56,22 @@ export default function ExplainerStudio() {
   const [pending, setPending] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(() => typeof location.state?.explainerError === 'string' ? location.state.explainerError : null)
   const [conflict, setConflict] = useState(false)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(() => typeof location.state?.explainerNotice === 'string' ? location.state.explainerNotice : null)
   const [localSaveError, setLocalSaveError] = useState(false)
   const { data: defaults, error: defaultsError } = useQuery({ queryKey: ['explainer-defaults'], queryFn: fetchExplainerDefaults })
   const { data: library, error: libraryError, refetch: reloadLibrary } = useQuery({ queryKey: ['explainers'], queryFn: fetchExplainers, refetchInterval: 7000 })
+  const { data: queue, error: queueError, refetch: reloadQueue } = useQuery({ queryKey: ['explainer-queue'], queryFn: fetchExplainerQueue, refetchInterval: 3000 })
   const { data: project, error: projectError, isLoading: projectLoading } = useQuery({
     queryKey: ['explainer', id], queryFn: () => fetchExplainer(id!), enabled: !!id,
-    refetchInterval: (query) => isExplainerRunning(query.state.data?.status) ? 2000 : 7000,
+    refetchInterval: (query) => isExplainerRunning(query.state.data?.status) || query.state.data?.status === 'queued' ? 2000 : 7000,
   })
   const form = override?.form ?? (project ? formOf(project) : !id && defaults ? {
     title: '', research: '', scenes: [], language: defaults.language, target_minutes: defaults.target_minutes,
     tts_model: defaults.tts_model, voice: defaults.voice, captions_enabled: defaults.captions_enabled, style: defaults.style,
   } : null)
   const running = isExplainerRunning(project?.status)
-  const locked = running || !!pending || (!!id && !project)
+  const queued = project?.status === 'queued'
+  const locked = running || queued || !!pending || (!!id && !project)
   const dirty = override !== null
 
   useEffect(() => {
@@ -100,6 +104,7 @@ export default function ExplainerStudio() {
   function rememberSaved(saved: ExplainerProject) {
     queryClient.setQueryData(['explainer', saved.id], saved)
     void queryClient.invalidateQueries({ queryKey: ['explainers'] })
+    void queryClient.invalidateQueries({ queryKey: ['explainer-queue'] })
     setOverride(null)
     try { localStorage.removeItem(storageKey(id)); localStorage.removeItem(storageKey(saved.id)) } catch { /* server copy is saved */ }
     setConflict(false)
@@ -119,12 +124,14 @@ export default function ExplainerStudio() {
     return saved
   }
 
-  async function act(action: 'save' | 'script' | 'render' | 'cancel' | 'defaults') {
+  async function act(action: 'save' | 'save-next' | 'script' | 'render' | 'queue' | 'dequeue' | 'cancel' | 'defaults') {
     setError(null)
     setNotice(null)
     setPending(action)
     let savedId = id
     let actionError: string | null = null
+    let actionNotice: string | null = null
+    let savingCurrent = false
     try {
       if (action === 'defaults') {
         if (!form) return
@@ -132,25 +139,55 @@ export default function ExplainerStudio() {
         await saveExplainerDefaults({ language, target_minutes, tts_model, voice, captions_enabled, style })
         await queryClient.invalidateQueries({ queryKey: ['explainer-defaults'] })
         setNotice('Style, language and voice settings saved as defaults for new projects.')
-      } else if (action === 'cancel' && id) {
-        const cancelled = await runExplainer(id, 'cancel')
+      } else if ((action === 'cancel' || action === 'dequeue') && id) {
+        const cancelled = await runExplainer(id, action)
         queryClient.setQueryData(['explainer', id], cancelled)
         void queryClient.invalidateQueries({ queryKey: ['explainers'] })
-        setNotice('Cancellation requested. Finishing the current step.')
+        void queryClient.invalidateQueries({ queryKey: ['explainer-queue'] })
+        setNotice(action === 'dequeue' ? 'Removed from the queue. Your topic and research are saved.' : 'Cancellation requested. Finishing the current step.')
       } else {
+        savingCurrent = true
         const saved = await saveCurrent()
+        savingCurrent = false
         savedId = saved.id
-        if (action === 'script' || action === 'render') {
+        if (action === 'script' || action === 'render' || action === 'queue') {
           rememberSaved(await runExplainer(saved.id, action))
-        } else setNotice('Project saved.')
+          actionNotice = action === 'queue' ? 'Added to the video queue. You can plan another topic while this one waits.' : 'Added to the production queue. This step will start when its turn arrives.'
+        } else actionNotice = action === 'save-next' ? `“${saved.title}” saved to Topic plans. Start your next topic below.` : 'Topic plan saved.'
+        setNotice(actionNotice)
       }
     } catch (cause) {
       actionError = cause instanceof Error ? cause.message : String(cause)
       setError(actionError)
-      setConflict(cause instanceof ExplainerApiError && cause.status === 409)
+      setConflict(savingCurrent && cause instanceof ExplainerApiError && cause.status === 409)
     } finally {
       setPending(null)
-      if (!id && savedId) navigate(`/explainer-studio/${savedId}`, { replace: true, state: { explainerError: actionError } })
+      if (['queue', 'script', 'render', 'dequeue', 'cancel'].includes(action)) {
+        void queryClient.invalidateQueries({ queryKey: ['explainers'] })
+        void queryClient.invalidateQueries({ queryKey: ['explainer-queue'] })
+        if (savedId) void queryClient.invalidateQueries({ queryKey: ['explainer', savedId] })
+      }
+      if (action === 'save-next' && !actionError) navigate('/explainer-studio', { state: { explainerNotice: actionNotice } })
+      else if (!id && savedId) navigate(`/explainer-studio/${savedId}`, { replace: true, state: { explainerError: actionError, explainerNotice: actionNotice } })
+    }
+  }
+
+  async function actOnPlan(target: ExplainerProject, action: 'queue' | 'dequeue') {
+    if (target.id === id) { await act(action); return }
+    setError(null)
+    setNotice(null)
+    setPending(`${action}:${target.id}`)
+    try {
+      const updated = await runExplainer(target.id, action)
+      queryClient.setQueryData(['explainer', target.id], updated)
+      setNotice(action === 'queue' ? `“${target.title}” added to the video queue.` : `“${target.title}” removed from the queue. Its research is saved.`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setPending(null)
+      void queryClient.invalidateQueries({ queryKey: ['explainers'] })
+      void queryClient.invalidateQueries({ queryKey: ['explainer-queue'] })
+      void queryClient.invalidateQueries({ queryKey: ['explainer', target.id] })
     }
   }
 
@@ -200,12 +237,21 @@ export default function ExplainerStudio() {
   return <div className="explainer-studio">
     <header className="explainer-header">
       <div><p className="explainer-eyebrow">RESEARCH → STORY → VIDEO</p><h1>Explainer Studio</h1>
-        <p className="explainer-intro">A place for your research to become an illustrated story.</p></div>
+        <p className="explainer-intro">Plan several stories. Turn your research into videos, one topic at a time.</p></div>
       <div className="explainer-header-actions">
         <ExplainerProjectHistory projects={library?.projects} error={!!libraryError} currentId={id} statusLabels={STATUS} onRetry={() => { void reloadLibrary() }} />
-        <Link to="/explainer-studio" className="explainer-button explainer-new">+ New project</Link>
+        <button type="button" className="explainer-button explainer-new" disabled={!!pending || (!id && dirty && !form?.title.trim())} onClick={() => {
+          if (!id && dirty) void act('save-next')
+          else if (id) navigate('/explainer-studio')
+          else document.getElementById('explainer-title')?.focus()
+        }}>{!id && dirty ? 'Save & add another' : '+ New topic'}</button>
       </div>
     </header>
+
+    <ExplainerTopicPlans projects={library?.projects} queue={queue} libraryError={!!libraryError} queueError={!!queueError}
+      currentId={id} pending={pending} statusLabels={STATUS} hasLocalDraft={(projectId) => projectId === id ? dirty : !!readDraft(projectId)}
+      onQueue={(target) => { void actOnPlan(target, 'queue') }} onRemove={(target) => { void actOnPlan(target, 'dequeue') }}
+      onRetry={() => { void reloadLibrary(); void reloadQueue() }} />
 
     <nav className="explainer-workflow" aria-label="Studio sections">
       {([['source', 'Research & direction', 'Start with your sources'], ['style', 'Make it your own', 'Artwork, tone & motion'], ['storyboard', 'Narration & visuals', 'Review and generate']] as const).map(([section, title, hint], index) => <button key={section} type="button" disabled={!form} onClick={() => {
@@ -228,18 +274,19 @@ export default function ExplainerStudio() {
         {form && <>
           <div className="explainer-project-bar">
             <div className="explainer-project-identity"><strong>{form.title.trim() || 'Untitled explainer'}</strong><span className="explainer-save-state">{dirty ? 'Draft kept locally · Not yet saved to project' : project ? 'Saved to project' : 'Start with your research'} · {form.scenes.length} {form.scenes.length === 1 ? 'scene' : 'scenes'}</span></div>
-            <span className="explainer-badge">{project ? STATUS[project.status] : 'New project'}</span>
-            <button type="button" onClick={() => void act('save')} disabled={locked || (!!project && !dirty) || !form.title.trim()}>{pending === 'save' ? 'Saving…' : 'Save project'}</button>
+            <span className="explainer-badge">{project ? STATUS[project.status] : 'New topic'}</span>
+            <button type="button" onClick={() => void act('save')} disabled={locked || (!!project && !dirty) || !form.title.trim()}>{pending === 'save' ? 'Saving…' : 'Save topic plan'}</button>
           </div>
 
-          {project && (running || project.error || ['cancelled', 'interrupted'].includes(project.status)) && <section className="explainer-progress-panel" aria-label="Production progress">
+          {project && (running || queued || project.error || ['cancelled', 'interrupted'].includes(project.status)) && <section className="explainer-progress-panel" aria-label="Production progress">
             <div className="explainer-section-heading"><div><p className="explainer-eyebrow">PRODUCTION</p><h2>{STATUS[project.status]}</h2></div>
-              {running && <button type="button" disabled={!!pending} onClick={() => void act('cancel')}>{pending === 'cancel' ? 'Cancelling…' : 'Cancel run'}</button>}</div>
-            <p role="status" aria-live="polite">{progress?.message || 'Preparing…'}</p>
+              {(running || queued) && <button type="button" disabled={!!pending} onClick={() => void act(queued ? 'dequeue' : 'cancel')}>{pending === 'dequeue' ? 'Removing…' : pending === 'cancel' ? 'Cancelling…' : queued ? 'Remove from queue' : 'Cancel run'}</button>}</div>
+            <p role="status" aria-live="polite">{queued ? queue?.message || 'Waiting for the production slot.' : progress?.message || 'Preparing…'}</p>
+            {queued && <p className="explainer-muted">{project.queue?.position ? `Queue position ${project.queue.position}. ` : ''}Remove this topic from the queue to edit it. You can keep planning other topics while it waits.</p>}
             {running && <progress max={100} value={percentage} aria-label="Video generation progress" />}
             {progress && progress.total > 0 && <small>{progress.completed} / {progress.total}</small>}
             {project.error && <p className="explainer-small-error">{project.error}</p>}
-            {!running && <p className="explainer-muted">Edit the research or settings, then regenerate the script or video.</p>}
+            {!running && !queued && <p className="explainer-muted">Edit the research or settings, then add the topic to the queue again.</p>}
           </section>}
 
           {project?.artifacts.video_url && <section className="explainer-result">
@@ -269,6 +316,10 @@ export default function ExplainerStudio() {
               </div>
               {form.language === 'zh' && selectedModel?.language === 'en' && <p className="explainer-small-error">This voice model only supports English. Choose a model that supports Chinese before generating a Chinese video.</p>}
               <label className="explainer-check"><input type="checkbox" checked={form.captions_enabled} onChange={(e) => patch('captions_enabled', e.target.checked)} /><span>Show narration captions in the finished video</span></label>
+              <div className="explainer-topic-actions"><div><strong>Ready when you are.</strong><p>Save this topic for later, or queue the full video. Missing scripts are written automatically; existing scenes are used as saved.</p></div>
+                <div><button type="button" className="explainer-button" disabled={!form.title.trim() || invalidScenes} onClick={() => void act('save-next')}>{pending === 'save-next' ? 'Saving…' : 'Save & add another'}</button>
+                  <button type="button" className="explainer-button is-primary" disabled={!canQueueExplainer(form) || !!queueError || !queue || (form.language === 'zh' && selectedModel?.language === 'en')} onClick={() => void act('queue')}>{pending === 'queue' ? 'Adding to queue…' : 'Add to video queue →'}</button></div>
+              </div>
             </section>
 
             <section id="explainer-style-section" tabIndex={-1} className="explainer-section">
@@ -303,7 +354,7 @@ export default function ExplainerStudio() {
                   </details>}
                 </div>}
               </details>
-              <div className="explainer-generate-row"><p>Research → Full narration + Storyboard</p><button type="button" className="explainer-button is-primary" disabled={!form.title.trim() || form.research.trim().length < 40 || invalidScenes} onClick={() => void act('script')}>{form.scenes.length ? 'Regenerate script ↗' : 'Generate script ↗'}</button></div>
+              <div className="explainer-generate-row"><p>Prefer to review the story first? Queue just the narration and storyboard.</p><button type="button" className="explainer-button" disabled={!form.title.trim() || form.research.trim().length < 40 || invalidScenes || !!queueError || !queue} onClick={() => void act('script')}>{form.scenes.length ? 'Queue script rewrite ↗' : 'Queue script only ↗'}</button></div>
             </section>
 
             <section id="explainer-storyboard-section" tabIndex={-1} className="explainer-section explainer-script">
@@ -325,11 +376,11 @@ export default function ExplainerStudio() {
               </div>
               <button type="button" className="explainer-add-scene" onClick={() => { const used = new Set(form.scenes.map((scene) => scene.id)); let number = form.scenes.length + 1; while (used.has(`scene-${String(number).padStart(3, '0')}`)) number++; patch('scenes', [...form.scenes, { id: `scene-${String(number).padStart(3, '0')}`, chapter: '', narration: '', visual_prompt: '', on_screen_text: '', motion: false }]) }}>+ Add scene</button>
               {invalidScenes && <p className="explainer-small-error">Every scene needs narration and a visual description before you can generate a video.</p>}
-              <div className="explainer-render-row"><div><strong>Bring your story to life.</strong><p>Edits are saved automatically, then each scene gets narration and an illustration. The video follows the actual audio duration.</p></div><button type="button" className="explainer-button is-primary" disabled={!form.title.trim() || form.scenes.length === 0 || invalidScenes || (form.language === 'zh' && selectedModel?.language === 'en')} onClick={() => void act('render')}>{project?.status === 'failed' || project?.status === 'interrupted' ? 'Regenerate video →' : 'Generate video →'}</button></div>
+              <div className="explainer-render-row"><div><strong>Bring your story to life.</strong><p>Your edits are saved before this storyboard joins the queue. Production starts when the shared slot is free.</p></div><button type="button" className="explainer-button is-primary" disabled={!form.title.trim() || form.scenes.length === 0 || invalidScenes || !!queueError || !queue || (form.language === 'zh' && selectedModel?.language === 'en')} onClick={() => void act('render')}>Queue storyboard video →</button></div>
             </section>
           </fieldset>
           {project && project.logs.length > 0 && <details className="explainer-logs"><summary>Run log · {project.logs.length}</summary><pre>{project.logs.join('\n')}</pre></details>}
-          {pending && <div className="explainer-pending" role="status" aria-live="polite">{pending === 'script' ? 'Saving and starting script generation…' : pending === 'render' ? 'Saving and starting video generation…' : 'Processing…'}</div>}
+          {pending && <div className="explainer-pending" role="status" aria-live="polite">{['script', 'render', 'queue'].includes(pending) ? 'Saving and adding to the production queue…' : 'Processing…'}</div>}
         </>}
       </div>
     </div>
