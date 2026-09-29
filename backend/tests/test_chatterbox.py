@@ -15,6 +15,23 @@ from backend import config
 from backend.pipeline import chatterbox, composer, tts
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("voices, expected", [(None, "space-en-f1"), (["jane"], "jane"), (["default"], "default")])
+async def test_dispatcher_uses_official_default_but_preserves_explicit_chatterbox_voice(tmp_path, monkeypatch, voices, expected):
+    generate = AsyncMock(return_value=str(tmp_path / "audio.wav"))
+    monkeypatch.setattr(chatterbox, "_generate_chatterbox", generate)
+    monkeypatch.setattr(config, "TTS_DEFAULT_VOICE_1", "jane")
+    pocket = AsyncMock(side_effect=AssertionError("Chatterbox must not route through Pocket"))
+    monkeypatch.setattr(tts, "_generate_pocket_tts", pocket)
+    script = tmp_path / "script.txt"
+    script.write_text("A short voice selection test.")
+    result = await tts.generate_tts(script, tmp_path, voices=voices, tts_model="chatterbox-multilingual")
+    assert result == str(tmp_path / "audio.wav")
+    assert generate.await_args.args[2:] == (expected, "en")
+    assert generate.await_args.kwargs["verify_text"] is True
+    pocket.assert_not_awaited()
+
+
 def pcm_wav(*, seconds=3.0, sample_rate=24_000, channels=1):
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
@@ -141,6 +158,31 @@ def setup_client(tmp_path, monkeypatch):
         ))
 
     return server, script, directory, verifier, generate
+
+
+@pytest.mark.asyncio
+async def test_generation_freezes_contract_before_first_network_await(setup_client, monkeypatch):
+    server, _script, directory, _verifier, generate = setup_client
+    initial = chatterbox.cache_contract()
+    handle = server.handle
+    def change_settings_after_request(request):
+        response = handle(request)
+        if request.url.path == "/v1/capabilities":
+            monkeypatch.setattr(config, "TTS_RANDOM_SEED", initial["seed"] + 1)
+            monkeypatch.setattr(config, "CHATTERBOX_TTS_CHUNK_WORDS", 1)
+            monkeypatch.setattr(config, "CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT", "changed-deployment")
+        return response
+    server.handle = change_settings_after_request
+    output = await generate()
+    assert output.is_file()
+    assert len(server.jobs) == 1
+    assert server.jobs["job-1"]["request"]["seed"] == initial["seed"]
+    manifest = json.loads((directory / "tts_manifest.json").read_text())
+    assert manifest["cache_contract"] == initial
+    assert manifest["deployment_fingerprint"] == initial["deployment_fingerprint"]
+    metadata = json.loads((directory / "tts_input_part_001_generated.json").read_text())
+    assert metadata["identity"]["seed"] == initial["seed"]
+    assert metadata["identity"]["deployment_fingerprint"] == initial["deployment_fingerprint"]
 
 
 @pytest.mark.parametrize("max_words,max_chars", [(8, 60), (30, 250), (4, 22)])
@@ -302,6 +344,7 @@ async def test_service_failure_attempt_budget_survives_repeated_resume(setup_cli
 
 @pytest.mark.asyncio
 async def test_adapter_recovers_actual_service_decoder_rejection_without_model_loading(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "deploy" / "chatterbox"))
     from deploy.chatterbox import service
 
     class Runner:
@@ -317,7 +360,7 @@ async def test_adapter_recovers_actual_service_decoder_rejection_without_model_l
 
     runner = Runner()
     app = service.create_app(service.Settings(
-        api_key="test-secret", data_dir=tmp_path / "jobs",
+        api_key="test-secret", data_dir=tmp_path / "jobs", default_voice="default",
     ), runner=runner)
     monkeypatch.setattr(config, "CHATTERBOX_TTS_API_KEY", "test-secret")
     monkeypatch.setattr(config, "CHATTERBOX_TTS_URL", "http://chatterbox.test")

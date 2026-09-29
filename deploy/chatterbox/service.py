@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from prefetch_reference import VOICE_ID as SPACE_EN_VOICE, reference_source, verify_reference
 
 SOURCE_REVISION = "5de7a54aa4e5e2baadb0182dde554908b48b85c2"
 MODEL_REVISION = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18"
@@ -69,6 +70,7 @@ class Settings:
     api_key: str
     data_dir: Path
     voice_files: dict[str, Path] = field(default_factory=dict)
+    default_voice: str = SPACE_EN_VOICE
     max_chars: int = 250
     queue_limit: int = 16
     generation_timeout: float = 900
@@ -79,10 +81,14 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         reference = os.environ.get("CHATTERBOX_JANE_REFERENCE", "")
+        space_reference = os.environ.get("CHATTERBOX_SPACE_EN_REFERENCE", "")
+        voice_files = {"jane": Path(reference)} if reference else {}
+        if space_reference:
+            voice_files[SPACE_EN_VOICE] = Path(space_reference)
         return cls(
             api_key=os.environ.get("CHATTERBOX_API_KEY", ""),
             data_dir=Path(os.environ.get("CHATTERBOX_DATA_DIR", "/data")),
-            voice_files={"jane": Path(reference)} if reference else {},
+            voice_files=voice_files,
             max_chars=int(os.environ.get("CHATTERBOX_MAX_CHARS", "250")),
             queue_limit=int(os.environ.get("CHATTERBOX_QUEUE_LIMIT", "16")),
             generation_timeout=float(os.environ.get("CHATTERBOX_GENERATION_TIMEOUT", "900")),
@@ -96,7 +102,7 @@ class Request(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     text: str = Field(min_length=1, max_length=1000)
     language_id: str = "en"
-    voice: str = "default"
+    voice: str | None = None
     seed: int = Field(default=0, ge=0, le=2**32 - 1)
     exaggeration: float = Field(default=0.5, ge=0, le=1)
     cfg_weight: float = Field(default=0.5, ge=0, le=1)
@@ -315,8 +321,12 @@ class Jobs:
         if settings.generation_timeout <= 0 or settings.max_audio_seconds <= 0 or settings.cpu_threads < 1:
             raise RuntimeError("Invalid generation limits")
         for voice, path in settings.voice_files.items():
-            if voice != "jane" or not path.is_file():
-                raise RuntimeError("Only an existing server-owned jane reference is supported")
+            if voice not in {"jane", SPACE_EN_VOICE} or not path.is_file():
+                raise RuntimeError("Only existing server-owned jane/space-en-f1 references are supported")
+            if voice == SPACE_EN_VOICE:
+                verify_reference(path)
+        if settings.default_voice != "default" and settings.default_voice not in settings.voice_files:
+            raise RuntimeError("Default voice reference is not installed; prefetch the official Space reference")
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         # A second HTTP worker/container on the same store must not duplicate jobs.
         import fcntl
@@ -337,6 +347,7 @@ class Jobs:
         self.manifest = {
             "source_revision": SOURCE_REVISION, "model_revision": MODEL_REVISION,
             "model_variant": "v2", "sample_rate": SAMPLE_RATE,
+            "default_voice": settings.default_voice,
             "channels": 1, "sample_width": 2, "encoding": "PCM_16", "defaults": DEFAULTS,
             "max_decoder_seconds": DECODER_LIMIT_SECONDS,
             "device": settings.device, "cpu_threads": settings.cpu_threads,
@@ -349,12 +360,18 @@ class Jobs:
             if Path(__file__).with_name("alignment_patch_manifest.json").is_file() else None,
             "service_sha256": file_hash(Path(__file__)),
             "pkuseg_loader_sha256": file_hash(Path(__file__).with_name("prefetch_pkuseg.py")),
+            "reference_loader_sha256": file_hash(Path(__file__).with_name("prefetch_reference.py")),
             "runtime_requirements_sha256": file_hash(Path("/app/runtime-requirements.txt"))
             if Path("/app/runtime-requirements.txt").is_file() else None,
         }
         self.voices = [{"id": "default", "reference_sha256": DEFAULT_CONDS_SHA256}]
         for voice, path in sorted(settings.voice_files.items()):
-            self.voices.append({"id": voice, "reference_sha256": file_hash(path)})
+            entry = {"id": voice, "reference_sha256": file_hash(path)}
+            if voice == SPACE_EN_VOICE:
+                entry["reference_source"] = reference_source()
+                self.voices.insert(0, entry)
+            else:
+                self.voices.append(entry)
         for voice in self.voices:
             voice["fingerprint"] = digest({**self.manifest, **voice})
         self.fingerprint = digest({**self.manifest, "voices": self.voices})
@@ -385,9 +402,11 @@ class Jobs:
 
     def submit(self, request: Request, key: str):
         body = request.model_dump()
+        if body["voice"] is None:
+            body["voice"] = self.settings.default_voice
         if len(request.text) > self.settings.max_chars:
             raise HTTPException(422, f"text exceeds {self.settings.max_chars} characters; split without dropping source text")
-        voice = next((v for v in self.voices if v["id"] == request.voice), None)
+        voice = next((v for v in self.voices if v["id"] == body["voice"]), None)
         if voice is None:
             raise HTTPException(422, "Voice is unavailable; see /v1/voices")
         request_hash = digest({"request": body, "fingerprint": self.fingerprint})
@@ -431,6 +450,11 @@ class Jobs:
                 # Hash again before use so reference mutation fails closed.
                 reference = self.settings.voice_files.get(job["request"]["voice"])
                 expected_voice = next(v for v in self.voices if v["id"] == job["request"]["voice"])
+                if job["request"]["voice"] == SPACE_EN_VOICE:
+                    try:
+                        verify_reference(reference)
+                    except (OSError, RuntimeError):
+                        raise RuntimeError("voice_reference_changed") from None
                 if reference and file_hash(reference) != expected_voice["reference_sha256"]:
                     raise RuntimeError("voice_reference_changed")
                 self.runner.run(job["request"], temporary)

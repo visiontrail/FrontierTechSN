@@ -42,7 +42,7 @@ RUN python -c "import os,re; assert all(not os.getenv(k) or re.search(r'#sha256=
     && python -m pip freeze > /app/runtime-requirements.txt \
     && apt-get purge -y --auto-remove git build-essential \
     && rm -rf /root/.cache/pip
-COPY service.py prefetch_pkuseg.py /app/
+COPY service.py prefetch_pkuseg.py prefetch_reference.py /app/
 COPY space_alignment.py apply_space_alignment.py /app/
 RUN python apply_space_alignment.py && python space_alignment.py
 ENV PKUSEG_HOME=/cache/pkuseg

@@ -52,7 +52,7 @@ model = ChatterboxMultilingualTTS.from_local(
     checkpoint_dir, device="cpu", t3_model="v2"
 )
 model.t3.tfmr.set_attn_implementation("eager")  # 前提：镜像已应用并核验 Space 补丁。
-reference_wav = None  # 模型 conds.pt 默认声音；克隆时改为已核验的参考 WAV。
+reference_wav = "/voices/en_f1.flac"  # 必须先按下文固定 generation、大小和 SHA-256 核验。
 wav = model.generate(
     text,
     language_id="en",
@@ -65,6 +65,8 @@ wav = model.generate(
     top_p=1.0,
 )
 ```
+
+上例显式使用官方 Space 的英语参考；将 `audio_prompt_path` 设为 `None` 会使用已加载的条件，初始条件来自 `conds.pt`，不等于 Space English 的默认参考。此示例不证明该参考已在目标服务器安装或通过视频验收。
 
 `from_pretrained(device="cpu", t3_model="v2")` 也是有效 API，但不固定下载 revision。模型原生返回 `[1, N]` 浮点张量，服务应明确编码成单声道、24,000 Hz、PCM16 WAV。当前官方代码支持 CPU 的 `map_location`，并删除末尾一个语音 token 对应的约 40 ms 噪声。旧 Space 的 `torch.load()` 缺少相应 CPU 映射，不能仅复制其 Gradio 界面就认定 ARM CPU 部署可用。[当前多语言实现](https://github.com/resemble-ai/chatterbox/blob/5de7a54aa4e5e2baadb0182dde554908b48b85c2/src/chatterbox/mtl_tts.py)、[采样率常量](https://github.com/resemble-ai/chatterbox/blob/5de7a54aa4e5e2baadb0182dde554908b48b85c2/src/chatterbox/models/s3gen/const.py)
 
@@ -122,11 +124,35 @@ Chatterbox 的 `generate()` 会修改模型的 `self.conds`；参考声线和随
 
 模型一次推理固定最多生成 1,000 个语音 token，语音编码器速率为每秒 25 token，因而单次输出上限约为 40 秒，而不是任意长度朗读。2,048 个文本 token 的配置上限不等于 2,048 token 长稿都能完整发声。适配层应按句切分，限制字符和词数，遇到过长单句继续在标点或词边界切分，拒绝静默截断；需要同时用边界样本验证开头、结尾及跨片段连接。[语音 token 常量](https://github.com/resemble-ai/chatterbox/blob/5de7a54aa4e5e2baadb0182dde554908b48b85c2/src/chatterbox/models/s3tokenizer/s3tokenizer.py)、[T3 配置](https://github.com/resemble-ai/chatterbox/blob/5de7a54aa4e5e2baadb0182dde554908b48b85c2/src/chatterbox/models/t3/modules/t3_config.py)
 
-模型支持的语言代码为 `ar da de el en es fi fr he hi it ja ko ms nl no pl pt ru sv sw tr zh`。参考音频应与输出语言匹配。沿用 `jane` 时，应将已调好的现有旁白中干净、单人、无背景音乐的片段登记为独立克隆参考，记录来源和 SHA-256；对比使用同一段文字。不能把官方默认参考标成现有 `jane`。参考编码分别使用前 6 秒和前 10 秒；整段语音还用于说话人嵌入。
+模型支持的语言代码为 `ar da de el en es fi fr he hi it ja ko ms nl no pl pt ru sv sw tr zh`。参考音频应与输出语言匹配。只有明确要求保留 Pocket 音色时，才应将已有旁白登记为独立的 `jane` 克隆参考；复现指定 Space 的英语声音应使用其 `en_f1.flac`。两种选择均须记录来源和 SHA-256，不能仅以同名声线或相同模型参数代替参考身份。参考编码分别使用前 6 秒和前 10 秒；整段语音还用于说话人嵌入。
 
-当前独立服务的 `default` 指固定模型自带的 `conds.pt`，与 Space 的英语 `en_f1.flac` 是不同参考；服务只在配置的 `jane` 参考 WAV 存在时暴露该声线。每次推理前恢复模型原始条件，避免一次 `jane` 克隆污染后续 `default` 请求。客户端按服务返回的参考指纹核验声音身份，不因名称相同就接受其他声音。
+首次验收构建 `c21819f5…` 中，独立服务的 `default` 指固定模型自带的 `conds.pt`，`jane` 指配置的 Pocket 参考 WAV，两者均与 Space English 不同。每次推理前恢复模型原始条件，避免一次参考克隆污染后续请求。客户端按服务返回的参考指纹核验声音身份，不因名称相同就接受其他声音。
 
 模型没有原生 `speed` 参数。`cfg_weight`、`exaggeration` 可以影响韵律和主观速度，但没有与 1.0×/1.2× 对应的时间比例契约。固定种子有利于同环境复现，不保证不同硬件、依赖版本或模型修订之间逐样本一致。不得通过 FFmpeg `atempo` 强行让新模型配音匹配旧视频时长。
+
+## 声音来源复核：官方 English 与 Pocket/Jane 克隆
+
+2026-09-29 用户反馈 Chatterbox Jane 听起来与 Pocket/Jane 一样、与官方 Space 不同。复核证实参考选择存在实质差异：首次部署的 `jane` 取自 Pocket/Jane 任务 `20260928-235341-4aa80a` 的 10.92 秒干净旁白，SHA-256 为 `4c3f950e7e549b41143921da5e5d8e477573d4104d74b03f70fcdeb014a10060`。服务把该文件传入 Chatterbox 的 `audio_prompt_path`，使模型克隆这份旁白的说话人条件。它不是 Chatterbox 官方内置的同名声音。[已记录的参考来源](../outputs/chatterbox-deployment-20260929/baseline.json)、[首次验收声音身份](../outputs/chatterbox-validation/20260929-065234-6fc5b7/audio/tts_input_part_002_generated.json)
+
+用户指出“没有得到官方 Space 的声音”是正确的；此前把保留视频制作约束扩展成了继承 Pocket 音色，参考选择没有满足这一期望。相似听感与参考来源吻合，但这里不把“完全一样”扩大为两份波形逐样本相同。已有 ASR、完整稿件、WAV、自然速度、混音和视频验收能够证明制作链路合格，不能证明声音匹配官方参考；使用不同模型或得到不同音频哈希也不能证明声音匹配。
+
+本次重新读取的 Space 仍为 `c612a94210c0af895d6b649850d15b7ccca36594`，其 `app.py` SHA-256 为 `5d1848199b8abaa59ba983912ec268b5c911ba0793d02611a7858348044ad983`。`LANGUAGE_CONFIG['en']` 指向 `en_f1.flac`；页面初始语言为 `fr`，对应 `fr_f1.flac`。切换语言会更新参考音频；生成时使用 `audio_prompt_path_input or default_audio_for_ui(language_id)`，所以清空上传也会恢复该语言参考，不会自动变成模型的 `conds.pt`。因此，还须区分用户试听的是初始 French 还是切换后的 English。[固定版本应用源码](https://huggingface.co/spaces/ResembleAI/Chatterbox-Multilingual-TTS/blob/c612a94210c0af895d6b649850d15b7ccca36594/app.py)
+
+官方英语参考已直接下载并核验；带固定 generation 的 URL 与应用中不带参数的 URL 返回相同字节：
+
+| 项目 | 已核验值 |
+| --- | --- |
+| 官方文件 | [`mtl_prompts/en_f1.flac`](https://storage.googleapis.com/chatterbox-demo-samples/mtl_prompts/en_f1.flac?generation=1755807478904629) |
+| GCS generation | `1755807478904629` |
+| 大小 | `83,323` bytes |
+| SHA-256 | `e81950378b53827aed08d164ebd332a7b8c5805b8a97b4f79ab057071e359c72` |
+| 实际音频 | FLAC，24,000 Hz，单声道，16-bit，72,936 samples，3.039 秒 |
+
+原始 HTTP 元数据、FFprobe 及原件哈希见 [provenance.json](../outputs/chatterbox-deployment-20260929/official-space-reference-audit/provenance.json)；23 种语言的参考映射和固定 URL 字节比对见 [source-comparison.json](../outputs/chatterbox-deployment-20260929/official-space-reference-audit/source-comparison.json)。原始 FLAC 可以直接交给 `librosa.load()`；不需要先裁剪、重复延长或转码来满足官方参考的加载方式。
+
+进一步对照确认，Space 与所选 GitHub 代码的 `prepare_conditionals()` 抽象语法树完全一致；本次六个生成参数也已与 Space V2 对齐。Space 的 seed 0 表示不重设随机数，服务的 seed 0 则固定随机状态；CPU/依赖版本和末尾约 40 ms 裁剪仍可能改变具体输出，但没有证据表明这些差异能解释或替代对参考声音的修正。[Space 参考编码及生成实现](https://huggingface.co/spaces/ResembleAI/Chatterbox-Multilingual-TTS/blob/c612a94210c0af895d6b649850d15b7ccca36594/src/chatterbox/mtl_tts.py)、[所选 GitHub 实现](https://github.com/resemble-ai/chatterbox/blob/5de7a54aa4e5e2baadb0182dde554908b48b85c2/src/chatterbox/mtl_tts.py)
+
+修复要求是将官方英语参考登记为独立声音身份 `space-en-f1`，明确标注 Jane 为 Pocket 参考克隆，保留 `default` 的模型条件含义，并把官方参考哈希与来源纳入部署及缓存身份。该参考的下载和源码核验已完成；新声音的目标机部署、真实生成、试听及视频验收须另行记录，不能沿用首次 Jane 样片的通过结论。
 
 ## ARM CPU 与依赖
 

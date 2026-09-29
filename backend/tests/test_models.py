@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from backend.models import (
     DEFAULT_CLOSING_REMARKS,
+    DailyAutomationSettings,
     SourceType,
     TaskConfig,
     TaskResponse,
@@ -75,6 +76,30 @@ def test_orpheus_is_monologue_only():
             voice_1="tara",
             voice_2="leah",
         )
+
+
+def test_chatterbox_new_request_defaults_to_the_official_space_voice():
+    assert TaskConfig(tts_model="chatterbox-multilingual").voice_1 == "space-en-f1"
+
+
+@pytest.mark.parametrize("voice", ["jane", "default", "space-en-f1"])
+def test_chatterbox_explicit_and_saved_voice_selections_are_preserved(voice):
+    task = TaskConfig(tts_model="chatterbox-multilingual", voice_1=voice)
+    assert task.voice_1 == voice
+    assert TaskConfig.model_validate(task.model_dump()).voice_1 == voice
+
+
+def test_pocket_jane_task_is_not_changed_by_chatterbox_default():
+    task = TaskConfig(tts_model="pocket-tts-en", voice_1="jane")
+    assert TaskConfig.model_validate(task.model_dump()).voice_1 == "jane"
+
+
+def test_daily_new_chatterbox_recipe_defaults_to_official_voice_and_keeps_saved_jane():
+    assert DailyAutomationSettings(tts_model="chatterbox-multilingual").voice == "space-en-f1"
+    for model in ("pocket-tts-en", "chatterbox-multilingual"):
+        settings = DailyAutomationSettings(tts_model=model, voice="jane", auto_publish=False)
+        restored = DailyAutomationSettings.model_validate(settings.model_dump())
+        assert (restored.tts_model, restored.voice, restored.auto_publish) == (model, "jane", False)
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from backend import config
 from backend.pipeline import chatterbox, tts, voice_previews
@@ -74,7 +74,7 @@ class VoiceSampleTests(unittest.TestCase):
                 self.assertTrue(config.voice_preview_supported("alba", "pocket-tts-en"))
 
     def test_chatterbox_preview_identity_tracks_deployment_without_changing_defaults(self):
-        self.assertEqual(list(config.voices_for_model("chatterbox-multilingual")), ["jane", "default"])
+        self.assertEqual(list(config.voices_for_model("chatterbox-multilingual")), ["space-en-f1", "jane", "default"])
         model = config.TTS_MODELS["chatterbox-multilingual"]
         self.assertEqual(model["language"], "en")
         self.assertFalse(model["preload_previews"])
@@ -108,6 +108,14 @@ class VoiceSampleTests(unittest.TestCase):
             with self.subTest(setting=name), patch.object(module, name, value):
                 self.assertNotEqual(config.voice_preview_cache_dir("chatterbox-multilingual"), original)
         self.assertEqual(config.voice_preview_cache_dir("chatterbox-multilingual"), original)
+
+    def test_model_default_does_not_reuse_a_different_providers_voice(self):
+        with patch.object(config, "TTS_DEFAULT_VOICE_1", "jane"):
+            self.assertEqual(config.default_voice_for_model("chatterbox-multilingual"), "space-en-f1")
+            self.assertEqual(config.default_voice_for_model("pocket-tts-en"), "jane")
+        with patch.object(config, "TTS_DEFAULT_VOICE_1", "Carter"):
+            self.assertEqual(config.default_voice_for_model("pocket-tts-en"), "alba")
+            self.assertEqual(config.default_voice_for_model("vibevoice-0.5b"), "Carter")
 
 
 class VoiceRouteTests(unittest.TestCase):
@@ -151,11 +159,70 @@ class VoiceRouteTests(unittest.TestCase):
         chatterbox = next(model for model in body if model["id"] == "chatterbox-multilingual")
         self.assertEqual(chatterbox["provider"], "Resemble AI Chatterbox")
         self.assertTrue(chatterbox["single_speaker"])
+        self.assertEqual(chatterbox["default_voice"], "space-en-f1")
 
     def test_lists_chatterbox_reference_voices(self):
-        body = self.client.get("/api/voices?tts_model=chatterbox-multilingual").json()
-        self.assertEqual([voice["name"] for voice in body], ["jane", "default"])
+        response = self.client.get("/api/voices?tts_model=chatterbox-multilingual")
+        body = response.json()
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual([voice["name"] for voice in body], ["space-en-f1", "jane", "default"])
+        self.assertEqual(body[0]["label"], "Official Space English")
+        self.assertIn("Pocket clone", body[1]["label"])
+        self.assertEqual(body[2]["label"], "Model default voice")
+        self.assertTrue(all(voice["preview_version"] for voice in body))
         self.assertTrue(all(voice["preview_available"] for voice in body))
+
+    def test_chatterbox_browser_preview_version_tracks_the_disk_cache(self):
+        original = self.client.get("/api/voices?tts_model=chatterbox-multilingual").json()[0]
+        for key, value in (
+            ("CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT", "new-reference-deployment"),
+            ("TTS_RANDOM_SEED", config.TTS_RANDOM_SEED + 1),
+        ):
+            with self.subTest(key=key), patch.object(config, key, value):
+                updated = self.client.get("/api/voices?tts_model=chatterbox-multilingual").json()[0]
+                self.assertNotEqual(updated["preview_version"], original["preview_version"])
+                self.assertEqual(updated["preview_version"], config.voice_preview_cache_dir("chatterbox-multilingual").name)
+
+    def test_stale_chatterbox_preview_url_rejects_before_generating(self):
+        version = config.voice_preview_version("space-en-f1", "chatterbox-multilingual")
+        with (
+            patch.object(config, "CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT", "different-deployment"),
+            patch("backend.routers.voices.ensure_voice_preview", new_callable=AsyncMock) as generate,
+        ):
+            response = self.client.get(f"/api/voices/space-en-f1/preview?tts_model=chatterbox-multilingual&v={version}")
+        self.assertEqual(response.status_code, 409)
+        generate.assert_not_awaited()
+
+    def test_chatterbox_versioned_url_serves_its_voice_and_legacy_url_is_uncached(self):
+        with tempfile.TemporaryDirectory() as cache, patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)):
+            directory = config.voice_preview_cache_dir("chatterbox-multilingual")
+            directory.mkdir(parents=True)
+            for index, voice in enumerate(config.CHATTERBOX_TTS_EN_VOICES):
+                sample = b"RIFF" + bytes([index]) * 64
+                (directory / f"{voice}.wav").write_bytes(sample)
+                version = config.voice_preview_version(voice, "chatterbox-multilingual")
+                url = f"/api/voices/{voice}/preview?tts_model=chatterbox-multilingual"
+                with self.subTest(voice=voice):
+                    response = self.client.get(f"{url}&v={version}")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.content, sample)
+                    self.assertEqual(response.headers["cache-control"], "private, max-age=86400, immutable")
+                    self.assertEqual(self.client.get(url).headers["cache-control"], "no-store")
+
+    def test_chatterbox_contract_change_during_generation_does_not_cache_wrong_identity(self):
+        with tempfile.TemporaryDirectory() as cache, patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)):
+            sample = Path(cache) / "sample.wav"
+            sample.write_bytes(b"RIFF" + b"0" * 64)
+            version = config.voice_preview_version("space-en-f1", "chatterbox-multilingual")
+            async def generate(*args):
+                config.CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT = "changed-during-request"
+                return sample
+            with (
+                patch.object(config, "CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT", config.CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT),
+                patch("backend.routers.voices.ensure_voice_preview", side_effect=generate),
+            ):
+                response = self.client.get(f"/api/voices/space-en-f1/preview?tts_model=chatterbox-multilingual&v={version}")
+            self.assertEqual(response.status_code, 409)
 
     def test_rejects_unknown_voice_before_touching_the_filesystem(self):
         res = self.client.get("/api/voices/Bogus*/preview")

@@ -3,5 +3,6 @@
 !requirements.txt
 !service.py
 !prefetch_pkuseg.py
+!prefetch_reference.py
 !space_alignment.py
 !apply_space_alignment.py

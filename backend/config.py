@@ -462,9 +462,19 @@ POCKET_TTS_EN_VOICES = {
 # These are reference-conditioned voices, not interchangeable speaker IDs from
 # Pocket TTS. Jane is cloned from accepted project narration; timbre can differ.
 CHATTERBOX_TTS_EN_VOICES = {
-    "jane": {"gender": "female", "lang": "en"},
+    "space-en-f1": {
+        "gender": "female", "lang": "en", "label": "Official Space English",
+        "description": "Official demo's English reference.",
+    },
+    "jane": {
+        "gender": "female", "lang": "en", "label": "Jane (Pocket clone)",
+        "description": "Cloned from Pocket/Jane audio.",
+    },
     # Model default voice from the pinned conds.pt, not the demo's en sample.
-    "default": {"gender": "unspecified", "lang": "en"},
+    "default": {
+        "gender": "unspecified", "lang": "en", "label": "Model default voice",
+        "description": "Model's bundled voice reference.",
+    },
 }
 
 
@@ -542,6 +552,7 @@ def _build_tts_models(root: Path) -> dict[str, dict]:
             "single_speaker": True,
             "language": "en",
             "voices": CHATTERBOX_TTS_EN_VOICES,
+            "default_voice": "space-en-f1",
             "acoustic_integrity": True,
             "remote_preview": True,
             "preload_previews": False,
@@ -584,6 +595,22 @@ def resolve_voice(voice: str, tts_model: str | None = None) -> str:
     """Map a requested voice to the preset the given model actually uses."""
     model = TTS_MODELS.get(tts_model or TTS_DEFAULT_MODEL, {})
     return model.get("voice_aliases", {}).get(voice, voice)
+
+
+def default_voice_for_model(tts_model: str | None = None) -> str:
+    """Choose the model's default without changing a saved task's selection."""
+    model = TTS_MODELS.get(tts_model or TTS_DEFAULT_MODEL, {})
+    voices = voices_for_model(tts_model)
+    preferred = model.get("default_voice") or TTS_DEFAULT_VOICE_1
+    return preferred if preferred in voices else next(iter(voices))
+
+
+def voice_preview_version(voice: str, tts_model: str | None = None) -> str | None:
+    """Version browser preview URLs by the same contract as the disk cache."""
+    model_id = tts_model or TTS_DEFAULT_MODEL
+    if TTS_MODELS.get(model_id, {}).get("kind") == "chatterbox_http":
+        return voice_preview_cache_dir(model_id).name
+    return None
 
 
 def voices_for_model(tts_model: str | None = None) -> dict[str, dict]:

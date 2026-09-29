@@ -197,6 +197,8 @@ class TaskConfig(BaseModel):
         model = app_config.TTS_MODELS.get(self.tts_model)
         if model is None:
             raise ValueError(f"Unknown TTS model '{self.tts_model}'")
+        if "tts_model" in self.model_fields_set and "voice_1" not in self.model_fields_set:
+            self.voice_1 = app_config.default_voice_for_model(self.tts_model)
         if model.get("single_speaker") and self.script_format == ScriptFormat.DIALOGUE:
             raise ValueError(f"TTS model '{self.tts_model}' supports monologue only")
         voices = app_config.voices_for_model(self.tts_model)
@@ -619,11 +621,14 @@ class ProviderRouteTestResponse(BaseModel):
 
 class VoiceOption(BaseModel):
     name: str
+    label: Optional[str] = None
+    description: Optional[str] = None
     gender: str
     lang: str
     # The preset the selected TTS model actually uses (0.5B substitutes some).
     resolved_name: str
     preview_available: bool
+    preview_version: Optional[str] = None
 
 
 class TtsModelOption(BaseModel):
@@ -632,6 +637,7 @@ class TtsModelOption(BaseModel):
     provider: str
     single_speaker: bool
     is_default: bool
+    default_voice: Optional[str] = None
 
 
 class SettingField(BaseModel):
@@ -774,6 +780,8 @@ class DailyAutomationSettings(BaseModel):
 
         if self.tts_model not in app_config.TTS_MODELS:
             raise ValueError(f"Unknown TTS model '{self.tts_model}'")
+        if "tts_model" in self.model_fields_set and "voice" not in self.model_fields_set:
+            self.voice = app_config.default_voice_for_model(self.tts_model)
         if self.voice not in app_config.voices_for_model(self.tts_model):
             raise ValueError(
                 f"Voice '{self.voice}' is unavailable for TTS model '{self.tts_model}'"

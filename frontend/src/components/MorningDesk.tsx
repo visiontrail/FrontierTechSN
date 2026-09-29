@@ -115,6 +115,8 @@ export default function MorningDesk() {
     setPreviewState(null)
   }
 
+  const voiceDisplayName = (name: string) => voices.find((voice) => voice.name === name)?.label ?? voiceLabel(name)
+
   const toggleVoicePreview = (voice: string) => {
     if (!draft) return
     if (previewVoice === voice) {
@@ -128,11 +130,12 @@ export default function MorningDesk() {
     setPreviewError(null)
     setPreviewVoice(voice)
     setPreviewState('loading')
-    audio.src = voicePreviewUrl(voice, draft.tts_model)
+    const option = voices.find((item) => item.name === voice)
+    audio.src = voicePreviewUrl(voice, draft.tts_model, option?.preview_version)
     void audio.play().catch(() => {
       setPreviewVoice(null)
       setPreviewState(null)
-      setPreviewError(`Could not generate or play the ${voiceLabel(voice)} preview.`)
+      setPreviewError(`Could not generate or play the ${voiceDisplayName(voice)} preview.`)
     })
   }
 
@@ -345,7 +348,8 @@ export default function MorningDesk() {
                 <select value={draft.tts_model} onChange={(event) => {
                   stopVoicePreview()
                   setPreviewError(null)
-                  patch('tts_model', event.target.value)
+                  const model = ttsModels.find((item) => item.id === event.target.value)
+                  setDraftOverride({ ...draft, tts_model: event.target.value, voice: model?.default_voice ?? draft.voice })
                 }}>
                   {!ttsModels.some((model) => model.id === draft.tts_model) && <option value={draft.tts_model}>{draft.tts_model}</option>}
                   {ttsModels.map((model) => <option value={model.id} key={model.id}>{model.provider} — {model.label}</option>)}
@@ -359,7 +363,7 @@ export default function MorningDesk() {
                   patch('voice', event.target.value)
                 }}>
                   {(voicesAreLoading || voicesAreError) && !selectedVoiceIsValid && <option value={draft.voice}>{voicesAreLoading ? 'Loading compatible voices…' : draft.voice}</option>}
-                  {voices.map((voice) => <option value={voice.name} key={voice.name}>{voiceLabel(voice.name)} · {voice.gender}</option>)}
+                  {voices.map((voice) => <option value={voice.name} key={voice.name}>{voiceDisplayName(voice.name)} · {voice.gender}</option>)}
                 </select>
               </label>
             </div>
@@ -370,10 +374,10 @@ export default function MorningDesk() {
                   <small>
                     {previewError
                       ?? (previewVoice && previewState === 'loading'
-                        ? `Preparing ${voiceLabel(previewVoice)}… First play may take a moment.`
+                        ? `Preparing ${voiceDisplayName(previewVoice)}… First play may take a moment.`
                         : previewVoice
-                          ? `Playing ${voiceLabel(previewVoice)}`
-                          : `${voices.length} model-native voices · choose and preview independently`)}
+                          ? `Playing ${voiceDisplayName(previewVoice)}`
+                          : `${voices.length} voices for this model · choose and preview independently`)}
                   </small>
                 </div>
                 <span>{voices.filter((voice) => voice.preview_available).length}/{voices.length} previewable</span>
@@ -390,8 +394,8 @@ export default function MorningDesk() {
                         className="morning-voice-listen"
                         onClick={() => toggleVoicePreview(voice.name)}
                         disabled={!voice.preview_available}
-                        aria-label={active ? `Stop ${voiceLabel(voice.name)} preview` : `Preview ${voiceLabel(voice.name)}`}
-                        title={voice.preview_available ? `Preview ${voiceLabel(voice.name)}` : 'Preview unavailable'}
+                        aria-label={active ? `Stop ${voiceDisplayName(voice.name)} preview` : `Preview ${voiceDisplayName(voice.name)}`}
+                        title={voice.preview_available ? `Preview ${voiceDisplayName(voice.name)}` : 'Preview unavailable'}
                       >
                         {active ? <IconStop /> : <IconPlay />}
                       </button>
@@ -401,8 +405,8 @@ export default function MorningDesk() {
                         onClick={() => patch('voice', voice.name)}
                         aria-pressed={selected}
                       >
-                        <strong>{voiceLabel(voice.name)}</strong>
-                        <small>{voice.gender} · {voice.lang}</small>
+                        <strong>{voiceDisplayName(voice.name)}</strong>
+                        <small>{voice.description ?? `${voice.gender} · ${voice.lang}`}</small>
                       </button>
                       <span className="morning-voice-index" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
                       {loading && <span className="morning-voice-loading" aria-hidden="true" />}
@@ -421,7 +425,7 @@ export default function MorningDesk() {
                 }}
                 onError={() => {
                   if (!previewVoice) return
-                  setPreviewError(`Could not generate or play the ${voiceLabel(previewVoice)} preview.`)
+                  setPreviewError(`Could not generate or play the ${voiceDisplayName(previewVoice)} preview.`)
                   setPreviewVoice(null)
                   setPreviewState(null)
                 }}

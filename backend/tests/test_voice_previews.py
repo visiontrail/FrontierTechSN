@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import tempfile
 import unittest
@@ -6,7 +7,20 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from backend import config
-from backend.pipeline import voice_previews
+from backend.pipeline import chatterbox, voice_previews
+
+
+def chatterbox_preview(directory, voice, language, *, contract=None):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / "preview.wav"
+    target.write_bytes(b"RIFF" + b"0" * 64)
+    (directory / "tts_manifest.json").write_text(json.dumps({
+        "cache_contract": chatterbox.cache_contract() if contract is None else contract,
+        "voice": voice, "language": language,
+        "output_audio_sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+    }))
+    return str(target)
 
 
 class VoicePreviewTests(unittest.IsolatedAsyncioTestCase):
@@ -73,10 +87,7 @@ class VoicePreviewTests(unittest.IsolatedAsyncioTestCase):
         async def generate(script_path, output_dir, voice, language, **kwargs):
             self.assertEqual((voice, language), ("jane", "en"))
             self.assertIs(kwargs["verify_text"], False)
-            target = Path(output_dir) / "preview.wav"
-            target.parent.mkdir(parents=True)
-            target.write_bytes(b"RIFF" + b"0" * 64)
-            return str(target)
+            return chatterbox_preview(output_dir, voice, language)
 
         with (
             tempfile.TemporaryDirectory() as cache,
@@ -105,9 +116,7 @@ class VoicePreviewTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(json.loads(checkpoint.read_text()), {
                         "idempotency_key": "original-key", "job_id": "original-job",
                     })
-                    target = directory / "preview.wav"
-                    target.write_bytes(b"RIFF" + b"0" * 64)
-                    return str(target)
+                    return chatterbox_preview(output_dir, voice, language)
 
                 with (
                     tempfile.TemporaryDirectory() as cache,
@@ -122,3 +131,47 @@ class VoicePreviewTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(directories[0], directories[1])
                     self.assertEqual(request.await_count, 2)
                     self.assertEqual(config.voice_sample_path("jane", "chatterbox-multilingual"), completed)
+
+    async def test_chatterbox_setting_change_cannot_publish_into_old_preview_cache(self):
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback):
+                async def generate(script_path, output_dir, voice, language, **kwargs):
+                    config.TTS_RANDOM_SEED += 1
+                    target = chatterbox_preview(output_dir, voice, language)
+                    if rollback:
+                        config.TTS_RANDOM_SEED -= 1
+                    return target
+
+                with (
+                    tempfile.TemporaryDirectory() as cache,
+                    patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)),
+                    patch.object(config, "TTS_RANDOM_SEED", 42),
+                    patch("backend.pipeline.chatterbox._generate_chatterbox", side_effect=generate),
+                ):
+                    old_cache = config.voice_preview_cache_dir("chatterbox-multilingual")
+                    with self.assertRaisesRegex(RuntimeError, "settings changed"):
+                        await voice_previews.ensure_voice_preview("space-en-f1", "chatterbox-multilingual")
+                    self.assertFalse((old_cache / "space-en-f1.wav").exists())
+                    self.assertTrue((old_cache / ".space-en-f1-work" / "audio" / "tts_manifest.json").is_file())
+
+    async def test_chatterbox_preview_manifest_must_match_voice_and_audio(self):
+        for mismatch in ("voice", "output_audio_sha256"):
+            with self.subTest(mismatch=mismatch):
+                async def generate(script_path, output_dir, voice, language, **kwargs):
+                    target = chatterbox_preview(output_dir, voice, language)
+                    path = Path(output_dir) / "tts_manifest.json"
+                    manifest = json.loads(path.read_text())
+                    manifest[mismatch] = "wrong"
+                    path.write_text(json.dumps(manifest))
+                    return target
+
+                with (
+                    tempfile.TemporaryDirectory() as cache,
+                    patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)),
+                    patch("backend.pipeline.chatterbox._generate_chatterbox", side_effect=generate),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        await voice_previews.ensure_voice_preview("space-en-f1", "chatterbox-multilingual")
+                    destination = config.voice_preview_cache_dir("chatterbox-multilingual") / "space-en-f1.wav"
+                    self.assertFalse(destination.exists())
+                    self.assertFalse(destination.with_suffix(".wav.tmp").exists())

@@ -236,28 +236,27 @@ async def _generate_chatterbox(
         raise ValueError("The Chatterbox video adapter currently validates English narration only")
     if not config.CHATTERBOX_TTS_API_KEY:
         raise RuntimeError("Set CHATTERBOX_TTS_API_KEY in Admin -> System -> Voice & TTS")
+    contract = cache_contract()
     _, directory, _, cleaned = tts._prepare_tts_input(script_path, output_dir, strip_speaker_labels=True)
-    base_url = config.CHATTERBOX_TTS_URL.rstrip("/")
+    base_url = contract["url"]
     timeout = httpx.Timeout(max(5, config.CHATTERBOX_TTS_REQUEST_TIMEOUT), connect=15)
     async with httpx.AsyncClient(timeout=timeout, headers={"X-API-Key": config.CHATTERBOX_TTS_API_KEY}, follow_redirects=False) as client:
         response = await _request(client, "GET", f"{base_url}/v1/capabilities", emit=emit)
         capabilities = response.json()
         revisions = {
-            "source_revision": config.CHATTERBOX_TTS_SOURCE_REVISION,
-            "model_revision": config.CHATTERBOX_TTS_MODEL_REVISION,
-            "model_variant": config.CHATTERBOX_TTS_MODEL_VARIANT,
+            key: contract[key] for key in ("source_revision", "model_revision", "model_variant")
         }
         if any(capabilities.get(key) != value for key, value in revisions.items()):
             raise RuntimeError("Chatterbox deployed revisions do not match the configured pinned build")
-        fingerprint = config.CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT
+        fingerprint = contract["deployment_fingerprint"]
         if not fingerprint or capabilities.get("fingerprint") != fingerprint:
             raise RuntimeError("Chatterbox deployment fingerprint is missing or changed; verify the service and its voice references in Admin -> System")
         voices = {item["id"]: item for item in capabilities.get("voices", [])}
         voice_info = voices.get(voice)
         if not voice_info or not voice_info.get("fingerprint"):
             raise RuntimeError(f"Chatterbox voice '{voice}' has no installed reference fingerprint")
-        chunks = _split_text(cleaned, max_words=config.CHATTERBOX_TTS_CHUNK_WORDS,
-                             max_chars=min(config.CHATTERBOX_TTS_MAX_CHARS, int(capabilities["max_chars"])))
+        chunks = _split_text(cleaned, max_words=contract["chunk_words"],
+                             max_chars=min(contract["max_chars"], int(capabilities["max_chars"])))
         emit(f"Chatterbox: {len(chunks)} bounded request(s), natural 1.0x speech, voice={voice}")
         parts, metadata_rows = [], []
         for index, text in enumerate(chunks, 1):
@@ -269,10 +268,10 @@ async def _generate_chatterbox(
                 "deployment_fingerprint": fingerprint,
                 "voice": voice, "voice_fingerprint": voice_info["fingerprint"],
                 "language": language, "text": text,
-                "seed": config.TTS_RANDOM_SEED, "verifier_version": VERIFIER_VERSION,
-                "shared_verifier_version": tts.POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
+                "seed": contract["seed"], "verifier_version": contract["verifier_version"],
+                "shared_verifier_version": contract["shared_verifier_version"],
                 "synthesis_speed_ratio": 1.0,
-                "synthesis_parameters": SYNTHESIS_PARAMETERS,
+                "synthesis_parameters": contract["synthesis_parameters"],
             }
             cached = _cached_part(path, identity, verify_text=verify_text)
             if cached:
@@ -284,8 +283,8 @@ async def _generate_chatterbox(
                 request_path = directory / f"{stem}.request-{attempt}.json"
                 payload = {
                     "text": text, "language_id": language, "voice": voice,
-                    "seed": (config.TTS_RANDOM_SEED + attempt) % (2 ** 32),
-                    **SYNTHESIS_PARAMETERS,
+                    "seed": (contract["seed"] + attempt) % (2 ** 32),
+                    **contract["synthesis_parameters"],
                 }
                 request_identity = _digest({"identity": identity, "payload": payload})
                 checkpoint = _read_request_checkpoint(request_path)
@@ -395,7 +394,7 @@ async def _generate_chatterbox(
     tts._write_tts_manifest(
         directory, model=MODEL_ID, source_text=cleaned, chunks=chunks, wav_parts=parts,
         output=output, deterministic=False, integrity=integrity,
-        extra={**revisions, "deployment_fingerprint": fingerprint,
+        extra={**revisions, "deployment_fingerprint": fingerprint, "cache_contract": contract,
                "voice": voice, "voice_fingerprint": voice_info["fingerprint"],
                "language": language, "continuity": _continuity_report(cleaned, chunks, parts, metadata_rows)},
     )

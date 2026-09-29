@@ -71,6 +71,8 @@ class Defaults(BaseModel):
     def validate_voice(self):
         if self.tts_model not in config.TTS_MODELS:
             raise ValueError("Unknown TTS model")
+        if "tts_model" in self.model_fields_set and "voice" not in self.model_fields_set:
+            self.voice = config.default_voice_for_model(self.tts_model)
         if self.voice not in config.voices_for_model(self.tts_model):
             raise ValueError("Voice is unavailable for the selected TTS model")
         return self
@@ -226,7 +228,10 @@ def defaults() -> dict:
                        {"id": "clear-mechanism", "label": "Clear diagrams", "style": technical}]
     data["tts_models"] = [{"id": key, "label": f"{value.get('provider', '')} · {value['label']}",
                            "language": tts_language(key),
-                           "voices": list(config.voices_for_model(key))}
+                           "voices": list(config.voices_for_model(key)),
+                           "voice_labels": {name: meta.get("label", name)
+                                            for name, meta in config.voices_for_model(key).items()},
+                           "default_voice": config.default_voice_for_model(key)}
                           for key, value in config.TTS_MODELS.items()]
     data["provider_limits"] = {"chatgpt_interval_seconds": normalize_interval(config.OPENCLI_WEB_REQUEST_INTERVAL_SECONDS),
                                "gemini_interval_min_seconds": 60, "gemini_interval_max_seconds": 120}

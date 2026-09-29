@@ -4670,7 +4670,6 @@ async def generate_tts(
     tts_model: str | None = None,
     log: LogCallback | None = None,
 ) -> str:
-    voices = voices or [config.TTS_DEFAULT_VOICE_1, config.TTS_DEFAULT_VOICE_2]
     tts_model = tts_model or config.TTS_DEFAULT_MODEL
 
     # Mirror to the task log (pipeline.log + LogPanel) when available, else the
@@ -4686,6 +4685,12 @@ async def generate_tts(
         valid = ", ".join(sorted(config.TTS_MODELS))
         raise ValueError(f"Unknown TTS model '{tts_model}'. Valid models: {valid}")
 
+    if not voices:
+        voices = (
+            [config.default_voice_for_model(tts_model)]
+            if model.get("single_speaker")
+            else [config.TTS_DEFAULT_VOICE_1, config.TTS_DEFAULT_VOICE_2]
+        )
     available_voices = config.voices_for_model(tts_model)
     unknown_voices = [voice for voice in voices if voice not in available_voices]
     if unknown_voices:

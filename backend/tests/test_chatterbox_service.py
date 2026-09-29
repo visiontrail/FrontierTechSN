@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 SERVICE_PATH = Path(__file__).resolve().parents[2] / "deploy" / "chatterbox" / "service.py"
+sys.path.insert(0, str(SERVICE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("chatterbox_deployment_service", SERVICE_PATH)
 service = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = service
@@ -53,6 +54,7 @@ class FakeRunner:
 
 
 def settings(tmp_path, **kwargs):
+    kwargs.setdefault("default_voice", "default")  # Existing model-default contract tests.
     return service.Settings(api_key="test-only-key", data_dir=tmp_path, **kwargs)
 
 
@@ -767,3 +769,163 @@ def test_space_patcher_rejects_unexpected_source():
     spec.loader.exec_module(patcher)
     with pytest.raises(RuntimeError, match="Unexpected upstream"):
         patcher.patched_source("unreviewed source")
+
+
+def _official_reference_fixture(tmp_path, monkeypatch):
+    import prefetch_reference
+
+    content = b"test-only original FLAC bytes"
+    monkeypatch.setattr(prefetch_reference, "SIZE_BYTES", len(content))
+    monkeypatch.setattr(prefetch_reference, "SHA256", hashlib.sha256(content).hexdigest())
+    path = tmp_path / "en_f1.flac"
+    path.write_bytes(content)
+    return prefetch_reference, path, content
+
+
+def test_production_env_requires_official_reference_and_keeps_jane(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHATTERBOX_API_KEY", "test-only-key")
+    monkeypatch.setenv("CHATTERBOX_DATA_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("CHATTERBOX_SPACE_EN_REFERENCE", raising=False)
+    monkeypatch.delenv("CHATTERBOX_JANE_REFERENCE", raising=False)
+    configured = service.Settings.from_env()
+    assert configured.default_voice == "space-en-f1"
+    with pytest.raises(RuntimeError, match="Default voice reference"):
+        service.Jobs(configured, FakeRunner())
+    _, official, _ = _official_reference_fixture(tmp_path, monkeypatch)
+    jane = tmp_path / "jane.wav"
+    jane.write_bytes(b"retained Pocket reference")
+    monkeypatch.setenv("CHATTERBOX_SPACE_EN_REFERENCE", str(official))
+    monkeypatch.setenv("CHATTERBOX_JANE_REFERENCE", str(jane))
+    configured = service.Settings.from_env()
+    assert configured.voice_files == {"jane": jane, "space-en-f1": official}
+    with TestClient(service.create_app(configured, FakeRunner())) as client:
+        caps = client.get("/v1/capabilities", headers=AUTH).json()
+        assert caps["default_voice"] == "space-en-f1"
+        assert [voice["id"] for voice in caps["voices"]] == ["space-en-f1", "default", "jane"]
+
+
+def test_official_default_is_canonical_and_explicit_legacy_voices_keep_identity(tmp_path, monkeypatch):
+    reference, official, _ = _official_reference_fixture(tmp_path, monkeypatch)
+    jane = tmp_path / "jane.wav"
+    jane.write_bytes(b"retained Pocket reference")
+    runner = FakeRunner()
+    configured = settings(tmp_path, default_voice="space-en-f1", voice_files={"space-en-f1": official, "jane": jane})
+    with TestClient(service.create_app(configured, runner)) as client:
+        caps = client.get("/v1/capabilities", headers=AUTH).json()
+        voices = {v["id"]: v for v in caps["voices"]}
+        source = voices["space-en-f1"]["reference_source"]
+        assert source["space_revision"] == service.SPACE_REVISION
+        assert source["generation"] == "1755807478904629"
+        assert source["url"].endswith("en_f1.flac?generation=1755807478904629")
+        assert voices["space-en-f1"]["reference_sha256"] == reference.SHA256
+        assert voices["default"]["reference_sha256"] == service.DEFAULT_CONDS_SHA256
+        assert voices["jane"]["reference_sha256"] == hashlib.sha256(jane.read_bytes()).hexdigest()
+        job = done(client, post(client).json()["id"])
+        assert job["request"]["voice"] == "space-en-f1"
+        assert job["voice_fingerprint"] == voices["space-en-f1"]["fingerprint"]
+        assert post(client, voice="space-en-f1").json()["id"] == job["id"]
+        assert post(client, voice="default").status_code == 409
+        for voice in ("jane", "default"):
+            result = done(client, post(client, key=voice, voice=voice).json()["id"])
+            assert result["request"]["voice"] == voice
+            assert result["voice_fingerprint"] == voices[voice]["fingerprint"]
+        assert [r["voice"] for r in runner.requests] == ["space-en-f1", "jane", "default"]
+
+
+@pytest.mark.parametrize("changed", [b"wrong-size", b"x" * len(b"test-only original FLAC bytes")])
+def test_official_reference_corruption_fails_startup_and_each_job(tmp_path, monkeypatch, changed):
+    _, official, content = _official_reference_fixture(tmp_path, monkeypatch)
+    configured = settings(tmp_path, default_voice="space-en-f1", voice_files={"space-en-f1": official})
+    official.write_bytes(changed)
+    with pytest.raises(RuntimeError, match="Official Space English reference"):
+        service.Jobs(configured, FakeRunner())
+    official.write_bytes(content)
+    runner = FakeRunner()
+    with TestClient(service.create_app(configured, runner)) as client:
+        official.write_bytes(changed)
+        job = done(client, post(client).json()["id"])
+        assert job["status"] == "failed" and job["error"] == "voice_reference_changed"
+        assert runner.requests == []
+        assert client.get(job["audio_url"], headers=AUTH).status_code == 409
+    assert official.read_bytes() == changed
+
+
+def test_new_official_default_preserves_historical_job_and_rejects_key_rebinding(tmp_path, monkeypatch):
+    with TestClient(service.create_app(settings(tmp_path), FakeRunner())) as client:
+        historical = done(client, post(client, voice="default").json()["id"])
+        audio = client.get(historical["audio_url"], headers=AUTH).content
+    _, official, _ = _official_reference_fixture(tmp_path, monkeypatch)
+    configured = settings(tmp_path, default_voice="space-en-f1", voice_files={"space-en-f1": official})
+    with TestClient(service.create_app(configured, FakeRunner())) as client:
+        assert client.get(f"/v1/jobs/{historical['id']}", headers=AUTH).json() == historical
+        assert client.get(historical["audio_url"], headers=AUTH).content == audio
+        assert post(client).status_code == 409
+        current = done(client, post(client, key="new-official-job").json()["id"])
+        assert current["request"]["voice"] == "space-en-f1"
+        assert current["fingerprint"] != historical["fingerprint"]
+
+
+def test_reference_prefetch_checks_generation_and_preserves_existing_files(tmp_path, monkeypatch):
+    import io
+
+    reference, installed, content = _official_reference_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(reference.urllib.request, "urlopen", lambda *_a, **_k: pytest.fail("valid cache must not fetch"))
+    assert reference.prepare_reference(installed) == installed
+    installed.write_bytes(b"other retained bytes")
+    with pytest.raises(RuntimeError):
+        reference.prepare_reference(installed)
+    assert installed.read_bytes() == b"other retained bytes"
+
+    calls = []
+    def fetch(url, timeout):
+        calls.append(url)
+        stream = io.BytesIO(content)
+        stream.headers = {"x-goog-generation": reference.GENERATION}
+        return stream
+    monkeypatch.setattr(reference.urllib.request, "urlopen", fetch)
+    destination = tmp_path / "new.flac"
+    assert reference.prepare_reference(destination) == destination
+    assert destination.read_bytes() == content
+    assert calls == [reference.SOURCE_URL]
+    assert reference.verify_reference(destination) == reference.SHA256
+
+    def wrong_generation(*_a, **_k):
+        stream = io.BytesIO(content)
+        stream.headers = {"x-goog-generation": "different"}
+        return stream
+    monkeypatch.setattr(reference.urllib.request, "urlopen", wrong_generation)
+    with pytest.raises(RuntimeError, match="generation"):
+        reference.prepare_reference(tmp_path / "unaccepted.flac")
+    assert not (tmp_path / "unaccepted.flac").exists()
+
+
+def test_model_child_resets_conditioning_between_official_jane_and_bundled_voice(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    import numpy as np
+
+    calls = []
+    class Model:
+        conds = {"identity": "bundled"}
+        def generate(self, text, **kwargs):
+            calls.append((dict(self.conds), kwargs.get("audio_prompt_path")))
+            self.conds["identity"] = "mutated by preceding generation"
+            return SimpleNamespace(detach=lambda: SimpleNamespace(cpu=lambda: SimpleNamespace(numpy=lambda: np.ones(24))))
+    model = Model()
+    monkeypatch.setattr(service, "_load_model", lambda _: model)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        manual_seed=lambda _: None, cuda=SimpleNamespace(is_available=lambda: False), inference_mode=nullcontext,
+    ))
+    monkeypatch.setitem(sys.modules, "soundfile", SimpleNamespace(write=lambda *_a, **_k: None))
+    commands = iter([
+        (service.Request(text="Complete sentence.", voice=voice).model_dump(), str(tmp_path / f"{voice}.wav"))
+        for voice in ("space-en-f1", "jane", "default", "space-en-f1")
+    ] + [None])
+    sent = []
+    connection = SimpleNamespace(recv=lambda: next(commands), send=sent.append)
+    service._model_child(connection, settings(tmp_path, voice_files={
+        "space-en-f1": tmp_path / "en_f1.flac", "jane": tmp_path / "jane.wav",
+    }))
+    assert sent == [{"ok": True}] * 4
+    assert [conds for conds, _ in calls] == [{"identity": "bundled"}] * 4
+    assert [path for _, path in calls] == [str(tmp_path / "en_f1.flac"), str(tmp_path / "jane.wav"), None, str(tmp_path / "en_f1.flac")]

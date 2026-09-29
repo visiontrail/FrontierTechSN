@@ -69,7 +69,7 @@ export interface ExplainerQueue {
 export type ExplainerDefaultValues = Omit<ExplainerForm, 'title' | 'research' | 'scenes'>
 
 export interface ExplainerDefaults extends ExplainerDefaultValues {
-  tts_models: { id: string; label: string; language: string; voices: string[] }[]
+  tts_models: { id: string; label: string; language: string; voices: string[]; voice_labels?: Record<string, string>; default_voice?: string }[]
   presets: { id: string; label: string; style: ExplainerStyle }[]
   provider_limits?: {
     chatgpt_interval_seconds: number

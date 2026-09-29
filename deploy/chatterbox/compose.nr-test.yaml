@@ -4,7 +4,7 @@ services:
   chatterbox-tts:
     build:
       context: .
-    image: chatterbox-tts:5de7a54-v2
+    image: chatterbox-tts:5de7a54-v2-space-en
     environment:
       CHATTERBOX_API_KEY: "${CHATTERBOX_API_KEY:?Set a private API key before starting}"
       CHATTERBOX_CPU_THREADS: "${CHATTERBOX_CPU_THREADS:-8}"
@@ -12,6 +12,8 @@ services:
       CHATTERBOX_MAX_AUDIO_SECONDS: "90"
       CHATTERBOX_MAX_CHARS: "250"
       CHATTERBOX_QUEUE_LIMIT: "16"
+      # Required: run prefetch_reference.py before starting this service.
+      CHATTERBOX_SPACE_EN_REFERENCE: "${CHATTERBOX_SPACE_EN_REFERENCE:-/voices/en_f1.flac}"
       # Enable only after putting the reviewed reference at voices/jane.wav.
       CHATTERBOX_JANE_REFERENCE: "${CHATTERBOX_JANE_REFERENCE:-}"
       OMP_NUM_THREADS: "${CHATTERBOX_CPU_THREADS:-8}"

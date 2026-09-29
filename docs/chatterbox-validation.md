@@ -8,7 +8,8 @@ hash-versioned video promotion. It does not create a database task, change saved
 defaults, purchase services, or publish anything. The existing configured AI
 providers still incur their ordinary inference usage.
 
-The fixed test uses the current Swiss template, landscape 4K at 30 fps, Jane,
+The fixed test uses the current Swiss template, landscape 4K at 30 fps,
+the selected model's default voice (`space-en-f1` for Chatterbox),
 the existing `morning-briefing` music track, and the hash-verified
 `morning-brief` moving bookend preset and logo. Burned captions are enabled by
 default; `--no-captions` matches the latest Daily News setting while retaining
@@ -61,10 +62,17 @@ Re-running the same command preserves validated TTS parts and idempotent remote
 jobs. Provider outages remain visible failures.
 
 To generate an optional Pocket/Jane counterpart with the identical source,
-prepare a **different directory** and pass `--model pocket-tts-en` to both
-`prepare` and `run`. Use the same caption and music options on both invocations.
+prepare a **different directory** and pass `--model pocket-tts-en --voice jane`
+to both `prepare` and `run`. Use the same caption and music options on both invocations.
 Comparison establishes delivery-contract parity; two synthesis models are not
 expected to produce identical voices, samples, duration, or pronunciation.
+
+Chatterbox's `space-en-f1` uses the exact official Space English FLAC, verified
+by size and SHA256 in the deployed service. The legacy `jane` ID deliberately
+clones a Pocket/Jane reference and is not the official Space voice. Always use
+a new directory when changing voice or deployment fingerprint; a historical
+Jane sample cannot establish acceptance of the official reference. The CLI
+still accepts `--voice jane` for an explicit legacy comparison.
 
 ## Evidence and audio preservation
 

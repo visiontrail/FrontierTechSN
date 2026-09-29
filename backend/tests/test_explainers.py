@@ -38,6 +38,10 @@ class ExplainerStoreTests(unittest.TestCase):
         with patch.object(config, "TTS_DEFAULT_MODEL", "vibevoice-0.5b"), patch.object(config, "TTS_DEFAULT_VOICE_1", "Carter"):
             defaults = studio.defaults()
         self.assertEqual((defaults["tts_model"], defaults["voice"]), ("pocket-tts-en", "alba"))
+        chatterbox = next(model for model in defaults["tts_models"] if model["id"] == "chatterbox-multilingual")
+        self.assertEqual(chatterbox["default_voice"], "space-en-f1")
+        self.assertEqual(chatterbox["voices"][0], "space-en-f1")
+        self.assertIn("Pocket reference clone", chatterbox["voice_labels"]["jane"])
         original = studio.create_project(studio.ProjectInput(title="How practice works", scenes=[scene()]))
         studio.save_defaults(studio.Defaults(tts_model="orpheus-en", voice="tara", style=studio.Style(accent_color="#112233")))
         snapshot = studio.read_project(original["id"])
@@ -49,6 +53,14 @@ class ExplainerStoreTests(unittest.TestCase):
         self.assertEqual(edited["artifacts"], {})
         self.assertEqual(studio.defaults()["style"]["accent_color"], "#112233")
         self.assertEqual((studio.defaults()["tts_model"], studio.defaults()["voice"]), ("orpheus-en", "tara"))
+
+    def test_chatterbox_omitted_voice_defaults_without_migrating_explicit_selections(self):
+        selected = studio.ProjectInput(title="An audio test", tts_model="chatterbox-multilingual")
+        self.assertEqual(selected.voice, "space-en-f1")
+        for model, voice in (("chatterbox-multilingual", "jane"), ("chatterbox-multilingual", "default"), ("pocket-tts-en", "jane")):
+            with self.subTest(model=model, voice=voice):
+                project = studio.create_project(studio.ProjectInput(title="An audio test", tts_model=model, voice=voice))
+                self.assertEqual(studio.read_project(project["id"])["voice"], voice)
 
     def test_rejects_stale_edits_and_running_edits(self):
         original = studio.create_project(project_input())

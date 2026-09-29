@@ -1,6 +1,6 @@
 # Chatterbox Multilingual V2 部署运行记录：2026-09-29
 
-最终状态（2026-09-29 09:09 UTC）：Chatterbox Multilingual V2 已部署到 nr-test，指纹 `c21819f5…` 已通过应用设置接口激活。52 词、约 26.99 秒的 4K30 验收样片通过现有制作、音视频同步、混音、多模态审核、完整解码、HTTP 读回和 Ego Lite 连续播放检查。原有 Pocket/Jane Morning Desk 配置及全局默认模型保留。这里确认的是本次样片和制作契约一致，不承诺不同模型的音色、波形或所有长稿结果完全相同。
+历史状态（2026-09-29 09:09 UTC）：Chatterbox Multilingual V2 已部署到 nr-test，指纹 `c21819f5…` 曾通过应用设置接口激活。52 词、约 26.99 秒的 4K30 验收样片通过现有制作、音视频同步、混音、多模态审核、完整解码、HTTP 读回和 Ego Lite 连续播放检查。该版本使用 Pocket/Jane 参考克隆，**不符合用户对指定官方 Space 声音的要求**；这些制作检查没有证明声音来源正确。后续已按用户反馈纠正默认参考，见[官方声音修复记录](chatterbox-voice-correction-20260929.md)。以下构建身份与样片保留为历史证据。
 
 相关文档：[模型及兼容性调研](chatterbox-research.md)、[完整视频验收流程](chatterbox-validation.md)、[Chatterbox 部署 runbook](../deploy/chatterbox/README.md)、[Pocket 部署 runbook](../deploy/pocket-tts/README.md)。运行证据保存在 ignored `outputs/`，以下链接为本工作区留存路径，不表示这些产物已进入 Git。
 

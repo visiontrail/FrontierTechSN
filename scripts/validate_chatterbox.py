@@ -77,7 +77,12 @@ def require_profile() -> dict:
     return profile
 
 
-def prepare(directory: Path, *, model: str, voice: str, track: str, captions: bool) -> dict:
+def prepare(directory: Path, *, model: str, voice: str | None, track: str, captions: bool) -> dict:
+    marker = directory / "validation_request.json"
+    if voice is None and marker.is_file():
+        # A model-default change must not alter the identity of an owned run.
+        voice = read_json(marker).get("voice")
+    voice = voice or config.default_voice_for_model(model)
     request = {
         "contract_version": CONTRACT_VERSION, "kind": "isolated_tts_video_acceptance",
         "script": SCRIPT, "title": TITLE, "tts_model": model, "voice": voice,
@@ -89,7 +94,6 @@ def prepare(directory: Path, *, model: str, voice: str, track: str, captions: bo
         raise ValueError(f"Voice {voice!r} is unavailable for {model!r}")
     music.resolve_program_music_track(track)
     outros.resolve_outro_preset("morning-brief")
-    marker = directory / "validation_request.json"
     if directory.exists() and any(directory.iterdir()):
         if not marker.is_file() or read_json(marker) != request:
             raise ValueError("Existing output belongs to another request; use a new directory")
@@ -306,7 +310,7 @@ def main() -> int:
     parser.add_argument("mode", choices=("prepare", "run", "audit"))
     parser.add_argument("--output-dir", help="Owned child of outputs/chatterbox-validation; required for run/audit")
     parser.add_argument("--model", choices=("chatterbox-multilingual", "pocket-tts-en"), default="chatterbox-multilingual")
-    parser.add_argument("--voice", default="jane")
+    parser.add_argument("--voice", help="Voice ID; defaults to the selected model's voice")
     parser.add_argument("--music-track", default="morning-briefing")
     parser.add_argument("--no-captions", action="store_true", help="Match the latest Daily News burned-caption setting; SRT still exported")
     parser.add_argument("--app-url", default="http://localhost:8101")

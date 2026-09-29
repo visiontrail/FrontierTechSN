@@ -507,10 +507,13 @@ export async function resetSettingsValues(keys: string[]): Promise<SettingsSchem
 
 export interface VoiceOption {
   name: string;
+  label?: string | null;
+  description?: string | null;
   gender: string;
   lang: string;
   resolved_name: string;
   preview_available: boolean;
+  preview_version?: string | null;
 }
 
 export interface TtsModelOption {
@@ -519,6 +522,7 @@ export interface TtsModelOption {
   provider: string;
   single_speaker: boolean;
   is_default: boolean;
+  default_voice?: string | null;
 }
 
 export async function fetchTtsModels(): Promise<TtsModelOption[]> {
@@ -534,8 +538,11 @@ export async function fetchVoices(ttsModel?: string): Promise<VoiceOption[]> {
   return res.json();
 }
 
-export function voicePreviewUrl(voice: string, ttsModel?: string): string {
-  const qs = ttsModel ? `?tts_model=${encodeURIComponent(ttsModel)}` : '';
+export function voicePreviewUrl(voice: string, ttsModel?: string, version?: string | null): string {
+  const params = new URLSearchParams();
+  if (ttsModel) params.set('tts_model', ttsModel);
+  if (version) params.set('v', version);
+  const qs = params.size ? `?${params}` : '';
   return `${BASE}/api/voices/${encodeURIComponent(voice)}/preview${qs}`;
 }
 

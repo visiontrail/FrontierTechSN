@@ -1,6 +1,8 @@
 """Persistent preview generation for voices backed by remote TTS providers."""
 
 import asyncio
+import hashlib
+import json
 import logging
 import shutil
 import tempfile
@@ -38,7 +40,11 @@ async def ensure_voice_preview(voice: str, tts_model: str) -> Path:
 
         destination = config.voice_preview_cache_dir(tts_model) / f"{voice}.wav"
         destination.parent.mkdir(parents=True, exist_ok=True)
+        contract = None
         if model.get("kind") == "chatterbox_http":
+            from backend.pipeline.chatterbox import cache_contract
+
+            contract = cache_contract()
             # Preserve the submitted job identity across timeout, cancellation
             # and process restarts; an uncertain remote job must be resumed.
             work = destination.parent / f".{voice}-work"
@@ -83,10 +89,26 @@ async def ensure_voice_preview(voice: str, tts_model: str) -> Path:
                 )
             else:
                 raise FileNotFoundError(f"No remote preview generator for '{tts_model}'")
+            if contract is not None:
+                manifest = json.loads((work_dir / "audio" / "tts_manifest.json").read_text(encoding="utf-8"))
+                if (
+                    config.voice_preview_cache_dir(tts_model) != destination.parent
+                    or cache_contract() != contract
+                    or manifest.get("cache_contract") != contract
+                    or manifest.get("voice") != voice
+                    or manifest.get("language") != str(model.get("language") or "en")
+                ):
+                    raise RuntimeError("Voice preview settings changed during generation; reload the voice catalog")
             # Copy to a sibling temporary file and atomically publish it, so a
             # concurrent list/read can never observe a partial WAV.
             staged = destination.with_suffix(".wav.tmp")
             shutil.copyfile(generated, staged)
+            if contract is not None:
+                with staged.open("rb") as stream:
+                    actual_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+                if actual_hash != manifest.get("output_audio_sha256"):
+                    staged.unlink()
+                    raise RuntimeError("Voice preview audio does not match its synthesis manifest")
             staged.replace(destination)
         return destination
 

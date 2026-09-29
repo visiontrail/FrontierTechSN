@@ -14,6 +14,9 @@ Pinned inputs:
 - Perth watermark source: `ff1c8ac55a976971245cdd53c18d6131ca00d993`.
 - Default conditioning `conds.pt` SHA256:
   `6552d70568833628ba019c6b03459e77fe71ca197d5c560cef9411bee9d87f4e`.
+- Official Space English reference `en_f1.flac`: GCS generation
+  `1755807478904629`, 83,323 bytes, SHA256
+  `e81950378b53827aed08d164ebd332a7b8c5805b8a97b4f79ab057071e359c72`.
 - PKUSEG `spacy_ontonotes.zip`: release `v0.0.26`, 34,567,143 bytes, SHA256
   `b216e7f92de7ae285aeab8feba2faa8ea8216e5995ff6fb3d391cc8356db1bfe`.
 
@@ -51,6 +54,7 @@ to start when it is missing.
 ```sh
 mkdir -p state cache voices
 chmod 700 state cache voices
+python3 prefetch_reference.py --output ./voices/en_f1.flac
 docker compose -f compose.nr-test.yaml build
 docker compose -f compose.nr-test.yaml up -d
 docker compose -f compose.nr-test.yaml ps
@@ -168,13 +172,31 @@ HTTP responses. This deployment failure must not consume acoustic retry seeds.
 Private stderr diagnostics retain the failure stage, exception class, and stack
 file/function/line locations; exception text, source lines, and locals are omitted.
 
-To enable the reviewed project reference voice, put its WAV at `voices/jane.wav`
-and set `CHATTERBOX_JANE_REFERENCE=/voices/jane.wav`. The service exposes `jane`
-only when that server-owned file exists. `default` is the model's bundled
-`conds.pt` voice; it is not the Space's separate English `en_f1.flac` sample.
-The reference SHA256 is exposed in capabilities and rechecked before every job.
-Changing the reference or deployment fingerprint requires a restart and an
-explicit application fingerprint update after acceptance.
+The default for new requests is `space-en-f1`, the original English reference
+selected by the fixed [Space app](https://huggingface.co/spaces/ResembleAI/Chatterbox-Multilingual-TTS/blob/c612a94210c0af895d6b649850d15b7ccca36594/app.py).
+Prefetch is mandatory: `prefetch_reference.py` downloads the original FLAC from
+the fixed GCS object generation, verifies its size and SHA256 before promotion,
+and reuses valid existing files. Unexpected existing content is preserved and
+rejected. `--verify-only` checks an installed file without network access.
+Compose sets `CHATTERBOX_SPACE_EN_REFERENCE=/voices/en_f1.flac`; direct launches
+must set the same environment variable to their local verified file. The
+service fails startup if this default reference is missing or incorrect, and
+checks it again before each job. Generation never downloads a voice reference.
+
+The explicit `default` ID retains the model's bundled `conds.pt` voice. The
+explicit `jane` ID retains the Pocket-derived project reference: put its WAV at
+`voices/jane.wav` and set `CHATTERBOX_JANE_REFERENCE=/voices/jane.wav` to enable
+it. Neither legacy ID is remapped to the official voice. The worker restores
+original conditioning before each call, including switches between all three.
+
+Capabilities expose `default_voice`, reference hashes, and the official source
+revision, object generation and URL. These identities participate in deployment
+and voice fingerprints. An omitted request voice is resolved to its explicit ID
+before hashing and persisting the job. Historical jobs/audio retain their
+original voice and fingerprint; a reused idempotency key with changed deployment
+identity is rejected. After upgrading this isolated service, verify synthesis
+before updating the application's expected fingerprint. Use a new acceptance
+output directory so historical Jane results remain available for comparison.
 
 ## HTTP contract
 
@@ -182,7 +204,7 @@ All `/v1/*` routes require `X-API-Key`. `/health` is public and reports basic
 service state and pinned revisions. OpenAPI and interactive docs are disabled.
 
 - `GET /v1/capabilities`: source/model/Perth revisions, V2 variant, deployment
-  fingerprint, defaults, languages, limits, and per-voice reference hashes and
+  fingerprint, default voice, defaults, languages, limits, and per-voice reference hashes and
   fingerprints.
 - `GET /v1/voices`: `{ "voices": [{ "id", "reference_sha256", "fingerprint" }] }`.
 - `POST /v1/jobs`: requires `Idempotency-Key` and returns HTTP 202 with durable
@@ -198,7 +220,7 @@ Example request body, with all inference settings explicitly recorded:
 {
   "text": "The full sentence is synthesized without truncation.",
   "language_id": "en",
-  "voice": "default",
+  "voice": "space-en-f1",
   "seed": 0,
   "exaggeration": 0.5,
   "cfg_weight": 0.5,
