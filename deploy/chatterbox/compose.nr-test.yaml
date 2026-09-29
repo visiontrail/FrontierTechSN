@@ -1,0 +1,37 @@
+name: chatterbox-tts
+
+services:
+  chatterbox-tts:
+    build:
+      context: .
+    image: chatterbox-tts:5de7a54-v2
+    environment:
+      CHATTERBOX_API_KEY: "${CHATTERBOX_API_KEY:?Set a private API key before starting}"
+      CHATTERBOX_CPU_THREADS: "${CHATTERBOX_CPU_THREADS:-8}"
+      CHATTERBOX_GENERATION_TIMEOUT: "${CHATTERBOX_GENERATION_TIMEOUT:-900}"
+      CHATTERBOX_MAX_AUDIO_SECONDS: "90"
+      CHATTERBOX_MAX_CHARS: "250"
+      CHATTERBOX_QUEUE_LIMIT: "16"
+      # Enable only after putting the reviewed reference at voices/jane.wav.
+      CHATTERBOX_JANE_REFERENCE: "${CHATTERBOX_JANE_REFERENCE:-}"
+      OMP_NUM_THREADS: "${CHATTERBOX_CPU_THREADS:-8}"
+      MKL_NUM_THREADS: "${CHATTERBOX_CPU_THREADS:-8}"
+      OPENBLAS_NUM_THREADS: "${CHATTERBOX_CPU_THREADS:-8}"
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
+      PKUSEG_HOME: /cache/pkuseg
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "${CHATTERBOX_BIND_HOST:-10.60.11.3}:${CHATTERBOX_PORT:-8092}:8000"
+    volumes:
+      - ./state:/data
+      - ./cache:/cache
+      - ./voices:/voices:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 30s

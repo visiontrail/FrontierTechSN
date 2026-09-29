@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 
 from backend import config
@@ -35,9 +36,17 @@ async def ensure_voice_preview(voice: str, tts_model: str) -> Path:
         if existing is not None:
             return existing
 
-        destination = config.VOICE_PREVIEW_CACHE_DIR / tts_model / f"{voice}.wav"
+        destination = config.voice_preview_cache_dir(tts_model) / f"{voice}.wav"
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=destination.parent) as temp_dir:
+        if model.get("kind") == "chatterbox_http":
+            # Preserve the submitted job identity across timeout, cancellation
+            # and process restarts; an uncertain remote job must be resumed.
+            work = destination.parent / f".{voice}-work"
+            work.mkdir(parents=True, exist_ok=True)
+            workspace = nullcontext(str(work))
+        else:
+            workspace = tempfile.TemporaryDirectory(dir=destination.parent)
+        with workspace as temp_dir:
             work_dir = Path(temp_dir)
             script = work_dir / "preview.txt"
             script.write_text(PREVIEW_TEXT, encoding="utf-8")
@@ -59,6 +68,18 @@ async def ensure_voice_preview(voice: str, tts_model: str) -> Path:
                     str(model.get("language") or "en"),
                     log=None,
                     emit=logger.info,
+                )
+            elif model.get("kind") == "chatterbox_http":
+                from backend.pipeline.chatterbox import _generate_chatterbox
+
+                generated = await _generate_chatterbox(
+                    str(script),
+                    str(work_dir / "audio"),
+                    voice,
+                    str(model.get("language") or "en"),
+                    log=None,
+                    emit=logger.info,
+                    verify_text=False,
                 )
             else:
                 raise FileNotFoundError(f"No remote preview generator for '{tts_model}'")

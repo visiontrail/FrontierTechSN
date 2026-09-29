@@ -11,6 +11,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from backend import explainer_pipeline as pipeline
+from backend.pipeline import chatterbox, tts
 
 
 pytestmark = pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="ffmpeg is required")
@@ -116,6 +117,54 @@ def test_real_ffmpeg_scene_alignment_cache_and_voice_invalidation(tmp_path, prov
         assert changed["scene_artifacts"][0]["audio_path"] != first["audio_path"]
         assert (tmp_path / first["audio_path"]).is_file()
         assert changed["scene_artifacts"][0]["image_path"] == first["image_path"]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("setting,value", [
+    ("CHATTERBOX_TTS_URL", "http://localhost:18092"),
+    ("CHATTERBOX_TTS_SOURCE_REVISION", "new-source"),
+    ("CHATTERBOX_TTS_MODEL_REVISION", "new-weights"),
+    ("CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT", "new-references-and-config"),
+    ("CHATTERBOX_TTS_CHUNK_WORDS", 20),
+    ("CHATTERBOX_TTS_MAX_CHARS", 200),
+    ("TTS_RANDOM_SEED", 1000001),
+])
+def test_chatterbox_audio_cache_tracks_deployment_and_chunk_contract(tmp_path, providers, monkeypatch, setting, value):
+    async def run():
+        project = _project()
+        project.update(tts_model="chatterbox-multilingual", voice="jane")
+        scene = project["scenes"][0]
+        first, _ = await pipeline._audio(scene, project, tmp_path, lambda _: None)
+        cached, _ = await pipeline._audio(scene, project, tmp_path, lambda _: None)
+        assert first == cached
+        assert len(providers.audio_calls) == 1
+        monkeypatch.setattr(pipeline.config, setting, value)
+        changed, _ = await pipeline._audio(scene, project, tmp_path, lambda _: None)
+        assert changed != first
+        assert first.is_file() and changed.is_file()
+        assert len(providers.audio_calls) == 2
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("module,setting,value", [
+    (chatterbox, "VERIFIER_VERSION", chatterbox.VERIFIER_VERSION + 1),
+    (tts, "POCKET_TTS_INTEGRITY_VERIFIER_VERSION", tts.POCKET_TTS_INTEGRITY_VERIFIER_VERSION + 1),
+    (chatterbox, "SYNTHESIS_PARAMETERS", {**chatterbox.SYNTHESIS_PARAMETERS, "temperature": 0.7}),
+])
+def test_chatterbox_outer_audio_cache_never_skips_changed_verification_or_parameters(
+    tmp_path, providers, monkeypatch, module, setting, value,
+):
+    async def run():
+        project = _project()
+        project.update(tts_model="chatterbox-multilingual", voice="jane")
+        scene = project["scenes"][0]
+        first, _ = await pipeline._audio(scene, project, tmp_path, lambda _: None)
+        cached, _ = await pipeline._audio(scene, project, tmp_path, lambda _: None)
+        assert cached == first and len(providers.audio_calls) == 1
+        monkeypatch.setattr(module, setting, value)
+        changed, _ = await pipeline._audio(scene, project, tmp_path, lambda _: None)
+        assert changed != first and len(providers.audio_calls) == 2
+        assert first.is_file() and changed.is_file()
     asyncio.run(run())
 
 

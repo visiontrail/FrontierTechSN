@@ -1,0 +1,20 @@
+# Runtime dependencies for the explicitly pinned V2 source. Gradio is omitted:
+# this service has its own authenticated durable HTTP API.
+torch==2.6.0
+torchaudio==2.6.0
+numpy==1.26.4
+librosa==0.11.0
+transformers==5.2.0
+diffusers==0.29.0
+conformer==0.3.2
+safetensors==0.5.3
+pykakasi==2.3.0
+s3tokenizer==0.3.0
+spacy-pkuseg==1.0.1
+omegaconf==2.3.0
+pyloudnorm==0.1.1
+pydub==0.25.1
+soundfile==0.13.1
+fastapi==0.115.12
+pydantic==2.11.7
+uvicorn==0.34.3

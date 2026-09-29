@@ -478,6 +478,57 @@ SPECS: tuple[SettingSpec, ...] = (
         description="HTTP ceiling for one paragraph/story request. Pocket synthesis "
                     "is synchronous and returns a streaming WAV response.",
     ),
+    SettingSpec(
+        "CHATTERBOX_TTS_URL", "tts", "Chatterbox service URL", "string",
+        placeholder="http://10.60.11.3:8092",
+        description="Base URL of the independent Chatterbox async TTS service on nr-test.",
+        allow_blank=False,
+    ),
+    SettingSpec(
+        "CHATTERBOX_TTS_API_KEY", "tts", "Chatterbox API key", "secret",
+        description="Sent only as X-API-Key to the configured Chatterbox service.",
+    ),
+    SettingSpec(
+        "CHATTERBOX_TTS_SOURCE_REVISION", "tts", "Chatterbox source revision", "string",
+        description="Pinned upstream source revision expected from the remote service. "
+                    "Changing it invalidates accepted-audio caches.",
+        allow_blank=False,
+    ),
+    SettingSpec(
+        "CHATTERBOX_TTS_MODEL_REVISION", "tts", "Chatterbox revision", "string",
+        description="Pinned Hugging Face weights revision expected from the remote service. "
+                    "The application uses the multilingual V2 model from the linked demo.",
+        allow_blank=False,
+    ),
+    SettingSpec(
+        "CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT", "tts", "Chatterbox deployment fingerprint", "string",
+        description="Accepted service capability fingerprint, including runtime configuration "
+                    "and installed voice reference hashes. Required for synthesis; blank leaves "
+                    "Chatterbox unavailable until deployment is verified. The default voice "
+                    "uses the model's pinned conditioning rather than the demo's English sample.",
+    ),
+    SettingSpec(
+        "CHATTERBOX_TTS_CHUNK_WORDS", "tts", "Chatterbox chunk words", "int",
+        unit="words", minimum=8, maximum=80,
+        description="Soft request target. Prefer complete sentences while keeping long "
+                    "utterances within the service character limit.",
+    ),
+    SettingSpec(
+        "CHATTERBOX_TTS_MAX_CHARS", "tts", "Chatterbox request characters", "int",
+        unit="characters", minimum=40, maximum=250,
+        description="Maximum text length per inference request. The pinned service rejects "
+                    "longer inputs instead of silently truncating narration.",
+    ),
+    SettingSpec(
+        "CHATTERBOX_TTS_REQUEST_TIMEOUT", "tts", "Chatterbox request timeout", "int",
+        unit="seconds", minimum=5, maximum=600,
+        description="HTTP ceiling for each job submission, status check or WAV download. "
+                    "The overall synthesis ceiling remains Total timeout.",
+    ),
+    SettingSpec(
+        "CHATTERBOX_TTS_POLL_SECONDS", "tts", "Chatterbox poll interval", "int",
+        unit="seconds", minimum=1, maximum=60,
+    ),
     # ── Audio / visual sync ──────────────────────────────────────────────
     SettingSpec(
         "AV_SYNC_LANGUAGE", "av_sync", "Narration language", "string",

@@ -247,8 +247,9 @@ class SettingsStoreTests(unittest.TestCase):
             list(config.AVAILABLE_VOICES)
             + list(config.ORPHEUS_EN_VOICES)
             + list(config.POCKET_TTS_EN_VOICES)
+            + list(config.CHATTERBOX_TTS_EN_VOICES)
         )
-        self.assertEqual(self.field("TTS_DEFAULT_VOICE_1")["options"], expected_voices)
+        self.assertEqual(self.field("TTS_DEFAULT_VOICE_1")["options"], list(dict.fromkeys(expected_voices)))
 
     def test_orpheus_api_key_is_masked(self):
         settings_store.update({"ORPHEUS_TTS_API_KEY": "orpheus-secret-value"})
@@ -256,6 +257,19 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(field["value"], "")
         self.assertEqual(field["masked"], "orph...alue")
         self.assertNotIn("orpheus-secret-value", json.dumps(settings_store.schema()))
+
+    def test_chatterbox_secret_and_request_limits(self):
+        settings_store.update({"CHATTERBOX_TTS_API_KEY": "chatterbox-secret-value"})
+        field = self.field("CHATTERBOX_TTS_API_KEY")
+        self.assertEqual(field["value"], "")
+        self.assertEqual(field["masked"], "chat...alue")
+        self.assertNotIn("chatterbox-secret-value", json.dumps(settings_store.schema()))
+        for key, value in (("CHATTERBOX_TTS_MAX_CHARS", 251), ("CHATTERBOX_TTS_POLL_SECONDS", 0)):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                settings_store.update({key: value})
+        settings_store.update({"CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT": "accepted-deployment"})
+        self.assertEqual(config.CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT, "accepted-deployment")
+        self.assertEqual(self.field("CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT")["value"], "accepted-deployment")
 
     def test_every_spec_maps_to_a_real_config_attribute(self):
         for spec in settings_store.SPECS:

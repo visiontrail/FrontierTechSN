@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend import config
+from backend.pipeline import chatterbox, tts, voice_previews
 
 
 class VoiceSampleTests(unittest.TestCase):
@@ -72,6 +73,42 @@ class VoiceSampleTests(unittest.TestCase):
                 self.assertIsNone(config.voice_sample_path("alba", "pocket-tts-en"))
                 self.assertTrue(config.voice_preview_supported("alba", "pocket-tts-en"))
 
+    def test_chatterbox_preview_identity_tracks_deployment_without_changing_defaults(self):
+        self.assertEqual(list(config.voices_for_model("chatterbox-multilingual")), ["jane", "default"])
+        model = config.TTS_MODELS["chatterbox-multilingual"]
+        self.assertEqual(model["language"], "en")
+        self.assertFalse(model["preload_previews"])
+        self.assertTrue(model["acoustic_integrity"])
+        with tempfile.TemporaryDirectory() as cache:
+            with patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)):
+                sample = config.voice_preview_cache_dir("chatterbox-multilingual") / "jane.wav"
+                sample.parent.mkdir(parents=True)
+                sample.write_bytes(b"RIFF" + b"0" * 64)
+                self.assertEqual(config.voice_sample_path("jane", "chatterbox-multilingual"), sample)
+                for key in (
+                    "CHATTERBOX_TTS_URL", "CHATTERBOX_TTS_SOURCE_REVISION",
+                    "CHATTERBOX_TTS_MODEL_REVISION", "CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT",
+                ):
+                    with self.subTest(key=key), patch.object(config, key, "changed"):
+                        self.assertIsNone(config.voice_sample_path("jane", "chatterbox-multilingual"))
+                self.assertEqual(config.voice_sample_path("jane", "chatterbox-multilingual"), sample)
+
+    def test_chatterbox_preview_cache_tracks_synthesis_and_verification_policy(self):
+        original = config.voice_preview_cache_dir("chatterbox-multilingual")
+        changes = [
+            (config, "TTS_RANDOM_SEED", config.TTS_RANDOM_SEED + 1),
+            (config, "CHATTERBOX_TTS_CHUNK_WORDS", config.CHATTERBOX_TTS_CHUNK_WORDS + 1),
+            (config, "CHATTERBOX_TTS_MAX_CHARS", config.CHATTERBOX_TTS_MAX_CHARS - 1),
+            (chatterbox, "VERIFIER_VERSION", chatterbox.VERIFIER_VERSION + 1),
+            (tts, "POCKET_TTS_INTEGRITY_VERIFIER_VERSION", tts.POCKET_TTS_INTEGRITY_VERIFIER_VERSION + 1),
+            (chatterbox, "SYNTHESIS_PARAMETERS", {**chatterbox.SYNTHESIS_PARAMETERS, "temperature": 0.7}),
+            (voice_previews, "PREVIEW_TEXT", "A different preview script."),
+        ]
+        for module, name, value in changes:
+            with self.subTest(setting=name), patch.object(module, name, value):
+                self.assertNotEqual(config.voice_preview_cache_dir("chatterbox-multilingual"), original)
+        self.assertEqual(config.voice_preview_cache_dir("chatterbox-multilingual"), original)
+
 
 class VoiceRouteTests(unittest.TestCase):
     def setUp(self):
@@ -111,6 +148,14 @@ class VoiceRouteTests(unittest.TestCase):
         pocket = next(model for model in body if model["id"] == "pocket-tts-en")
         self.assertEqual(pocket["provider"], "Kyutai Pocket TTS")
         self.assertTrue(pocket["single_speaker"])
+        chatterbox = next(model for model in body if model["id"] == "chatterbox-multilingual")
+        self.assertEqual(chatterbox["provider"], "Resemble AI Chatterbox")
+        self.assertTrue(chatterbox["single_speaker"])
+
+    def test_lists_chatterbox_reference_voices(self):
+        body = self.client.get("/api/voices?tts_model=chatterbox-multilingual").json()
+        self.assertEqual([voice["name"] for voice in body], ["jane", "default"])
+        self.assertTrue(all(voice["preview_available"] for voice in body))
 
     def test_rejects_unknown_voice_before_touching_the_filesystem(self):
         res = self.client.get("/api/voices/Bogus*/preview")

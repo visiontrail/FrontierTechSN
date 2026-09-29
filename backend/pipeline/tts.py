@@ -4693,6 +4693,15 @@ async def generate_tts(
             f"Voice(s) {unknown_voices} are unavailable for '{tts_model}'. Valid voices: "
             f"{', '.join(available_voices)}"
         )
+    if model.get("kind") == "chatterbox_http":
+        from backend.pipeline.chatterbox import _generate_chatterbox
+
+        if len(voices) > 1:
+            emit(f"Model '{tts_model}' is single-speaker; using only '{voices[0]}'")
+        return await _generate_chatterbox(
+            script_path, output_dir, voices[0], str(model.get("language") or "en"),
+            log=log, emit=emit, verify_text=True,
+        )
     if model.get("kind") == "pocket_tts_http":
         if len(voices) > 1:
             emit(f"Model '{tts_model}' is single-speaker; using only '{voices[0]}'")

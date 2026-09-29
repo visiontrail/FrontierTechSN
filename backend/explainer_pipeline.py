@@ -260,6 +260,10 @@ async def _audio(scene: dict, project: dict, root: Path, log: Log) -> tuple[Path
                  "provider": provider_model, "seed": config.TTS_RANDOM_SEED,
                  "endpoint": config.ORPHEUS_TTS_URL if model == "orpheus-en" else config.POCKET_TTS_URL if model == "pocket-tts-en" else None,
                  "provider_revision": config.POCKET_TTS_MODEL_REVISION if model == "pocket-tts-en" else None}
+    if provider_model.get("kind") == "chatterbox_http":
+        from backend.pipeline.chatterbox import cache_contract
+
+        inputs["chatterbox_contract"] = cache_contract()
     if requires_labels:
         inputs["speaker_input_contract"] = 1
     key = _hash(inputs)

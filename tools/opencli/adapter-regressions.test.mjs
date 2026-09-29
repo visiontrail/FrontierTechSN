@@ -952,6 +952,67 @@ test(`ChatGPT selects the active image callback instead of the first generic fil
 })
 }
 
+for (const scenario of ['current', 'renamed', 'legacy', 'unloaded', 'broken', 'hidden', 'wrong-name', 'outside-composer', 'avatar-only', 'send-disabled', 'missing-second-image']) {
+test(`ChatGPT upload preview requires the requested loaded image in its composer: ${scenario}`, async (t) => {
+  const files = videoFrameFixture(t, scenario === 'missing-second-image' ? ['contact-sheet.jpg', 'second.jpg'] : ['contact-sheet.jpg'])
+  class Element {
+    constructor(attrs = {}) { this.attrs = attrs; this.disabled = false }
+    getAttribute(name) { return this.attrs[name] ?? null }
+    setAttribute(name, value) { this.attrs[name] = value }
+    removeAttribute(name) { delete this.attrs[name] }
+    getBoundingClientRect() { return { width: this.hidden ? 0 : 100, height: 80 } }
+    querySelectorAll() { return [] }
+  }
+  const thumbnail = new Element()
+  Object.assign(thumbnail, { complete: scenario !== 'unloaded', naturalWidth: scenario === 'broken' ? 0 : 1288, naturalHeight: 804, hidden: scenario === 'hidden' })
+  const label = scenario === 'renamed' ? 'contact-sheet(2).jpg' : scenario === 'wrong-name' ? 'other-contact-sheet.jpg' : 'contact-sheet.jpg'
+  const tile = new Element({ 'aria-label': label, role: 'button' })
+  tile.querySelectorAll = selector => selector === 'img' ? [thumbnail] : []
+  const avatar = new Element()
+  Object.assign(avatar, { complete: true, naturalWidth: 100, naturalHeight: 100 })
+  if (scenario === 'avatar-only') tile.querySelectorAll = () => []
+  const send = new Element({ 'aria-label': 'Send', type: 'submit' })
+  send.disabled = scenario === 'send-disabled'
+  const attachments = new Element()
+  attachments.querySelectorAll = () => scenario === 'outside-composer' ? [] : [tile]
+  const form = new Element()
+  form.querySelector = selector => selector === '[data-composer-attachments]' ? attachments : send
+  const composer = new Element({ 'aria-label': 'Ask ChatGPT' })
+  composer.isContentEditable = true
+  composer.closest = selector => selector === 'form' ? form : null
+  let uploads = 0, previewReads = 0
+  const page = {
+    async sleep() {},
+    async setFileInput() { uploads++ },
+    async evaluate(script) {
+      if (script.includes('const reactiveInputs')) return true
+      assert.match(script, /matchedNames/)
+      previewReads++
+      return vm.runInNewContext(script, {
+        HTMLElement: Element,
+        window: { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+        document: {
+          querySelector: () => null,
+          querySelectorAll(selector) {
+            if (selector === '#prompt-textarea') return scenario === 'legacy' ? [composer] : []
+            if (selector === '[contenteditable="true"][role="textbox"]') return scenario === 'legacy' ? [] : [composer]
+            // An avatar and an old attachment exist elsewhere on the page.
+            if (selector === 'img') return [avatar, thumbnail]
+            if (selector === 'button[aria-label], [role="button"][aria-label]') return [tile]
+            return []
+          },
+        },
+      })
+    },
+  }
+  const result = await uploadChatGPTImages(page, files)
+  const expected = ['current', 'renamed', 'legacy'].includes(scenario)
+  assert.equal(result.ok, expected)
+  assert.equal(uploads, 1)
+  assert.equal(previewReads, expected ? 1 : 20)
+})
+}
+
 for (const current of ['https://chatgpt.com/c/abcdefgh1234', 'https://chatgpt.com/c/otherchat1234', 'about:blank']) {
   test(`ChatGPT detail navigates only when the target differs from ${current}`, async () => {
     const navigations = []

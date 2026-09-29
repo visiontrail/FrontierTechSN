@@ -8,6 +8,8 @@ is why consumers must read ``config.NAME`` at call time rather than binding
 what makes an Admin save reach the next pipeline stage without a restart.
 """
 
+import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -351,6 +353,28 @@ POCKET_TTS_MODEL_REVISION = os.getenv(
 POCKET_TTS_CHUNK_WORDS = int(os.getenv("POCKET_TTS_CHUNK_WORDS", "240"))
 POCKET_TTS_REQUEST_TIMEOUT = int(os.getenv("POCKET_TTS_REQUEST_TIMEOUT", "900"))
 
+# Chatterbox is independently deployed beside the existing providers. Pin both
+# source and multilingual V2 weights; changing either invalidates accepted audio.
+# The initial application integration certifies the existing English workflow.
+CHATTERBOX_TTS_URL = os.getenv("CHATTERBOX_TTS_URL", "http://10.60.11.3:8092").rstrip("/")
+CHATTERBOX_TTS_API_KEY = os.getenv("CHATTERBOX_TTS_API_KEY", "")
+CHATTERBOX_TTS_SOURCE_REVISION = os.getenv(
+    "CHATTERBOX_TTS_SOURCE_REVISION", "5de7a54aa4e5e2baadb0182dde554908b48b85c2",
+).strip()
+CHATTERBOX_TTS_MODEL_REVISION = os.getenv(
+    "CHATTERBOX_TTS_MODEL_REVISION", "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+).strip()
+CHATTERBOX_TTS_MODEL_VARIANT = "v2"
+# Populated after deployment inspection. Includes runtime configuration and all
+# installed voice references; blank prevents selecting an unaccepted service.
+CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT = os.getenv(
+    "CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT", "",
+).strip()
+CHATTERBOX_TTS_CHUNK_WORDS = int(os.getenv("CHATTERBOX_TTS_CHUNK_WORDS", "30"))
+CHATTERBOX_TTS_MAX_CHARS = int(os.getenv("CHATTERBOX_TTS_MAX_CHARS", "250"))
+CHATTERBOX_TTS_REQUEST_TIMEOUT = int(os.getenv("CHATTERBOX_TTS_REQUEST_TIMEOUT", "60"))
+CHATTERBOX_TTS_POLL_SECONDS = int(os.getenv("CHATTERBOX_TTS_POLL_SECONDS", "2"))
+
 # Audio/visual alignment. MLX Whisper reads the finished WAV from whichever TTS
 # provider the task selected to obtain word timestamps; it never generates or
 # replaces speech. Alignment is
@@ -435,6 +459,14 @@ POCKET_TTS_EN_VOICES = {
     "vera": {"gender": "female", "lang": "en"},
 }
 
+# These are reference-conditioned voices, not interchangeable speaker IDs from
+# Pocket TTS. Jane is cloned from accepted project narration; timbre can differ.
+CHATTERBOX_TTS_EN_VOICES = {
+    "jane": {"gender": "female", "lang": "en"},
+    # Model default voice from the pinned conds.pt, not the demo's en sample.
+    "default": {"gender": "unspecified", "lang": "en"},
+}
+
 
 def _build_tts_models(root: Path) -> dict[str, dict]:
     """Registry of local and remote TTS model invocation contracts.
@@ -503,6 +535,17 @@ def _build_tts_models(root: Path) -> dict[str, dict]:
             # previews are generated and cached on first play instead.
             "preload_previews": False,
         },
+        "chatterbox-multilingual": {
+            "label": "Multilingual V2 (English delivery)",
+            "provider": "Resemble AI Chatterbox",
+            "kind": "chatterbox_http",
+            "single_speaker": True,
+            "language": "en",
+            "voices": CHATTERBOX_TTS_EN_VOICES,
+            "acoustic_integrity": True,
+            "remote_preview": True,
+            "preload_previews": False,
+        },
     }
 
 
@@ -519,6 +562,22 @@ VOICE_SAMPLE_DIR = AIWORK_ROOT / "VibeVoice-1.5B" / "demo" / "voices"
 # Keeping them under ignored data/ makes a successful remote synthesis survive
 # app restarts without ever entering git.
 VOICE_PREVIEW_CACHE_DIR = PROJECT_ROOT / "data" / "voice_previews"
+
+
+def voice_preview_cache_dir(tts_model: str) -> Path:
+    directory = VOICE_PREVIEW_CACHE_DIR / tts_model
+    if TTS_MODELS.get(tts_model, {}).get("kind") == "chatterbox_http":
+        # Deferred to avoid importing pipeline modules during config loading.
+        from backend.pipeline.chatterbox import cache_contract
+        from backend.pipeline.voice_previews import PREVIEW_TEXT
+
+        identity = json.dumps({
+            "contract": cache_contract(), "text": PREVIEW_TEXT,
+            "language": TTS_MODELS[tts_model].get("language") or "en",
+            "verify_text": False,
+        }, sort_keys=True, ensure_ascii=False)
+        directory /= hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return directory
 
 
 def resolve_voice(voice: str, tts_model: str | None = None) -> str:
@@ -546,7 +605,7 @@ def voice_sample_path(voice: str, tts_model: str | None = None):
     """
     model = TTS_MODELS.get(tts_model or TTS_DEFAULT_MODEL, {})
     if model.get("remote_preview"):
-        cached = VOICE_PREVIEW_CACHE_DIR / (tts_model or TTS_DEFAULT_MODEL) / f"{voice}.wav"
+        cached = voice_preview_cache_dir(tts_model or TTS_DEFAULT_MODEL) / f"{voice}.wav"
         return cached if cached.is_file() and cached.stat().st_size >= 44 else None
     if model.get("kind") != "local_subprocess":
         return None

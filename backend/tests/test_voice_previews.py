@@ -1,3 +1,5 @@
+import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,3 +68,57 @@ class VoicePreviewTests(unittest.IsolatedAsyncioTestCase):
         ):
             await voice_previews.preload_remote_voice_previews()
         ensure.assert_not_awaited()
+
+    async def test_chatterbox_preview_is_cached_and_uses_preview_validation(self):
+        async def generate(script_path, output_dir, voice, language, **kwargs):
+            self.assertEqual((voice, language), ("jane", "en"))
+            self.assertIs(kwargs["verify_text"], False)
+            target = Path(output_dir) / "preview.wav"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"RIFF" + b"0" * 64)
+            return str(target)
+
+        with (
+            tempfile.TemporaryDirectory() as cache,
+            patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)),
+            patch("backend.pipeline.chatterbox._generate_chatterbox", side_effect=generate) as request,
+        ):
+            first = await voice_previews.ensure_voice_preview("jane", "chatterbox-multilingual")
+            second = await voice_previews.ensure_voice_preview("jane", "chatterbox-multilingual")
+            self.assertEqual(first, second)
+            self.assertEqual(request.await_count, 1)
+            self.assertEqual(first.parent, config.voice_preview_cache_dir("chatterbox-multilingual"))
+
+    async def test_chatterbox_preview_resumes_job_after_timeout_or_cancellation(self):
+        for failure in (TimeoutError("poll timed out"), asyncio.CancelledError()):
+            with self.subTest(failure=type(failure).__name__):
+                directories = []
+
+                async def generate(script_path, output_dir, voice, language, **kwargs):
+                    directory = Path(output_dir)
+                    directories.append(directory)
+                    directory.mkdir(parents=True, exist_ok=True)
+                    checkpoint = directory / "tts_input_part_001.request-0.json"
+                    if len(directories) == 1:
+                        checkpoint.write_text(json.dumps({"idempotency_key": "original-key", "job_id": "original-job"}))
+                        raise failure
+                    self.assertEqual(json.loads(checkpoint.read_text()), {
+                        "idempotency_key": "original-key", "job_id": "original-job",
+                    })
+                    target = directory / "preview.wav"
+                    target.write_bytes(b"RIFF" + b"0" * 64)
+                    return str(target)
+
+                with (
+                    tempfile.TemporaryDirectory() as cache,
+                    patch.object(config, "VOICE_PREVIEW_CACHE_DIR", Path(cache)),
+                    patch("backend.pipeline.chatterbox._generate_chatterbox", side_effect=generate) as request,
+                ):
+                    with self.assertRaises(type(failure)):
+                        await voice_previews.ensure_voice_preview("jane", "chatterbox-multilingual")
+                    self.assertIsNone(config.voice_sample_path("jane", "chatterbox-multilingual"))
+                    self.assertTrue((directories[0] / "tts_input_part_001.request-0.json").is_file())
+                    completed = await voice_previews.ensure_voice_preview("jane", "chatterbox-multilingual")
+                    self.assertEqual(directories[0], directories[1])
+                    self.assertEqual(request.await_count, 2)
+                    self.assertEqual(config.voice_sample_path("jane", "chatterbox-multilingual"), completed)

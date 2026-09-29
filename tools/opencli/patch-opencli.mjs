@@ -1011,25 +1011,8 @@ chatgptUtils = replaceWithinFunction(chatgptUtils,
   const start = chatgptUtils.indexOf('async function waitForChatGPTUploadPreview(page, fileNames) {')
   const end = chatgptUtils.indexOf('export async function uploadChatGPTImages(page, imagePaths) {', start)
   if (start < 0 || end < 0) throw new Error('ChatGPT image preview confirmation boundary was not found')
-  chatgptUtils = chatgptUtils.slice(0, start) + `async function waitForChatGPTUploadPreview(page, fileNames) {
-    for (let attempt = 0; attempt < 20; attempt++) {
-        await page.sleep(1);
-        const ready = unwrapEvaluateResult(await page.evaluate(\`(() => {
-            const names = \${JSON.stringify(fileNames)};
-            const composer = document.querySelector('#prompt-textarea');
-            const scope = composer?.closest('form')?.parentElement || composer?.parentElement;
-            if (!scope) return false;
-            const labels = Array.from(scope.querySelectorAll('button[aria-label]')).map(button => button.getAttribute('aria-label') || '');
-            const matchedNames = names.filter(name => labels.some(label => label.includes(name))).length;
-            const send = scope.querySelector('[data-testid="send-button"]');
-            return matchedNames === names.length && !!send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
-        })()\`));
-        if (ready === true) return true;
-    }
-    return false;
-}
-
-` + chatgptUtils.slice(end)
+  const previewHelper = fs.readFileSync(path.join(runtimeDir, 'patches', 'chatgpt-upload-preview.js'), 'utf8')
+  chatgptUtils = chatgptUtils.slice(0, start) + previewHelper + '\n' + chatgptUtils.slice(end)
 }
 chatgptUtils = replaceWithinFunction(
   chatgptUtils,
