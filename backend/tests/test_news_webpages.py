@@ -241,6 +241,43 @@ def test_overlay_assignments_require_english_url_and_existing_visual_scene():
     ]
 
 
+@pytest.mark.parametrize("blocked_layout", ["collage_broll", "news_image_collage", "no_media"])
+def test_article_never_moves_to_weaker_scene_when_its_owner_cannot_show_an_overlay(blocked_layout):
+    dossier = {"selected": [{
+        "language": "en", "source_name": "IEEE Spectrum",
+        "title": "Animal testing models change human science",
+        "url": "https://example.com/animal-testing",
+    }]}
+    board = {"scenes": [
+        {"id": "science", "text": "IEEE Spectrum: animal testing models change human science."},
+        {"id": "ai", "text": "OpenAI models change human computer use."},
+    ]}
+    owner = {"id": "science"}
+    if blocked_layout != "no_media":
+        owner.update(footage_src="science.mp4", **{blocked_layout: True})
+    plans = [owner, {"id": "ai", "footage_src": "devday.mp4"}]
+    assert news_webpages.select_overlay_assignments(dossier, board, plans) == []
+
+
+def test_article_with_ambiguous_scene_identity_is_not_assigned():
+    article = {"language": "en", "title": "Chip factory expansion", "url": "https://example.com/chips"}
+    board = {"scenes": [{"id": value, "text": "Chip factory expansion"} for value in ["a", "b"]]}
+    plans = [{"id": value, "footage_src": "chips.mp4"} for value in ["a", "b"]]
+    assert news_webpages.select_overlay_assignments({"selected": [article]}, board, plans) == []
+
+
+def test_article_does_not_fall_back_to_unrelated_scene_when_owner_is_already_used():
+    articles = [{"language": "en", "title": title, "url": f"https://example.com/{index}"}
+                for index, title in enumerate(["Animal testing science research", "Animal testing science"])]
+    board = {"scenes": [
+        {"id": "science", "text": "Animal testing science research"},
+        {"id": "other", "text": "Animal testing hardware"},
+    ]}
+    plans = [{"id": scene["id"], "footage_src": "clip.mp4"} for scene in board["scenes"]]
+    assignments = news_webpages.select_overlay_assignments({"selected": articles}, board, plans)
+    assert [(row["scene_id"], row["source_url"]) for row in assignments] == [("science", "https://example.com/0")]
+
+
 def test_page_language_gate_requires_headline_article_copy_and_english_words():
     assert news_webpages._page_is_english(
         {
@@ -541,13 +578,14 @@ def test_overlay_assignment_rejects_generic_reporting_word_overlap():
 async def test_capture_uses_later_english_story_when_a_publisher_blocks(
     monkeypatch, tmp_path, failure_kind
 ):
+    topics = {1: "memory packaging", 2: "robotics laboratory", 3: "battery chemistry"}
     dossier = {
         "selected": [
             {
                 "language": "en",
                 "source_name": f"Source {index}",
-                "title": f"Grounded story {index} alpha beta",
-                "summary": f"Grounded story {index} alpha beta details",
+                "title": f"Grounded story {topics[index]}",
+                "summary": f"Grounded story {topics[index]} details",
                 "url": f"https://example.com/story-{index}",
             }
             for index in range(1, 4)
@@ -557,7 +595,7 @@ async def test_capture_uses_later_english_story_when_a_publisher_blocks(
         "scenes": [
             {
                 "id": f"scene-0{index}",
-                "text": f"Grounded story {index} alpha beta details",
+                "text": f"Grounded story {topics[index]} details",
             }
             for index in range(1, 4)
         ]
@@ -628,3 +666,34 @@ async def test_capture_uses_later_english_story_when_a_publisher_blocks(
         "https://example.com/story-2",
         "https://example.com/story-3",
     ]
+
+
+@pytest.mark.asyncio
+async def test_assignment_change_retains_exact_verified_capture_and_old_evidence(tmp_path, monkeypatch):
+    research = tmp_path / "research"
+    research.mkdir()
+    article = {"language": "en", "source_name": "Publisher", "title": "Battery chemistry advances",
+               "url": "https://example.com/battery"}
+    (research / "dossier.json").write_text(json.dumps({"selected": [article]}))
+    board = {"scenes": [{"id": "battery", "text": article["title"]}]}
+    plans = [{"id": "battery", "footage_src": "battery.mp4"}]
+    assignment = news_webpages.select_overlay_assignments({"selected": [article]}, board, plans)[0]
+    root = tmp_path / "news_webpages"
+    root.mkdir()
+    asset = root / "page-06.png"
+    Image.new("RGB", (2880, 1800), "white").save(asset)
+    wrong_asset = root / "page-05.png"
+    wrong_asset.write_bytes(b"retained rejected evidence")
+    item = {**assignment, "status": "captured", "local_path": "news_webpages/page-06.png",
+            "bytes": asset.stat().st_size, "sha256": news_webpages._sha256(asset)}
+    (root / "manifest.json").write_text(json.dumps({
+        "manifest_version": news_webpages.MANIFEST_VERSION, "fingerprint": "old assignments",
+        "pages": [{**item, "scene_id": "wrong", "local_path": "news_webpages/page-05.png"}, item],
+    }))
+    start = AsyncMock(side_effect=AssertionError("verified capture must be reused"))
+    monkeypatch.setattr(news_webpages, "_start_chrome", start)
+    manifest = await news_webpages.acquire_news_webpages(board, plans, tmp_path, limit=1)
+    assert manifest["status"] == "ready"
+    assert manifest["pages"] == [item]
+    assert wrong_asset.read_bytes() == b"retained rejected evidence"
+    start.assert_not_awaited()

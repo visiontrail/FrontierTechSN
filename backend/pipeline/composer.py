@@ -455,6 +455,54 @@ def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> d
         return {}
 
 
+def _review_misassigned_webpages(output_dir: Path, board: dict, source_hash: str) -> dict:
+    """Repair a proven article assignment error without rewriting narration copy.
+
+    A sequence verdict alone cannot identify a bad asset. Here the selected
+    dossier, current assignment rules and exact rendered article bytes provide
+    independent evidence; the rebuilt inventory still needs a full new review.
+    """
+    try:
+        report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
+        if report.get("rendered_video_sha256") != source_hash:
+            return {}
+        rendered = _strict_json_loads((output_dir / "visual_plan.json").read_bytes())
+        dossier = _strict_json_loads((output_dir / "research/dossier.json").read_bytes())
+        assignments = news_webpages.select_overlay_assignments(
+            dossier, board, rendered, limit=len(rendered),
+        )
+        allowed = {(item["scene_id"], item["source_url"]) for item in assignments}
+        failed = {
+            row["id"] for row in report.get("multimodal", {}).get("scenes", [])
+            if row.get("passed") is False and row.get("verdict") in {"mismatch", "partial"}
+            and row.get("rubric_consistent") is True
+        }
+        plans = {plan["id"]: plan for plan in rendered}
+        repairs = {}
+        for item in (news_webpages.read_manifest(output_dir) or {}).get("pages", []):
+            scene_id, url = item.get("scene_id"), item.get("source_url")
+            plan = plans.get(scene_id, {})
+            src = f"../{item.get('local_path')}"
+            digest = item.get("sha256")
+            if (
+                scene_id not in failed or (scene_id, url) in allowed
+                or plan.get("news_webpage_src") != src
+                or plan.get("news_webpage_sha256") != digest
+                or not news_webpages._asset_is_intact(output_dir, item)
+                or not any(shot.get("kind") == "article" and shot.get("src") == src
+                           and shot.get("sha256") == digest for shot in plan.get("media_shots", []))
+            ):
+                continue
+            repairs[scene_id] = {
+                "source_url": url, "src": src, "sha256": digest,
+                "rendered_video_sha256": source_hash,
+                "reason": "Article no longer belongs to this scene under current story assignment rules",
+            }
+        return repairs
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
 async def _load_or_plan_scene_visuals(
     output_dir: Path,
     board: dict,
@@ -471,12 +519,17 @@ async def _load_or_plan_scene_visuals(
         if feedback:
             failed_ids = {row["id"] for row in feedback}
             rejected = _review_rejected_media(output_dir, board, source_hash)
+            reassigned = _review_misassigned_webpages(output_dir, board, source_hash)
             media_repairs = [
                 {**plan, "review_rejected_media": rejected[plan["id"]]}
                 for plan in plans if plan["id"] in failed_ids and plan["id"] in rejected
             ]
             for plan in media_repairs:
                 log(f"Visual plan {plan['id']}: excluding reviewed mismatching media; retaining grounded copy")
+            for plan in plans:
+                if plan["id"] in failed_ids and plan["id"] in reassigned and plan["id"] not in rejected:
+                    media_repairs.append({**plan, "review_webpage_assignment_repair": reassigned[plan["id"]]})
+                    log(f"Visual plan {plan['id']}: rebuilding misassigned article inventory; retaining grounded copy")
             repair_ids = failed_ids - {plan["id"] for plan in media_repairs}
             repair_scenes = [scene for scene in board["scenes"] if scene["id"] in repair_ids]
             log(f"Visual plan: repairing {len(repair_scenes)} failed scene(s) from rendered-frame feedback")
@@ -508,7 +561,8 @@ async def _load_or_plan_scene_visuals(
                 )
             unchanged = [
                 row["id"] for row in feedback
-                if row["id"] not in rejected and all(by_id[row["id"]].get(key) == value
+                if row["id"] not in rejected and row["id"] not in reassigned
+                and all(by_id[row["id"]].get(key) == value
                        for key, value in row["previous_copy"].items())
             ]
             if unchanged:
@@ -1379,7 +1433,7 @@ def _review_retry_fingerprint(directory: Path, request: dict, render: RenderSpec
     paths.update((directory / "footage").glob("*-render.mp4"))
     paths.update(Path(__file__).parent / name for name in (
         "scene_kit.py", "assembler.py", "storyboard.py", "intros.py", "outros.py",
-        "composer.py", "news_images.py", "collage_broll.py", "visual_plan.py",
+        "composer.py", "news_images.py", "news_webpages.py", "collage_broll.py", "visual_plan.py",
         "media_shots.py", "video_format.py",
     ))
     paths.add(config.PROMPTS_DIR / "media_shots.txt")

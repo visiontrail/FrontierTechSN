@@ -164,11 +164,10 @@ def select_overlay_assignments(
 ) -> list[dict]:
     """Map selected English stories to exact visual narration scenes."""
     visual_ids = _visual_scene_ids(plans)
-    scenes = [
-        scene
-        for scene in storyboard.get("scenes") or []
-        if str(scene.get("id") or "") in visual_ids
-    ]
+    # Establish story identity across the whole narration before checking the
+    # visual layout. Excluding a collage first can send its article to an
+    # unrelated eligible scene that merely shares a few generic words.
+    scenes = storyboard.get("scenes") or []
     scored: list[tuple[int, int, int, dict, dict]] = []
     for article_index, article in enumerate(dossier.get("selected") or []):
         if not isinstance(article, dict) or not _valid_english_source(article):
@@ -176,6 +175,7 @@ def select_overlay_assignments(
         article_terms = _tokens(_story_text(article))
         if not article_terms:
             continue
+        matches: list[tuple[int, int, dict]] = []
         for scene_index, scene in enumerate(scenes):
             scene_terms = _tokens(scene.get("text"))
             overlap = article_terms & scene_terms
@@ -183,7 +183,13 @@ def select_overlay_assignments(
                 continue
             # Prefer the exact story scene, then preserve edition order.
             score = len(overlap) * 10 + min(9, len(overlap) * 2)
-            scored.append((score, -article_index, -scene_index, article, scene))
+            matches.append((score, -scene_index, scene))
+        matches.sort(reverse=True, key=lambda row: row[:2])
+        if not matches or (len(matches) > 1 and matches[0][0] == matches[1][0]):
+            continue
+        score, scene_order, scene = matches[0]
+        if str(scene.get("id") or "") in visual_ids:
+            scored.append((score, -article_index, scene_order, article, scene))
 
     assignments: list[dict] = []
     used_articles: set[str] = set()
@@ -918,12 +924,19 @@ async def acquire_news_webpages(
     root = task_dir / "news_webpages"
     root.mkdir(parents=True, exist_ok=True)
     previous = read_manifest(task_dir) or {}
-    for item in previous.get("pages") or []:
-        if not isinstance(item, dict):
-            continue
-        relative = Path(str(item.get("local_path") or ""))
-        if not relative.is_absolute() and ".." not in relative.parts:
-            (task_dir / relative).unlink(missing_ok=True)
+    # A placement correction does not invalidate other verified article
+    # captures. Retain exact assignment matches and preserve old evidence.
+    retained = []
+    if previous.get("manifest_version") == MANIFEST_VERSION:
+        for assignment in assignments:
+            for item in previous.get("pages") or []:
+                if (isinstance(item, dict)
+                    and all(item.get(key) == value for key, value in assignment.items())
+                    and item.get("status") == "captured"
+                    and _asset_is_intact(task_dir, item)):
+                    retained.append(item)
+                    break
+    retained = retained[:requested_count]
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -935,7 +948,7 @@ async def acquire_news_webpages(
         "candidate_count": len(assignments),
         "english_only": True,
         "assignments": assignments,
-        "pages": [],
+        "pages": retained,
         "errors": [],
     }
     _write_manifest(task_dir, manifest)
@@ -946,11 +959,14 @@ async def acquire_news_webpages(
     process: asyncio.subprocess.Process | None = None
     profile: Path | None = None
     try:
-        process, browser_ws_url, profile = await _start_chrome()
+        if len(retained) < requested_count:
+            process, browser_ws_url, profile = await _start_chrome()
         for index, assignment in enumerate(assignments, start=1):
             if len(manifest["pages"]) >= requested_count:
                 break
-            destination = root / f"page-{index:02d}.png"
+            if any(item["scene_id"] == assignment["scene_id"] for item in retained):
+                continue
+            destination = root / f"page-{index:02d}-{fingerprint[:12]}.png"
             _emit(
                 log,
                 f"News webpage candidate {index}/{len(assignments)}: capturing English source "

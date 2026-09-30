@@ -497,6 +497,73 @@ def test_quality_retry_removes_sampled_wrong_media_without_rewriting_correct_cop
     assert (tmp_path / "historical.jpg").read_bytes() == b"wrong historical event"
 
 
+def _misassigned_article_candidate(root):
+    from PIL import Image
+    board, digest = _mismatching_media_candidate(root)
+    plans = json.loads((root / "visual_plan.json").read_text())
+    asset = root / "news_webpages/article.png"
+    asset.parent.mkdir()
+    Image.new("RGB", (2880, 1800), "white").save(asset)
+    asset_hash = hashlib.sha256(asset.read_bytes()).hexdigest()
+    plans[1].update(news_webpage_src="../news_webpages/article.png", news_webpage_sha256=asset_hash)
+    plans[1]["media_shots"] = [{"kind": "article", "src": "../news_webpages/article.png", "sha256": asset_hash}]
+    composer._write_visual_plan_checkpoint(root, board, plans)
+    article = {"language": "en", "source_name": "Example", "title": "Robots learn in training centers",
+               "url": "https://example.com/robots"}
+    (root / "research").mkdir()
+    (root / "research/dossier.json").write_text(json.dumps({"selected": [article]}))
+    page = {"scene_id": "scene-02", "source_url": article["url"], "sha256": asset_hash,
+            "local_path": "news_webpages/article.png", "bytes": asset.stat().st_size}
+    (root / "news_webpages/manifest.json").write_text(json.dumps({"pages": [page]}))
+    path = root / "av_sync_report.next.json"
+    report = json.loads(path.read_text())
+    report["multimodal"]["scenes"][0].update(rubric_consistent=True, sample_timestamps=[8, 9, 10])
+    path.write_text(json.dumps(report))
+    return board, digest
+
+
+def test_quality_retry_repairs_proven_article_assignment_without_rewriting_copy(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    board, digest = _misassigned_article_candidate(tmp_path)
+    before = composer._load_cached_scene_plans(tmp_path, board)
+    planner = AsyncMock(side_effect=AssertionError("repair the article inventory, not correct copy"))
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", planner)
+    kwargs = dict(ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None)
+    report_before = (tmp_path / "av_sync_report.next.json").read_bytes()
+    repaired = asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs))
+    assert repaired[0] == before[0]
+    assert repaired[1]["headline"] == before[1]["headline"]
+    assert repaired[1]["review_webpage_assignment_repair"]["source_url"] == "https://example.com/robots"
+    assert repaired[1]["review_repair_source_sha256"] == digest
+    assert "news_webpage_src" not in repaired[1]
+    assert asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs)) == repaired
+    planner.assert_not_awaited()
+    assert (tmp_path / "av_sync_report.next.json").read_bytes() == report_before
+    assert (tmp_path / "news_webpages/article.png").is_file()
+
+
+@pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "shot_hash", "unavailable", "correct_assignment"])
+def test_article_assignment_repair_requires_current_independent_evidence(tmp_path, mutation):
+    board, digest = _misassigned_article_candidate(tmp_path)
+    path = tmp_path / "av_sync_report.next.json"
+    report = json.loads(path.read_text())
+    if mutation == "report_hash": report["rendered_video_sha256"] = "stale"
+    if mutation == "unavailable": report["multimodal"]["scenes"][0]["rubric_consistent"] = False
+    path.write_text(json.dumps(report))
+    if mutation == "asset_bytes": (tmp_path / "news_webpages/article.png").write_bytes(b"new image")
+    if mutation == "shot_hash":
+        path = tmp_path / "visual_plan.json"
+        plans = json.loads(path.read_text())
+        plans[1]["media_shots"][0]["sha256"] = "stale"
+        path.write_text(json.dumps(plans))
+    if mutation == "correct_assignment":
+        path = tmp_path / "research/dossier.json"
+        dossier = json.loads(path.read_text())
+        dossier["selected"][0]["title"] = board["scenes"][1]["text"]
+        path.write_text(json.dumps(dossier))
+    assert composer._review_misassigned_webpages(tmp_path, board, digest) == {}
+
+
 @pytest.mark.parametrize("verdict", ["mismatch", "partial"])
 @pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "editorial_sample", "match", "passed_partial", "unknown_verdict", "outside_sample", "unavailable", "sequence"])
 def test_media_exclusion_requires_current_mismatching_sample(tmp_path, monkeypatch, mutation, verdict):
