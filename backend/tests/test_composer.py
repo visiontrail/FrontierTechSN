@@ -295,6 +295,7 @@ def _failed_visual_candidate(root):
     (root / "quality_retry_state.json").write_text(json.dumps({
         "status": "retrying", "latest": {
             "rendered_video_sha256": digest, "failed_scene_ids": ["scene-02"],
+            "sampling_contract": composer.multimodal_review.SAMPLING_CONTRACT,
             "scene_reviews": [{"id": "scene-02", "review_available": True, "issues": ["Missing quantified context"],
                                "suggested_visual": "Show the narrated figures"}],
         },
@@ -332,6 +333,15 @@ def test_quality_retry_replans_only_failed_scenes_and_checkpoints_feedback(tmp_p
 def test_quality_feedback_from_another_candidate_is_not_reused(tmp_path):
     _failed_visual_candidate(tmp_path)
     (tmp_path / "video.next.mp4").write_bytes(b"different video")
+    assert composer._pending_visual_repairs(tmp_path, _cache_plans()) == ("", [])
+
+
+def test_legacy_midpoint_feedback_cannot_rewrite_a_complete_shot_sequence(tmp_path):
+    _failed_visual_candidate(tmp_path)
+    path = tmp_path / "quality_retry_state.json"
+    state = json.loads(path.read_text())
+    state["latest"].pop("sampling_contract")
+    path.write_text(json.dumps(state))
     assert composer._pending_visual_repairs(tmp_path, _cache_plans()) == ("", [])
 
 
@@ -488,7 +498,7 @@ def test_quality_retry_removes_sampled_wrong_media_without_rewriting_correct_cop
 
 
 @pytest.mark.parametrize("verdict", ["mismatch", "partial"])
-@pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "editorial_sample", "match", "passed_partial", "unknown_verdict", "outside_sample", "unavailable"])
+@pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "editorial_sample", "match", "passed_partial", "unknown_verdict", "outside_sample", "unavailable", "sequence"])
 def test_media_exclusion_requires_current_mismatching_sample(tmp_path, monkeypatch, mutation, verdict):
     from unittest.mock import AsyncMock
     board, digest = _mismatching_media_candidate(tmp_path, verdict)
@@ -505,6 +515,7 @@ def test_media_exclusion_requires_current_mismatching_sample(tmp_path, monkeypat
     if mutation == "passed_partial": review.update(passed=True, verdict="partial")
     if mutation == "unknown_verdict": review["verdict"] = "unknown"
     if mutation == "outside_sample": review["timestamp"] = 100
+    if mutation == "sequence": review["sample_timestamps"] = [8.0, 9.0, 10.0]
     path.write_text(json.dumps(report))
     if mutation == "unavailable":
         path = tmp_path / "quality_retry_state.json"

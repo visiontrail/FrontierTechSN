@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from pathlib import Path
@@ -98,6 +99,91 @@ def test_contact_sheet_labels_and_compacts_frames(tmp_path: Path):
             multimodal_review.FRAME_HEIGHT + multimodal_review.HEADER_HEIGHT
         ) + multimodal_review.SHEET_GAP
     assert output.stat().st_size <= 750_000
+
+
+def test_review_samples_every_timed_shot_and_preserves_whole_scene_context(tmp_path):
+    scene = _scene("scene-09", 100, "Motor specs. Price and range. Charging and job cuts.")
+    opening = _scene("scene-01", 0, "Welcome.")
+    (tmp_path / "visual_plan.json").write_text(json.dumps([{
+        "id": "scene-09", "media_shots": [
+            {"start": 0, "duration": 2}, {"start": 2, "duration": 4},
+            {"start": 6, "duration": 2},
+        ],
+    }]))
+
+    async def extract(video, path, timestamp):
+        Image.new("RGB", (640, 360), "white").save(path)
+
+    with patch.object(multimodal_review, "_extract_frame", AsyncMock(side_effect=extract)) as call:
+        frames = asyncio.run(multimodal_review.extract_scene_frames(
+            tmp_path / "video.next.mp4", {"scenes": [opening, scene]}, tmp_path / "review",
+        ))
+    assert call.await_count == 4
+    assert frames[0]["timestamp"] == 4
+    assert [sample["timestamp"] for sample in frames[1]["samples"]] == [101, 104, 107]
+    assert frames[1]["scene"]["text"] == scene["text"]
+    sheet = multimodal_review.create_contact_sheet(frames, tmp_path / "sheet.jpg")
+    with Image.open(sheet) as image:
+        assert image.height == 2 * (multimodal_review.FRAME_HEIGHT + multimodal_review.HEADER_HEIGHT) + multimodal_review.SHEET_GAP
+    prompt = multimodal_review._review_prompt("EV news", frames, 70, 82)
+    assert scene["text"] in prompt
+    assert "scene-09-shot-03" in prompt
+    assert "every fact simultaneously in every frame" in prompt
+    assert "missing from the entire sequence or contradicted by any frame" in prompt
+
+
+@pytest.mark.parametrize("shots", [
+    [{"start": 1, "duration": 7}],
+    [{"start": 0, "duration": 7}],
+    [{"start": 0, "duration": 9}],
+    [{"start": 0, "duration": 0}],
+    [{"start": 0, "duration": float("nan")}],
+])
+def test_incomplete_or_invalid_shot_evidence_fails_closed(tmp_path, shots):
+    (tmp_path / "visual_plan.json").write_text(json.dumps([{"id": "scene-09", "media_shots": shots}]))
+    with patch.object(multimodal_review, "_extract_frame", AsyncMock()):
+        with pytest.raises(ValueError, match="review shot coverage"):
+            asyncio.run(multimodal_review.extract_scene_frames(
+                tmp_path / "video.next.mp4", {"scenes": [_scene("scene-09", 0, "Specs.")]}, tmp_path / "review",
+            ))
+
+
+def test_contact_sheet_budget_never_splits_or_truncates_a_scene_sequence():
+    frames = [{"id": f"scene-{index}", "samples": [{}] * count} for index, count in enumerate([1, 4, 7, 9, 1])]
+    batches = multimodal_review._frame_batches(frames, 8)
+    assert [[frame["id"] for frame in batch] for batch in batches] == [
+        ["scene-0", "scene-1"], ["scene-2"], ["scene-3"], ["scene-4"],
+    ]
+    assert [frame for batch in batches for frame in batch] == frames
+
+
+@pytest.mark.parametrize("verdict", ["match", "partial", "omitted"])
+def test_sequence_review_still_requires_complete_contract_valid_scene_results(tmp_path, verdict):
+    scenes = [_scene("scene-09", 0, "Motor specs. Price and range. Charging and jobs.")]
+    frames = _frames(tmp_path, scenes)
+    frames[0]["samples"] = [
+        {"id": f"scene-09-shot-{index:02d}", "timestamp": index, "path": frames[0]["path"]}
+        for index in range(1, 5)
+    ]
+    payload = _matching_payload(scenes, 90)
+    if verdict == "partial":
+        payload["reviews"][0].update(score=55, verdict="partial", issues=["Range absent from every shot"], suggested_visual="Add the narrated range")
+    elif verdict == "omitted":
+        payload["reviews"] = []
+    with (
+        patch.object(multimodal_review, "extract_scene_frames", AsyncMock(return_value=frames)),
+        patch.object(multimodal_review, "run_opencli", AsyncMock(return_value=_opencli_result(payload))),
+        patch.object(config, "AV_SYNC_GEMINI_MAX_RETRIES", 0),
+        patch.object(config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", ""),
+    ):
+        report = asyncio.run(multimodal_review.review_video(tmp_path / "video.mp4", {"scenes": scenes}, tmp_path))
+    assert report["passed"] is (verdict == "match")
+    assert report["sampling_contract"] == multimodal_review.SAMPLING_CONTRACT
+    assert report["reviewed_scenes"] == 1
+    assert report["scenes"][0]["sample_timestamps"] == [1, 2, 3, 4]
+    if verdict == "partial":
+        assert report["failed_scene_ids"] == ["scene-09"]
+        assert report["average_score"] == 55
 
 
 def test_missing_or_unsubstantiated_gemini_rows_fail_closed(tmp_path: Path):

@@ -124,6 +124,7 @@ def _record_quality_retry(
         "attempt": len(history) + 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "rendered_video_sha256": video_sha256,
+        "sampling_contract": multimodal.get("sampling_contract"),
         "failed_scene_ids": [
             str(value) for value in multimodal.get("failed_scene_ids") or []
         ],
@@ -370,6 +371,7 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
         candidate = output_dir / "video.next.mp4"
         if (
             state.get("status") != "retrying"
+            or latest.get("sampling_contract") != multimodal_review.SAMPLING_CONTRACT
             or not isinstance(source_hash, str)
             or not candidate.is_file()
             or _sha256_path(candidate) != source_hash
@@ -424,6 +426,10 @@ def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> d
         rejected = {}
         for review in report.get("multimodal", {}).get("scenes", []):
             scene_id = review["id"]
+            # A sequence-level rejection does not identify which asset failed.
+            # Do not quarantine the representative frame's unrelated asset.
+            if len(review.get("sample_timestamps") or []) > 1:
+                continue
             if review.get("passed") is not False or review.get("verdict") not in {"mismatch", "partial"}:
                 continue
             local_time = float(review["timestamp"]) - float(scenes[scene_id]["start"])

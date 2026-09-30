@@ -2,7 +2,7 @@
 
 Acoustic word alignment proves *when* each sentence is spoken. It cannot prove
 that the pixels rendered at that time depict the same subject. This module
-samples the final MP4 at every scene midpoint, labels compact contact sheets
+samples the final MP4 at every planned shot midpoint, labels compact contact sheets
 with scene ids/timecodes, and sends each sheet together with the corresponding
 narration excerpts to the signed-in Gemini web product through the repository's
 project-local OpenCLI wrapper.
@@ -45,6 +45,7 @@ SHEET_COLUMNS = 2
 SHEET_GAP = 8
 FRAME_TIMEOUT_SECONDS = 45
 FRAME_WORKERS = 4
+SAMPLING_CONTRACT = "complete-shot-sequence-v1"
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -122,15 +123,48 @@ async def extract_scene_frames(
     storyboard: dict,
     review_dir: str | Path,
 ) -> list[dict]:
-    """Extract one actual rendered midpoint frame for every narrated scene."""
+    """Sample every shot; a scene midpoint cannot represent a timed sequence."""
     video = Path(video_path).resolve()
     directory = Path(review_dir).resolve()
     frame_dir = directory / "frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
     semaphore = asyncio.Semaphore(FRAME_WORKERS)
+    plan_path = video.parent / "visual_plan.json"
+    plans = json.loads(plan_path.read_text()) if plan_path.is_file() else []
+    by_id = {plan["id"]: plan for plan in plans}
 
     async def one(scene: dict) -> dict:
         scene_id = str(scene["id"])
+        shots = by_id.get(scene_id, {}).get("media_shots") or []
+        if shots:
+            # Fail closed on stale or incomplete placement data instead of
+            # silently dropping the part of the sequence that needs review.
+            cursor = 0.0
+            samples = []
+            for index, shot in enumerate(shots, start=1):
+                start, duration = float(shot["start"]), float(shot["duration"])
+                if (
+                    not math.isfinite(start) or not math.isfinite(duration)
+                    or duration <= 0 or abs(start - cursor) > 0.02
+                ):
+                    raise ValueError(f"{scene_id}: invalid review shot coverage")
+                cursor = start + duration
+                sample_id = f"{scene_id}-shot-{index:02d}"
+                timestamp = round(float(scene["start"]) + start + duration / 2, 3)
+                samples.append({
+                    "id": sample_id, "timestamp": timestamp,
+                    "path": frame_dir / f"{sample_id}.jpg",
+                })
+            if abs(cursor - float(scene["duration"])) > 0.02:
+                raise ValueError(f"{scene_id}: incomplete review shot coverage")
+
+            async def extract(sample: dict) -> None:
+                async with semaphore:
+                    await _extract_frame(video, sample["path"], sample["timestamp"])
+
+            await asyncio.gather(*(extract(sample) for sample in samples))
+            representative = min(samples, key=lambda sample: abs(sample["timestamp"] - _scene_timestamp(scene)))
+            return {**representative, "id": scene_id, "scene": scene, "samples": samples}
         timestamp = _scene_timestamp(scene)
         output_path = frame_dir / f"{scene_id}.jpg"
         async with semaphore:
@@ -143,6 +177,21 @@ async def extract_scene_frames(
         }
 
     return list(await asyncio.gather(*(one(scene) for scene in storyboard.get("scenes", []))))
+
+
+def _frame_batches(frames: list[dict], panel_budget: int) -> list[list[dict]]:
+    """Keep a scene's evidence together while bounding ordinary sheet size."""
+    batches, batch, panels = [], [], 0
+    for frame in frames:
+        count = len(frame.get("samples") or [frame])
+        if batch and panels + count > panel_budget:
+            batches.append(batch)
+            batch, panels = [], 0
+        batch.append(frame)
+        panels += count
+    if batch:
+        batches.append(batch)
+    return batches
 
 
 def _font(size: int) -> ImageFont.ImageFont:
@@ -167,6 +216,7 @@ def create_contact_sheet(frames: list[dict], output_path: str | Path) -> Path:
     """Create a labeled, browser-upload-sized JPEG for a review batch."""
     if not frames:
         raise ValueError("Cannot create an empty multimodal review contact sheet")
+    frames = [sample for frame in frames for sample in frame.get("samples") or [frame]]
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     columns = min(SHEET_COLUMNS, len(frames))
@@ -219,6 +269,10 @@ def _review_prompt(
                 2,
             ),
             "narration": str(frame["scene"].get("text") or "").strip(),
+            "rendered_samples": [
+                {"id": sample["id"], "timestamp": sample.get("timestamp")}
+                for sample in frame.get("samples") or [frame]
+            ],
             "program_segment_kind": frame["scene"].get("program_segment_kind")
             or frame["scene"].get("scene_kind")
             or "news",
@@ -234,9 +288,12 @@ def _review_prompt(
     )
     return (
         "You are the final semantic continuity reviewer for a narrated video. "
-        "The attached contact sheet contains one actual midpoint frame per scene. "
-        "Each frame is visibly labeled with its scene id and timecode. Compare every "
-        "frame with the matching narration segment below. Judge semantic subject, "
+        "The attached contact sheet contains actual rendered frames, one from each "
+        "planned shot (or the scene midpoint when there is no shot sequence). "
+        "Each frame is visibly labeled with its sample id and timecode. The "
+        "rendered_samples list maps all frames to their scene. Evaluate all of a "
+        "scene's frames together, in time order, against its complete narration. "
+        "Judge semantic subject, "
         "objects, setting, quantities, and claim—not lip sync or photographic realism. "
         "A well-designed text/data card can match when its visible message accurately "
         "represents the narration. "
@@ -270,8 +327,12 @@ def _review_prompt(
         "clearly correct depiction or text/data card that covers every core narrated "
         f"subject should normally score at least {minimum_average_score}; do not deduct "
         "for illustration style, branding, or layout when the semantic message is clear. "
-        "If one scene contains multiple distinct narrated subjects, the visible frame "
-        "must represent every core subject, including through readable text or data. "
+        "If one scene contains multiple distinct narrated subjects, its complete "
+        "frame sequence must represent every core subject, including through "
+        "readable text or data. A claim shown in an earlier or later shot is not "
+        "missing merely because it is absent from another shot. Do not require "
+        "every fact simultaneously in every frame. Still reject a core claim "
+        "missing from the entire sequence or contradicted by any frame. "
         "Use integer scores from 0 to 100. "
         "Include every supplied scene id exactly once. If the attachment is absent or "
         "unreadable, set image_received to false and do not invent reviews."
@@ -495,6 +556,10 @@ def normalise_batch(
             {
                 "id": scene_id,
                 "timestamp": float(frame["timestamp"]),
+                "sample_timestamps": [
+                    float(sample["timestamp"])
+                    for sample in frame.get("samples") or [frame]
+                ],
                 "score": score,
                 "passed": score >= minimum_scene_score,
                 "verdict": (
@@ -798,8 +863,8 @@ async def review_video(
     batch_inputs: list[tuple[int, list[dict], Path]] = []
     title = str(storyboard.get("title") or "Untitled")
 
-    for batch_index, offset in enumerate(range(0, len(frames), batch_size), start=1):
-        batch_frames = frames[offset : offset + batch_size]
+    frame_batches = _frame_batches(frames, batch_size)
+    for batch_index, batch_frames in enumerate(frame_batches, start=1):
         sheet = create_contact_sheet(
             batch_frames, review_dir / f"contact-sheet-{batch_index:02d}.jpg"
         )
@@ -807,7 +872,8 @@ async def review_video(
         _emit(
             log,
             f"Gemini A/V review: batch {batch_index}/"
-            f"{math.ceil(len(frames) / batch_size)} ({len(batch_frames)} scene(s))",
+            f"{len(frame_batches)} ({len(batch_frames)} scene(s), "
+            f"{sum(len(frame.get('samples') or [frame]) for frame in batch_frames)} frames)",
         )
         normalized, attempts, last_error = await _review_batch(
             title=title,
@@ -985,6 +1051,7 @@ async def review_video(
         "status": "passed" if passed else "failed",
         "passed": passed,
         "analyzer": "gemini-web-via-opencli",
+        "sampling_contract": SAMPLING_CONTRACT,
         "minimum_scene_score": minimum_scene_score,
         "minimum_average_score": minimum_average_score,
         "average_score": average,
