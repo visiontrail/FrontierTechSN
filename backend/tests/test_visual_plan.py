@@ -715,6 +715,85 @@ def test_visual_planner_does_not_load_unrelated_project_skills(monkeypatch):
     assert len(plans) == 1
 
 
+@pytest.mark.parametrize("first_reply", [
+    # Observed token-limit continuation began with a quote inside an already
+    # open attribution string. Neither the joined JSON nor its tail is valid.
+    '"Bank of England Governor", "items": [], "accent": "amber"}]',
+    '[{"id":"scene-01","headline":42}]',
+    '[{"id":"scene-01","headline":"Unrelated","body":"Unrelated"}]',
+])
+def test_visual_repair_retries_unusable_direction_once(monkeypatch, first_reply):
+    data = board(1)
+    data["visual_review_feedback"] = [{"id": "scene-01", "issues": ["Missing detail"]}]
+    calls = []
+
+    async def resolve(*_args):
+        return "http://provider.test", "model", "key"
+
+    async def chat(_system, payload, *_args, **kwargs):
+        calls.append((json.loads(payload), kwargs))
+        return first_reply if len(calls) == 1 else json.dumps([
+            {"id": "scene-01", "headline": "Sentence 0 opens with more detail"},
+        ])
+
+    monkeypatch.setattr(digester, "_resolve_provider", resolve)
+    monkeypatch.setattr(digester, "_chat", chat)
+    plans = asyncio.run(visual_plan.plan_scene_visuals(data))
+
+    assert len(calls) == 2
+    assert calls[1][1]["max_tokens"] > calls[0][1]["max_tokens"]
+    assert calls[1][1]["disable_thinking"] is True
+    assert calls[1][0]["visual_review_feedback"] == data["visual_review_feedback"]
+    assert plans[0]["grounding_source"] == "model"
+
+
+def test_visual_repair_retains_valid_scenes_and_bounds_validation_retry(monkeypatch):
+    data = board(3)
+    data["visual_review_feedback"] = [{"id": "scene-01"}, {"id": "scene-02"}]
+    calls = []
+
+    async def resolve(*_args):
+        return "http://provider.test", "model", "key"
+
+    async def chat(_system, payload, *_args, **_kwargs):
+        calls.append(json.loads(payload))
+        return json.dumps([{"id": "scene-01", "headline": (
+            "Sentence 0 retained" if len(calls) == 1 else "Sentence 0 unwanted overwrite"
+        )}])
+
+    monkeypatch.setattr(digester, "_resolve_provider", resolve)
+    monkeypatch.setattr(digester, "_chat", chat)
+    plans = asyncio.run(visual_plan.plan_scene_visuals(data))
+
+    assert len(calls) == 2
+    assert [row["id"] for row in calls[1]["scenes"]] == ["scene-02"]
+    assert calls[1]["visual_review_feedback"] == [{"id": "scene-02"}]
+    assert plans[0]["headline"] == "Sentence 0 retained"
+    # The composer still rejects fallback repair plans; no gate is bypassed.
+    assert plans[1]["grounding_source"] == "narration_fallback"
+    assert plans[2]["grounding_source"] == "narration_fallback"
+
+
+def test_visual_repair_does_not_repeat_transport_failures(monkeypatch):
+    data = board(1)
+    data["visual_review_feedback"] = [{"id": "scene-01"}]
+    calls = []
+
+    async def resolve(*_args):
+        return "http://provider.test", "model", "key"
+
+    async def chat(*_args, **_kwargs):
+        calls.append(1)
+        raise RuntimeError("provider retries exhausted")
+
+    monkeypatch.setattr(digester, "_resolve_provider", resolve)
+    monkeypatch.setattr(digester, "_chat", chat)
+    plans = asyncio.run(visual_plan.plan_scene_visuals(data))
+
+    assert len(calls) == 1
+    assert plans[0]["grounding_source"] == "narration_fallback"
+
+
 @pytest.mark.parametrize("nonfinite", ["NaN", "Infinity", "1e999"])
 def test_visual_planner_drops_unknown_nonfinite_and_arbitrary_fields(
     tmp_path,

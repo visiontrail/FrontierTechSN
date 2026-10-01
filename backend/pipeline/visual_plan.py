@@ -35,6 +35,9 @@ PLAN_BATCH_SIZE = 12
 # Recent batches exhausted 8192 before producing the JSON plan; reasoning
 # still consumes the allowance on gateways that ignore thinking=disabled.
 VISUAL_PLAN_MAX_TOKENS = 16384
+# A repair response has exhausted 16384 and resumed with malformed JSON. Give
+# one validation retry more room, without repeating already valid scenes.
+VISUAL_PLAN_REPAIR_MAX_TOKENS = 32768
 
 # Accent rotation used by the fallback and as a sanity default. Consecutive
 # scenes never share an accent, which alone gives the video a sense of movement.
@@ -485,42 +488,61 @@ async def plan_scene_visuals(
     _emit(log, f"Visual plan: directing {len(scenes)} scenes in {len(batches)} batch(es)")
 
     by_id: dict[str, dict] = {}
+    repair_ids = {row["id"] for row in storyboard.get("visual_review_feedback", [])}
     for n, batch in enumerate(batches, start=1):
-        try:
-            reply = await _chat(
-                system_prompt,
-                _batch_prompt_payload(storyboard, batch),
-                endpoint,
-                model,
-                api_key,
-                log,
-                f"Visual plan {n}/{len(batches)}",
-                max_tokens=VISUAL_PLAN_MAX_TOKENS,
-                enable_skills=False,
-                disable_thinking=True,
-            )
-            entries = _first_json_array(reply) or []
-        except Exception as exc:  # noqa: BLE001 - one bad batch must not lose the rest
-            _emit(log, f"Visual plan batch {n} failed ({exc}); deriving that batch from narration")
-            entries = []
-
-        indexed = {str(entry.get("id")): entry for entry in entries if isinstance(entry, dict)}
-        for scene in batch:
-            raw = indexed.get(scene["id"])
-            if raw is None:
-                continue
+        pending = batch
+        for attempt in range(2):
+            label = f"Visual plan {n}/{len(batches)}"
+            if attempt:
+                label += " validation retry"
             try:
-                normalised = _normalise(raw, scene, scene["index"])
-            except (TypeError, ValueError) as exc:
+                reply = await _chat(
+                    system_prompt,
+                    _batch_prompt_payload(storyboard, pending),
+                    endpoint,
+                    model,
+                    api_key,
+                    log,
+                    label,
+                    max_tokens=(VISUAL_PLAN_REPAIR_MAX_TOKENS if attempt else VISUAL_PLAN_MAX_TOKENS),
+                    enable_skills=False,
+                    disable_thinking=True,
+                )
+                entries = _first_json_array(reply) or []
+            except Exception as exc:  # noqa: BLE001 - transport already owns provider retries
+                _emit(log, f"Visual plan batch {n} failed ({exc}); deriving unresolved scenes from narration")
+                break
+
+            indexed = {str(entry.get("id")): entry for entry in entries if isinstance(entry, dict)}
+            for scene in pending:
+                raw = indexed.get(scene["id"])
+                if raw is None:
+                    continue
+                try:
+                    normalised = _normalise(raw, scene, scene["index"])
+                except (TypeError, ValueError) as exc:
+                    _emit(
+                        log,
+                        f"Visual plan {scene['id']}: invalid model fields ({exc}); "
+                        "using narration-derived direction",
+                    )
+                    continue
+                grounded, _ = _plan_grounding(normalised, scene)
+                if grounded:
+                    by_id[scene["id"]] = normalised
+
+            pending = [scene for scene in pending if scene["id"] not in by_id]
+            if pending:
                 _emit(
                     log,
-                    f"Visual plan {scene['id']}: invalid model fields ({exc}); "
-                    "using narration-derived direction",
+                    f"{label}: no usable model direction for "
+                    + ", ".join(scene["id"] for scene in pending),
                 )
-                continue
-            grounded, _ = _plan_grounding(normalised, scene)
-            if grounded:
-                by_id[scene["id"]] = normalised
+            pending = [scene for scene in pending if scene["id"] in repair_ids]
+            if not pending or attempt:
+                break
+            _emit(log, f"{label}: retrying only {len(pending)} unresolved repair scene(s) "
+                  f"once with max_tokens={VISUAL_PLAN_REPAIR_MAX_TOKENS}")
 
     derived = {plan["id"]: plan for plan in fallback_plan(storyboard)}
     plans = [by_id.get(scene["id"]) or derived[scene["id"]] for scene in scenes]
