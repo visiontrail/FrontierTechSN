@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -15,8 +16,10 @@ from PIL import Image
 
 from backend import config
 from backend.pipeline.image_layout import image_layout
+from backend.pipeline.timing import timed
 
 CONTRACT_VERSION = 2
+MAX_CONCURRENT_BATCHES = 2
 
 
 class _Elements(HTMLParser):
@@ -283,6 +286,7 @@ def fallback(scene: dict, assets: list[dict], copy: list[dict]) -> dict:
     return {"id": scene["id"], "rationale": "Provider/plan recovery using verified assets and grounded editorial graphics", "shots": shots}
 
 
+@timed("media_shots")
 async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
                            provider_id=None, ai_endpoint=None, ai_model=None, log=None) -> dict:
     from backend.pipeline.digester import _chat, _resolve_provider
@@ -344,18 +348,15 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
             except (ValueError, TypeError, KeyError, AttributeError, OSError, subprocess.SubprocessError):
                 pass
     provider = None
-    # Batch normal direction; only rejected scenes return for the repair round.
-    for attempt in range(2):
-        pending = [scene for scene in contexts if scene["id"] not in results]
-        for offset in range(0, len(pending), 4):
-            batch = pending[offset:offset + 4]
+    gate = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
+
+    async def plan_batch(batch, batch_index, attempt):
+        async with gate:
             try:
-                if provider is None:
-                    provider = await _resolve_provider(provider_id, ai_endpoint, ai_model)
                 answer = await _chat(
                     prompt, json.dumps({"scenes": batch, "validation_feedback":
                                         {scene["id"]: failures[scene["id"]] for scene in batch}}, ensure_ascii=False),
-                    *provider, log, f"Shot editor batch {offset // 4 + 1} ({attempt + 1}/2)",
+                    *provider, log, f"Shot editor batch {batch_index} ({attempt + 1}/2)",
                     max_tokens=14000, enable_skills=False, disable_thinking=True,
                 )
                 entries = _first_json_array(answer) or []
@@ -364,12 +365,34 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
                 indexed = {}
                 for scene in batch:
                     failures[scene["id"]].append(str(exc))
+            # Validation and checkpoint writes are synchronous on this event
+            # loop. Each batch owns disjoint scenes; completed work is retained
+            # even while another batch is still awaiting its model response.
             for scene in batch:
                 try:
                     accept(scene, indexed.get(scene["id"], {}), "ai")
                 except (ValueError, TypeError, KeyError, AttributeError, OSError, subprocess.SubprocessError) as exc:
                     failures[scene["id"]].append(str(exc))
                     emit(f"Shot editor {scene['id']}: replanning after {exc}")
+
+    # Batch normal direction; only rejected scenes return for the repair round.
+    for attempt in range(2):
+        pending = [scene for scene in contexts if scene["id"] not in results]
+        if not pending:
+            break
+        try:
+            if provider is None:
+                provider = await _resolve_provider(provider_id, ai_endpoint, ai_model)
+        except Exception as exc:
+            for scene in pending:
+                failures[scene["id"]].append(str(exc))
+            continue
+        # These are API-only editorial requests. _chat still applies the shared
+        # provider pacing/cooldown; browser fact and final reviews stay unchanged.
+        # TaskGroup cancels and drains siblings if the parent is interrupted.
+        async with asyncio.TaskGroup() as group:
+            for offset in range(0, len(pending), 4):
+                group.create_task(plan_batch(pending[offset:offset + 4], offset // 4 + 1, attempt))
     for scene in contexts:
         if scene["id"] not in results:
             accept(scene, fallback(scene, scene["assets"], scene["editorial_copy"]), "recovery")

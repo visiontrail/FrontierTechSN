@@ -233,6 +233,120 @@ def test_live_planner_repairs_invalid_output_and_reuses_only_valid_checkpoint(tm
         assert all(s["duration"] <= 14 for s in plan["media_shots"] if s["kind"] == "public_footage")
 
 
+def _batch_contexts(count):
+    scene, assets, _ = context()
+    scenes = [{**scene, "id": f"scene-{i:02d}"} for i in range(count)]
+    plans = [{"id": scene["id"], "headline": "Five priorities", "body": "Artificial intelligence"}
+             for scene in scenes]
+    return plans, {"scenes": scenes}, assets
+
+
+def _batch_answer(content):
+    return json.dumps([{**raw_plan(), "id": scene["id"]}
+                       for scene in json.loads(content)["scenes"]])
+
+
+def test_editor_batches_overlap_with_a_two_request_cap_and_reuse_results(tmp_path):
+    async def exercise():
+        plans, board, assets = _batch_contexts(9)
+        started, release = asyncio.Event(), asyncio.Event()
+        active = maximum = 0
+        batches = []
+
+        async def chat(prompt, content, *args, **kwargs):
+            nonlocal active, maximum
+            batches.append([scene["id"] for scene in json.loads(content)["scenes"]])
+            active += 1
+            maximum = max(maximum, active)
+            if len(batches) == 2:
+                started.set()
+            try:
+                await release.wait()
+                return _batch_answer(content)
+            finally:
+                active -= 1
+
+        provider = AsyncMock(return_value=("endpoint", "model", "key"))
+        with patch.object(ms, "inventory", return_value=assets), patch(
+            "backend.pipeline.digester._resolve_provider", provider
+        ), patch("backend.pipeline.digester._chat", side_effect=chat):
+            task = asyncio.create_task(ms.plan_media_shots(plans, board, tmp_path))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await asyncio.sleep(0)
+                assert len(batches) == 2  # The third batch cannot start yet.
+            finally:
+                release.set()
+            report = await asyncio.wait_for(task, 2)
+            assert maximum == 2 and len(batches) == 3 and active == 0
+            assert [row["id"] for row in report["scenes"]] == [scene["id"] for scene in board["scenes"]]
+            assert all(row["coverage"] == 1 and row["passed"] for row in report["scenes"])
+            await ms.plan_media_shots(plans, board, tmp_path)
+            assert len(batches) == 3
+            assert provider.await_count == 1
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("failure", ["provider", "invalid_plan"])
+def test_editor_parallel_failure_retries_only_unaccepted_scenes(tmp_path, failure):
+    plans, board, assets = _batch_contexts(8)
+    batches = []
+
+    async def chat(prompt, content, *args, **kwargs):
+        scenes = json.loads(content)["scenes"]
+        ids = [scene["id"] for scene in scenes]
+        batches.append(ids)
+        if ids[0] == "scene-04" and sum(batch[0] == "scene-04" for batch in batches) == 1:
+            if failure == "provider":
+                raise RuntimeError("temporary provider failure")
+            response = json.loads(_batch_answer(content))
+            response[0]["shots"][0]["duration"] = 99
+            return json.dumps(response)
+        return _batch_answer(content)
+
+    with patch.object(ms, "inventory", return_value=assets), patch(
+        "backend.pipeline.digester._resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))
+    ), patch("backend.pipeline.digester._chat", side_effect=chat):
+        report = asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+    assert len(batches) == 3
+    assert batches[2] == (["scene-04", "scene-05", "scene-06", "scene-07"]
+                          if failure == "provider" else ["scene-04"])
+    assert len(report["scenes"]) == 8
+    assert all(row["passed"] and row["planner"] == "ai" for row in report["scenes"])
+
+
+def test_editor_cancellation_drains_inflight_batches_without_retrying(tmp_path):
+    async def exercise():
+        plans, board, assets = _batch_contexts(9)
+        ready, never = asyncio.Event(), asyncio.Event()
+        started = drained = 0
+
+        async def chat(*args, **kwargs):
+            nonlocal started, drained
+            started += 1
+            if started == 2:
+                ready.set()
+            try:
+                await never.wait()
+            finally:
+                drained += 1
+
+        with patch.object(ms, "inventory", return_value=assets), patch(
+            "backend.pipeline.digester._resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))
+        ), patch("backend.pipeline.digester._chat", side_effect=chat):
+            task = asyncio.create_task(ms.plan_media_shots(plans, board, tmp_path))
+            await asyncio.wait_for(ready.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert started == drained == 2
+        assert not (tmp_path / "media_shots.json").exists()
+        assert all("media_shots" not in plan for plan in plans)
+
+    asyncio.run(exercise())
+
+
 def test_locked_gate_inspects_real_scheduled_elements(tmp_path):
     scene, assets, _ = context()
     shots = ms.validate(raw_plan(), *context())
