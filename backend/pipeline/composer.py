@@ -426,30 +426,52 @@ def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> d
         rejected = {}
         for review in report.get("multimodal", {}).get("scenes", []):
             scene_id = review["id"]
-            # A sequence-level rejection does not identify which asset failed.
-            # Do not quarantine the representative frame's unrelated asset.
-            if len(review.get("sample_timestamps") or []) > 1:
-                continue
             if review.get("passed") is not False or review.get("verdict") not in {"mismatch", "partial"}:
                 continue
-            local_time = float(review["timestamp"]) - float(scenes[scene_id]["start"])
-            for shot in plans[scene_id].get("media_shots", []):
-                if not (float(shot["start"]) <= local_time < float(shot["start"]) + float(shot["duration"])):
+            attributed = review.get("rejected_media_samples") or []
+            sequence_review = len(review.get("sample_timestamps") or []) > 1 or bool(attributed)
+            if sequence_review:
+                # Scene prose alone cannot identify a failed source. Only an
+                # explicit source-media verdict bound to the exact shot can.
+                if (
+                    review.get("rubric_consistent") is not True
+                    or review.get("media_sample_contract") != multimodal_review.MEDIA_SAMPLE_CONTRACT
+                    or report.get("multimodal", {}).get("sampling_contract") != multimodal_review.SAMPLING_CONTRACT
+                ):
                     continue
-                src, digest = shot.get("src"), shot.get("sha256")
-                if not src or not digest or shot.get("kind") not in {"public_footage", "paper_collage", "image", "article"}:
-                    continue
-                path = (output_dir / "compositions" / src).resolve()
-                if not path.is_relative_to(output_dir.resolve()) or not path.is_file() or _sha256_path(path) != digest:
-                    continue
-                prior = plans[scene_id].get("review_rejected_media", [])
-                if any(item.get("src") == src and item.get("sha256") == digest for item in prior):
-                    continue
-                rejected[scene_id] = [*prior, {
-                    "src": src, "sha256": digest, "kind": shot["kind"],
-                    "rendered_video_sha256": source_hash,
-                    "timestamp": review["timestamp"], "issues": review.get("issues") or [],
-                }]
+                samples = attributed
+            else:
+                samples = [{"timestamp": review["timestamp"]}]
+            for sample in samples:
+                local_time = float(sample["timestamp"]) - float(scenes[scene_id]["start"])
+                for index, shot in enumerate(plans[scene_id].get("media_shots", []), start=1):
+                    if sequence_review and (
+                        sample.get("sample_id") != f"{scene_id}-shot-{index:02d}"
+                        or sample.get("shot_sha256") != multimodal_review.shot_fingerprint(shot)
+                        or any(sample.get(key) != shot.get(key) for key in ("src", "sha256", "kind"))
+                        or not isinstance(sample.get("reason"), str) or not sample["reason"].strip()
+                        or sample["timestamp"] not in review.get("sample_timestamps", [])
+                        or abs(local_time - float(shot["start"]) - float(shot["duration"]) / 2) > .002
+                    ):
+                        continue
+                    if not (float(shot["start"]) <= local_time < float(shot["start"]) + float(shot["duration"])):
+                        continue
+                    src, digest = shot.get("src"), shot.get("sha256")
+                    if not src or not digest or shot.get("kind") not in {"public_footage", "paper_collage", "image", "article"}:
+                        continue
+                    path = (output_dir / "compositions" / src).resolve()
+                    if not path.is_relative_to(output_dir.resolve()) or not path.is_file() or _sha256_path(path) != digest:
+                        continue
+                    prior = rejected.get(scene_id, plans[scene_id].get("review_rejected_media", []))
+                    if any(item.get("src") == src and item.get("sha256") == digest for item in prior):
+                        continue
+                    rejected[scene_id] = [*prior, {
+                        "src": src, "sha256": digest, "kind": shot["kind"],
+                        "rendered_video_sha256": source_hash,
+                        "timestamp": sample["timestamp"], "issues": review.get("issues") or [],
+                        **({"sample_id": sample["sample_id"], "shot_sha256": sample["shot_sha256"],
+                            "source_media_reason": sample["reason"]} if sequence_review else {}),
+                    }]
         return rejected
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {}

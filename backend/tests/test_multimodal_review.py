@@ -121,6 +121,7 @@ def test_review_samples_every_timed_shot_and_preserves_whole_scene_context(tmp_p
     assert call.await_count == 4
     assert frames[0]["timestamp"] == 4
     assert [sample["timestamp"] for sample in frames[1]["samples"]] == [101, 104, 107]
+    assert frames[1]["samples"][0]["shot_sha256"] == multimodal_review.shot_fingerprint({"start": 0, "duration": 2})
     assert frames[1]["scene"]["text"] == scene["text"]
     sheet = multimodal_review.create_contact_sheet(frames, tmp_path / "sheet.jpg")
     with Image.open(sheet) as image:
@@ -130,6 +131,39 @@ def test_review_samples_every_timed_shot_and_preserves_whole_scene_context(tmp_p
     assert "scene-09-shot-03" in prompt
     assert "every fact simultaneously in every frame" in prompt
     assert "missing from the entire sequence or contradicted by any frame" in prompt
+    assert "source_media_mismatches" in prompt
+    assert "incorrect overlay copy" in prompt
+
+
+@pytest.mark.parametrize("mutation", [None, "unknown_sample", "duplicate", "editorial", "blank_reason", "match", "malformed", "no_image", "missing_scene"])
+def test_source_rejection_requires_explicit_valid_sample_attribution(tmp_path, mutation):
+    scenes = [_scene("scene-09", 0, "Robot doing kitchen chores.")]
+    frames = _frames(tmp_path, scenes)
+    sample = {"id": "scene-09-shot-02", "timestamp": 5, "shot_sha256": "local-shot",
+              "media": {"src": "../robot.mp4", "sha256": "local-asset", "kind": "public_footage"}}
+    frames[0]["samples"] = [sample]
+    payload = _matching_payload(scenes, 55)
+    row = payload["reviews"][0]
+    row.update(verdict="partial", issues=["Warehouse instead of kitchen"], suggested_visual="Kitchen footage",
+               source_media_mismatches=[{"sample_id": sample["id"], "reason": "Source shows warehouse boxes",
+                                         "src": "model-must-not-select-a-path", "sha256": "invented"}])
+    if mutation == "unknown_sample": row["source_media_mismatches"][0]["sample_id"] = "scene-08-shot-02"
+    if mutation == "duplicate": row["source_media_mismatches"] *= 2
+    if mutation == "editorial": sample["media"]["kind"] = "editorial"
+    if mutation == "blank_reason": row["source_media_mismatches"][0]["reason"] = " "
+    if mutation == "match": row.update(score=90, verdict="match", issues=[])
+    if mutation == "malformed": row["source_media_mismatches"] = "shot 02"
+    if mutation == "no_image": payload["image_received"] = False
+    if mutation == "missing_scene": frames.append({**frames[0], "id": "scene-10"})
+    result = multimodal_review.normalise_batch(payload, frames, 70)
+    assert result["contract_valid"] is (mutation is None)
+    rejected = result["reviews"][0]["rejected_media_samples"]
+    if mutation:
+        assert rejected == []
+    else:
+        assert rejected == [{"sample_id": sample["id"], "timestamp": 5, "shot_sha256": "local-shot",
+                             **sample["media"], "reason": "Source shows warehouse boxes"}]
+        assert result["reviews"][0]["passed"] is False
 
 
 @pytest.mark.parametrize("shots", [

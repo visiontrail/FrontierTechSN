@@ -46,6 +46,12 @@ SHEET_GAP = 8
 FRAME_TIMEOUT_SECONDS = 45
 FRAME_WORKERS = 4
 SAMPLING_CONTRACT = "complete-shot-sequence-v1"
+MEDIA_SAMPLE_CONTRACT = "source-media-mismatch-v1"
+
+
+def shot_fingerprint(shot: dict) -> str:
+    """Bind a reviewed sample to the complete rendered shot, including its in-point."""
+    return hashlib.sha256(json.dumps(shot, sort_keys=True).encode()).hexdigest()
 
 
 def _emit(log: LogCallback | None, message: str) -> None:
@@ -154,6 +160,8 @@ async def extract_scene_frames(
                 samples.append({
                     "id": sample_id, "timestamp": timestamp,
                     "path": frame_dir / f"{sample_id}.jpg",
+                    "shot_sha256": shot_fingerprint(shot),
+                    "media": {key: shot.get(key) for key in ("src", "sha256", "kind")},
                 })
             if abs(cursor - float(scene["duration"])) > 0.02:
                 raise ValueError(f"{scene_id}: incomplete review shot coverage")
@@ -270,7 +278,8 @@ def _review_prompt(
             ),
             "narration": str(frame["scene"].get("text") or "").strip(),
             "rendered_samples": [
-                {"id": sample["id"], "timestamp": sample.get("timestamp")}
+                {"id": sample["id"], "timestamp": sample.get("timestamp"),
+                 "kind": (sample.get("media") or {}).get("kind", "editorial")}
                 for sample in frame.get("samples") or [frame]
             ],
             "program_segment_kind": frame["scene"].get("program_segment_kind")
@@ -316,7 +325,16 @@ def _review_prompt(
         '"visual_summary":"what is actually visible",'
         '"alignment_reason":"why it matches or does not",'
         '"issues":["specific issue"],'
+        '"source_media_mismatches":[{"sample_id":"scene-01-shot-02",'
+        '"reason":"visible source subject or setting contradicts narration"}],'
         '"suggested_visual":"replacement concept when verdict is partial or mismatch"}]}. '
+        "Set source_media_mismatches=[] unless a specific sampled source image/video "
+        "itself depicts the wrong subject, event, material or setting. Identify only "
+        "exact supplied sample ids and explain the visible contradiction. Do not "
+        "list editorial cards, missing coverage, unreadable overlays or incorrect "
+        "overlay copy here; report those in issues for editorial repair. Never "
+        "infer a source mismatch from a whole-scene verdict. A match must have "
+        "source_media_mismatches=[]. "
         "Scores and verdicts are one strict contract: "
         f"match requires score {minimum_scene_score}-100 and issues=[]; "
         f"partial requires score {partial_floor}-{minimum_scene_score - 1}, at least "
@@ -552,6 +570,36 @@ def normalise_batch(
                     and isinstance(raw_suggested_visual, str)
                     and bool(suggested_visual)
                 )
+        # Legacy responses may omit attribution. They retain the same scene
+        # gate, but cannot authorize removing an asset from a sequence. Bind
+        # new attribution only to locally captured samples, never model paths.
+        raw_mismatches = row.get("source_media_mismatches", [])
+        samples = {sample["id"]: sample for sample in frame.get("samples") or []}
+        mismatches = []
+        attribution_valid = isinstance(raw_mismatches, list)
+        seen_samples = set()
+        for item in raw_mismatches if isinstance(raw_mismatches, list) else []:
+            sample_id = item.get("sample_id") if isinstance(item, dict) else None
+            sample = samples.get(sample_id) if isinstance(sample_id, str) else None
+            reason = item.get("reason") if isinstance(item, dict) else None
+            media = (sample or {}).get("media") or {}
+            if (
+                not sample or sample_id in seen_samples
+                or not isinstance(reason, str) or not reason.strip()
+                or not sample.get("shot_sha256")
+                or media.get("kind") not in {"public_footage", "paper_collage", "image", "article"}
+                or not media.get("src") or not media.get("sha256")
+                or gemini_verdict not in {"partial", "mismatch"}
+            ):
+                attribution_valid = False
+                continue
+            seen_samples.add(sample_id)
+            mismatches.append({
+                "sample_id": sample_id, "timestamp": sample["timestamp"],
+                "shot_sha256": sample["shot_sha256"], **media,
+                "reason": reason.strip()[:500],
+            })
+        rubric_consistent = rubric_consistent and attribution_valid
         reviews.append(
             {
                 "id": scene_id,
@@ -575,6 +623,8 @@ def normalise_batch(
                 "alignment_reason": alignment_reason,
                 "issues": issues,
                 "suggested_visual": suggested_visual,
+                "media_sample_contract": MEDIA_SAMPLE_CONTRACT,
+                "rejected_media_samples": mismatches if rubric_consistent and id_structure_valid else [],
             }
         )
     return {

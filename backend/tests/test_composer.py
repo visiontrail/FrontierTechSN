@@ -522,6 +522,81 @@ def _misassigned_article_candidate(root):
     return board, digest
 
 
+def _attributed_sequence_candidate(root):
+    board, digest = _mismatching_media_candidate(root)
+    plans = json.loads((root / "visual_plan.json").read_text())
+    shot = plans[1]["media_shots"][0]
+    shot["duration"] = 2
+    plans[1]["media_shots"].append({"kind": "editorial", "start": 2, "duration": 3.5})
+    composer._write_visual_plan_checkpoint(root, board, plans)
+    frame = {"id": "scene-02", "timestamp": 11, "scene": board["scenes"][1], "samples": [
+        {"id": "scene-02-shot-01", "timestamp": 8.25,
+         "shot_sha256": composer.multimodal_review.shot_fingerprint(shot),
+         "media": {key: shot[key] for key in ("src", "sha256", "kind")}},
+        {"id": "scene-02-shot-02", "timestamp": 11, "media": {"kind": "editorial"}},
+    ]}
+    normalized = composer.multimodal_review.normalise_batch({"image_received": True, "reviews": [{
+        "id": "scene-02", "score": 30, "verdict": "mismatch", "visual_summary": "Wrong historical event",
+        "alignment_reason": "The first shot depicts a different event", "issues": ["Wrong source subject"],
+        "suggested_visual": "Use the correct event",
+        "source_media_mismatches": [{"sample_id": "scene-02-shot-01", "reason": "Wrong historical event"}],
+    }]}, [frame], 70)
+    assert normalized["contract_valid"]
+    (root / "av_sync_report.next.json").write_text(json.dumps({
+        "rendered_video_sha256": digest, "multimodal": {
+            "sampling_contract": composer.multimodal_review.SAMPLING_CONTRACT,
+            "scenes": normalized["reviews"],
+        },
+    }))
+    return board, digest
+
+
+def test_sequence_repair_excludes_exact_attributed_media_and_preserves_denial(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    board, digest = _attributed_sequence_candidate(tmp_path)
+    before = composer._load_cached_scene_plans(tmp_path, board)
+    report_bytes = (tmp_path / "av_sync_report.next.json").read_bytes()
+    planner = AsyncMock(side_effect=AssertionError("grounded copy does not need another request"))
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", planner)
+    repaired = asyncio.run(composer._load_or_plan_scene_visuals(
+        tmp_path, board, ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None,
+    ))
+    rejection = repaired[1]["review_rejected_media"][0]
+    assert rejection["sample_id"] == "scene-02-shot-01"
+    assert rejection["src"] == "../historical.jpg"
+    assert rejection["rendered_video_sha256"] == digest
+    assert repaired[0] == before[0]
+    assert repaired[1]["headline"] == before[1]["headline"]
+    assert (tmp_path / "av_sync_report.next.json").read_bytes() == report_bytes
+    assert (tmp_path / "historical.jpg").read_bytes() == b"wrong historical event"
+    planner.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "shot_inpoint", "wrong_id", "wrong_src", "wrong_timestamp", "unknown_contract", "missing_sampling_contract", "unavailable", "empty", "no_reason"])
+def test_sequence_exclusion_fails_closed_on_stale_or_incomplete_binding(tmp_path, mutation):
+    board, digest = _attributed_sequence_candidate(tmp_path)
+    path = tmp_path / "av_sync_report.next.json"
+    report = json.loads(path.read_text())
+    review = report["multimodal"]["scenes"][0]
+    sample = review["rejected_media_samples"][0]
+    if mutation == "report_hash": report["rendered_video_sha256"] = "old video"
+    if mutation == "asset_bytes": (tmp_path / "historical.jpg").write_bytes(b"replacement asset")
+    if mutation == "shot_inpoint":
+        plans = json.loads((tmp_path / "visual_plan.json").read_text())
+        plans[1]["media_shots"][0]["source_start"] = 1
+        composer._write_visual_plan_checkpoint(tmp_path, board, plans)
+    if mutation == "wrong_id": sample["sample_id"] = "scene-02-shot-02"
+    if mutation == "wrong_src": sample["src"] = "../other.jpg"
+    if mutation == "wrong_timestamp": sample["timestamp"] = 9
+    if mutation == "unknown_contract": review["media_sample_contract"] = "unknown"
+    if mutation == "missing_sampling_contract": report["multimodal"].pop("sampling_contract")
+    if mutation == "unavailable": review["rubric_consistent"] = False
+    if mutation == "empty": review["rejected_media_samples"] = []
+    if mutation == "no_reason": sample["reason"] = " "
+    path.write_text(json.dumps(report))
+    assert composer._review_rejected_media(tmp_path, board, digest) == {}
+
+
 def test_quality_retry_repairs_proven_article_assignment_without_rewriting_copy(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
     board, digest = _misassigned_article_candidate(tmp_path)
