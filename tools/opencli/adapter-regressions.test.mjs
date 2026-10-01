@@ -253,10 +253,14 @@ test('Gemini response progress resets the stall timer and a completed video wins
   assert.equal((await waitForVideo(page, [], 1800, { now: () => clock, stallTimeoutSeconds: 60 })).src, 'new')
 })
 
-test('Gemini video treats the observed unfulfilled-request reply as failure without waiting for a stall', async () => {
+test('Gemini video treats observed terminal replies as failure without waiting for a stall', async () => {
   for (const text of [
     "Gemini said\n\nI'm having a hard time fulfilling your request. Can I help you with something else instead?",
     'I’m having a hard time fulfilling your request. Can I help you with something else instead?',
+    'Gemini said\n\nI seem to be encountering an error. Can I try something else for you?',
+    'I seem to be encountering an error. Can I try something else for you?',
+    'Gemini said\n\nSorry, something went wrong. Please try your request again.',
+    'Sorry, something went wrong.\nPlease try your request again.',
   ]) {
     let clock = 1000
     let reads = 0
@@ -271,7 +275,7 @@ test('Gemini video treats the observed unfulfilled-request reply as failure with
     }
     await assert.rejects(waitForVideo(page, [], 1800, {
       now: () => clock, checkpoint,
-    }), /GEMINI_VIDEO_GENERATION_FAILED:.*hard time fulfilling/s)
+    }), /GEMINI_VIDEO_GENERATION_FAILED:.*reported a generation failure/s)
     assert.equal(reads, 1)
     assert.equal(clock, 6000)
     assert.equal(checkpoint.url, 'https://gemini.google.com/app/abc123')
@@ -279,19 +283,24 @@ test('Gemini video treats the observed unfulfilled-request reply as failure with
 })
 
 test('Gemini video preserves ordinary text mentioning a failure reply and accepts completed media first', async () => {
-  const failure = "I'm having a hard time fulfilling your request. Can I help you with something else instead?"
-  let reads = 0
-  const page = {
-    async wait() {},
-    async evaluate() {
-      reads++
-      return reads === 1
-        ? { text: `The character says: ${failure} Rendering the requested video.`, videos: [] }
-        : { text: `Gemini said ${failure}`, videos: [{ src: 'owned-video', readyState: 4 }] }
-    },
+  for (const failure of [
+    "I'm having a hard time fulfilling your request. Can I help you with something else instead?",
+    'I seem to be encountering an error. Can I try something else for you?',
+    'Sorry, something went wrong. Please try your request again.',
+  ]) {
+    let reads = 0
+    const page = {
+      async wait() {},
+      async evaluate() {
+        reads++
+        return reads === 1
+          ? { text: `The character says: ${failure} Rendering the requested video.`, videos: [] }
+          : { text: `Gemini said ${failure}`, videos: [{ src: 'owned-video', readyState: 4 }] }
+      },
+    }
+    assert.equal((await waitForVideo(page, [], 60)).src, 'owned-video')
+    assert.equal(reads, 2)
   }
-  assert.equal((await waitForVideo(page, [], 60)).src, 'owned-video')
-  assert.equal(reads, 2)
 })
 
 test('Gemini resume preserves the original total and no-progress deadlines', async () => {

@@ -816,8 +816,15 @@ export async function waitForVideo(page, before, timeoutSeconds, {
             );
         }
         const responseText = String(state?.text || '').replace(/\s+/g, ' ').trim();
-        const unfulfilledRequest = /^(?:Gemini said\s+)?I['’]m having a hard time fulfilling your request\. Can I help you with something else instead\?$/i.test(responseText);
-        if (unfulfilledRequest || /could not generate|generation failed|try again|unable to create/i.test(responseText)) {
+        // Match entire observed failure replies, not dialogue quoted in a
+        // still-progressing response. These are terminal, not stalled jobs.
+        const normalizedReply = responseText.replace(/^Gemini said\s+/i, '').replace(/’/g, "'").toLowerCase();
+        const terminalFailure = [
+            "i'm having a hard time fulfilling your request. can i help you with something else instead?",
+            'i seem to be encountering an error. can i try something else for you?',
+            'sorry, something went wrong. please try your request again.',
+        ].includes(normalizedReply);
+        if (terminalFailure || /could not generate|generation failed|try again|unable to create/i.test(responseText)) {
             throw new CommandExecutionError(`GEMINI_VIDEO_GENERATION_FAILED: Gemini Create Video reported a generation failure: ${String(state.text).slice(-500)}`);
         }
         // The Videos surface can stop refreshing while the accepted job has
