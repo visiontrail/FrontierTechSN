@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { patchRenderRecovery } from './patch-render-recovery.mjs'
 
 const marker = '// FrontierTechSN: range-aware local media responses'
 const source = 'import { mediaResponse as frontierMediaResponse } from "../../../scripts/media-response.mjs";'
@@ -23,9 +24,9 @@ ${original}`)
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const cli = new URL('../node_modules/hyperframes/dist/cli.js', import.meta.url)
   const original = readFileSync(cli, 'utf8')
-  const patched = patchMediaServer(original)
+  const patched = patchRenderRecovery(patchMediaServer(original))
   if (patched !== original) {
     writeFileSync(cli, patched)
-    console.log('Applied HyperFrames media Range response fix')
+    console.log('Applied HyperFrames media Range and render recovery fixes')
   }
 }
