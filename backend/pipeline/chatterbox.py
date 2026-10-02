@@ -24,6 +24,31 @@ from backend.pipeline import tts
 
 MODEL_ID = "chatterbox-multilingual"
 VERIFIER_VERSION = 1
+PRONUNCIATION_VERSION = 1
+# The pinned multilingual tokenizer lowercases its input. Capitalization alone
+# therefore cannot tell the model to spell an initialism. Keep this allowlist
+# explicit: NASA, NATO, DRAM, RAM and all-caps ordinary words are not initialisms.
+INITIALISM_PRONUNCIATIONS = {
+    name: "-".join(name)
+    for name in (
+        "AI", "AGI", "API", "BBC", "CBS", "CEO", "CFO", "CIA", "CLI",
+        "CNBC", "CNN", "CPU", "CTO", "EU", "FBI", "FCC", "FDA", "FT", "GDP",
+        "GPU", "GPT", "HBM", "IBM", "IPO", "LLM", "MIT", "NBC", "NPR", "PC",
+        "PDF", "RBC", "RTX", "SCP", "SEC", "TSMC", "TV", "UK", "UN", "US",
+        "USB", "VR", "WSJ",
+    )
+}
+# The official English voice can still fuse some separated letter sequences.
+# Keep observed problem names explicit instead of changing ordinary prose.
+INITIALISM_PRONUNCIATIONS.update({
+    "AI": "ay eye",
+    "API": "ay pee eye",
+    "GPU": "gee pee you",
+    "GPT": "gee pee tee",
+})
+INITIALISM_RE = re.compile(r"(?<![\w./@])([A-Z]{2,})(?![\w/@]|\.[A-Za-z])")
+SPELLED_LETTERS_RE = re.compile(r"\b(?:[A-Z]-)+[A-Z]\b")
+PROTECTED_TEXT_RE = re.compile(r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+", re.IGNORECASE)
 MAX_INTEGRITY_ATTEMPTS = 3
 RETRYABLE_SERVICE_ERRORS = frozenset({
     "service_restarted", "service_stopping", "generation_timeout",
@@ -55,6 +80,8 @@ def cache_contract() -> dict:
         "verifier_version": VERIFIER_VERSION,
         "shared_verifier_version": tts.POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
         "synthesis_parameters": dict(SYNTHESIS_PARAMETERS),
+        "pronunciation_version": PRONUNCIATION_VERSION,
+        "initialism_pronunciations": dict(INITIALISM_PRONUNCIATIONS),
     }
 
 
@@ -112,16 +139,51 @@ def _read_request_checkpoint(path: Path) -> dict:
     return value
 
 
-def _split_text(text: str, *, max_words: int, max_chars: int) -> list[str]:
-    """Keep physical script lines, complete sentences and every source token."""
+def _synthesis_text(text: str, pronunciations: dict[str, str]) -> str:
+    """Supply provider-only spelling hints, retaining canonical source text.
+
+    Match standalone uppercase names, including possessives and hyphenated
+    compounds. Mixed-case names, plural suffixes, attached model numbers and
+    URL/email components are deliberately left alone.
+    """
+    pieces = []
+    start = 0
+    for protected in PROTECTED_TEXT_RE.finditer(text):
+        pieces.append(INITIALISM_RE.sub(
+            lambda match: pronunciations.get(match[1], match[1]), text[start:protected.start()],
+        ))
+        pieces.append(protected[0])
+        start = protected.end()
+    pieces.append(INITIALISM_RE.sub(
+        lambda match: pronunciations.get(match[1], match[1]), text[start:],
+    ))
+    return "".join(pieces)
+
+
+def _synthesis_word_count(text: str) -> int:
+    # A hyphenated four-letter name still consumes four spoken letter names.
+    return len(SPELLED_LETTERS_RE.sub(lambda match: match[0].replace("-", " "), text).split())
+
+
+def _split_text(
+    text: str, *, max_words: int, max_chars: int,
+    pronunciations: dict[str, str] | None = None,
+) -> list[str]:
+    """Preserve source tokens while budgeting the expanded provider input."""
     if max_words < 1 or max_chars < 20:
         raise ValueError("Chatterbox chunk limits must be positive (at least 20 characters)")
     chunks = []
     for line in text.splitlines():
         remaining = " ".join(line.split())
         while remaining:
-            words = remaining.split()
-            limit = min(max_chars, len(" ".join(words[:max_words])))
+            limit = 0
+            for word in re.finditer(r"\S+", remaining):
+                candidate = _synthesis_text(remaining[:word.end()], pronunciations or {})
+                if len(candidate) > max_chars or _synthesis_word_count(candidate) > max_words:
+                    break
+                limit = word.end()
+            if not limit:
+                raise ValueError("A Chatterbox input token exceeds the expanded request limit; refusing to truncate it")
             if len(remaining) <= limit:
                 chunks.append(remaining)
                 break
@@ -162,7 +224,9 @@ def _validate_audio(path: Path, text: str) -> tts.WavInfo:
     info = tts._validate_downloaded_wav_container(path, provider="Chatterbox")
     if (info.sample_rate, info.channels, info.sample_width) != (24000, 1, 2):
         raise tts.TtsIntegrityError("Chatterbox must return 24 kHz mono PCM16 WAV")
-    tts._validate_wav_part(path, text)
+    # Count every spoken letter for duration sanity, including provider hints.
+    duration_text = SPELLED_LETTERS_RE.sub(lambda match: match[0].replace("-", " "), text)
+    tts._validate_wav_part(path, duration_text)
     # The pinned V2 decoder has a 1,000-token, 25-token/s ceiling. A response
     # at that ceiling can be a cut-off utterance even with a valid WAV header.
     if info.duration_seconds >= 38.8:
@@ -177,7 +241,7 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
     if verify_text and not tts._part_integrity_accepted(metadata.get("integrity")):
         return None
     try:
-        info = _validate_audio(path, identity["text"])
+        info = _validate_audio(path, identity["synthesis_text"])
         if metadata.get("audio_sha256") != tts._file_sha256(path) or metadata.get("wav") != asdict(info):
             return None
     except tts.TtsIntegrityError:
@@ -256,18 +320,26 @@ async def _generate_chatterbox(
         if not voice_info or not voice_info.get("fingerprint"):
             raise RuntimeError(f"Chatterbox voice '{voice}' has no installed reference fingerprint")
         chunks = _split_text(cleaned, max_words=contract["chunk_words"],
-                             max_chars=min(contract["max_chars"], int(capabilities["max_chars"])))
+                             max_chars=min(contract["max_chars"], int(capabilities["max_chars"])),
+                             pronunciations=contract["initialism_pronunciations"])
         emit(f"Chatterbox: {len(chunks)} bounded request(s), natural 1.0x speech, voice={voice}")
+        synthesis_directory = directory / "synthesis"
+        synthesis_directory.mkdir(exist_ok=True)
         parts, metadata_rows = [], []
         for index, text in enumerate(chunks, 1):
+            synthesis_text = _synthesis_text(text, contract["initialism_pronunciations"])
             stem = f"tts_input_part_{index:03d}"
             (directory / f"{stem}.txt").write_text(text, encoding="utf-8")
+            (synthesis_directory / f"{stem}.txt").write_text(synthesis_text, encoding="utf-8")
             path = directory / f"{stem}_generated.wav"
             identity = {
                 **revisions, "provider": "chatterbox", "url": base_url,
                 "deployment_fingerprint": fingerprint,
                 "voice": voice, "voice_fingerprint": voice_info["fingerprint"],
                 "language": language, "text": text,
+                "synthesis_text": synthesis_text,
+                "pronunciation_version": contract["pronunciation_version"],
+                "initialism_pronunciations": contract["initialism_pronunciations"],
                 "seed": contract["seed"], "verifier_version": contract["verifier_version"],
                 "shared_verifier_version": contract["shared_verifier_version"],
                 "synthesis_speed_ratio": 1.0,
@@ -282,7 +354,7 @@ async def _generate_chatterbox(
             for attempt in range(MAX_INTEGRITY_ATTEMPTS):
                 request_path = directory / f"{stem}.request-{attempt}.json"
                 payload = {
-                    "text": text, "language_id": language, "voice": voice,
+                    "text": synthesis_text, "language_id": language, "voice": voice,
                     "seed": (contract["seed"] + attempt) % (2 ** 32),
                     **contract["synthesis_parameters"],
                 }
@@ -317,7 +389,7 @@ async def _generate_chatterbox(
                         previous_status = status
                     if status in {"completed", "failed"}:
                         _validate_job_identity(
-                            job, job_id=job_id, text=text, payload=payload,
+                            job, job_id=job_id, text=synthesis_text, payload=payload,
                             fingerprint=fingerprint, revisions=revisions,
                             voice_fingerprint=voice_info["fingerprint"],
                         )
@@ -350,7 +422,7 @@ async def _generate_chatterbox(
                 try:
                     if tts._file_sha256(staged) != job.get("audio_sha256"):
                         raise RuntimeError("Chatterbox download does not match the completed job audio hash")
-                    _validate_audio(staged, text)
+                    _validate_audio(staged, synthesis_text)
                     if verify_text:
                         integrity = await tts._verify_orpheus_part(
                             staged, text, directory / "verification" / stem, emit=emit,
