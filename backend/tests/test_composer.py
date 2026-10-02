@@ -551,9 +551,13 @@ def _attributed_sequence_candidate(root):
     return board, digest
 
 
-def test_sequence_repair_excludes_exact_attributed_media_and_preserves_denial(tmp_path, monkeypatch):
+@pytest.mark.parametrize("grounding_source", ["model", "narration_fallback"])
+def test_sequence_repair_excludes_exact_attributed_media_and_preserves_denial(tmp_path, monkeypatch, grounding_source):
     from unittest.mock import AsyncMock
     board, digest = _attributed_sequence_candidate(tmp_path)
+    plans = json.loads((tmp_path / "visual_plan.json").read_text())
+    plans[1]["grounding_source"] = grounding_source
+    _write_cache(tmp_path, board, plans)
     before = composer._load_cached_scene_plans(tmp_path, board)
     report_bytes = (tmp_path / "av_sync_report.next.json").read_bytes()
     planner = AsyncMock(side_effect=AssertionError("grounded copy does not need another request"))
@@ -567,6 +571,10 @@ def test_sequence_repair_excludes_exact_attributed_media_and_preserves_denial(tm
     assert rejection["rendered_video_sha256"] == digest
     assert repaired[0] == before[0]
     assert repaired[1]["headline"] == before[1]["headline"]
+    assert repaired[1]["grounding_source"] == grounding_source
+    assert asyncio.run(composer._load_or_plan_scene_visuals(
+        tmp_path, board, ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None,
+    )) == repaired
     assert (tmp_path / "av_sync_report.next.json").read_bytes() == report_bytes
     assert (tmp_path / "historical.jpg").read_bytes() == b"wrong historical event"
     planner.assert_not_awaited()
@@ -679,9 +687,13 @@ def test_sequence_exclusion_fails_closed_on_stale_or_incomplete_binding(tmp_path
     assert composer._review_rejected_media(tmp_path, board, digest) == {}
 
 
-def test_quality_retry_repairs_proven_article_assignment_without_rewriting_copy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("grounding_source", ["model", "narration_fallback"])
+def test_quality_retry_repairs_proven_article_assignment_without_rewriting_copy(tmp_path, monkeypatch, grounding_source):
     from unittest.mock import AsyncMock
     board, digest = _misassigned_article_candidate(tmp_path)
+    plans = json.loads((tmp_path / "visual_plan.json").read_text())
+    plans[1]["grounding_source"] = grounding_source
+    _write_cache(tmp_path, board, plans)
     before = composer._load_cached_scene_plans(tmp_path, board)
     planner = AsyncMock(side_effect=AssertionError("repair the article inventory, not correct copy"))
     monkeypatch.setattr(visual_plan, "plan_scene_visuals", planner)
@@ -690,6 +702,7 @@ def test_quality_retry_repairs_proven_article_assignment_without_rewriting_copy(
     repaired = asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs))
     assert repaired[0] == before[0]
     assert repaired[1]["headline"] == before[1]["headline"]
+    assert repaired[1]["grounding_source"] == grounding_source
     assert repaired[1]["review_webpage_assignment_repair"]["source_url"] == "https://example.com/robots"
     assert repaired[1]["review_repair_source_sha256"] == digest
     assert "news_webpage_src" not in repaired[1]
@@ -697,6 +710,44 @@ def test_quality_retry_repairs_proven_article_assignment_without_rewriting_copy(
     planner.assert_not_awaited()
     assert (tmp_path / "av_sync_report.next.json").read_bytes() == report_before
     assert (tmp_path / "news_webpages/article.png").is_file()
+
+
+@pytest.mark.parametrize("provider_available", [True, False])
+def test_mixed_media_and_copy_repairs_keep_provider_failure_gate(tmp_path, monkeypatch, provider_available):
+    from unittest.mock import AsyncMock
+    board, digest = _attributed_sequence_candidate(tmp_path)
+    plans = json.loads((tmp_path / "visual_plan.json").read_text())
+    plans[1]["grounding_source"] = "narration_fallback"
+    _write_cache(tmp_path, board, plans)
+    checkpoint = (tmp_path / "visual_plan.json").read_bytes()
+    retry_path = tmp_path / "quality_retry_state.json"
+    retry = json.loads(retry_path.read_text())
+    retry["latest"]["failed_scene_ids"].append("scene-01")
+    retry["latest"]["scene_reviews"].append({
+        "id": "scene-01", "review_available": True, "issues": ["Text collision"],
+        "suggested_visual": "Shorten the headline",
+    })
+    retry_path.write_text(json.dumps(retry))
+    denial = retry_path.read_bytes()
+    planner = AsyncMock(return_value=[{
+        "id": "scene-01", "headline": "Corrected headline",
+        "grounding_source": "model" if provider_available else "narration_fallback",
+    }])
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", planner)
+    kwargs = dict(ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None)
+    if provider_available:
+        repaired = asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs))
+        assert repaired[0]["headline"] == "Corrected headline"
+        assert repaired[1]["review_rejected_media"][0]["rendered_video_sha256"] == digest
+        assert asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs)) == repaired
+    else:
+        with pytest.raises(RuntimeError, match="corrected direction for scene-01;"):
+            asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs))
+        assert (tmp_path / "visual_plan.json").read_bytes() == checkpoint
+        assert {r["id"] for r in composer._pending_visual_repairs(tmp_path, plans)[1]} == {"scene-01", "scene-02"}
+    planner.assert_awaited_once()
+    assert [s["id"] for s in planner.await_args.args[0]["scenes"]] == ["scene-01"]
+    assert retry_path.read_bytes() == denial
 
 
 @pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "shot_hash", "unavailable", "correct_assignment"])

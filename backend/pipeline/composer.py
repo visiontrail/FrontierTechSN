@@ -389,7 +389,10 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
                 or review.get("review_available") is not True
                 or (
                     previous.get("review_repair_source_sha256") == source_hash
-                    and previous.get("grounding_source") != "narration_fallback"
+                    and (
+                        previous.get("grounding_source") != "narration_fallback"
+                        or previous.get("review_repair_kind") == "media_inventory"
+                    )
                 )
             ):
                 continue
@@ -657,7 +660,10 @@ async def _load_or_plan_scene_visuals(
                 raise RuntimeError("Visual review repair did not return every failed scene")
             unavailable = [
                 plan["id"] for plan in repaired
-                if plan.get("grounding_source") == "narration_fallback"
+                # Media repairs deliberately retain the previous grounded copy;
+                # its origin does not describe the result of a provider request.
+                if plan["id"] in repair_ids
+                and plan.get("grounding_source") == "narration_fallback"
             ]
             if unavailable:
                 raise RuntimeError(
@@ -678,6 +684,9 @@ async def _load_or_plan_scene_visuals(
                 )
             for repaired_plan in repaired:
                 repaired_plan["review_repair_source_sha256"] = source_hash
+                repaired_plan["review_repair_kind"] = (
+                    "model_direction" if repaired_plan["id"] in repair_ids else "media_inventory"
+                )
                 repaired_plan["visual_review_feedback"] = next(
                     {key: row[key] for key in ("issues", "suggested_visual")}
                     for row in feedback if row["id"] == repaired_plan["id"]
