@@ -160,3 +160,53 @@ def test_replacement_id_preserves_retired_normalized_and_source_artifacts(tmp_pa
     (tmp_path / 'clip-01-render.mp4').write_bytes(b'rejected render')
     (tmp_path / 'source-clip-02.webm').write_bytes(b'rejected source')
     assert footage._next_clip_id(tmp_path, [{'id': 'clip-03'}]) == 'clip-04'
+
+
+def approved_fiber_clip():
+    return {
+        "id": "clip-12", "local_path": "footage/clip-12.mp4",
+        "query": "fiber optic cable installation",
+        "script_excerpt": "Private browsing runs on the network's own backbone.",
+        "analysis": {
+            "analyzer": "gemini-web-contact-sheet", "image_received": True,
+            "suitable": True, "confidence": 0.8, "selected_window": 2,
+            "visible_content": "Hands connect fiber optic cables to networking hardware.",
+            "reason": "Appropriate network backbone B-roll, avoiding the talking-head filler seen in other rows.",
+        },
+    }
+
+
+def test_approved_preview_avoiding_filler_reaches_its_exact_narration(tmp_path):
+    clip = approved_fiber_clip()
+    (tmp_path / "footage").mkdir()
+    (tmp_path / clip["local_path"]).write_bytes(b"video")
+    board = {"scenes": [
+        {"id": "other", "text": "Network engineers install fiber optic cables."},
+        {"id": "owner", "text": clip["script_excerpt"]},
+    ]}
+    plans = [{"id": scene["id"], "archetype": "topic"} for scene in board["scenes"]]
+    manifest = {"requested_clip_count": 1, "selection_mode": "ai", "clips": [clip]}
+    assert visual_plan.attach_footage(plans, board, manifest, tmp_path) == 1
+    assert plans[1]["footage_src"] == clip["local_path"]
+    assert not plans[0].get("footage_src")
+    composer._require_public_footage_placement(plans, manifest, tmp_path)
+    assert json.loads((tmp_path / "footage-placement.json").read_text())["passed"]
+
+
+@pytest.mark.parametrize("override", [
+    {"suitable": False, "reason": "The chosen row is a studio presenter."},
+    {"confidence": 0.5},
+    {"suitable": None},
+    {"image_received": False},
+    {"analyzer": "legacy"},
+    {"selected_window": None},
+    {"visible_content": ""},
+    {"reason": "The selected row is talking-head filler."},
+    {"reason": "Network footage, not avoiding the talking-head filler."},
+    {"reason": "Network footage, avoiding the talking-head filler; unrelated to the narration."},
+])
+def test_preview_filler_exception_preserves_real_rejections(override):
+    clip = approved_fiber_clip()
+    clip["analysis"].update(override)
+    board = {"scenes": [{"id": "owner", "text": clip["script_excerpt"]}]}
+    assert visual_plan.match_footage_scene(clip, board) is None

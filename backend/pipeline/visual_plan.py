@@ -609,8 +609,31 @@ def match_footage_scene(clip: dict, storyboard: dict, *, eligible_ids: set[str] 
         confidence = max(confidence, 0.65)
     if analysis and confidence < 0.65:
         return None
-    if _NEGATIVE_ANALYSIS.search(str(analysis.get("reason") or "")):
+    if analysis.get("suitable") is False:
         return None
+    reason = str(analysis.get("reason") or "")
+    approved_preview = (
+        analysis.get("analyzer") == "gemini-web-contact-sheet"
+        and analysis.get("image_received") is True
+        and analysis.get("suitable") is True
+        and bool(str(analysis.get("visible_content") or "").strip())
+        and type(analysis.get("selected_window")) is int
+        and analysis["selected_window"] >= 0
+    )
+    for rejection in _NEGATIVE_ANALYSIS.finditer(reason):
+        # A preview may approve one row specifically because it avoids the
+        # talking head in other rows. Keep genuine negative clauses and
+        # legacy prose-only analyses subject to the existing rejection gate.
+        avoided_filler = (
+            approved_preview
+            and rejection.group().casefold() == "talking-head filler"
+            and re.search(
+                r"(?:^|[,;])\s*avoid(?:ing|s)\s+(?:the\s+)?$",
+                reason[:rejection.start()], re.IGNORECASE,
+            )
+        )
+        if not avoided_filler:
+            return None
 
     weighted_terms: dict[str, int] = {}
     for value, weight in (
