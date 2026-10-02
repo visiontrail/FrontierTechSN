@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from backend import config
-from backend.pipeline import chatterbox, composer, tts
+from backend.pipeline import chatterbox, composer, digester, tts, tts_pronunciation
 
 
 @pytest.mark.asyncio
@@ -52,6 +52,21 @@ def advisory_report():
         "warnings": ["ASR used a different spelling"],
         "internal_silence": {"count": 0, "max_seconds": 0.0},
     }
+
+
+def spelling_decisions(source):
+    """A deterministic test double for contextual model output, never production rules."""
+    return [
+        {
+            "id": candidate["id"], "source": candidate["source"],
+            "action": "keep" if candidate["source"] == "NASA" else "spell",
+            "spoken": candidate["source"] if candidate["source"] == "NASA" else "-".join(
+                candidate["source"].replace(".", "")
+            ),
+            "reason": "Fixture pronunciation decision in this sentence.",
+        }
+        for candidate in tts_pronunciation.candidates(source)
+    ]
 
 
 class FakeService:
@@ -145,6 +160,12 @@ def setup_client(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CHATTERBOX_TTS_CHUNK_WORDS", 30)
     monkeypatch.setattr(config, "CHATTERBOX_TTS_MAX_CHARS", 250)
     server = FakeService()
+    server.pronunciation_route = AsyncMock(return_value=("test-endpoint", "test-model", "test-key"))
+    server.pronunciation_ai = AsyncMock(side_effect=lambda _prompt, payload, **_kwargs: json.dumps({
+        "decisions": spelling_decisions(json.loads(payload)["source_text"]),
+    }))
+    monkeypatch.setattr(digester, "_resolve_provider", server.pronunciation_route)
+    monkeypatch.setattr(digester, "_chat", server.pronunciation_ai)
     client_class = httpx.AsyncClient
     monkeypatch.setattr(chatterbox.httpx, "AsyncClient", lambda **kwargs: client_class(
         transport=httpx.MockTransport(server.handle), **kwargs,
@@ -217,46 +238,31 @@ def test_single_oversize_token_is_rejected_without_truncation():
         chatterbox._split_text("a" * 251, max_words=30, max_chars=250)
 
 
-@pytest.mark.parametrize("source, expected", [
-    ("CNBC and TSMC cover AI.", "C-N-B-C and T-S-M-C cover A-I."),
-    ("CNBC's report cites CNBC’s sources.", "C-N-B-C's report cites C-N-B-C’s sources."),
-    ("CNBC-backed, AI-driven research.", "C-N-B-C-backed, A-I-driven research."),
-    ("cnbc Cnbc GPUs AI2 GPT4 OpenAI XCNBC CNBCX", "cnbc Cnbc GPUs AI2 GPT4 OpenAI XCNBC CNBCX"),
-    ("CNBC.com https://CNBC.com/CNBC CNBC@example.com @CNBC", "CNBC.com https://CNBC.com/CNBC CNBC@example.com @CNBC"),
-    ("https://example.com/?source=CNBC#AI", "https://example.com/?source=CNBC#AI"),
-    ("HTTPS://example.com/?source=CNBC#AI WWW.example.com/?q=CNBC", "HTTPS://example.com/?source=CNBC#AI WWW.example.com/?q=CNBC"),
-])
-def test_initialism_hints_preserve_case_suffixes_and_nonprose_boundaries(source, expected):
-    pronunciations = {name: "-".join(name) for name in ("CNBC", "TSMC", "AI", "GPU", "GPT")}
-    assert chatterbox._synthesis_text(source, pronunciations) == expected
-
-
-def test_word_acronyms_and_unlisted_uppercase_words_keep_their_natural_reading():
-    source = "NASA NATO ARM DRAM RAM ROM CERN LIGO OSHA LASER IMPORTANT ALL CAPS."
-    assert chatterbox._synthesis_text(source, chatterbox.INITIALISM_PRONUNCIATIONS) == source
-
-
 @pytest.mark.parametrize("max_words,max_chars", [(8, 250), (30, 24), (8, 24)])
 def test_initialism_expansion_is_budgeted_without_changing_or_splitting_source_names(max_words, max_chars):
     source = "CNBC TSMC report AI chip demand.\nCNBC explains the AI market."
-    pronunciations = {name: "-".join(name) for name in ("CNBC", "TSMC", "AI")}
-    chunks = chatterbox._split_text(source, max_words=max_words, max_chars=max_chars, pronunciations=pronunciations)
+    _decisions, edits = tts_pronunciation.validate_decisions(source, spelling_decisions(source))
+    chunks = chatterbox._split_text(source, max_words=max_words, max_chars=max_chars, pronunciation_edits=edits)
     assert " ".join(chunks) == " ".join(source.split())
     assert len(chunks) > 2
+    cursor = 0
     for chunk in chunks:
-        spoken = chatterbox._synthesis_text(chunk, pronunciations)
+        start = source.index(chunk, cursor)
+        cursor = start + len(chunk)
+        spoken = tts_pronunciation.render_span(source, start, cursor, edits)
         assert len(spoken) <= max_chars
         assert len(spoken.replace("-", " ").split()) <= max_words
         assert all(token not in {"C", "N", "B", "T", "S", "M"} for token in chunk.split())
 
 
-@pytest.mark.parametrize("source, pronunciations, max_words, max_chars", [
-    ("CNBC", {"CNBC": "C-N-B-C"}, 3, 250),
-    ("ABCDEFGHIJK", {"ABCDEFGHIJK": "A-B-C-D-E-F-G-H-I-J-K"}, 30, 20),
+@pytest.mark.parametrize("source, max_words, max_chars", [
+    ("CNBC", 3, 250),
+    ("ABCDEFGHIJK", 30, 20),
 ])
-def test_single_initialism_that_exceeds_expanded_budget_is_rejected(source, pronunciations, max_words, max_chars):
+def test_single_initialism_that_exceeds_expanded_budget_is_rejected(source, max_words, max_chars):
+    _decisions, edits = tts_pronunciation.validate_decisions(source, spelling_decisions(source))
     with pytest.raises(ValueError, match="token exceeds"):
-        chatterbox._split_text(source, max_words=max_words, max_chars=max_chars, pronunciations=pronunciations)
+        chatterbox._split_text(source, max_words=max_words, max_chars=max_chars, pronunciation_edits=edits)
 
 
 @pytest.mark.asyncio
@@ -265,11 +271,9 @@ async def test_spelling_hints_only_change_provider_request_not_canonical_narrati
     source = "CNBC TSMC report on AI chips while NASA studies space."
     script.write_text(source, encoding="utf-8")
     output = await generate()
-    expected_spoken = (
-        f"{chatterbox.INITIALISM_PRONUNCIATIONS['CNBC']} "
-        f"{chatterbox.INITIALISM_PRONUNCIATIONS['TSMC']} report on "
-        f"{chatterbox.INITIALISM_PRONUNCIATIONS['AI']} chips while NASA studies space."
-    )
+    expected_spoken = "C-N-B-C T-S-M-C report on A-I chips while NASA studies space."
+    server.pronunciation_ai.assert_awaited_once()
+    assert json.loads(server.pronunciation_ai.await_args.args[1])["source_text"] == source
     assert len(server.jobs) == 1
     assert server.jobs["job-1"]["request"]["text"] == expected_spoken
     assert server.jobs["job-1"]["text_sha256"] == hashlib.sha256(expected_spoken.encode()).hexdigest()
@@ -281,11 +285,35 @@ async def test_spelling_hints_only_change_provider_request_not_canonical_narrati
     metadata = json.loads((directory / "tts_input_part_001_generated.json").read_text())
     assert metadata["identity"]["text"] == source
     assert metadata["identity"]["synthesis_text"] == metadata["synthesis_request"]["text"] == expected_spoken
+    plan = json.loads((directory / "tts_pronunciation.json").read_text())
+    assert metadata["identity"]["pronunciation_policy"] == plan["identity"]["policy"]
+    assert metadata["identity"]["pronunciation_plan_sha256"] == plan["plan_sha256"]
     manifest = json.loads((directory / "tts_manifest.json").read_text())
     assert manifest["source_text_sha256"] == manifest["parts"][0]["text_sha256"] == hashlib.sha256(source.encode()).hexdigest()
     assert manifest["source_word_count"] == manifest["parts"][0]["word_count"] == len(source.split())
     assert composer._narration_manifest_failures(script, output, chatterbox.MODEL_ID) == []
     assert composer._manifest_program_segments(output, [{"text": source}])[0]["text"] == source
+
+
+@pytest.mark.asyncio
+async def test_same_spelling_can_receive_different_contextual_readings_in_one_script(setup_client):
+    server, script, directory, verifier, generate = setup_client
+    source = "CAD software supports this design. CAD is the currency code here."
+    script.write_text(source, encoding="utf-8")
+    server.pronunciation_ai.side_effect = None
+    server.pronunciation_ai.return_value = json.dumps({"decisions": [
+        {"id": 0, "source": "CAD", "action": "keep", "spoken": "CAD",
+         "reason": "Computer aided design is conventionally read as a word here."},
+        {"id": 1, "source": "CAD", "action": "spell", "spoken": "C-A-D",
+         "reason": "This occurrence is an explicitly spoken currency code."},
+    ]})
+    await generate()
+    assert server.jobs["job-1"]["request"]["text"] == (
+        "CAD software supports this design. C-A-D is the currency code here."
+    )
+    assert (directory / "tts_input_part_001.txt").read_text() == source
+    assert verifier.await_args.args[1] == source
+    server.pronunciation_ai.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -311,9 +339,17 @@ async def test_spelled_initialism_resume_reuses_original_request_identity(setup_
         await generate()
     checkpoint_path = directory / "tts_input_part_001.request-0.json"
     checkpoint = checkpoint_path.read_bytes()
+    plan_path = directory / "tts_pronunciation.json"
+    plan = plan_path.read_bytes()
+    server.pronunciation_ai.assert_awaited_once()
+    server.pronunciation_ai.side_effect = AssertionError("Resume must reuse its frozen pronunciation plan")
+    server.pronunciation_route.side_effect = AssertionError("Resume must not resolve a new model")
     server.fail_poll = False
     assert (await generate()).is_file()
     assert checkpoint_path.read_bytes() == checkpoint
+    assert plan_path.read_bytes() == plan
+    server.pronunciation_ai.assert_awaited_once()
+    server.pronunciation_route.assert_awaited_once()
     assert len(server.jobs) == 1
     assert len(server.post_keys) == 2
     assert len(set(server.post_keys)) == 1
@@ -333,6 +369,48 @@ async def test_initialism_heavy_audio_must_cover_spoken_letters_before_asr(setup
     assert not (directory / "tts_manifest.json").exists()
     assert len(list((directory / "verification" / "tts_input_part_001").glob("rejected-*.wav"))) == chatterbox.MAX_INTEGRITY_ATTEMPTS
     verifier.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_name,spoken,letters", [
+    ("CNBC", "c-n-b-c", 4),
+    ("CNBC", "C--N--B--C", 4),
+    ("CNBC", "C.-N.-B.-C", 4),
+    ("API", "a.p.i", 3),
+    ("API", "ay-pee-eye", 3),
+])
+async def test_model_hint_separators_count_for_chunk_budget_and_audio_duration(setup_client, source_name, spoken, letters):
+    server, script, directory, verifier, generate = setup_client
+    source = " ".join([source_name] * 3)
+    script.write_text(source, encoding="utf-8")
+    decisions = spelling_decisions(source)
+    for decision in decisions:
+        decision["spoken"] = spoken
+    _validated, edits = tts_pronunciation.validate_decisions(source, decisions)
+    assert chatterbox._split_text(
+        source, max_words=letters, max_chars=250, pronunciation_edits=edits,
+    ) == [source_name] * 3
+
+    server.pronunciation_ai.side_effect = None
+    server.pronunciation_ai.return_value = json.dumps({"decisions": decisions})
+    server.audio_seconds = 1.0
+    with pytest.raises(tts.TtsIntegrityError, match=rf"too short.*{letters * 3} words"):
+        await generate()
+    assert len(server.jobs) == chatterbox.MAX_INTEGRITY_ATTEMPTS
+    assert all(job["request"]["text"] == " ".join([spoken] * 3) for job in server.jobs.values())
+    assert not (directory / "tts_input_part_001_generated.wav").exists()
+    assert not (directory / "tts_manifest.json").exists()
+    verifier.assert_not_awaited()
+
+
+def test_decimal_periods_preserve_word_budget_and_audio_duration_count(tmp_path):
+    source = "Revenue grew 2.5 percent in this quarter."
+    assert chatterbox._split_text(source, max_words=7, max_chars=250) == [source]
+    path = tmp_path / "decimal.wav"
+    path.write_bytes(pcm_wav(seconds=1.0))
+    # Seven words remain below the eight-word duration guard. Splitting the
+    # decimal point would incorrectly turn this into eight spoken words.
+    assert chatterbox._validate_audio(path, source).duration_seconds == 1.0
 
 
 @pytest.mark.asyncio
@@ -356,29 +434,37 @@ async def test_cached_initialism_audio_rechecks_duration_even_when_hash_and_side
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["version", "mapping"])
-async def test_pronunciation_policy_invalidates_audio_request_and_preview_caches(setup_client, monkeypatch, change):
+@pytest.mark.parametrize("change", ["version", "prompt"])
+async def test_pronunciation_policy_invalidates_preview_cache_and_preserves_submitted_jobs(setup_client, monkeypatch, tmp_path, change):
     server, script, directory, verifier, generate = setup_client
     script.write_text("CNBC reported the complete story today.", encoding="utf-8")
     await generate()
     await generate()
     original_preview = config.voice_preview_cache_dir(chatterbox.MODEL_ID)
     original_contract = chatterbox.cache_contract()
+    plan_path = directory / "tts_pronunciation.json"
+    checkpoint_path = directory / "tts_input_part_001.request-0.json"
+    plan, checkpoint = plan_path.read_bytes(), checkpoint_path.read_bytes()
     if change == "version":
-        monkeypatch.setattr(chatterbox, "PRONUNCIATION_VERSION", chatterbox.PRONUNCIATION_VERSION + 1)
+        monkeypatch.setattr(tts_pronunciation, "POLICY_VERSION", tts_pronunciation.POLICY_VERSION + 1)
     else:
-        # Even an added entry absent from this source changes the declared policy.
-        monkeypatch.setattr(chatterbox, "INITIALISM_PRONUNCIATIONS", {
-            **chatterbox.INITIALISM_PRONUNCIATIONS, "XYZ": "X-Y-Z",
-        })
+        prompts = tmp_path / "changed-prompts"
+        prompts.mkdir()
+        prompt = (config.PROMPTS_DIR / "tts_pronunciation.txt").read_text()
+        (prompts / "tts_pronunciation.txt").write_text(prompt + "\nTest policy change.\n")
+        monkeypatch.setattr(config, "PROMPTS_DIR", prompts)
     assert config.voice_preview_cache_dir(chatterbox.MODEL_ID) != original_preview
-    await generate()
-    assert len(server.jobs) == len(set(server.post_keys)) == verifier.await_count == 2
+    assert chatterbox.cache_contract() != original_contract
+    with pytest.raises(RuntimeError, match="submitted jobs"):
+        await generate()
+    assert len(server.jobs) == len(set(server.post_keys)) == verifier.await_count == 1
+    assert plan_path.read_bytes() == plan
+    assert checkpoint_path.read_bytes() == checkpoint
+    server.pronunciation_ai.assert_awaited_once()
     manifest = json.loads((directory / "tts_manifest.json").read_text())
-    assert manifest["cache_contract"] == chatterbox.cache_contract() != original_contract
+    assert manifest["cache_contract"] == original_contract
     metadata = json.loads((directory / "tts_input_part_001_generated.json").read_text())
-    assert metadata["identity"]["pronunciation_version"] == chatterbox.PRONUNCIATION_VERSION
-    assert metadata["identity"]["initialism_pronunciations"] == chatterbox.INITIALISM_PRONUNCIATIONS
+    assert metadata["identity"]["pronunciation_policy"] == original_contract["pronunciation_policy"]
 
 
 @pytest.mark.asyncio
@@ -391,17 +477,48 @@ async def test_generation_freezes_pronunciation_policy_before_network_await(setu
     def change_pronunciation_after_request(request):
         response = handle(request)
         if request.url.path == "/v1/capabilities":
-            monkeypatch.setitem(chatterbox.INITIALISM_PRONUNCIATIONS, "CNBC", "C N B C")
-            monkeypatch.setattr(chatterbox, "PRONUNCIATION_VERSION", initial_contract["pronunciation_version"] + 1)
+            monkeypatch.setattr(tts_pronunciation, "POLICY_VERSION", initial_contract["pronunciation_policy"]["version"] + 1)
         return response
 
     server.handle = change_pronunciation_after_request
     await generate()
-    assert server.jobs["job-1"]["request"]["text"] == (
-        f"{initial_contract['initialism_pronunciations']['CNBC']} reported the complete story today."
-    )
+    assert server.jobs["job-1"]["request"]["text"] == "C-N-B-C reported the complete story today."
     manifest = json.loads((directory / "tts_manifest.json").read_text())
     assert manifest["cache_contract"] == initial_contract
+    plan = json.loads((directory / "tts_pronunciation.json").read_text())
+    assert plan["identity"]["policy"] == initial_contract["pronunciation_policy"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_ai_pronunciation_fails_before_any_synthesis_submission(setup_client):
+    server, script, directory, verifier, generate = setup_client
+    source = "CNBC reported the complete story today."
+    script.write_text(source, encoding="utf-8")
+    server.pronunciation_ai.side_effect = None
+    server.pronunciation_ai.return_value = json.dumps({"decisions": [{
+        "id": 0, "source": "CNBC", "action": "spell", "spoken": "C-B-C",
+        "reason": "Invalid fixture drops the source letter N.",
+    }]})
+    with pytest.raises(RuntimeError, match="AI plan failed validation"):
+        await generate()
+    assert server.pronunciation_ai.await_count == tts_pronunciation.MAX_PLAN_ATTEMPTS
+    assert not server.post_keys
+    assert not server.jobs
+    assert not (directory / "tts_pronunciation.json").exists()
+    assert not (directory / "tts_manifest.json").exists()
+    assert script.read_text() == source
+    verifier.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_script_without_pronunciation_candidates_skips_model_request(setup_client):
+    server, script, directory, _verifier, generate = setup_client
+    assert (await generate()).is_file()
+    server.pronunciation_route.assert_not_awaited()
+    server.pronunciation_ai.assert_not_awaited()
+    plan = json.loads((directory / "tts_pronunciation.json").read_text())
+    assert plan["decisions"] == plan["edits"] == []
+    assert plan["synthesis_text"] == script.read_text()
 
 
 @pytest.mark.asyncio

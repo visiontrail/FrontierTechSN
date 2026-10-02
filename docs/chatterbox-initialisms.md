@@ -5,22 +5,30 @@ The pinned multilingual tokenizer lowercases text before encoding, so uppercase
 
 ## Provider input policy
 
-`backend/pipeline/chatterbox.py` maintains an explicit English initialism map.
-Most listed names use letter separators (`CNBC` → `C-N-B-C`). Observed
-exceptions use explicit letter names: `AI` → `ay eye`, `API` → `ay pee eye`,
-`GPU` → `gee pee you`, and `GPT` → `gee pee tee`. The official English voice
-collapsed `A-I`, `A I` and `A. I.` into a sound transcribed as `iChips` in the
-test sentence. A subsequent list of API, GPU and GPT also lost letters with
-hyphens alone, so separator-only handling was not accepted for those names.
-The [pinned punctuation normalization](https://github.com/resemble-ai/chatterbox/blob/5de7a54aa4e5e2baadb0182dde554908b48b85c2/src/chatterbox/mtl_tts.py#L65-L102)
-preserves hyphens between letters; it rewrites a space-hyphen-space sequence.
+`backend/pipeline/tts_pronunciation.py` asks the application's configured AI
+model to review the full English script before synthesis. The prompt is
+`backend/prompts/tts_pronunciation.txt`; there is no named-initialism allowlist.
+Typography identifies candidate occurrences, including uppercase fragments in
+mixed-case brands, plural forms and numbered models. The model decides per
+occurrence whether to preserve a word reading or supply spoken letter names.
+The same spelling may receive different decisions in different contexts.
+URLs, email addresses and domains are excluded.
 
-Only explicitly listed uppercase names are changed. This avoids changing word
-acronyms such as NASA, NATO, ARM, DRAM and RAM or ordinary uppercase emphasis.
-Possessives and hyphenated compounds are supported. Mixed-case names, plural
-suffixes such as GPUs, attached model numbers such as GPT4, URLs and email
-addresses stay unchanged. Add new exceptions only with a representative live
-voice sample; no spelling hint guarantees every stochastic utterance.
+The prompt explains the installed voice's observed articulation behavior:
+explicit letter-name words generally work better than separated literal
+letters; an `N` can turn phonetic `en` into `and`, so candidates containing N
+use hyphens throughout. Conventional repeated-letter readings are allowed.
+These are general prompt rules derived from the samples below, not a complete
+acoustic guarantee for untested names. The model remains responsible for
+deciding which occurrences need spelling.
+
+Every model decision is validated before any TTS job is submitted. A generic
+English alphabet checks that a spoken spelling retains exactly the original
+letters in order. Missing decisions, invented expansions, omitted letters,
+changed candidate text and invalid output fail validation. One bounded repair
+attempt includes the validation error; persistent failures stop before
+synthesis. This alphabet is a validation vocabulary, not a name-to-reading
+dictionary. Text outside approved candidate spans cannot be rewritten.
 
 The transformation applies only to Chatterbox's English synthesis request:
 
@@ -28,18 +36,49 @@ The transformation applies only to Chatterbox's English synthesis request:
   manifest source counts and subtitle/timing inputs retain the original text.
 - Actual provider input is stored in `audio/synthesis/tts_input_part_NNN.txt`
   and the audio sidecar's `identity.synthesis_text` / `synthesis_request.text`.
+  `audio/tts_pronunciation.json` stores the source-bound AI plan, reasons,
+  requested/actual model route and hashes; `audio/tts_synthesis.txt` stores the
+  complete revised speech text. Raw AI attempts remain available for audit.
 - Source chunks are bounded using the expanded character and spoken-word
   lengths. An initialism stays within one request; oversized indivisible input
   is rejected before any synthesis request. Audio duration sanity also uses
   the expanded spoken-word count.
-- Pronunciation version and the complete map participate in part, narration
-  and preview cache identities. An old pronunciation cannot reuse an old WAV
-  under the new contract. Request hashing validates the actual provider text;
-  uncertain requests still retain their idempotency key when resumed.
+- Pronunciation policy version, prompt hash and alphabet hash participate in
+  part, narration and preview cache identities. The accepted plan hash also
+  binds each part. Request hashing validates the actual provider text.
+- Save the validated plan before submitting audio jobs, then reuse it without
+  another AI call when resuming. Changing the configured AI model does not
+  rewrite an already accepted plan. A missing/stale plan beside submitted job
+  checkpoints fails closed instead of rebinding their idempotency keys.
 - Natural 1.0x synthesis, voice reference, service build, physical audio checks
   and the existing ASR-advisory policy are retained.
 
-## Live comparison, 2026-10-02
+## Real AI validation, 2026-10-02
+
+Evidence is under `outputs/chatterbox-ai-pronunciation-20261002/`. Calls used
+the configured `yinhe-thinking` model through the existing provider route.
+The context fixture produced:
+
+| Source/context | Model-selected speech text |
+| --- | --- |
+| CNBC | `C-N-B-C` |
+| AI | `ay eye` |
+| Unfamiliar QZVX protocol | `cue zee vee ex` |
+| NASA | `NASA` (keep word reading) |
+| The word IT is emphasized | `IT` (keep) |
+| The IT department | `eye tee` |
+| OpenAI | `Open ay eye` |
+| IEEE | `I triple E` |
+
+A copy of completed video `20261001-062032-2ae717`'s script also passed a real
+model call: 26 candidate occurrences, 26 accepted edits, 54 bounded synthesis
+chunks, and exact canonical-token preservation. See
+`script-check/validation.json` and the saved plan. These checks establish AI
+planning, preservation and segmentation, not fresh acoustic acceptance of
+every new pronunciation. An active production video was left running with its
+existing inputs during these checks.
+
+## Earlier acoustic comparison, 2026-10-02
 
 Evidence is under `outputs/chatterbox-initialisms-20261002/` (ignored runtime
 artifacts). Tests used the deployed pinned V2 service, `space-en-f1`, seed 42,
@@ -59,22 +98,24 @@ The space sample's seed-42 WAV failed the unchanged internal-pause check
 bounded retry at seed 43. The other rows used seed 42. These are acoustic
 transcription observations, not a claim of subjective listening review.
 
-Canonical-input checks exercise the actual adapter and preserve source text.
+These checks exercised the preceding deterministic adapter implementation and
+informed the current AI prompt. Canonical-input checks preserved source text.
 In `acceptance/`, `CNBC reports on AI chips.` matched the independent transcript
 exactly with `C-N-B-C reports on ay eye chips.` as provider input. The second
 chunk confirmed BBC/TSMC, but failed API/GPU/GPT with hyphens alone; that failure
-is retained. `acceptance-v2/` tests the latter sentence with explicit letter-name
-exceptions. Existing finished videos and remote service files are untouched.
+is retained. `acceptance-v2/` tests the latter sentence with explicit letter
+names. Existing finished videos and remote service files are untouched.
 
 Final result: both canonical sentences matched exactly (5/5 and 10/10 source
 words, no token differences). The first sample is 4.16 seconds; the final
 BBC/TSMC/API/GPU/GPT sample is 4.76 seconds. Both pass the current physical
-validator, retain their recorded audio hashes and have the same synthesis text
-under the final pronunciation map. `summary.json` binds these two passing
-samples without overwriting the failed alternatives.
+validator and retain their recorded audio hashes. The first sentence's current
+AI-produced synthesis text matches the previously accepted input exactly.
+`summary.json` binds these two passing samples without overwriting the failed
+alternatives.
 
-Regression checks passed: 379 tests and 53 subtests across TTS, resume,
-Chatterbox service, previews and validation; after the last map adjustments,
-106 tests and 22 subtests passed in the affected Chatterbox/voice suites.
-No remote TTS redeployment, settings migration or full-video regeneration was
-needed for this provider-input repair.
+Regression coverage includes contextual decisions, unknown names, exact
+letter validation, unchanged factual text, URLs, expanded chunk/duration
+budgets, plan tampering, prompt invalidation and resume without another model
+call. This provider-input change requires the local backend to load the new
+code; it requires no remote TTS redeployment or settings migration.
