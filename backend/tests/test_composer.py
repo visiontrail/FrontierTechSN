@@ -572,6 +572,88 @@ def test_sequence_repair_excludes_exact_attributed_media_and_preserves_denial(tm
     planner.assert_not_awaited()
 
 
+@pytest.mark.parametrize("outcome", ["mismatch", "match", "unavailable", "changed_video", "changed_plan"])
+def test_legacy_attribution_reuses_pixels_and_preserves_original_denial(tmp_path, monkeypatch, outcome):
+    from unittest.mock import AsyncMock
+    board, digest = _attributed_sequence_candidate(tmp_path)
+    path = tmp_path / "av_sync_report.next.json"
+    original = json.loads(path.read_text())
+    fresh_review = copy.deepcopy(original["multimodal"])
+    legacy = original["multimodal"]["scenes"][0]
+    legacy.pop("media_sample_contract")
+    legacy.pop("rejected_media_samples")
+    path.write_text(json.dumps(original))
+    before = path.read_bytes()
+    if outcome == "match":
+        fresh_review["scenes"][0].update(passed=True, verdict="match", rejected_media_samples=[])
+    if outcome == "unavailable":
+        fresh_review["scenes"][0].update(rubric_consistent=False, rejected_media_samples=[])
+
+    async def review(candidate, scoped, directory, **kwargs):
+        assert candidate == tmp_path / "video.next.mp4"
+        assert [scene["id"] for scene in scoped["scenes"]] == ["scene-02"]
+        if outcome == "changed_video": candidate.write_bytes(b"new render")
+        if outcome == "changed_plan":
+            plans = json.loads((tmp_path / "visual_plan.json").read_text())
+            plans[1]["media_shots"][0]["source_start"] = 1
+            (tmp_path / "visual_plan.json").write_text(json.dumps(plans))
+        return fresh_review
+
+    reviewer = AsyncMock(side_effect=review)
+    monkeypatch.setattr(composer.multimodal_review, "review_video", reviewer)
+    result = asyncio.run(composer._legacy_media_attribution(
+        tmp_path, board, digest, {"scene-02"}, lambda _: None,
+    ))
+    assert bool(result) is (outcome == "mismatch")
+    assert path.read_bytes() == before
+    assert (tmp_path / "historical.jpg").read_bytes() == b"wrong historical event"
+    assert len(list((tmp_path / "media_attribution").glob("*/report.json"))) == 1
+    if outcome in {"mismatch", "match", "unavailable"}:
+        assert asyncio.run(composer._legacy_media_attribution(
+            tmp_path, board, digest, {"scene-02"}, lambda _: None,
+        )) == result
+    reviewer.assert_awaited_once()
+
+
+def test_interrupted_legacy_attribution_does_not_repeat_browser_request(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    board, digest = _attributed_sequence_candidate(tmp_path)
+    path = tmp_path / "av_sync_report.next.json"
+    report = json.loads(path.read_text())
+    report["multimodal"]["scenes"][0].pop("media_sample_contract")
+    path.write_text(json.dumps(report))
+    reviewer = AsyncMock(side_effect=asyncio.CancelledError())
+    monkeypatch.setattr(composer.multimodal_review, "review_video", reviewer)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(composer._legacy_media_attribution(tmp_path, board, digest, {"scene-02"}, lambda _: None))
+    with pytest.raises(RuntimeError, match="recover its existing browser request"):
+        asyncio.run(composer._legacy_media_attribution(tmp_path, board, digest, {"scene-02"}, lambda _: None))
+    reviewer.assert_awaited_once()
+
+
+def test_legacy_recovery_supplies_exclusion_to_compose_without_copy_retry(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    board, digest = _attributed_sequence_candidate(tmp_path)
+    path = tmp_path / "av_sync_report.next.json"
+    report = json.loads(path.read_text())
+    review = copy.deepcopy(report["multimodal"])
+    report["multimodal"]["scenes"][0].pop("media_sample_contract")
+    report["multimodal"]["scenes"][0].pop("rejected_media_samples")
+    path.write_text(json.dumps(report))
+    before = path.read_bytes()
+    reviewer = AsyncMock(return_value=review)
+    planner = AsyncMock(side_effect=AssertionError("copy cannot fix mismatching media"))
+    monkeypatch.setattr(composer.multimodal_review, "review_video", reviewer)
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", planner)
+    repaired = asyncio.run(composer._load_or_plan_scene_visuals(
+        tmp_path, board, ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None,
+    ))
+    assert repaired[1]["review_rejected_media"][0]["sample_id"] == "scene-02-shot-01"
+    assert repaired[1]["review_repair_source_sha256"] == digest
+    assert path.read_bytes() == before
+    planner.assert_not_awaited()
+
+
 @pytest.mark.parametrize("mutation", ["report_hash", "asset_bytes", "shot_inpoint", "wrong_id", "wrong_src", "wrong_timestamp", "unknown_contract", "missing_sampling_contract", "unavailable", "empty", "no_reason"])
 def test_sequence_exclusion_fails_closed_on_stale_or_incomplete_binding(tmp_path, mutation):
     board, digest = _attributed_sequence_candidate(tmp_path)

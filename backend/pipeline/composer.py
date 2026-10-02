@@ -407,7 +407,9 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
         return "", []
 
 
-def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> dict:
+def _review_rejected_media(
+    output_dir: Path, board: dict, source_hash: str, *, report: dict | None = None,
+) -> dict:
     """Quarantine only the asset visible in a hash-bound failed media sample.
 
     A copy repair cannot fix the wrong person/event in required footage. Keep
@@ -417,7 +419,8 @@ def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> d
     grant no exemption from the normal required-asset contract.
     """
     try:
-        report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
+        if report is None:
+            report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
         if report.get("rendered_video_sha256") != source_hash:
             return {}
         rendered = _strict_json_loads((output_dir / "visual_plan.json").read_bytes())
@@ -473,6 +476,84 @@ def _review_rejected_media(output_dir: Path, board: dict, source_hash: str) -> d
                             "source_media_reason": sample["reason"]} if sequence_review else {}),
                     }]
         return rejected
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
+async def _legacy_media_attribution(
+    output_dir: Path, board: dict, source_hash: str, failed_ids: set[str], log: LogCallback,
+) -> dict:
+    """Supplement a legacy denial without replacing it or rendering again.
+
+    Only the failed sequences missing the shot-attribution contract are reviewed.
+    A fresh match cannot clear the original denial. The supplemental review can
+    only identify exact source bytes for the normal repair and full release gate.
+    """
+    try:
+        original = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
+        prior = original["multimodal"]
+        if (original.get("rendered_video_sha256") != source_hash
+                or prior.get("sampling_contract") != multimodal_review.SAMPLING_CONTRACT):
+            return {}
+        legacy_ids = {
+            row["id"] for row in prior.get("scenes", [])
+            if row["id"] in failed_ids and row.get("passed") is False
+            and row.get("rubric_consistent") is True
+            and row.get("verdict") in {"partial", "mismatch"}
+            and len(row.get("sample_timestamps") or []) > 1
+            and not row.get("media_sample_contract")
+        }
+        if not legacy_ids:
+            return {}
+        scenes = [scene for scene in board["scenes"] if scene["id"] in legacy_ids]
+        if {scene["id"] for scene in scenes} != legacy_ids:
+            return {}
+        plan_path = output_dir / "visual_plan.json"
+        candidate = output_dir / "video.next.mp4"
+        if _sha256_path(candidate) != source_hash:
+            return {}
+        identity = {
+            "rendered_video_sha256": source_hash,
+            "visual_plan_sha256": _sha256_path(plan_path),
+            "scenes": scenes,
+            "media_sample_contract": multimodal_review.MEDIA_SAMPLE_CONTRACT,
+        }
+        key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        directory = output_dir / "media_attribution" / key
+        result_path = directory / "report.json"
+        request_path = directory / "request.json"
+        if result_path.is_file():
+            saved = _strict_json_loads(result_path.read_bytes())
+            if saved.get("identity") != identity:
+                return {}
+            review = saved["review"]
+            log("Visual repair: reusing candidate-bound supplemental media attribution")
+        else:
+            directory.mkdir(parents=True, exist_ok=True)
+            # An interrupted browser request must be recovered, never blindly
+            # repeated by the next compose attempt (including fallback turns).
+            if request_path.exists():
+                raise RuntimeError(f"Supplemental media attribution pending; recover its existing browser request in {directory}")
+            request_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
+            log(f"Visual repair: reviewing {len(scenes)} legacy failed sequence(s) for exact media attribution before rendering")
+            from backend.pipeline.timing import span
+            with span("legacy_media_attribution"):
+                review = await multimodal_review.review_video(
+                    candidate, {**board, "scenes": scenes, "scene_count": len(scenes)}, directory, log=log,
+                )
+            temporary = result_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"identity": identity, "review": review}, indent=2), encoding="utf-8")
+            temporary.replace(result_path)
+        if (_sha256_path(candidate) != source_hash
+                or _sha256_path(plan_path) != identity["visual_plan_sha256"]):
+            return {}
+        supplemental = {
+            "rendered_video_sha256": source_hash,
+            "multimodal": {**review, "scenes": [
+                row for row in review.get("scenes", []) if row.get("id") in legacy_ids
+            ]},
+        }
+        return _review_rejected_media(output_dir, board, source_hash, report=supplemental)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {}
 
@@ -542,6 +623,9 @@ async def _load_or_plan_scene_visuals(
             failed_ids = {row["id"] for row in feedback}
             rejected = _review_rejected_media(output_dir, board, source_hash)
             reassigned = _review_misassigned_webpages(output_dir, board, source_hash)
+            rejected.update(await _legacy_media_attribution(
+                output_dir, board, source_hash, failed_ids - rejected.keys() - reassigned.keys(), log,
+            ))
             media_repairs = [
                 {**plan, "review_rejected_media": rejected[plan["id"]]}
                 for plan in plans if plan["id"] in failed_ids and plan["id"] in rejected
