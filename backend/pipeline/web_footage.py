@@ -335,6 +335,8 @@ def _fallback_analysis(candidate: dict, *, reason: str) -> dict:
 
 def analysis_rejection(analysis: dict) -> str:
     """Use the same minimum suitability as placement, before downloading."""
+    from backend.pipeline.visual_plan import negative_footage_analysis
+
     verdict = str(analysis.get("suitable", "")).strip().casefold()
     reason = str(analysis.get("reason") or "")
     if verdict in {"false", "no", "0", "unsuitable"}:
@@ -343,6 +345,8 @@ def analysis_rejection(analysis: dict) -> str:
         r"no (?:visual )?connection|unrelated|not suitable|does not (?:match|depict)"
         r"|unavailable|cannot (?:view|access|verify)", reason, re.I,
     ):
+        return reason
+    if negative_footage_analysis(analysis):
         return reason
     confidence = float(analysis.get("confidence") or 0)
     if not math.isfinite(confidence) or confidence < 0.65:
@@ -1400,6 +1404,14 @@ async def supplement_web_footage(
             and (not error.get("script_excerpt") or error["script_excerpt"] == shot.get("script_excerpt"))
             and (error.get("stage") != "web-metadata" or error.get("query") == shot["query"])
         }
+        # A retained clip rejected by the shared placement policy must not
+        # spend another browser request on the same source and narration.
+        failed.update(
+            clip.get("source_page_url") for clip in manifest.get("invalidated_clips", [])
+            if (clip.get("plan_query") or clip.get("query")) == shot["plan_query"]
+            and clip.get("script_excerpt") == shot.get("script_excerpt")
+            and analysis_rejection(clip.get("analysis") or {})
+        )
         def eligible(results: list[dict]) -> list[dict]:
             available = []
             for candidate in results:

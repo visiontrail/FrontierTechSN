@@ -210,3 +210,66 @@ def test_preview_filler_exception_preserves_real_rejections(override):
     clip["analysis"].update(override)
     board = {"scenes": [{"id": "owner", "text": clip["script_excerpt"]}]}
     assert visual_plan.match_footage_scene(clip, board) is None
+
+
+def legacy_ambiguous_analysis():
+    return {
+        "analyzer": "gemini-web-via-opencli", "status": "analyzed",
+        "confidence": 0.95, "start_seconds": 11.0, "end_seconds": 24.0,
+        "reason": "This segment features an mRNA animation. It avoids talking-head filler.",
+    }
+
+
+def test_acquisition_and_placement_share_negative_analysis_policy():
+    analysis = legacy_ambiguous_analysis()
+    assert web_footage.analysis_rejection(analysis) == analysis["reason"]
+    clip = approved_fiber_clip()
+    # An explicit contact-sheet approval remains valid under both policies.
+    assert web_footage.analysis_rejection(clip["analysis"]) == ""
+    board = {"scenes": [{"id": "owner", "text": clip["script_excerpt"]}]}
+    assert visual_plan.match_footage_scene(clip, board)
+    clip["analysis"] = analysis
+    assert visual_plan.match_footage_scene(clip, board) is None
+
+
+def test_web_ready_manifest_is_incomplete_when_placement_would_reject(tmp_path):
+    manifest = save_manifest(tmp_path)
+    clip = manifest["clips"][1]
+    clip.update(provider_id="youtube-ytdlp", provider="YouTube", platform="youtube",
+                analysis=legacy_ambiguous_analysis())
+    footage._write_manifest(tmp_path, manifest)
+    assert not footage.acquisition_is_complete(tmp_path, manifest, SCRIPT)
+    resumed = footage._resume_web_manifest(
+        tmp_path, provider="hybrid", script=SCRIPT, orientation="landscape", clip_count=None,
+    )
+    assert [c["id"] for c in resumed["clips"]] == ["clip-01"]
+    assert resumed["clips"][0]["sha256"] == manifest["clips"][0]["sha256"]
+    assert resumed["invalidated_clips"][0]["analysis"] == clip["analysis"]
+    assert resumed["invalidated_clips"][0]["invalidation_reason"] == clip["analysis"]["reason"]
+    assert (tmp_path / clip["local_path"]).read_bytes() == b"clip-02"
+
+
+@pytest.mark.parametrize("already_rejected", [False, True])
+def test_web_rejection_precedes_download_and_is_not_reviewed_twice(tmp_path, monkeypatch, already_rejected):
+    candidate = {"platform": "youtube", "provider_id": "youtube-ytdlp",
+                 "source_page_url": "https://www.youtube.com/watch?v=ambiguous",
+                 "title": "mRNA animation", "duration_seconds": 65}
+    shot = {"query": "mRNA animation", "script_excerpt": "A messenger RNA drug candidate."}
+    invalidated = [{**candidate, **shot, "analysis": legacy_ambiguous_analysis()}] if already_rejected else []
+    manifest = {"clips": [], "invalidated_clips": invalidated}
+    monkeypatch.setattr(web_footage, "MAX_QUERY_REPAIR_ROUNDS", 0)
+    monkeypatch.setattr(web_footage, "_metadata_rejection", lambda *a: "")
+    monkeypatch.setattr(web_footage, "search_youtube", AsyncMock(return_value=[candidate]))
+    review = AsyncMock(return_value=legacy_ambiguous_analysis())
+    download = AsyncMock()
+    monkeypatch.setattr(web_footage, "analyze_candidate_link", review)
+    monkeypatch.setattr(web_footage, "_download_youtube", download)
+    result = asyncio.run(web_footage.supplement_web_footage(
+        task_dir=tmp_path, manifest=manifest, query_plan=[shot], target_total=1,
+        orientation="landscape", script=shot["script_excerpt"],
+    ))
+    assert not result["clips"]
+    download.assert_not_awaited()
+    assert review.await_count == (0 if already_rejected else 1)
+    if not already_rejected:
+        assert result["rejected_candidates"][0]["analysis"] == legacy_ambiguous_analysis()

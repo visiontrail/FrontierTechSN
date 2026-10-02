@@ -1105,6 +1105,8 @@ def acquisition_is_complete(task_dir: Path, manifest: dict | None, script: str) 
         or (requested == 0 and manifest.get("selection_mode") != "ai")
     ):
         return False
+    from backend.pipeline.web_footage import analysis_rejection
+
     root = task_dir.resolve()
     for clip in clips:
         if not isinstance(clip, dict) or not clip.get("local_path") or not clip.get("sha256"):
@@ -1118,6 +1120,10 @@ def acquisition_is_complete(task_dir: Path, manifest: dict | None, script: str) 
             return False
         if _commons_narration_rejection(clip, script) or _commons_visual_rejection(clip):
             return False
+        if (clip.get("platform") in {"youtube", "publisher"}
+                or clip.get("provider_id") in {"youtube-ytdlp", "publisher-direct"}):
+            if analysis_rejection(clip.get("analysis") or {}):
+                return False
     return True
 
 
