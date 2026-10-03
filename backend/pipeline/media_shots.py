@@ -486,7 +486,9 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
                     prompt, json.dumps({"scenes": batch, "validation_feedback":
                                         {scene["id"]: failures[scene["id"]] for scene in batch}}, ensure_ascii=False),
                     *provider, log, f"Shot editor batch {batch_index} ({attempt + 1}/2)",
-                    max_tokens=14000, enable_skills=False, disable_thinking=True,
+                    # Complete direction can exceed 14k; avoid a truncated
+                    # first response before the provider doubles its budget.
+                    max_tokens=28000, enable_skills=False, disable_thinking=True,
                 )
                 entries = _first_json_array(answer) or []
                 indexed = {entry["id"]: entry for entry in entries}

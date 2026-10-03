@@ -236,6 +236,9 @@ def test_no_asset_explainer_is_directed_and_brief_changes_invalidate_checkpoint(
         payload = json.loads(chat.call_args.args[1])["scenes"][0]
         assert payload["assets"] == [] and payload["director_brief"] == board["director_brief"]
         assert chat.call_args.args[2:5] == ("local-endpoint", "configured-model", "not-a-real-key")
+        assert chat.call_args.kwargs == {
+            "max_tokens": 28000, "enable_skills": False, "disable_thinking": True,
+        }
         asyncio.run(ms.plan_media_shots([plan], board, tmp_path))
         assert chat.await_count == 1
         board["director_brief"]["takeaway"] = "Explain the response"
@@ -356,6 +359,9 @@ def test_live_planner_repairs_invalid_output_and_reuses_only_valid_checkpoint(tm
     with patch.object(ms, "inventory", return_value=assets), patch("backend.pipeline.digester._resolve_provider", provider), patch("backend.pipeline.digester._chat", chat):
         report = asyncio.run(ms.plan_media_shots([plan], {"scenes": [scene]}, tmp_path))
         assert chat.await_count == 2
+        assert all(call.kwargs == {
+            "max_tokens": 28000, "enable_skills": False, "disable_thinking": True,
+        } for call in chat.await_args_list)
         assert "measured duration" in chat.call_args_list[1].args[1]
         assert report["scenes"][0]["planner"] == "ai"
         assert plan["media_shots"][0]["kind"] == "paper_collage"
