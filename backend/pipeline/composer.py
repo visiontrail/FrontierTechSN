@@ -1758,13 +1758,16 @@ def _previous_rejection_used_fallback(output_dir: Path) -> bool:
         return False
 
 
-def _director_scene_plans(plans: list[dict], *, quality_retry: bool) -> list[dict]:
+def _director_scene_plans(
+    plans: list[dict], *, quality_retry: bool, reused_bookends: set[str] | None = None,
+) -> list[dict]:
     # Preserve unrelated bookends on retry, but route rejected bookends to the
     # overlay editor: staging their locked media cannot apply layout feedback.
     # Source rolls retain their measured geometry and complete attribution.
     return [
         plan for plan in plans
-        if not plan.get("outro_credits") and ((
+        if plan.get("id") not in (reused_bookends or set())
+        and not plan.get("outro_credits") and ((
             plan.get("archetype") in {"intro", "outro"}
             and (not quality_retry or bool(plan.get("visual_review_feedback")))
         ) or (
@@ -1774,6 +1777,117 @@ def _director_scene_plans(plans: list[dict], *, quality_retry: bool) -> list[dic
             and not plan.get("news_webpage")
         ))
     ]
+
+
+def _bookend_input_fingerprints(
+    board: dict, plans: list[dict], kit_plans: list[scene_kit.ScenePlan], render: RenderSpec,
+) -> dict[str, str]:
+    scenes = {scene["id"]: scene for scene in board.get("scenes", [])}
+    kits = {plan.id: plan for plan in kit_plans}
+    return {
+        plan["id"]: _canonical_sha256({
+            "version": 1, "plan": plan, "scene": scenes.get(plan["id"]),
+            "draft": scene_kit.render_scene(kits[plan["id"]]),
+            "director_prompt": director.SYSTEM_PROMPT,
+            "production_contract": production_plan.CONTRACT, "render": render.to_dict(),
+            "variables": board.get("intro_variables"),
+        })
+        for plan in plans
+        if plan.get("archetype") in {"intro", "outro"}
+        and not plan.get("outro_credits") and plan.get("id") in kits
+    }
+
+
+def _bookend_asset_hashes(output_dir: Path, source: str) -> dict[str, str]:
+    """Hash each file actually loaded by a bookend, including its GSAP runtime."""
+    assets = {}
+    sources = re.findall(r'(?:src|poster|href)\s*=\s*[\"\']([^\"\']+)[\"\']', source)
+    sources += re.findall(r'url\(\s*[\"\']?([^\"\'\s)]+)', source)
+    for src in sources:
+        # Media paths follow the project root; the vendor script uses the
+        # composition-relative path required by the HyperFrames contract.
+        root = output_dir / "compositions" if src.startswith("../") else output_dir
+        assets[src] = _sha256_path(root / src)
+    return assets
+
+
+def _cache_reviewed_bookends(
+    output_dir: Path, fingerprints: dict[str, str], plans: list[dict], frame: FrameSpec,
+    report: dict, video_sha256: str, rendered_sources: dict[str, dict],
+) -> None:
+    """Retain source only after this candidate's complete pixel review approved it."""
+    review = report.get("multimodal") or {}
+    approved = {
+        row.get("id") for row in review.get("scenes") or []
+        if row.get("passed") is True and row.get("rubric_consistent") is True
+        and row.get("verdict") == "match"
+        and row.get("id") not in (review.get("failed_scene_ids") or [])
+    }
+    entries = {}
+    if (
+        report.get("production_preflight", {}).get("passed") is True
+        and report.get("delivery_timeline", {}).get("passed") is True
+        and report.get("delivery_timeline", {}).get("video_sha256") == video_sha256
+        and review.get("sampling_contract") == multimodal_review.SAMPLING_CONTRACT
+    ):
+        for plan in plans:
+            scene_id = plan["id"]
+            if scene_id not in fingerprints or scene_id not in approved:
+                continue
+            try:
+                source = (output_dir / "compositions" / f"{scene_id}.html").read_text(encoding="utf-8")
+                assets = _bookend_asset_hashes(output_dir, source)
+                if (
+                    rendered_sources.get(scene_id) != {"source": source, "assets": assets}
+                    or director.validate_scene_html(source, scene_id, frame, plan=plan)
+                ):
+                    continue
+                entries[scene_id] = {
+                    "input_sha256": fingerprints[scene_id], "source": source,
+                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                    "assets": assets,
+                }
+            except (OSError, ValueError):
+                continue
+    try:
+        _atomic_write_bytes(output_dir / "reviewed_bookends.cache.json", json.dumps({
+            "version": 1, "rendered_video_sha256": video_sha256, "scenes": entries,
+        }, ensure_ascii=False, indent=2).encode("utf-8"))
+    except OSError as exc:
+        logger.warning("Could not retain optional reviewed bookend cache: %s", exc)
+
+
+def _restore_reviewed_bookends(
+    output_dir: Path, fingerprints: dict[str, str], plans: list[dict], frame: FrameSpec,
+    quality_retry_source: str,
+) -> set[str]:
+    """Reuse only sources approved in the exact retained retry candidate."""
+    restored = set()
+    if not quality_retry_source:
+        return restored
+    try:
+        cache = _strict_json_loads((output_dir / "reviewed_bookends.cache.json").read_bytes())
+        if cache.get("version") != 1 or cache.get("rendered_video_sha256") != quality_retry_source:
+            return restored
+        for plan in plans:
+            scene_id = plan["id"]
+            entry = cache.get("scenes", {}).get(scene_id) or {}
+            source = entry.get("source")
+            if (
+                scene_id not in fingerprints or not isinstance(source, str)
+                or (plan.get("visual_review_feedback")
+                    and plan.get("review_repair_source_sha256") == quality_retry_source)
+                or entry.get("input_sha256") != fingerprints[scene_id]
+                or entry.get("source_sha256") != hashlib.sha256(source.encode("utf-8")).hexdigest()
+                or entry.get("assets") != _bookend_asset_hashes(output_dir, source)
+                or director.validate_scene_html(source, scene_id, frame, plan=plan)
+            ):
+                continue
+            _atomic_write_bytes(output_dir / "compositions" / f"{scene_id}.html", source.encode("utf-8"))
+            restored.add(scene_id)
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return restored
 
 
 def _retain_bookend_review_feedback(staged: dict, previous: dict) -> dict:
@@ -2388,6 +2502,13 @@ async def compose_video(
     character_src = assembler.stage_character(output_dir_path) if include_character else None
     assembler.write_scene_files(output_dir_path, kit_plans)
     emit(f"Wrote {len(kit_plans)} deterministic scene draft(s)")
+    bookend_fingerprints = _bookend_input_fingerprints(board, scene_plans, kit_plans, render)
+    reused_bookends = _restore_reviewed_bookends(
+        output_dir_path, bookend_fingerprints, scene_plans, frame, quality_retry_source,
+    )
+    if reused_bookends:
+        emit("Director: reused pixel-reviewed bookend sources with unchanged inputs/assets: "
+             + ", ".join(sorted(reused_bookends)))
 
     # The crews talk to the same provider as the digest stage, so they need its
     # resolved credentials — not just the task's overrides.
@@ -2407,6 +2528,7 @@ async def compose_video(
         quality_retry=bool(quality_retry_source) or any(
             plan.get("visual_review_feedback") for plan in scene_plans
         ),
+        reused_bookends=reused_bookends,
     )
     if quality_retry_source:
         emit("Quality retry: preserving bookend media and directing overlays with frame feedback")
@@ -2444,24 +2566,28 @@ async def compose_video(
                 log=emit,
                 frame=frame,
             )
-            (output_dir_path / "director_report.json").write_text(
-                json.dumps(
-                    {
-                        "authored": outcome.authored,
-                        "rejected": outcome.rejected,
-                        "failures": outcome.failures,
-                        "agents_run": outcome.agents_run,
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
         except Exception as exc:  # noqa: BLE001 - the deterministic scenes still stand
             emit(f"Director unavailable ({exc}); rendering the deterministic scenes")
             outcome = director.DirectorOutcome()
     else:
-        emit("Director agents disabled; rendering the deterministic scenes")
+        if reused_bookends and not director_plans:
+            emit("Director: no new authoring required after verified bookend reuse")
+        else:
+            emit("Director agents disabled; rendering the deterministic scenes")
         outcome = director.DirectorOutcome()
+
+    try:
+        production_plan.write_json(output_dir_path / "director_report.json", {
+            "authored": outcome.authored, "rejected": outcome.rejected,
+            "failures": outcome.failures, "agents_run": outcome.agents_run,
+            "reused_bookends": sorted(reused_bookends),
+        })
+    except OSError as exc:
+        emit(f"Could not write optional director report: {exc}")
+
+    # Reused sources still take the same lint/layout repair and fallback paths
+    # as newly authored scenes, followed by fresh preview and final pixel gates.
+    outcome.authored.extend(sorted(reused_bookends))
 
     # --- 4. Assembly -------------------------------------------------------
     _assert_locked_visual_assets(output_dir_path, scene_plans)
@@ -2590,6 +2716,18 @@ async def compose_video(
     if not pixels_ok:
         raise RuntimeError("Production preview failed before full render: " + "; ".join(pixel_findings)[:1800])
 
+    # Bind reuse to the source/assets that entered this render, not files edited
+    # while the export or its asynchronous pixel review was running.
+    bookend_render_sources = {}
+    for scene_id in bookend_fingerprints:
+        try:
+            source = (output_dir_path / "compositions" / f"{scene_id}.html").read_text(encoding="utf-8")
+            bookend_render_sources[scene_id] = {
+                "source": source, "assets": _bookend_asset_hashes(output_dir_path, source),
+            }
+        except (OSError, ValueError):
+            pass
+
     # --- 5. Render ---------------------------------------------------------
     staged_video_path = output_dir_path / "video.next.mp4"
     staged_video_path.unlink(missing_ok=True)
@@ -2677,6 +2815,10 @@ async def compose_video(
     )
     quality_report_path.write_text(
         json.dumps(quality_report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    _cache_reviewed_bookends(
+        output_dir_path, bookend_fingerprints, scene_plans, frame,
+        quality_report, rendered_video_sha256, bookend_render_sources,
     )
     if gemini_review.get("passed"):
         emit(

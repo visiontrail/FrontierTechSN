@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.pipeline import composer, visual_plan
-from backend.pipeline.video_format import PORTRAIT
+from backend.pipeline import composer, scene_kit, visual_plan
+from backend.pipeline.video_format import LANDSCAPE, PORTRAIT, resolve_render_spec
 
 
 def test_quality_retry_preserves_configured_bookends_but_still_directs_unlocked_scenes():
@@ -34,6 +34,153 @@ def test_rejected_bookend_keeps_locked_preset_and_reaches_overlay_editor():
     assert plan["review_repair_source_sha256"] == "candidate"
     assert plan["visual_review_feedback"] == feedback
     assert composer._director_scene_plans([plan], quality_retry=True) == [plan]
+
+
+@pytest.fixture
+def reviewed_bookend(tmp_path):
+    plan = {
+        "id": "scene-01", "archetype": "intro", "duration": 6.0,
+        "footage_src": "assets/intro/background.mp4", "footage_kind": "video",
+        "intro_logo_src": "assets/intro/logo.png", "intro_style": "morning-brief",
+        "edition_date": "OCTOBER 03, 2026", "edition_weekday": "SATURDAY",
+        "visual_review_feedback": {"issues": ["Old candidate feedback"]},
+        "review_repair_source_sha256": "older-candidate",
+    }
+    board = {"scenes": [{"id": "scene-01", "duration": 6.0, "text": "Opening"}]}
+    kit = scene_kit.ScenePlan.from_dict(plan, duration=6.0, scene_id="scene-01")
+    draft = scene_kit.render_scene(kit)
+    source = draft + "\n<!-- pixel-reviewed overlay -->\n"
+    path = tmp_path / "compositions" / "scene-01.html"
+    path.parent.mkdir()
+    path.write_text(source)
+    for asset in ("assets/intro/background.mp4", "assets/intro/logo.png", "vendor/gsap.min.js"):
+        target = tmp_path / asset
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"unchanged asset")
+    render = resolve_render_spec()
+    fingerprints = composer._bookend_input_fingerprints(board, [plan], [kit], render)
+    report = {
+        "production_preflight": {"passed": True},
+        "delivery_timeline": {"passed": True, "video_sha256": "candidate"},
+        "multimodal": {
+            "passed": False, "sampling_contract": composer.multimodal_review.SAMPLING_CONTRACT,
+            "failed_scene_ids": ["scene-07"], "scenes": [{
+                "id": "scene-01", "passed": True, "rubric_consistent": True, "verdict": "match",
+            }],
+        },
+    }
+    rendered = {"scene-01": {"source": source, "assets": composer._bookend_asset_hashes(tmp_path, source)}}
+    return plan, board, kit, fingerprints, report, rendered, source, draft, path
+
+
+def test_quality_retry_reuses_reviewed_bookend_without_discarding_old_feedback(tmp_path, reviewed_bookend):
+    plan, _, _, fingerprints, report, rendered, source, draft, path = reviewed_bookend
+    composer._cache_reviewed_bookends(
+        tmp_path, fingerprints, [plan], LANDSCAPE, report, "candidate", rendered,
+    )
+    path.write_text(draft)  # The normal assembler regenerates all deterministic drafts.
+    reused = composer._restore_reviewed_bookends(tmp_path, fingerprints, [plan], LANDSCAPE, "candidate")
+    assert reused == {"scene-01"}
+    assert path.read_text() == source
+    assert plan["visual_review_feedback"] == {"issues": ["Old candidate feedback"]}
+    other = {"id": "scene-07", "archetype": "topic"}
+    assert composer._director_scene_plans(
+        [plan, other], quality_retry=True, reused_bookends=reused,
+    ) == [other]
+
+
+@pytest.mark.parametrize("mutation", [
+    "rejected", "unknown", "inconsistent", "preflight", "delivery", "sampling",
+    "source_changed", "delivery_hash",
+])
+def test_bookend_cache_requires_current_complete_pixel_evidence(tmp_path, reviewed_bookend, mutation):
+    plan, _, _, fingerprints, report, rendered, _, draft, path = reviewed_bookend
+    review = report["multimodal"]
+    if mutation == "rejected":
+        review["failed_scene_ids"].append("scene-01")
+    elif mutation == "unknown":
+        review["scenes"][0]["passed"] = None
+    elif mutation == "inconsistent":
+        review["scenes"][0]["rubric_consistent"] = False
+    elif mutation in {"preflight", "delivery"}:
+        report["production_preflight" if mutation == "preflight" else "delivery_timeline"]["passed"] = False
+    elif mutation == "sampling":
+        review["sampling_contract"] = "legacy-summary"
+    elif mutation == "delivery_hash":
+        report["delivery_timeline"]["video_sha256"] = "stale-candidate"
+    else:
+        path.write_text(draft)  # Source edited during rendering/review has no pixel provenance.
+    composer._cache_reviewed_bookends(
+        tmp_path, fingerprints, [plan], LANDSCAPE, report, "candidate", rendered,
+    )
+    assert composer._restore_reviewed_bookends(
+        tmp_path, fingerprints, [plan], LANDSCAPE, "candidate",
+    ) == set()
+    assert composer._director_scene_plans([plan], quality_retry=True) == [plan]
+
+
+def test_optional_bookend_cache_io_failure_does_not_fail_delivery(tmp_path, reviewed_bookend, monkeypatch):
+    plan, _, _, fingerprints, report, rendered, *_ = reviewed_bookend
+
+    def fail_write(*args):
+        raise OSError("read-only cache location")
+
+    monkeypatch.setattr(composer, "_atomic_write_bytes", fail_write)
+    composer._cache_reviewed_bookends(
+        tmp_path, fingerprints, [plan], LANDSCAPE, report, "candidate", rendered,
+    )
+
+
+@pytest.mark.parametrize("mutation", [
+    "candidate", "source", "asset", "input", "current_feedback", "missing", "malformed",
+])
+def test_bookend_cache_invalidates_instead_of_skipping_authoring(tmp_path, reviewed_bookend, mutation):
+    plan, _, _, fingerprints, report, rendered, _, draft, path = reviewed_bookend
+    composer._cache_reviewed_bookends(
+        tmp_path, fingerprints, [plan], LANDSCAPE, report, "candidate", rendered,
+    )
+    path.write_text(draft)
+    cache_path = tmp_path / "reviewed_bookends.cache.json"
+    candidate = "candidate"
+    if mutation == "candidate":
+        candidate = "different-candidate"
+    elif mutation == "source":
+        cache = json.loads(cache_path.read_text())
+        cache["scenes"]["scene-01"]["source"] += "changed source"
+        cache_path.write_text(json.dumps(cache))
+    elif mutation == "asset":
+        (tmp_path / "assets/intro/background.mp4").write_bytes(b"replaced asset")
+    elif mutation == "input":
+        fingerprints["scene-01"] = "changed-input"
+    elif mutation == "current_feedback":
+        plan["review_repair_source_sha256"] = candidate
+    elif mutation == "missing":
+        cache_path.unlink()
+    else:
+        cache_path.write_text("[]")
+    reused = composer._restore_reviewed_bookends(tmp_path, fingerprints, [plan], LANDSCAPE, candidate)
+    assert reused == set()
+    assert path.read_text() == draft
+    assert composer._director_scene_plans([plan], quality_retry=True, reused_bookends=reused) == [plan]
+
+
+@pytest.mark.parametrize("mutation", ["narration", "timing", "edition", "feedback", "draft"])
+def test_bookend_fingerprint_tracks_inputs_without_including_other_scenes(reviewed_bookend, mutation):
+    plan, board, kit, fingerprints, *_ = reviewed_bookend
+    board["scenes"].append({"id": "scene-07", "text": "Unrelated correction"})
+    render = resolve_render_spec()
+    assert composer._bookend_input_fingerprints(board, [plan], [kit], render) == fingerprints
+    if mutation == "narration":
+        board["scenes"][0]["text"] = "Revised opening"
+    elif mutation == "timing":
+        board["scenes"][0]["duration"] = 9.0
+    elif mutation == "edition":
+        plan["edition_date"] = "OCTOBER 04, 2026"
+    elif mutation == "feedback":
+        plan["visual_review_feedback"] = {"issues": ["New failure"]}
+    else:
+        kit = scene_kit.ScenePlan.from_dict(plan, duration=9.0, scene_id="scene-01")
+    assert composer._bookend_input_fingerprints(board, [plan], [kit], render) != fingerprints
 
 
 @pytest.mark.parametrize("enabled,passed,providers,valid,expected", [
