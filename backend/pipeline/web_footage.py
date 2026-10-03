@@ -54,6 +54,12 @@ class WebFootageError(RuntimeError):
     """One candidate failed without invalidating the rest of the scout."""
 
 
+class WebFootagePreviewRefused(WebFootageError):
+    """The provider declined these pixels; they have no suitability approval."""
+
+    failure_kind = "image_refusal"
+
+
 class WebFootageReviewUnavailable(WebFootageError):
     """The review did not execute; candidate suitability remains undecided."""
 
@@ -968,6 +974,48 @@ def _preview_response_payload(output: str, *, batch: bool) -> dict:
     )
 
 
+def _preview_image_refused(output: str) -> bool:
+    """Recognize only the observed, unambiguous image refusal response."""
+    try:
+        value = json.loads(output)
+    except (TypeError, ValueError):
+        return False
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    if not isinstance(value, dict) or set(value) not in ({"response"}, {"Response"}):
+        return False
+    response = value.get("response", value.get("Response"))
+    if not isinstance(response, str):
+        return False
+    response = " ".join(response.removeprefix("💬").strip().replace("’", "'").split())
+    return response == (
+        "Sorry I can't help with that image. Try uploading another image or describing "
+        "the image you tried to upload and I can help you that way."
+    )
+
+
+def _saved_preview_refusal(sheet: Path, request: dict) -> Path | None:
+    """Reuse a refusal only for the exact pixels, prompt and response contract."""
+    if not request["sheet_sha256"]:
+        return None
+    for path in sorted((sheet.parent / "review-attempts").glob("*/request.json")):
+        try:
+            if json.loads(path.read_text(encoding="utf-8")) != request:
+                continue
+        except (OSError, ValueError):
+            continue
+        for attempt in sorted(path.parent.glob("attempt-*.json")):
+            try:
+                record = json.loads(attempt.read_text(encoding="utf-8"))
+                if (isinstance(record, dict) and record.get("provider") == "gemini"
+                        and record.get("returncode") == 0
+                        and _preview_image_refused(record.get("stdout", ""))):
+                    return attempt
+            except (OSError, ValueError):
+                continue
+    return None
+
+
 def _validate_preview_response(payload: dict, prepared: dict[int, dict], *, batch: bool) -> None:
     """Separate an unusable answer from an explicit rejection of the pixels."""
     if batch:
@@ -1002,15 +1050,22 @@ async def _request_preview_review(
 ) -> dict:
     from backend.pipeline.multimodal_review import _review_command
 
+    request = {
+        "prompt": prompt, "sheet_sha256": _sha256(sheet) if sheet.is_file() else None,
+        "contract": "footage-preview-batch" if batch else "footage-preview",
+        "candidate_ids": list(prepared),
+    }
+    refused = _saved_preview_refusal(sheet, request)
+    if refused is not None:
+        _emit(log, f"Web footage: reusing saved image refusal: {refused}")
+        raise WebFootagePreviewRefused(
+            f"Gemini declined this preview image; suitability remains unverified. Evidence: {refused}"
+        )
     # Each retry invocation gets its own directory so resuming a failed task
     # cannot overwrite the response that explains the original failure.
     evidence = sheet.parent / "review-attempts" / uuid.uuid4().hex
     evidence.mkdir(parents=True, exist_ok=True)
-    _write_manifest(evidence / "request.json", {
-        "prompt": prompt, "sheet_sha256": _sha256(sheet) if sheet.is_file() else None,
-        "contract": "footage-preview-batch" if batch else "footage-preview",
-        "candidate_ids": list(prepared),
-    })
+    _write_manifest(evidence / "request.json", request)
     attempts = _preview_attempt_budget() if max_attempts is None else max_attempts
     last_error: Exception | None = None
     failure_kind = "transport"
@@ -1037,6 +1092,12 @@ async def _request_preview_review(
                 raise OpenCLIError(
                     f"OpenCLI Gemini preview failed with exit {result.returncode}: "
                     f"{(result.stderr or result.stdout)[-1200:]}"
+                )
+            if _preview_image_refused(result.stdout):
+                record.update(status="refused", failure_kind="image_refusal")
+                raise WebFootagePreviewRefused(
+                    "Gemini declined this preview image; suitability remains unverified. "
+                    f"Evidence: {evidence / f'attempt-{attempt:02d}.json'}"
                 )
             payload = _preview_response_payload(f"{result.stdout}\n{result.stderr}", batch=batch)
             _validate_preview_response(payload, prepared, batch=batch)

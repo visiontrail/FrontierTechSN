@@ -273,7 +273,8 @@ def test_scout_consumes_batch_results_before_reviewing_alternate_queries(tmp_pat
 
 
 @pytest.mark.parametrize('approved_index', [2, None])
-def test_one_remaining_shot_reviews_three_candidates_once(tmp_path, approved_index):
+@pytest.mark.parametrize('refused', [False, True])
+def test_one_remaining_shot_reviews_three_candidates_once(tmp_path, approved_index, refused):
     plan = [{'query': 'convention centre', 'purpose': 'Narrated venue', 'script_excerpt': 'The venue opened.'}]
     manifest = {'provider_id': 'youtube-web', 'clips': [], 'errors': [], 'url_inspection_unavailable': True}
     candidates = [{'source_page_url': f'https://youtu.be/{i}', 'title': f'Centre {i}',
@@ -288,6 +289,7 @@ def test_one_remaining_shot_reviews_three_candidates_once(tmp_path, approved_ind
         assert [entry[0]['source_page_url'] for entry in requests] == [c['source_page_url'] for c in candidates]
         return [({'start_seconds': 5, 'end_seconds': 20, 'suitable': True, 'confidence': .9,
                   'analyzer': 'test'} if i == approved_index else
+                 web_footage.WebFootagePreviewRefused('Provider declined image') if refused else
                  web_footage.WebFootageError('Preview visual review rejected: unrelated event'))
                 for i in range(3)]
     async def run():
@@ -303,7 +305,9 @@ def test_one_remaining_shot_reviews_three_candidates_once(tmp_path, approved_ind
             )
         assert review.await_count == 1
         assert len(result['clips']) == (1 if approved_index is not None else 0)
-        assert len(result['rejected_candidates']) == (2 if approved_index is not None else 3)
+        assert len(result.get('rejected_candidates', [])) == (
+            0 if refused else 2 if approved_index is not None else 3
+        )
         if approved_index is not None:
             assert result['clips'][0]['source_page_url'] == candidates[approved_index]['source_page_url']
             assert result['status'] == 'ready'
@@ -916,3 +920,74 @@ def test_preview_generation_timeout_expands_only_the_bounded_retry_deadline(tmp_
     assert [call.kwargs['timeout'] for call in request.await_args_list] == [180, 300, 420, 420]
     records = sorted(tmp_path.glob('review-attempts/*/attempt-*.json'))
     assert [json.loads(path.read_text())['timeout_seconds'] for path in records] == [120, 240, 360, 360]
+
+
+IMAGE_REFUSAL = (
+    "💬 Sorry I can't help with that image. Try uploading another image or describing "
+    "the image you tried to upload and I can help you that way."
+)
+
+
+@pytest.mark.parametrize('changed', [None, 'pixels', 'prompt', 'contract', 'candidate_ids'])
+def test_explicit_image_refusal_stops_retries_and_reuses_only_bound_evidence(tmp_path, changed):
+    sheet = tmp_path / 'sheet.jpg'
+    sheet.write_bytes(b'original pixels')
+    refusal = OpenCLIResult((), 0, json.dumps([{'response': IMAGE_REFUSAL}]), '')
+    args = dict(prompt='Review actual frames', sheet=sheet,
+                prepared={0: {'intervals': [{}]}}, batch=False, log=None, max_attempts=10)
+    with patch.object(web_footage, 'run_opencli', AsyncMock(return_value=refusal)) as ask:
+        with pytest.raises(web_footage.WebFootagePreviewRefused):
+            asyncio.run(web_footage._request_preview_review(**args))
+        assert ask.await_count == 1
+        record = next(tmp_path.glob('review-attempts/*/attempt-*.json'))
+        original = record.read_bytes()
+        assert json.loads(original)['status'] == 'refused'
+        if changed == 'pixels':
+            sheet.write_bytes(b'changed pixels')
+        elif changed == 'prompt':
+            args['prompt'] += ' Different narration.'
+        elif changed == 'contract':
+            args['batch'] = True
+        elif changed == 'candidate_ids':
+            args['prepared'] = {1: {'intervals': [{}]}}
+        with pytest.raises(web_footage.WebFootagePreviewRefused):
+            asyncio.run(web_footage._request_preview_review(**args))
+        assert ask.await_count == (2 if changed else 1)
+        assert record.read_bytes() == original
+
+
+@pytest.mark.parametrize('value', [
+    [{'response': IMAGE_REFUSAL}, {'response': IMAGE_REFUSAL}],
+    {'prompt': IMAGE_REFUSAL},
+    {'response': IMAGE_REFUSAL, 'suitable': True},
+    {'response': 'Quoted refusal: ' + IMAGE_REFUSAL},
+    {'response': 'Image upload unavailable; please wait'},
+    {'response': {'image_received': True, 'suitable': False, 'reason': IMAGE_REFUSAL}},
+])
+def test_other_responses_are_not_misclassified_as_terminal_image_refusals(value):
+    assert not web_footage._preview_image_refused(json.dumps(value))
+
+
+def test_batch_image_refusal_preserves_individual_approval_and_denial(tmp_path):
+    async def prepare(candidate, excerpt, root):
+        folder = root / candidate['source_page_url']
+        folder.mkdir()
+        sheet = folder / 'sheet.jpg'
+        Image.new('RGB', (160, 90), 'blue').save(sheet)
+        return {'folder': folder, 'sheet': sheet,
+                'intervals': [{'start_seconds': 5, 'end_seconds': 20}]}
+
+    approval = {'image_received': True, 'suitable': True, 'confidence': .9,
+                'selected_window': 0, 'visible_content': 'Relevant laboratory equipment'}
+    denial = {'image_received': True, 'suitable': False, 'reason': 'Unrelated scene'}
+    replies = [json.dumps([{'response': IMAGE_REFUSAL}]), json.dumps(approval), json.dumps(denial)]
+    with (patch.object(web_footage, '_prepare_candidate_preview', AsyncMock(side_effect=prepare)),
+          patch.object(web_footage, 'run_opencli', AsyncMock(side_effect=[
+              OpenCLIResult((), 0, reply, '') for reply in replies])) as ask):
+        results = asyncio.run(web_footage._analyze_preview_batch([
+            ({'source_page_url': str(i), 'title': str(i)}, f'narration {i}') for i in range(2)
+        ], tmp_path))
+    assert ask.await_count == 3
+    assert results[0]['suitable'] is True
+    assert isinstance(results[1], web_footage.WebFootageError)
+    assert 'Unrelated scene' in str(results[1])
