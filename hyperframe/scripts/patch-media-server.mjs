@@ -22,12 +22,44 @@ ${original}`)
   return patched.replace(/^(#![^\n]*\n)?/, (prefix) => `${prefix}${marker}\n${source}\n`)
 }
 
+const nodeMarker = '// FrontierTechSN: range-aware Node inspection media responses'
+const nodeSource = 'import { nodeMediaResponse as frontierNodeMediaResponse } from "../../../scripts/media-response.mjs";'
+// Exact HyperFrames 0.6.99 staticProjectServer anchor, distinct from Hono above.
+const nodeBefore = `    if (existsSync62(filePath)) {
+      res.writeHead(200, { "Content-Type": getMimeType(filePath) });
+      res.end(readFileSync49(filePath));
+      return;
+    }`
+const nodeAfter = `    if (existsSync62(filePath)) {
+      const contentType = getMimeType(filePath);
+      if (contentType.startsWith("audio/") || contentType.startsWith("video/")) {
+        frontierNodeMediaResponse(req, res, filePath, contentType);
+        return;
+      }
+      res.writeHead(200, { "Content-Type": getMimeType(filePath) });
+      res.end(readFileSync49(filePath));
+      return;
+    }`
+
+export function patchInspectMediaServer(code) {
+  const markerCount = code.split(nodeMarker).length - 1
+  const beforeCount = code.split(nodeBefore).length - 1
+  const afterCount = code.split(nodeAfter).length - 1
+  const importCount = code.split(nodeSource).length - 1
+  if (markerCount === 1 && beforeCount === 0 && afterCount === 1 && importCount === 1) return code
+  if (markerCount !== 0 || beforeCount !== 1 || afterCount !== 0 || importCount !== 0) {
+    throw new Error(`HyperFrames Node media-server patch expected 1 original anchor or 1 complete patch, found original=${beforeCount}, patched=${afterCount}, markers=${markerCount}, imports=${importCount}; review the installed version before inspecting`)
+  }
+  return code.replace(nodeBefore, nodeAfter)
+    .replace(/^(#![^\n]*\n)?/, (prefix) => `${prefix}${nodeMarker}\n${nodeSource}\n`)
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const cli = new URL('../node_modules/hyperframes/dist/cli.js', import.meta.url)
   const original = readFileSync(cli, 'utf8')
-  const patched = patchInspectNavigation(patchRenderRecovery(patchMediaServer(original)))
+  const patched = patchInspectNavigation(patchRenderRecovery(patchInspectMediaServer(patchMediaServer(original))))
   if (patched !== original) {
     writeFileSync(cli, patched)
-    console.log('Applied HyperFrames media Range, render recovery and bounded inspect navigation fixes')
+    console.log('Applied HyperFrames Fetch/Node media Range, render recovery and bounded inspect navigation fixes')
   }
 }
