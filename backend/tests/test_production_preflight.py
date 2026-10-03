@@ -68,6 +68,84 @@ def test_inspect_timeout_persists_a_failed_report(tmp_path, monkeypatch):
     assert json.loads(path.read_text())["passed"] is False
 
 
+def _navigation_failure(**overrides):
+    return {
+        "schemaVersion": 1, "ok": False,
+        "error": "Navigation timeout of 10000 ms exceeded",
+        "issues": [], "errorCount": 0, "warningCount": 0,
+        "infoCount": 0, "issueCount": 0, **overrides,
+    }
+
+
+def test_inspect_retries_only_presampling_navigation_failure(tmp_path, monkeypatch):
+    commands = []
+    first = _navigation_failure()
+
+    def run(**kwargs):
+        commands.append(kwargs["command"])
+        payload = first if len(commands) == 1 else _inspection()
+        return subprocess.CompletedProcess([], 1 if len(commands) == 1 else 0,
+                                           json.dumps(payload), "")
+
+    monkeypatch.setattr(assembler, "run_capture_logged", run)
+    path = tmp_path / "production_preflight.json"
+    clean, findings = assembler.inspect_project(tmp_path, timestamps=[1, 5.25], report_path=path)
+    assert clean and not findings
+    assert len(commands) == 2 and commands[0] == commands[1]
+    report = json.loads(path.read_text())
+    assert report["attempts"][0]["inspection"] == first
+    assert report["attempts"][1]["inspection"]["samples"] == [1, 5.25]
+    assert all(attempt["elapsed_seconds"] >= 0 for attempt in report["attempts"])
+
+
+@pytest.mark.parametrize("second,code", [
+    (_navigation_failure(), 1),
+    (_inspection(samples=[1]), 0),
+    (_inspection(), 1),
+    (_inspection(issues=[{"severity": "error", "message": "Clipped text"}], errorCount=1), 0),
+    ("not json", 0),
+])
+def test_inspect_retry_is_bounded_and_keeps_all_gates(tmp_path, monkeypatch, second, code):
+    calls = []
+
+    def run(**kwargs):
+        calls.append(kwargs)
+        payload = _navigation_failure() if len(calls) == 1 else second
+        return subprocess.CompletedProcess([], 1 if len(calls) == 1 else code,
+                                           json.dumps(payload) if isinstance(payload, dict) else payload, "")
+
+    monkeypatch.setattr(assembler, "run_capture_logged", run)
+    path = tmp_path / "production_preflight.json"
+    clean, findings = assembler.inspect_project(tmp_path, timestamps=[1, 5.25], report_path=path)
+    assert not clean and findings and len(calls) == 2
+    assert json.loads(path.read_text())["passed"] is False
+
+
+@pytest.mark.parametrize("overrides,code", [
+    ({"samples": [1]}, 1),
+    ({"duration": 10}, 1),
+    ({"issues": [{"severity": "error", "message": "Clipped text"}]}, 1),
+    ({"warningCount": 1}, 1),
+    ({"errorCount": False}, 1),
+    ({"schemaVersion": 2}, 1),
+    ({"schemaVersion": True}, 1),
+    ({"error": "Runtime did not become render-ready"}, 1),
+    ({"error": "Navigation timeout of 30000 ms exceeded"}, 1),
+    ({}, 0),
+    ({}, 2),
+])
+def test_inspect_does_not_retry_other_failures(tmp_path, monkeypatch, overrides, code):
+    calls = []
+
+    def run(**kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess([], code, json.dumps(_navigation_failure(**overrides)), "")
+
+    monkeypatch.setattr(assembler, "run_capture_logged", run)
+    clean, findings = assembler.inspect_project(tmp_path, timestamps=[1, 5.25])
+    assert not clean and findings and len(calls) == 1
+
+
 def _write_frame(path, *, blank=False):
     frame = Image.new("RGB", (160, 90), "white")
     if not blank:

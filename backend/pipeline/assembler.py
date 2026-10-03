@@ -23,6 +23,7 @@ import math
 import re
 import shutil
 import subprocess
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -50,6 +51,24 @@ LINT_TIMEOUT = 180
 # so it costs real time on a long episode — but it is the only check that sees
 # text overflowing a card or two blocks landing on top of each other.
 INSPECT_TIMEOUT = 900
+
+
+def _inspect_navigation_timeout(result: subprocess.CompletedProcess, payload: object) -> bool:
+    """Recognize the CLI's pre-sampling navigation failure, never layout findings."""
+    return (
+        result.returncode == 1
+        and isinstance(payload, dict)
+        and type(payload.get("schemaVersion")) is int
+        and payload.get("schemaVersion") == 1
+        and payload.get("ok") is False
+        and payload.get("error") == "Navigation timeout of 10000 ms exceeded"
+        and payload.get("samples") in (None, [])
+        and "duration" not in payload
+        and payload.get("issues") == []
+        and all(type(payload.get(key)) is int and payload[key] == 0 for key in (
+            "errorCount", "warningCount", "infoCount", "issueCount",
+        ))
+    )
 
 CAPTION_MAX_WORDS = 6
 CAPTION_MAX_CJK_CHARS = 28
@@ -507,16 +526,32 @@ def inspect_project(
             requested = sorted({round(value, 3) for value in values})
             command += ["--at", ",".join(f"{value:.3f}" for value in requested)]
         report["requested_timestamps"] = requested
-        result = run_capture_logged(
-            name="HyperFrames inspect",
-            command=command,
-            logger=logger,
-            log=None,
-            timeout=INSPECT_TIMEOUT,
-        )
-        report["returncode"] = result.returncode
-        report["stderr"] = result.stderr[-2000:]
-        payload = json.loads(result.stdout)
+        report["attempts"] = []
+        for attempt in range(2):
+            evidence: dict = {"attempt": attempt + 1}
+            report["attempts"].append(evidence)
+            started = time.monotonic()
+            try:
+                result = run_capture_logged(
+                    name="HyperFrames inspect",
+                    command=command,
+                    logger=logger,
+                    log=None,
+                    timeout=INSPECT_TIMEOUT,
+                )
+                report["returncode"] = evidence["returncode"] = result.returncode
+                report["stderr"] = evidence["stderr"] = result.stderr[-2000:]
+                # Retain failed infrastructure evidence even when a fresh browser
+                # succeeds. A retry must still supply every requested sample.
+                payload = json.loads(result.stdout)
+                evidence["inspection"] = payload
+            finally:
+                evidence["elapsed_seconds"] = time.monotonic() - started
+            if attempt == 0 and _inspect_navigation_timeout(result, payload):
+                if log:
+                    log("Inspect: navigation timed out before sampling; retrying once in a fresh browser")
+                continue
+            break
         if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
             raise ValueError("inspect returned an unsupported or missing JSON schema")
         report["inspection"] = payload
