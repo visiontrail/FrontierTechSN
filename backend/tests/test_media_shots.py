@@ -466,6 +466,57 @@ def _batch_answer(content):
                        for scene in json.loads(content)["scenes"]])
 
 
+def test_direction_constraints_repair_only_current_rejected_candidate(tmp_path):
+    plans, board, assets = _batch_contexts(2)
+    for plan, digest in zip(plans, ["historical-video", "current-video"]):
+        plan["review_repair_source_sha256"] = digest
+        plan["visual_review_feedback"] = {
+            "issues": ["The second clause appears before its promised reveal."],
+            "suggested_visual": "Use a supported staged explanation.",
+        }
+    batches = []
+
+    async def chat(prompt, content, *args, **kwargs):
+        batches.append(json.loads(content)["scenes"])
+        return _batch_answer(content)
+
+    provider = AsyncMock(return_value=("endpoint", "model", "key"))
+    with patch.object(ms, "inventory", return_value=assets), patch(
+        "backend.pipeline.digester._resolve_provider", provider
+    ), patch("backend.pipeline.digester._chat", side_effect=chat):
+        original = asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+        report_path = tmp_path / "av_sync_report.next.json"
+        report_path.write_text(json.dumps({
+            "rendered_video_sha256": "current-video",
+            "multimodal": {"failed_scene_ids": ["scene-01"]},
+        }))
+        repaired = asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+        assert [scene["id"] for scene in batches[-1]] == ["scene-01"]
+        feedback = batches[-1][0]["visual_review_feedback"]
+        assert len(feedback["production_constraints"]) == 3
+        assert "indivisible" in feedback["production_constraints"][0]
+        assert "actual selected asset" in feedback["production_constraints"][1]
+        assert "Do not repeat exact copy-id groups" in feedback["production_constraints"][2]
+        assert all("production_constraints" not in plan["visual_review_feedback"] for plan in plans)
+        assert [row["input_sha256"] for row in repaired["scenes"]] == [
+            row["input_sha256"] for row in original["scenes"]
+        ]
+        assert repaired["scenes"][1]["direction_repair"]["video_sha256"] == "current-video"
+        asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+        assert len(batches) == 2  # Reuse this exact constrained repair on resume.
+
+        # A later candidate rejects another scene. Historical feedback and the
+        # repaired scene's unchanged context must not force both through the model.
+        plans[0]["review_repair_source_sha256"] = "next-video"
+        report_path.write_text(json.dumps({
+            "rendered_video_sha256": "next-video",
+            "multimodal": {"failed_scene_ids": ["scene-00"]},
+        }))
+        asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+        assert len(batches) == 3
+        assert [scene["id"] for scene in batches[-1]] == ["scene-00"]
+
+
 def test_editor_batches_overlap_with_a_two_request_cap_and_reuse_results(tmp_path):
     async def exercise():
         plans, board, assets = _batch_contexts(9)

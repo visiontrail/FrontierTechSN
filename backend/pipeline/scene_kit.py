@@ -1944,7 +1944,7 @@ def _render_media_shots(plan: ScenePlan) -> str:
     sid = plan.id
     css = f"""
   #{sid} .shot-media {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
-  #{sid} .shot-media.article {{ object-fit:contain; background:{bg}; padding:48px 100px 160px; box-sizing:border-box; }}
+  #{sid} .shot-media.article {{ width:58%; object-fit:contain; background:{bg}; padding:48px 28px 100px 48px; box-sizing:border-box; }}
   #{sid} .shot-media.contained {{ object-fit:contain; background:{bg}; padding:56px 100px 110px; box-sizing:border-box; }}
   #{sid} .shot-media.contained-photo {{ width:46%; padding:56px 32px 100px 64px; }}
   #{sid} .shot-panel {{ position:absolute; inset:0; padding:76px 110px 180px; box-sizing:border-box; font-family:{SANS}; }}
@@ -1997,16 +1997,24 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .shot-grid.shot-pair.split {{ grid-template-columns:1.05fr 1fr; }}
   #{sid} .shot-pair > .shot-card {{ min-width:0; margin:0; padding:36px; }}
   #{sid} .shot-pair .shot-number {{ display:none; }}
-  #{sid} .shot-pair .shot-title {{ font-size:60px; line-height:1.12; max-width:none; margin:0; overflow-wrap:anywhere; }}
-  #{sid} .shot-pair .shot-pair-title.dense .shot-title {{ font-size:46px; }}
-  #{sid} .shot-pair .shot-copy {{ font-size:40px; line-height:1.3; }}
-  #{sid} .shot-pair .dense .shot-copy {{ font-size:34px; }}
+  #{sid} .shot-pair .shot-title {{ max-width:none; margin:0; overflow-wrap:anywhere; }}
   #{sid} .visual .shot-grid.shot-pair {{ display:grid; max-width:1400px; }}
   #{sid} .visual .shot-pair > .shot-card {{ padding:24px 28px; background:rgba(9,11,19,.68); border-left:3px solid {accent}; }}
-  #{sid} .visual .shot-pair .shot-title {{ font-size:44px; }}
-  #{sid} .visual .shot-pair .shot-pair-title.dense .shot-title {{ font-size:40px; }}
-  #{sid} .visual .shot-pair .shot-copy {{ font-size:36px; }}
-  #{sid} .visual .shot-pair .dense .shot-copy {{ font-size:32px; }}
+  #{sid} .shot-pair {{ --pair-copy-size:52px; }}
+  #{sid} .shot-pair[data-pair-density="dense"] {{ --pair-copy-size:40px; }}
+  #{sid} .visual .shot-pair {{ --pair-copy-size:40px; }}
+  #{sid} .visual .shot-pair[data-pair-density="dense"] {{ --pair-copy-size:34px; }}
+  #{sid} .shot-panel.article-panel {{ left:58%; padding:100px 64px 140px 40px; justify-content:center; background:{bg}; color:{ink}; }}
+  #{sid} .article-panel .shot-kicker {{ color:{label_ink}; }}
+  #{sid} .article-panel .shot-title {{ font-size:44px; line-height:1.16; }}
+  #{sid} .article-panel[data-copy-density="dense"] .shot-title {{ font-size:36px; }}
+  #{sid} .article-panel .shot-copy {{ font-size:30px; }}
+  #{sid} .article-panel .shot-credit {{ position:static; align-self:flex-start; order:10; margin-top:24px; max-width:100%; }}
+  #{sid} .article-panel .shot-grid.shot-pair {{ grid-template-columns:1fr; }}
+  #{sid} .article-panel .shot-pair > .shot-card {{ background:{card}; padding:22px; }}
+  #{sid} .article-panel .shot-pair {{ --pair-copy-size:32px; }}
+  #{sid} .article-panel .shot-pair[data-pair-density="dense"] {{ --pair-copy-size:28px; }}
+  #{sid} .shot-panel .shot-pair[data-pair-density] .shot-title, #{sid} .shot-panel .shot-pair[data-pair-density] .shot-copy {{ font-size:var(--pair-copy-size); line-height:1.16; font-weight:700; color:inherit; }}
   #{sid} .contained-photo .shot-grid.shot-pair {{ grid-template-columns:1fr; }}
   #{sid} .shot-wipe {{ position:absolute; inset:0; background:{accent}; pointer-events:none; }}
 """
@@ -2035,6 +2043,8 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .shot-panel.editorial[data-shot-layout="focus"] .shot-title {{ font-size:76px; }}
   #{sid} .shot-panel.editorial[data-shot-layout="focus"][data-copy-density="dense"] .shot-title {{ font-size:56px; }}
   #{sid} .shot-grid.shot-pair, #{sid} .shot-grid.shot-pair.split {{ grid-template-columns:1fr; }}
+  #{sid} .shot-media.article {{ width:100%; height:52%; padding:60px 64px 24px; }}
+  #{sid} .shot-panel.article-panel {{ left:0; top:52%; padding:32px 64px 170px; justify-content:flex-start; }}
 """
     markup = []
     timeline = []
@@ -2063,7 +2073,7 @@ def _render_media_shots(plan: ScenePlan) -> str:
             markup.append(f'<{tag} id="{prefix}-media" class="clip shot-media {kind}{media_class}" '
                           f'src="{_esc(shot["src"])}" {timing} data-track-index="{media_track}" '
                           f'{extra} crossorigin="anonymous">' + ("</video>" if video else ""))
-            if not video and not contain:
+            if not video and not contain and kind != "article":
                 timeline.append(f'inAt("#{prefix}-media", {{scale:1}}, {{scale:1.035, duration:{duration:.2f}, ease:"none"}}, {start:.2f});')
             elif contain:
                 timeline.append(f'inAt("#{prefix}-media", {{opacity:0}}, {{opacity:1, duration:{min(.4, duration):.2f}, ease:"sine.out"}}, {start:.2f});')
@@ -2095,14 +2105,14 @@ def _render_media_shots(plan: ScenePlan) -> str:
             # Two selected assertions need two actual panels. Keep the first
             # copy as the title and retain the existing animation target ids.
             content = (
-                f'<div id="{prefix}-pair" class="shot-grid {layout} shot-pair">'
+                f'<div id="{prefix}-pair" class="shot-grid {layout} shot-pair" data-pair-density="{"dense" if max(map(len, selected)) > 100 else "normal"}">'
                 f'<div id="{prefix}-title-panel" class="shot-card shot-pair-title{" dense" if len(title) > 100 else ""}">'
                 + title_html + '</div>' + "".join(cards) + '</div>'
             )
         else:
             content = title_html + f'<div class="shot-grid {layout}">{"".join(cards)}</div>'
         markup.append(
-            f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}{" contained-photo" if portrait_photo else ""}" '
+            f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}{" contained-photo" if portrait_photo else ""}{" article-panel" if kind == "article" else ""}" '
             f'{timing} data-track-index="{panel_track}" data-shot-layout="{layout}" data-copy-density="{"dense" if len(title) > 100 else "normal"}" {cue_attributes}>'
             + f'<div class="shot-kicker" id="{prefix}-kicker">{_esc(plan.kicker)}</div>'
             + f'<div class="shot-rule" id="{prefix}-rule"></div>'

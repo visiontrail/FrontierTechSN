@@ -457,6 +457,95 @@ def test_quality_retry_stops_before_rendering_unchanged_scene_again(tmp_path, mo
         ))
 
 
+def _directed_noop_candidate(root):
+    board = {**_cache_board(), "scene_count": 2,
+             "director_brief": {"contract": composer.production_plan.CONTRACT}}
+    plans = _cache_plans()
+    plans[1] = {"id": "scene-02", "archetype": "statement",
+                "headline": "Living circuit boards", "grounding_source": "model",
+                "media_shots": [{"kind": "editorial", "start": 0, "duration": 5.5,
+                                 "copy": ["Living circuit boards"]}]}
+    _write_cache(root, board, plans)
+    digest = _failed_visual_candidate(root)
+    (root / "av_sync_report.next.json").write_text(json.dumps({
+        "rendered_video_sha256": digest, "passed": False,
+        "production_method": {"contract": composer.production_plan.CONTRACT},
+        "multimodal": {"scenes": [{"id": "scene-02", "passed": False, "rubric_consistent": True}]},
+    }))
+    (root / "compositions").mkdir()
+    source = '<style>.shot-panel {color:#bbbbbb}</style><div id="scene-02-shot-1-panel" class="clip shot-panel" data-start="0" data-duration="5.5">Living circuit boards</div>'
+    (root / "compositions/scene-02.html").write_text(source)
+    return board, digest, source
+
+
+@pytest.mark.parametrize("change", ["none", "annotations", "missing", "layout"])
+def test_directed_copy_noop_requires_changed_authored_scene_before_render(tmp_path, monkeypatch, change):
+    from unittest.mock import AsyncMock
+
+    board, digest, source = _directed_noop_candidate(tmp_path)
+    cached = composer._load_cached_scene_plans(tmp_path, board)
+    planner = AsyncMock(return_value=[cached[1]])
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", planner)
+    kwargs = dict(ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None)
+    plans = asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs))
+    assert plans[1]["headline"] == cached[1]["headline"]
+    assert plans[1]["review_render_repair"] == {
+        "rendered_video_sha256": digest,
+        "scene_render_sha256": composer._scene_render_signature(source),
+    }
+    assert plans[1]["visual_review_feedback"]["issues"] == ["Missing quantified context"]
+    path = tmp_path / "compositions/scene-02.html"
+    if change == "annotations":
+        path.write_text('<!-- repaired direction -->\n' + source.replace('class="clip', 'data-cue-settle="2" class="clip'))
+    elif change == "missing":
+        path.unlink()
+    elif change == "layout":
+        path.write_text(source.replace("#bbbbbb", "#14161f"))
+    # A process restart preserves the original baseline, even if authoring was
+    # already attempted; neither feedback nor the provider request is repeated.
+    resumed = asyncio.run(composer._load_or_plan_scene_visuals(tmp_path, board, **kwargs))
+    assert resumed == plans
+    planner.assert_awaited_once()
+    if change == "layout":
+        composer._assert_render_repairs_changed(tmp_path, resumed, digest)
+    else:
+        with pytest.raises(RuntimeError, match="unchanged shot composition"):
+            composer._assert_render_repairs_changed(tmp_path, resumed, digest)
+    assert composer._sha256_path(tmp_path / "video.next.mp4") == digest
+    assert json.loads((tmp_path / "av_sync_report.next.json").read_text())["passed"] is False
+
+
+@pytest.mark.parametrize("mutation", ["hash", "contract", "unreviewed", "no_shots", "missing_source"])
+def test_directed_copy_noop_cannot_defer_without_current_render_evidence(tmp_path, monkeypatch, mutation):
+    from unittest.mock import AsyncMock
+
+    board, _, _ = _directed_noop_candidate(tmp_path)
+    report_path = tmp_path / "av_sync_report.next.json"
+    report = json.loads(report_path.read_text())
+    if mutation == "hash":
+        report["rendered_video_sha256"] = "another-candidate"
+    elif mutation == "contract":
+        report["production_method"]["contract"] = "legacy"
+    elif mutation == "unreviewed":
+        report["multimodal"]["scenes"][0]["rubric_consistent"] = False
+    elif mutation == "no_shots":
+        plans = json.loads((tmp_path / "visual_plan.json").read_text())
+        plans[1].pop("media_shots")
+        _write_cache(tmp_path, board, plans)
+    elif mutation == "missing_source":
+        (tmp_path / "compositions/scene-02.html").unlink()
+    report_path.write_text(json.dumps(report))
+    before = (tmp_path / "visual_plan.json").read_bytes()
+    cached = composer._load_cached_scene_plans(tmp_path, board)
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", AsyncMock(return_value=[cached[1]]))
+    with pytest.raises(RuntimeError, match="unchanged visible content"):
+        asyncio.run(composer._load_or_plan_scene_visuals(
+            tmp_path, board, ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None,
+        ))
+    assert (tmp_path / "visual_plan.json").read_bytes() == before
+    assert composer._pending_visual_repairs(tmp_path, cached)[1]
+
+
 def _mismatching_media_candidate(root, verdict="mismatch"):
     board = {**_cache_board(), "scene_count": 2}
     plans = _cache_plans()

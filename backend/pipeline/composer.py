@@ -615,6 +615,78 @@ def _review_misassigned_webpages(output_dir: Path, board: dict, source_hash: str
         return {}
 
 
+def _scene_render_signature(source: str) -> str:
+    """Ignore annotation-only changes when checking a deferred render repair.
+
+    This proves only that authored render input changed, never that the visual
+    denial was resolved. Preflight and the full rendered-frame gate still run.
+    """
+    source = re.sub(r"<!--.*?-->", "", source, flags=re.S)
+    source = re.sub(r'\sdata-cue-[\w-]+="[^"]*"', "", source)
+    source = re.sub(r"(?m)^\s*//[^\n]*$", "", source)
+    source = re.sub(r">\s+<", "><", source).strip()
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
+def _directed_render_repair_baselines(
+    output_dir: Path, board: dict, source_hash: str, scene_ids: set[str],
+) -> dict:
+    """Defer a copy no-op only for current, reviewed directed shot sequences."""
+    if not scene_ids or (board.get("director_brief") or {}).get("contract") != production_plan.CONTRACT:
+        return {}
+    try:
+        report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
+        if (report.get("rendered_video_sha256") != source_hash
+                or (report.get("production_method") or {}).get("contract") != production_plan.CONTRACT):
+            return {}
+        denied = {row["id"] for row in report.get("multimodal", {}).get("scenes", [])
+                  if row.get("passed") is False and row.get("rubric_consistent") is True}
+        rendered = _strict_json_loads((output_dir / "visual_plan.json").read_bytes())
+        baselines = {}
+        for plan in rendered:
+            scene_id = plan["id"]
+            if scene_id not in scene_ids or scene_id not in denied or not plan.get("media_shots"):
+                continue
+            path = output_dir / "compositions" / f"{scene_id}.html"
+            if not path.resolve().is_relative_to((output_dir / "compositions").resolve()):
+                continue
+            source = path.read_text(encoding="utf-8")
+            media_shots.assert_rendered_shots(plan, source)
+            baselines[scene_id] = {
+                "rendered_video_sha256": source_hash,
+                "scene_render_sha256": _scene_render_signature(source),
+            }
+        return baselines
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
+def _assert_render_repairs_changed(output_dir: Path, plans: list[dict], source_hash: str) -> None:
+    """Stop a deferred copy no-op before preflight/export if nothing rendered changed."""
+    if not source_hash:
+        return
+    unchanged = []
+    for plan in plans:
+        baseline = plan.get("review_render_repair") or {}
+        if baseline.get("rendered_video_sha256") != source_hash:
+            continue
+        path = output_dir / "compositions" / f"{plan['id']}.html"
+        try:
+            signature = _scene_render_signature(path.read_text(encoding="utf-8"))
+        except OSError:
+            signature = None
+        original = baseline.get("scene_render_sha256")
+        if (not isinstance(original, str) or re.fullmatch(r"[0-9a-f]{64}", original) is None
+                or not signature or signature == original):
+            unchanged.append(plan["id"])
+    if unchanged:
+        raise RuntimeError(
+            "Visual review repair returned unchanged shot composition for "
+            + ", ".join(unchanged)
+            + "; retaining the rejected candidate and requiring a concrete render repair"
+        )
+
+
 async def _load_or_plan_scene_visuals(
     output_dir: Path,
     board: dict,
@@ -683,11 +755,21 @@ async def _load_or_plan_scene_visuals(
                 and all(by_id[row["id"]].get(key) == value
                        for key, value in row["previous_copy"].items())
             ]
-            if unchanged:
+            render_repairs = _directed_render_repair_baselines(
+                output_dir, board, source_hash, set(unchanged),
+            )
+            unrepairable = [scene_id for scene_id in unchanged if scene_id not in render_repairs]
+            if unrepairable:
                 raise RuntimeError(
                     "Visual review repair returned unchanged visible content for "
-                    + ", ".join(unchanged)
+                    + ", ".join(unrepairable)
                 )
+            for scene_id, baseline in render_repairs.items():
+                # Layout, timing and animation denials may leave factual copy
+                # intact. Let the shot editor/renderer apply that feedback, but
+                # require changed authored output before another full export.
+                by_id[scene_id]["review_render_repair"] = baseline
+                log(f"Visual plan {scene_id}: retaining grounded copy; requiring a changed shot composition before render")
             for repaired_plan in repaired:
                 repaired_plan["review_repair_source_sha256"] = source_hash
                 repaired_plan["review_repair_kind"] = (
@@ -2479,6 +2561,7 @@ async def compose_video(
     # A repair or future agent implementation must never drop the selected
     # Gemini plate or exact ByteFront logo after the initial authoring gate.
     _assert_locked_visual_assets(output_dir_path, scene_plans)
+    _assert_render_repairs_changed(output_dir_path, scene_plans, quality_retry_source)
 
     # Inspect the actual settled/action states before paying for a full export.
     # This is mandatory for the directed production contract even when the old

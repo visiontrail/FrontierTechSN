@@ -70,6 +70,31 @@ def _default_direction(kind: str, copy: list[str]) -> dict[str, str]:
             "continuity": subject, "evidence_kind": evidence, "motion": "reveal"}
 
 
+def _repair_feedback(plan: dict, review: dict) -> dict | None:
+    """Constrain the current repair without invalidating unrelated shot caches."""
+    feedback = plan.get("visual_review_feedback", {})
+    source_hash = review.get("rendered_video_sha256")
+    multimodal = review.get("multimodal") or {}
+    if (not isinstance(feedback, dict) or not feedback or not source_hash
+            or not isinstance(multimodal, dict)
+            or plan.get("review_repair_source_sha256") != source_hash
+            or plan.get("id") not in (multimodal.get("failed_scene_ids") or [])):
+        return None
+    return {**feedback, "production_constraints": [
+        "Each supplied copy item is indivisible and must remain verbatim. The renderer "
+        "reveals a whole item, not individual clauses. Never promise to reveal one part "
+        "of a single copy item before another part. A staged explanation requires "
+        "distinct existing copy ids or separate shots; do not split or invent copy.",
+        "Describe only subjects and actions supported by the actual selected asset "
+        "inventory. Narration does not prove that a clip or collage depicts its named "
+        "product, event or mechanism. Do not promise to add objects to immutable media "
+        "or present related illustrative footage as the specific reported event.",
+        "Do not repeat exact copy-id groups across the repair sequence or reuse an "
+        "introductory line as support for an unrelated later claim. Select relevant "
+        "existing copy that advances the explanation; preserve attribution and limits.",
+    ]}
+
+
 def _direction(item: dict, kind: str, copy: list[str], *, required: bool) -> dict:
     defaults = _default_direction(kind, copy)
     supplied = item.get("direction")
@@ -456,6 +481,16 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
             log(message)
 
     by_id = {plan["id"]: plan for plan in plans}
+    try:
+        review = json.loads((task_dir / "av_sync_report.next.json").read_text())
+        if not isinstance(review, dict):
+            review = {}
+    except (OSError, ValueError):
+        review = {}
+    repair_feedback = {
+        plan["id"]: feedback for plan in plans
+        if (feedback := _repair_feedback(plan, review)) is not None
+    }
     contexts = []
     for scene in board.get("scenes", []):
         if scene.get("program_segment_kind") in {"opening", "closing"}:
@@ -493,6 +528,11 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
             "duration": scene["duration"], "coverage": 1.0, "passed": True,
             "review_rejected_media": by_id[scene["id"]].get("review_rejected_media", []),
         }
+        if scene["id"] in repair_feedback:
+            results[scene["id"]]["direction_repair"] = {
+                "contract": "renderable-direction-repair-v1",
+                "video_sha256": review["rendered_video_sha256"],
+            }
         checkpoint.write_text(json.dumps({"input_sha256": fingerprint, "passed": False,
                                           "scenes": list(results.values())}, indent=2, ensure_ascii=False))
         emit(f"Shot editor {scene['id']}: {planner}, "
@@ -500,6 +540,11 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
 
     for scene in contexts:
         selected = cached.get(scene["id"], {})
+        if scene["id"] in repair_feedback and selected.get("direction_repair") != {
+            "contract": "renderable-direction-repair-v1",
+            "video_sha256": review["rendered_video_sha256"],
+        }:
+            continue
         if selected.get("input_sha256") == scene["input_sha256"]:
             try:
                 accept(scene, selected, selected.get("planner", "ai"))
@@ -512,7 +557,10 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
         async with gate:
             try:
                 answer = await _chat(
-                    prompt, json.dumps({"scenes": batch, "validation_feedback":
+                    prompt, json.dumps({"scenes": [
+                        {**scene, "visual_review_feedback": repair_feedback[scene["id"]]}
+                        if scene["id"] in repair_feedback else scene for scene in batch
+                    ], "validation_feedback":
                                         {scene["id"]: failures[scene["id"]] for scene in batch}}, ensure_ascii=False),
                     *provider, log, f"Shot editor batch {batch_index} ({attempt + 1}/2)",
                     # Complete direction can exceed 14k; avoid a truncated
