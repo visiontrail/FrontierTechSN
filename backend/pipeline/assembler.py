@@ -61,7 +61,10 @@ def _inspect_navigation_timeout(result: subprocess.CompletedProcess, payload: ob
         and type(payload.get("schemaVersion")) is int
         and payload.get("schemaVersion") == 1
         and payload.get("ok") is False
-        and payload.get("error") == "Navigation timeout of 10000 ms exceeded"
+        and payload.get("error") in (
+            "Navigation timeout of 10000 ms exceeded",  # Original pinned CLI.
+            "Navigation timeout of 60000 ms exceeded",  # Persistent navigation patch.
+        )
         and payload.get("samples") in (None, [])
         and "duration" not in payload
         and payload.get("issues") == []

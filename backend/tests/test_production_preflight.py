@@ -68,18 +68,19 @@ def test_inspect_timeout_persists_a_failed_report(tmp_path, monkeypatch):
     assert json.loads(path.read_text())["passed"] is False
 
 
-def _navigation_failure(**overrides):
+def _navigation_failure(timeout_ms=10000, **overrides):
     return {
         "schemaVersion": 1, "ok": False,
-        "error": "Navigation timeout of 10000 ms exceeded",
+        "error": f"Navigation timeout of {timeout_ms} ms exceeded",
         "issues": [], "errorCount": 0, "warningCount": 0,
         "infoCount": 0, "issueCount": 0, **overrides,
     }
 
 
-def test_inspect_retries_only_presampling_navigation_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize("timeout_ms", [10000, 60000])
+def test_inspect_retries_only_presampling_navigation_failure(tmp_path, monkeypatch, timeout_ms):
     commands = []
-    first = _navigation_failure()
+    first = _navigation_failure(timeout_ms)
 
     def run(**kwargs):
         commands.append(kwargs["command"])
@@ -100,17 +101,19 @@ def test_inspect_retries_only_presampling_navigation_failure(tmp_path, monkeypat
 
 @pytest.mark.parametrize("second,code", [
     (_navigation_failure(), 1),
+    (_navigation_failure(60000), 1),
     (_inspection(samples=[1]), 0),
     (_inspection(), 1),
     (_inspection(issues=[{"severity": "error", "message": "Clipped text"}], errorCount=1), 0),
     ("not json", 0),
 ])
-def test_inspect_retry_is_bounded_and_keeps_all_gates(tmp_path, monkeypatch, second, code):
+@pytest.mark.parametrize("timeout_ms", [10000, 60000])
+def test_inspect_retry_is_bounded_and_keeps_all_gates(tmp_path, monkeypatch, second, code, timeout_ms):
     calls = []
 
     def run(**kwargs):
         calls.append(kwargs)
-        payload = _navigation_failure() if len(calls) == 1 else second
+        payload = _navigation_failure(timeout_ms) if len(calls) == 1 else second
         return subprocess.CompletedProcess([], 1 if len(calls) == 1 else code,
                                            json.dumps(payload) if isinstance(payload, dict) else payload, "")
 
@@ -131,15 +134,18 @@ def test_inspect_retry_is_bounded_and_keeps_all_gates(tmp_path, monkeypatch, sec
     ({"schemaVersion": True}, 1),
     ({"error": "Runtime did not become render-ready"}, 1),
     ({"error": "Navigation timeout of 30000 ms exceeded"}, 1),
+    ({"error": "Navigation timeout of 60001 ms exceeded"}, 1),
+    ({"error": "Navigation timeout of 600000 ms exceeded"}, 1),
     ({}, 0),
     ({}, 2),
 ])
-def test_inspect_does_not_retry_other_failures(tmp_path, monkeypatch, overrides, code):
+@pytest.mark.parametrize("timeout_ms", [10000, 60000])
+def test_inspect_does_not_retry_other_failures(tmp_path, monkeypatch, overrides, code, timeout_ms):
     calls = []
 
     def run(**kwargs):
         calls.append(kwargs)
-        return subprocess.CompletedProcess([], code, json.dumps(_navigation_failure(**overrides)), "")
+        return subprocess.CompletedProcess([], code, json.dumps(_navigation_failure(timeout_ms, **overrides)), "")
 
     monkeypatch.setattr(assembler, "run_capture_logged", run)
     clean, findings = assembler.inspect_project(tmp_path, timestamps=[1, 5.25])
