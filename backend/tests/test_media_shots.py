@@ -144,7 +144,11 @@ def raw_plan(order=("asset-2", "asset-1", "editorial")):
     duration = {"asset-1": 15.01, "asset-2": 8, "editorial": 3.49}
     return {"id": "scene-02", "shots": [
         {"asset_id": key, "duration": duration[key], "copy_ids": ["copy-1", "copy-2"],
-         "script_excerpt": "The agency has five priorities.", "layout": "cards"}
+         "script_excerpt": "The agency has five priorities.", "layout": "cards",
+         "direction": {"purpose": "Explain the agency's priorities", "subject": "The agency",
+                       "action": "Reveal its named priorities", "continuity": "Agency priorities",
+                       "evidence_kind": {"asset-1": "captured_evidence", "asset-2": "illustration",
+                                         "editorial": "editorial"}[key], "motion": "reveal"}}
         for key in order
     ]}
 
@@ -172,7 +176,8 @@ def test_editor_order_is_preserved_and_covers_the_original_blank_interval(order)
     (lambda p: p["shots"][0].update(duration=-1), "nonnegative"),
     (lambda p: p["shots"][0].update(duration=True), "boolean"),
     (lambda p: p["shots"][2].update(asset_id="asset-2"), "repeated"),
-    (lambda p: p["shots"][0].update(asset_id="editorial"), "omitted"),
+    (lambda p: (p["shots"][0].update(asset_id="editorial"),
+                p["shots"][0]["direction"].update(evidence_kind="editorial")), "omitted"),
 ])
 def test_editor_cannot_ship_gaps_invented_assets_or_repetition(mutation, error):
     raw = raw_plan()
@@ -189,6 +194,138 @@ def test_recovery_keeps_assets_and_fills_long_tail_with_real_information():
     assert {s["kind"] for s in shots} == {"public_footage", "paper_collage", "editorial"}
     assert all(s["duration"] <= 12 for s in shots if s["kind"] == "editorial")
     assert round(sum(s["duration"] for s in shots), 2) == 70.26
+
+
+def test_recovery_reserves_reading_time_for_the_editorial_tail():
+    scene = {"id": "scene-01", "duration": 16, "text": "The system processes a single request."}
+    assets = [{"id": "asset-1", "kind": "public_footage", "duration": 15.01}]
+    copy = [{"id": "copy-1", "text": scene["text"]}]
+    shots = ms.validate(ms.fallback(scene, assets, copy), scene, assets, copy, require_direction=True)
+    assert shots[-1]["kind"] == "editorial" and shots[-1]["duration"] >= 2
+    assert sum(ms.ticks(shot["duration"]) for shot in shots) == 1600
+
+
+def test_recovery_rebudgets_copy_when_trimming_the_previous_shot_for_a_tail():
+    long_copy = "The system processes a request and returns the result while preserving every important detail of the original submitted input data"
+    scene = {"id": "scene-01", "duration": 9, "text": long_copy}
+    assets = [{"id": "asset-1", "kind": "public_footage", "duration": 8.9}]
+    copy = [{"id": "copy-1", "text": long_copy}, {"id": "copy-2", "text": "Request processing"}]
+    raw = ms.fallback(scene, assets, copy)
+    shots = ms.validate(raw, scene, assets, copy, require_direction=True)
+    assert shots[0]["copy_ids"] == ["copy-2"]
+    assert sum(ms.ticks(shot["duration"]) for shot in shots) == 900
+
+
+def test_no_asset_explainer_is_directed_and_brief_changes_invalidate_checkpoint(tmp_path):
+    scene = {"id": "scene-01", "duration": 9, "text": "A request enters the system. Then a response returns."}
+    plan = {"id": scene["id"], "headline": "Request and response", "body": "A response returns"}
+    opening = {"id": "intro", "duration": 2, "text": "Welcome", "program_segment_kind": "opening"}
+    board = {"scenes": [opening, scene], "director_brief": {"takeaway": "Follow one request"}}
+    raw = {"id": scene["id"], "shots": [{"asset_id": "editorial", "duration": 9,
+        "copy_ids": ["copy-1", "copy-2"], "script_excerpt": scene["text"], "layout": "cards",
+        "direction": {"purpose": "Follow a request", "subject": "Request",
+                      "action": "Reveal the response", "continuity": "The same request",
+                      "evidence_kind": "editorial", "motion": "reveal"}}]}
+    chat = AsyncMock(return_value=json.dumps([raw]))
+    provider = AsyncMock(return_value=("local-endpoint", "configured-model", "not-a-real-key"))
+    with patch("backend.pipeline.digester._resolve_provider", provider), patch("backend.pipeline.digester._chat", chat):
+        report = asyncio.run(ms.plan_media_shots([plan], board, tmp_path))
+        assert report["contract_version"] == 3
+        assert [row["id"] for row in report["scenes"]] == [scene["id"]]
+        assert report["scenes"][0]["planner"] == "ai"
+        payload = json.loads(chat.call_args.args[1])["scenes"][0]
+        assert payload["assets"] == [] and payload["director_brief"] == board["director_brief"]
+        assert chat.call_args.args[2:5] == ("local-endpoint", "configured-model", "not-a-real-key")
+        asyncio.run(ms.plan_media_shots([plan], board, tmp_path))
+        assert chat.await_count == 1
+        board["director_brief"]["takeaway"] = "Explain the response"
+        asyncio.run(ms.plan_media_shots([plan], board, tmp_path))
+        assert chat.await_count == 2
+
+
+@pytest.mark.parametrize("duration", [.2, .37, 1, 3.49, 15.01, 120])
+def test_shared_motion_cues_are_deterministic_ordered_and_inside_the_shot(duration):
+    cues = ms.motion_cues(duration)
+    assert list(cues) == ["reveal_start", "reveal_end", "emphasis", "settle"]
+    assert list(cues.values()) == sorted(cues.values())
+    assert 0 < cues["reveal_start"] <= cues["settle"] < duration
+    assert cues == ms.motion_cues(duration)
+
+
+def _relationship(layout="flow"):
+    text = ("A request enters the system. Then a response returns." if layout == "flow" else
+            "The old system uses five steps, whereas the new system uses two steps.")
+    scene = {"id": "scene-02", "text": text, "duration": 12}
+    copy = [{"id": "title", "text": "Request sequence" if layout == "flow" else "Two systems"},
+            {"id": "left", "text": "Request enters" if layout == "flow" else "Old: five steps"},
+            {"id": "right", "text": "Response returns" if layout == "flow" else "New: two steps"}]
+    raw = {"shots": [{"asset_id": "editorial", "duration": 12, "copy_ids": ["title", "left", "right"],
+        "script_excerpt": text, "relationship_excerpt": text, "layout": layout,
+        "motion_cues": {"reveal_start": 999, "settle": -1},
+        "direction": {"purpose": "Explain the stated relationship", "subject": "Request",
+            "action": "Reveal the stated stages", "continuity": "The same system",
+            "evidence_kind": "editorial", "motion": "trace" if layout == "flow" else "compare"}}]}
+    return raw, scene, [], copy
+
+
+@pytest.mark.parametrize("layout", ["flow", "comparison"])
+def test_relationship_layout_uses_grounded_excerpt_and_program_owned_motion(layout):
+    raw, scene, assets, copy = _relationship(layout)
+    shot = ms.validate(raw, scene, assets, copy, require_direction=True)[0]
+    assert shot["layout"] == layout and shot["relationship_excerpt"] == scene["text"]
+    assert shot["motion_cues"] == ms.motion_cues(12)
+
+
+@pytest.mark.parametrize("layout", ["flow", "comparison"])
+def test_relationship_layout_cannot_replace_the_captured_media_frame(layout):
+    raw, scene, _, copy = _relationship(layout)
+    raw["shots"][0]["asset_id"] = "asset-1"
+    raw["shots"][0]["direction"]["evidence_kind"] = "captured_evidence"
+    with pytest.raises(ValueError, match="require an editorial shot"):
+        ms.validate(raw, scene, [{"id": "asset-1", "kind": "image"}], copy, require_direction=True)
+
+
+@pytest.mark.parametrize("mutation,error", [
+    (lambda shot: shot.pop("direction"), "direction object"),
+    (lambda shot: shot["direction"].update(purpose=""), "purpose"),
+    (lambda shot: shot["direction"].update(evidence_kind="captured_evidence"), "actual asset"),
+    (lambda shot: shot.update(relationship_excerpt="A request enters the system."), "grounded relationship"),
+    (lambda shot: shot.update(relationship_excerpt="An invented claim causes a response."), "grounded relationship"),
+    (lambda shot: shot["direction"].update(motion="compare"), "match the grounded layout"),
+    (lambda shot: shot.update(copy_ids=["title", "left", "left"]), "repeats"),
+])
+def test_direction_and_relationship_cannot_invent_evidence_or_duplicate_copy(mutation, error):
+    raw, scene, assets, copy = _relationship()
+    mutation(raw["shots"][0])
+    with pytest.raises(ValueError, match=error):
+        ms.validate(raw, scene, assets, copy, require_direction=True)
+
+
+def test_long_copy_must_have_a_readable_hold_and_legacy_direction_stays_compatible():
+    scene = {"id": "scene-02", "duration": 1, "text": "The system has many important details to explain."}
+    copy = [{"id": "copy-1", "text": scene["text"]}]
+    raw = {"shots": [{"asset_id": "editorial", "duration": 1,
+                     "script_excerpt": scene["text"], "copy_ids": ["copy-1"]}]}
+    assert ms.validate(raw, scene, [], copy)[0]["direction"]["motion"] == "reveal"
+    raw["shots"][0]["direction"] = ms._default_direction("editorial", [scene["text"]])
+    with pytest.raises(ValueError, match="readable attention window"):
+        ms.validate(raw, scene, [], copy, require_direction=True)
+
+
+def test_a_short_cut_cannot_claim_a_three_word_reading_window():
+    scene = {"id": "scene-01", "duration": .2, "text": "Request processing"}
+    copy = [{"id": "copy-1", "text": scene["text"]}]
+    raw = {"shots": [{"asset_id": "editorial", "duration": .2, "copy_ids": ["copy-1"],
+                     "script_excerpt": scene["text"],
+                     "direction": ms._default_direction("editorial", [scene["text"]])}]}
+    with pytest.raises(ValueError, match="readable attention window"):
+        ms.validate(raw, scene, [], copy, require_direction=True)
+
+
+def test_editorial_copy_deduplicates_case_and_punctuation_variants():
+    copy = ms.editorial_copy({"headline": "A request arrives", "body": "A REQUEST ARRIVES."},
+                             {"text": "A request arrives. A response follows."})
+    assert [row["text"] for row in copy] == ["A request arrives", "A response follows."]
 
 
 @pytest.mark.parametrize("theme", list(scene_kit.THEMES))

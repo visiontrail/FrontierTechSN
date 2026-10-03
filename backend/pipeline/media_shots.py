@@ -18,8 +18,79 @@ from backend import config
 from backend.pipeline.image_layout import image_layout
 from backend.pipeline.timing import timed
 
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 MAX_CONCURRENT_BATCHES = 2
+_RELATIONSHIP_MARKERS = {
+    "flow": re.compile(
+        r"\b(?:then|before|after|first|next|finally|because|therefore|leads? to|results? in|"
+        r"causes?|produces?|converts?|transforms?)\b|首先|然后|随后|最后|导致|因此|转化|转换", re.I),
+    "comparison": re.compile(
+        r"\b(?:versus|vs\.?|compared (?:with|to)|whereas|while|unlike|rather than|more than|"
+        r"less than|higher than|lower than|from .+ to)\b|相比|对比|而非|高于|低于|从.+到", re.I),
+}
+
+
+def motion_cues(duration: float) -> dict[str, float]:
+    """One shot-local, centisecond schedule shared by motion and review.
+
+    Keep the existing audio-owned centisecond convention; do not round each
+    consumer independently or retime narration to fit a visual beat.
+    """
+    total = ticks(duration)
+    if total < 20:
+        raise ValueError("shot shorter than 0.20 seconds")
+    reveal = max(1, min(10, total // 12))
+    revealed = max(reveal, min(total * 28 // 100, reveal + 55))
+    emphasis = max(revealed, min(total * 42 // 100, revealed + 65))
+    settled = max(emphasis, min(total * 55 // 100, emphasis + 45))
+    return {"reveal_start": reveal / 100, "reveal_end": revealed / 100,
+            "emphasis": emphasis / 100, "settle": settled / 100}
+
+
+def _reading_units(text: str) -> int:
+    # CJK glyphs carry more information than Latin letters; count the unspaced
+    # characters individually so a Chinese paragraph cannot count as one word.
+    return len(re.findall(r"[\u3400-\u9fff]|[A-Za-z0-9]+(?:['’.-][A-Za-z0-9]+)*", text))
+
+
+def _reading_budget(duration: float) -> int:
+    return max(0, int(float(duration) * 3))
+
+
+def _copy_identity(text: str) -> str:
+    return re.sub(r"\W+", " ", text.casefold()).strip()
+
+
+def _default_direction(kind: str, copy: list[str]) -> dict[str, str]:
+    evidence = ("illustration" if kind == "paper_collage" else
+                "editorial" if kind == "editorial" else "captured_evidence")
+    subject = next((value for value in copy if value), "Narrated subject")[:400]
+    return {"purpose": "Explain the supplied narration with its selected copy",
+            "subject": subject, "action": "Reveal the selected information, then hold for reading",
+            "continuity": subject, "evidence_kind": evidence, "motion": "reveal"}
+
+
+def _direction(item: dict, kind: str, copy: list[str], *, required: bool) -> dict:
+    defaults = _default_direction(kind, copy)
+    supplied = item.get("direction")
+    if supplied is None and not required:
+        return defaults
+    if not isinstance(supplied, dict):
+        raise ValueError("each shot needs a direction object")
+    result = {}
+    for key in ("purpose", "subject", "action", "continuity"):
+        value = supplied.get(key)
+        if not isinstance(value, str) or not value.strip() or len(value) > 400:
+            raise ValueError(f"direction {key} must be concise nonempty text")
+        result[key] = value.strip()
+    if supplied.get("evidence_kind") != defaults["evidence_kind"]:
+        raise ValueError("direction evidence_kind conflicts with the actual asset")
+    result["evidence_kind"] = defaults["evidence_kind"]
+    motion = supplied.get("motion")
+    if motion not in {"reveal", "compare", "trace"}:
+        raise ValueError("unknown direction motion")
+    result["motion"] = motion
+    return result
 
 
 class _Elements(HTMLParser):
@@ -100,7 +171,14 @@ def editorial_copy(plan: dict, scene: dict) -> list[dict]:
         boundaries.append(match.end())
     boundaries.append(len(narration))
     values += [narration[start:end].strip() for start, end in zip(boundaries, boundaries[1:])]
-    unique = list(dict.fromkeys(str(value).strip() for value in values if value and str(value).strip()))
+    unique = []
+    identities = set()
+    for value in values:
+        text = str(value or "").strip()
+        identity = _copy_identity(text)
+        if text and identity not in identities:
+            unique.append(text)
+            identities.add(identity)
     return [{"id": f"copy-{i + 1}", "text": text} for i, text in enumerate(unique)]
 
 
@@ -182,7 +260,8 @@ def review_rejected_sources(plan: dict, task_dir: Path) -> dict:
     return rejected
 
 
-def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict]) -> list[dict]:
+def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict], *,
+             require_direction: bool = False) -> list[dict]:
     allowed = {asset["id"]: asset for asset in assets}
     words = {item["id"]: item["text"] for item in copy}
     seen = set()
@@ -216,17 +295,42 @@ def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict]) -> li
         ids = item.get("copy_ids") or []
         if not isinstance(ids, list) or not ids or len(ids) > 5 or any(key not in words for key in ids):
             raise ValueError("each shot needs 1-5 supplied copy ids")
+        selected_copy = [words[key] for key in ids]
+        comparable_copy = [_copy_identity(text) for text in selected_copy]
+        if len(comparable_copy) != len(set(comparable_copy)):
+            raise ValueError("shot repeats the same title or copy")
+        if require_direction and sum(_reading_units(text) for text in selected_copy) > _reading_budget(duration / 100):
+            raise ValueError("shot copy exceeds its readable attention window; reduce copy or extend the shot")
         layout = item.get("layout", "cards")
         transition = item.get("transition", "wipe")
-        if layout not in {"cards", "focus", "split"} or transition not in {"wipe", "iris"}:
+        if layout not in {"cards", "focus", "split", "flow", "comparison"} or transition not in {"wipe", "iris"}:
             raise ValueError("unknown layout or transition")
+        relation = item.get("relationship_excerpt", "")
+        if not isinstance(relation, str):
+            raise ValueError("relationship_excerpt must be text")
+        if layout in _RELATIONSHIP_MARKERS:
+            if aid != "editorial":
+                raise ValueError("relationship layouts require an editorial shot; preserve captured media framing")
+            if len(ids) < 3 or (layout == "comparison" and len(ids) != 3):
+                raise ValueError("relationship layout needs a title and two distinct supplied claims")
+            if not relation or relation not in scene["text"] or not _RELATIONSHIP_MARKERS[layout].search(relation):
+                raise ValueError("relationship layout lacks an explicit grounded relationship_excerpt")
+        elif relation and relation not in scene["text"]:
+            raise ValueError("relationship_excerpt is not from its narration")
+        direction = _direction(item, asset.get("kind", "editorial"), selected_copy,
+                               required=require_direction)
+        expected_motion = {"flow": "trace", "comparison": "compare"}.get(layout, "reveal")
+        if direction["motion"] != expected_motion:
+            raise ValueError("direction motion must match the grounded layout")
         shots.append({
             **asset, "asset_id": aid, "kind": "hold" if hold else asset.get("kind", "editorial"),
             "start": cursor / 100, "duration": duration / 100,
             "source_start": source_start / 100, "treatment": "hold" if hold else "play",
             "source_duration": asset.get("duration"),
             "script_excerpt": excerpt, "copy_ids": ids,
-            "copy": [words[key] for key in ids], "layout": layout, "transition": transition,
+            "copy": selected_copy, "layout": layout, "transition": transition,
+            "direction": direction, "relationship_excerpt": relation,
+            "motion_cues": motion_cues(duration / 100),
         })
         cursor += duration
     if cursor != ticks(scene["duration"]):
@@ -260,29 +364,55 @@ def fallback(scene: dict, assets: list[dict], copy: list[dict]) -> dict:
     remaining = ticks(scene["duration"])
     shots = []
     excerpt = scene["text"]
+    copy_cursor = 0
+
+    def readable_copy(duration, *, kind):
+        nonlocal copy_cursor
+        selected = []
+        budget = _reading_budget(duration / 100)
+        for offset in range(len(copy)):
+            candidate = copy[(copy_cursor + offset) % len(copy)]
+            units = _reading_units(candidate["text"])
+            if units > budget:
+                continue
+            selected.append(candidate)
+            budget -= units
+            if len(selected) == (3 if kind == "editorial" else 1):
+                break
+        if not selected:
+            raise ValueError("No supplied copy fits the shot's reading window")
+        copy_cursor = (copy.index(selected[-1]) + 1) % len(copy)
+        return {"copy_ids": [entry["id"] for entry in selected],
+                "direction": _default_direction(kind, [entry["text"] for entry in selected])}
+
     for i, asset in enumerate(assets):
         reserve = 20 * (len(assets) - i - 1)
         duration = min(ticks(asset.get("duration", 6)), remaining - reserve)
         if duration < 20:
             raise ValueError("too many required assets for the scene duration")
         shots.append({"asset_id": asset["id"], "duration": duration / 100,
-                      "copy_ids": [copy[0]["id"]], "script_excerpt": excerpt})
+                      **readable_copy(duration, kind=asset["kind"]), "script_excerpt": excerpt})
         remaining -= duration
-    # Avoid a one-frame information flash after centisecond/source rounding.
-    if 0 < remaining < 120 and shots:
-        trim = min(120 - remaining, ticks(shots[-1]["duration"]) - 20)
+    # Leave a readable tail, not a one-frame information flash. When a video
+    # almost fills the scene, shorten its trim rather than accelerating copy.
+    shortest = min((_reading_units(entry["text"]) for entry in copy), default=0)
+    minimum_reading_ticks = max(20, math.ceil(shortest / 3 * 100))
+    tail_minimum = max(120, minimum_reading_ticks)
+    if 0 < remaining < tail_minimum and shots:
+        trim = min(tail_minimum - remaining, ticks(shots[-1]["duration"]) - minimum_reading_ticks)
+        trim = max(0, trim)
         shots[-1]["duration"] = (ticks(shots[-1]["duration"]) - trim) / 100
+        if trim:
+            shots[-1].update(readable_copy(ticks(shots[-1]["duration"]), kind=assets[-1]["kind"]))
         remaining += trim
-    n = 0
     while remaining:
-        parts = max(1, math.ceil(remaining / 1200))
+        parts = max(1, min(math.ceil(remaining / 1200), remaining // minimum_reading_ticks))
         duration = remaining // parts
-        selected = copy[n * 3:(n + 1) * 3] or copy[:3]
+        selected = readable_copy(duration, kind="editorial")
         shots.append({"asset_id": "editorial", "duration": duration / 100,
-                      "copy_ids": [entry["id"] for entry in selected],
-                      "script_excerpt": excerpt, "layout": "cards" if len(selected) > 1 else "focus"})
+                      **selected, "script_excerpt": excerpt,
+                      "layout": "cards" if len(selected["copy_ids"]) > 1 else "focus"})
         remaining -= duration
-        n += 1
     return {"id": scene["id"], "rationale": "Provider/plan recovery using verified assets and grounded editorial graphics", "shots": shots}
 
 
@@ -303,12 +433,11 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
             continue
         plan = by_id[scene["id"]]
         assets = inventory(plan, task_dir)
-        if not assets and not plan.get("review_rejected_media"):
-            continue
         contexts.append({"id": scene["id"], "duration": ticks(scene["duration"]) / 100,
                          "text": scene["text"], "lines": scene.get("lines", []),
                          "assets": assets, "editorial_copy": editorial_copy(plan, scene),
-                         "visual_review_feedback": plan.get("visual_review_feedback", {})})
+                         "visual_review_feedback": plan.get("visual_review_feedback", {}),
+                         "director_brief": board.get("director_brief", {})})
     prompt = (config.PROMPTS_DIR / "media_shots.txt").read_text()
     fingerprint = hashlib.sha256(json.dumps([CONTRACT_VERSION, prompt, contexts], sort_keys=True).encode()).hexdigest()
     checkpoint = task_dir / "media_shots.json"
@@ -326,7 +455,7 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
         ).hexdigest()
 
     def accept(scene, selected, planner):
-        shots = validate(selected, scene, scene["assets"], scene["editorial_copy"])
+        shots = validate(selected, scene, scene["assets"], scene["editorial_copy"], require_direction=True)
         _prepare_holds(shots, task_dir)
         by_id[scene["id"]]["media_shots"] = shots
         results[scene["id"]] = {

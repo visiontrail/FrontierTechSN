@@ -15,11 +15,15 @@ Everything the earlier renders got wrong is enforced here:
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
+import math
 import re
 import shutil
+import subprocess
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -478,28 +482,193 @@ def lint_project(task_dir: Path, log: LogCallback | None = None) -> tuple[bool, 
     return clean, output
 
 
-def inspect_project(task_dir: Path, log: LogCallback | None = None) -> tuple[bool, list[str]]:
+def inspect_project(
+    task_dir: Path,
+    log: LogCallback | None = None,
+    *,
+    timestamps: Sequence[float] | None = None,
+    report_path: Path | None = None,
+) -> tuple[bool, list[str]]:
     """Run ``hyperframes inspect``; return (clean, error findings).
 
-    Unlike lint, these are *layout* failures — overlapping text, content spilling
-    out of a card. They do not stop the render, but they are what makes an
-    otherwise correct scene look broken, so the director gets a chance to fix
-    them before capture starts.
+    The CLI audits browser-rendered geometry at the supplied timeline positions.
+    Missing samples, malformed reports, and failed browser launches must never
+    look like clean layout. Warnings remain visible in the persisted report.
     """
-    result = run_capture_logged(
-        name="HyperFrames inspect",
-        command=_hyperframes_bin() + ["inspect", str(task_dir)],
-        logger=logger,
-        log=None,
-        timeout=INSPECT_TIMEOUT,
-    )
-    output = f"{result.stdout}\n{result.stderr}".strip()
-    findings = [line.strip() for line in output.splitlines() if "✗" in line]
+    command = _hyperframes_bin() + ["inspect", str(task_dir), "--json"]
+    requested: list[float] | None = None
+    findings: list[str] = []
+    report: dict = {"contract": "representative-layout-preflight-v1", "passed": False}
+    try:
+        if timestamps is not None:
+            values = [float(value) for value in timestamps]
+            if not values or any(not math.isfinite(value) or value < 0 for value in values):
+                raise ValueError("inspect timestamps must be nonempty, finite and nonnegative")
+            requested = sorted({round(value, 3) for value in values})
+            command += ["--at", ",".join(f"{value:.3f}" for value in requested)]
+        report["requested_timestamps"] = requested
+        result = run_capture_logged(
+            name="HyperFrames inspect",
+            command=command,
+            logger=logger,
+            log=None,
+            timeout=INSPECT_TIMEOUT,
+        )
+        report["returncode"] = result.returncode
+        report["stderr"] = result.stderr[-2000:]
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
+            raise ValueError("inspect returned an unsupported or missing JSON schema")
+        report["inspection"] = payload
+        if result.returncode != 0:
+            findings.append(f"Inspect command failed with exit code {result.returncode}")
+        if payload.get("error"):
+            findings.append(f"Inspect failed: {payload['error']}")
+        samples = payload.get("samples")
+        duration = payload.get("duration")
+        if (
+            not isinstance(duration, (float, int)) or isinstance(duration, bool)
+            or not math.isfinite(duration) or duration <= 0
+            or not isinstance(samples, list) or not samples
+            or any(
+                not isinstance(value, (float, int)) or isinstance(value, bool)
+                or not math.isfinite(value) or not 0 <= value <= duration
+                for value in samples
+            )
+        ):
+            raise ValueError("inspect returned no valid rendered timeline samples")
+        sampled = {round(value, 3) for value in samples}
+        if requested is not None and not set(requested).issubset(sampled):
+            missing = sorted(set(requested) - sampled)
+            findings.append(f"Inspect omitted requested timestamps: {missing}")
+        issues = payload.get("issues")
+        if not isinstance(issues, list) or any(
+            not isinstance(issue, dict) or issue.get("severity") not in {"error", "warning", "info"}
+            for issue in issues
+        ):
+            raise ValueError("inspect returned invalid layout findings")
+        for issue in issues:
+            if issue["severity"] == "error":
+                findings.append(
+                    f"t={issue.get('time', '?')}s {issue.get('selector', '')}: "
+                    f"{issue.get('code', 'layout_error')} — {issue.get('message', '')}"
+                )
+        error_count = payload.get("errorCount")
+        if type(error_count) is not int or error_count < 0:
+            raise ValueError("inspect returned an invalid error count")
+        if payload.get("ok") is not True or error_count > 0:
+            if not findings:
+                findings.append("Inspect did not report a clean layout")
+    except (OSError, TypeError, ValueError, subprocess.TimeoutExpired) as exc:
+        findings.append(f"Inspect unavailable: {exc}")
+    report["passed"] = not findings
+    report["findings"] = findings
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     if log:
         if findings:
-            log(f"Inspect: {len(findings)} layout issue(s)")
+            log(f"Inspect: {len(findings)} blocking issue(s)")
             for line in findings[:8]:
                 log(f"  {line}")
         else:
-            log("Inspect: layout clean")
+            inspected = report["inspection"]
+            log(
+                f"Inspect: layout clean at {len(inspected['samples'])} timestamp(s), "
+                f"{inspected.get('warningCount', 0)} warning(s)"
+            )
     return (not findings), findings
+
+
+def snapshot_project(
+    task_dir: Path,
+    log: LogCallback | None = None,
+    *,
+    timestamps: Sequence[float],
+    report_path: Path | None = None,
+) -> tuple[bool, list[str]]:
+    """Capture real preview pixels locally, without the CLI's optional cloud vision.
+
+    This establishes fresh, decodable, nonblank evidence at every requested
+    position. Semantic quality remains the configured final-reviewer's job.
+    Previous snapshots are retained because the CLI overwrites its output folder.
+    """
+    from PIL import Image
+
+    findings: list[str] = []
+    report: dict = {
+        "contract": "representative-pixel-preflight-v1", "passed": False,
+        "frames": [], "semantic_review": "not established by pixel preflight",
+    }
+    try:
+        values = [float(value) for value in timestamps]
+        if not values or any(not math.isfinite(value) or value < 0 for value in values):
+            raise ValueError("snapshot timestamps must be nonempty, finite and nonnegative")
+        requested = sorted({round(value, 3) for value in values})
+        report["requested_timestamps"] = requested
+        snapshots = task_dir / "snapshots"
+        if snapshots.exists():
+            if not snapshots.is_dir() or snapshots.is_symlink():
+                raise ValueError("snapshot output must be a local directory")
+            archive = task_dir / "snapshots-history" / uuid.uuid4().hex
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            snapshots.rename(archive)
+            report["previous_snapshots"] = str(archive.relative_to(task_dir))
+        result = run_capture_logged(
+            name="HyperFrames representative snapshots",
+            command=_hyperframes_bin() + [
+                "snapshot", str(task_dir), "--at", ",".join(f"{value:.3f}" for value in requested),
+                "--describe", "false",
+            ],
+            logger=logger, log=None, timeout=INSPECT_TIMEOUT,
+        )
+        report["returncode"] = result.returncode
+        report["stderr"] = result.stderr[-2000:]
+        output = f"{result.stdout}\n{result.stderr}"
+        if result.returncode != 0:
+            findings.append(f"Snapshot command failed with exit code {result.returncode}")
+        for failure in (
+            "No player API", "Runtime did not become render-ready",
+            "Shader transitions did not finish pre-rendering",
+        ):
+            if failure in output:
+                findings.append(f"Snapshot unavailable: {failure}")
+        written = re.findall(r"snapshots/(frame-(\d+)-at-([\d.]+)s\.png)", output)
+        if len(written) != len(requested) or [int(row[1]) for row in written] != list(range(len(requested))):
+            raise ValueError("snapshot output does not cover every requested timestamp")
+        dimensions = set()
+        for (filename, _index, label), timestamp in zip(written, requested):
+            # The CLI names frames with one decimal while seeking the exact time.
+            if abs(float(label) - timestamp) > 0.050001:
+                raise ValueError(f"snapshot timestamp mismatch at {filename}")
+            path = snapshots / filename
+            with Image.open(path) as frame:
+                frame.load()
+                if frame.format != "PNG" or frame.width <= 1 or frame.height <= 1:
+                    raise ValueError(f"invalid snapshot image: {filename}")
+                extrema = frame.convert("RGB").getextrema()
+                if all(high - low <= 1 for low, high in extrema):
+                    findings.append(f"Snapshot is a uniform blank frame at {timestamp:.3f}s")
+                dimensions.add(frame.size)
+                report["frames"].append({
+                    "timestamp": timestamp, "path": str(path.relative_to(task_dir)),
+                    "width": frame.width, "height": frame.height,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                })
+        if len(dimensions) != 1:
+            findings.append("Snapshot canvas dimensions changed during the timeline")
+    except (OSError, TypeError, ValueError, subprocess.TimeoutExpired) as exc:
+        findings.append(f"Snapshot unavailable: {exc}")
+    report["passed"] = not findings
+    report["findings"] = findings
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    if log:
+        if findings:
+            log(f"Representative snapshots: {len(findings)} blocking issue(s)")
+            for finding in findings[:8]:
+                log(f"  {finding}")
+        else:
+            log(f"Representative snapshots: {len(report['frames'])} fresh frame(s) verified")
+    return not findings, findings

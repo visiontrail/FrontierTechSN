@@ -1912,6 +1912,28 @@ _RENDERERS = {
 }
 
 
+def _shot_cue_times(shot: dict) -> dict[str, float]:
+    """Resolve the one shot-local attention schedule into scene seconds.
+
+    Legacy cached shots have no cues. They receive a deterministic reveal and
+    a readable final hold; newly planned shots keep their validated cue times.
+    """
+    duration = float(shot["duration"])
+    values = shot.get("motion_cues") or {
+        "reveal_start": min(.12, duration * .05),
+        "reveal_end": duration * .35,
+        "emphasis": duration * .55,
+        "settle": duration * .72,
+    }
+    names = ("reveal_start", "reveal_end", "emphasis", "settle")
+    local = [float(values[name]) for name in names]
+    if any(not math.isfinite(value) for value in local) or not (
+        0 <= local[0] <= local[1] <= local[2] <= local[3] <= duration
+    ):
+        raise ValueError("shot motion cues must be ordered inside the shot")
+    return {name: float(shot["start"]) + value for name, value in zip(names, local)}
+
+
 def _render_media_shots(plan: ScenePlan) -> str:
     """Render AI-ordered shots, never a video overlay left on an empty plate."""
     accent = accent_hex(plan.accent, plan.theme)
@@ -1953,7 +1975,24 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .contained-photo .shot-copy {{ font-size:30px; }}
   #{sid} .shot-credit {{ position:absolute; top:34px; right:48px; max-width:1100px; border-radius:16px; padding:9px 18px; background:rgba(9,11,19,.82); color:#F5F2EA; font-size:20px; }}
   #{sid} .shot-rule {{ height:5px; width:140px; background:{accent}; margin-bottom:24px; transform-origin:left; }}
-  #{sid} .shot-orbit {{ position:absolute; width:820px; height:820px; right:-280px; top:-340px; border:95px solid {_rgba(accent,.17)}; border-radius:50%; pointer-events:none; }}
+  #{sid} .shot-grid.flow {{ display:flex; align-items:stretch; gap:0; }}
+  #{sid} .flow .shot-card {{ flex:1; min-width:0; display:flex; align-items:flex-start; padding:32px 24px; border:0; border-top:3px solid {_rgba(ink,.18)}; background:transparent; min-height:210px; }}
+  #{sid} .flow .shot-copy {{ font-size:36px; line-height:1.35; }}
+  #{sid} .flow .dense .shot-copy {{ font-size:29px; }}
+  #{sid} .shot-link {{ flex:0 0 58px; display:flex; align-items:center; padding:0 12px; box-sizing:border-box; }}
+  #{sid} .shot-link-line {{ height:4px; width:100%; background:{accent}; transform-origin:left center; position:relative; }}
+  #{sid} .shot-link-line::after {{ content:""; position:absolute; right:-1px; top:-6px; border-left:12px solid {accent}; border-top:8px solid transparent; border-bottom:8px solid transparent; }}
+  #{sid} .shot-grid.comparison {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:70px; }}
+  #{sid} .comparison .shot-card {{ border:0; padding:42px 0 34px; min-height:240px; background:transparent; align-items:flex-start; }}
+  #{sid} .comparison .shot-copy {{ font-size:43px; line-height:1.35; }}
+  #{sid} .comparison .dense .shot-copy {{ font-size:33px; }}
+  #{sid} .shot-emphasis {{ position:absolute; left:0; right:0; bottom:0; height:5px; background:{accent}; transform-origin:left center; }}
+  #{sid} .flow .shot-emphasis {{ top:0; bottom:auto; }}
+  #{sid} .shot-grid.flow .shot-number, #{sid} .shot-grid.comparison .shot-number, #{sid} .shot-grid.focus .shot-number {{ display:none; }}
+  #{sid} .shot-panel.editorial[data-shot-layout="focus"] .shot-card {{ border:0; background:transparent; padding:0 0 30px; min-height:0; }}
+  #{sid} .shot-panel.editorial[data-shot-layout="focus"] .shot-title {{ font-size:84px; line-height:1.13; max-width:1500px; }}
+  #{sid} .shot-panel.editorial[data-shot-layout="focus"][data-copy-density="dense"] .shot-title {{ font-size:58px; }}
+  #{sid} .shot-panel.editorial[data-copy-density="dense"] .shot-title {{ font-size:58px; }}
   #{sid} .shot-wipe {{ position:absolute; inset:0; background:{accent}; pointer-events:none; }}
 """
     if plan.frame.orientation == "portrait":
@@ -1966,6 +2005,20 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .shot-panel.contained-photo {{ left:0; top:58%; padding:35px 64px 160px; justify-content:flex-start; }}
   #{sid} .contained-photo .shot-title {{ font-size:46px; }}
   #{sid} .contained-photo .shot-credit {{ position:static; order:10; margin-top:18px; max-width:100%; }}
+  #{sid} .shot-grid.flow {{ flex-direction:column; }}
+  #{sid} .flow .shot-card {{ min-height:0; padding:22px 26px; border-top:0; border-left:3px solid {_rgba(ink,.18)}; }}
+  #{sid} .flow .shot-copy {{ font-size:38px; }}
+  #{sid} .flow .dense .shot-copy {{ font-size:30px; }}
+  #{sid} .shot-link {{ flex:0 0 46px; padding:6px 32px; }}
+  #{sid} .shot-link-line {{ width:4px; height:34px; transform-origin:top center; }}
+  #{sid} .shot-link-line::after {{ right:-6px; top:auto; bottom:-1px; border-left:8px solid transparent; border-right:8px solid transparent; border-top:12px solid {accent}; border-bottom:0; }}
+  #{sid} .flow .shot-emphasis {{ width:5px; height:100%; right:auto; transform-origin:top center; }}
+  #{sid} .shot-grid.comparison {{ grid-template-columns:1fr; gap:36px; }}
+  #{sid} .comparison .shot-card {{ min-height:0; padding:30px 0; }}
+  #{sid} .comparison .shot-copy {{ font-size:42px; }}
+  #{sid} .comparison .dense .shot-copy {{ font-size:32px; }}
+  #{sid} .shot-panel.editorial[data-shot-layout="focus"] .shot-title {{ font-size:76px; }}
+  #{sid} .shot-panel.editorial[data-shot-layout="focus"][data-copy-density="dense"] .shot-title {{ font-size:56px; }}
 """
     markup = []
     timeline = []
@@ -1998,41 +2051,66 @@ def _render_media_shots(plan: ScenePlan) -> str:
                 timeline.append(f'inAt("#{prefix}-media", {{scale:1}}, {{scale:1.035, duration:{duration:.2f}, ease:"none"}}, {start:.2f});')
             elif contain:
                 timeline.append(f'inAt("#{prefix}-media", {{opacity:0}}, {{opacity:1, duration:{min(.4, duration):.2f}, ease:"sine.out"}}, {start:.2f});')
-        texts = [text for text in shot["copy"] if text != plan.headline]
-        if not texts and editorial:
-            texts = list(shot["copy"])
-        title = plan.headline if editorial else shot["copy"][0]
-        if not editorial:
-            texts = shot["copy"][1:]
-        cards = "".join(
-            f'<div class="shot-card {"dense" if len(text) > 135 else ""}" id="{prefix}-card-{i}">'
-            f'<span class="shot-number">{i + 1:02d}</span><div class="shot-copy">{_esc(text)}</div></div>'
-            for i, text in enumerate(texts)
-        )
+        # The selected copy is the complete factual vocabulary of this shot.
+        # Do not reinsert the scene headline or repeat it as a supporting card.
+        selected = list(dict.fromkeys(shot["copy"]))
+        title, texts = selected[0], selected[1:]
         layout = shot.get("layout", "cards") if len(texts) > 1 else "focus"
+        if not editorial and layout in {"flow", "comparison"}:
+            layout = "cards"
+        if layout == "comparison" and len(texts) != 2:
+            layout = "cards"
+        cues = _shot_cue_times(shot)
+        cards = []
+        for i, text in enumerate(texts):
+            if i and layout == "flow":
+                cards.append(f'<div class="shot-link" aria-hidden="true"><div class="shot-link-line" id="{prefix}-link-{i}"></div></div>')
+            cards.append(
+                f'<div class="shot-card {"dense" if len(text) > 135 else ""}" id="{prefix}-card-{i}">'
+                f'<span class="shot-number">{i + 1:02d}</span><div class="shot-copy">{_esc(text)}</div>'
+                + (f'<div class="shot-emphasis" id="{prefix}-emphasis-{i}" aria-hidden="true"></div>'
+                   if editorial and layout in {"flow", "comparison", "focus"} else "")
+                + '</div>'
+            )
+        cue_attributes = " ".join(f'data-cue-{name.replace("_", "-")}="{value:.3f}"' for name, value in cues.items())
         markup.append(
             f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}{" contained-photo" if portrait_photo else ""}" '
-            f'{timing} data-track-index="{panel_track}">'
-            + (f'<div class="shot-orbit" id="{prefix}-orbit" data-layout-ignore></div>' if editorial else "")
+            f'{timing} data-track-index="{panel_track}" data-shot-layout="{layout}" data-copy-density="{"dense" if len(title) > 100 else "normal"}" {cue_attributes}>'
             + f'<div class="shot-kicker" id="{prefix}-kicker">{_esc(plan.kicker)}</div>'
             + f'<div class="shot-rule" id="{prefix}-rule"></div>'
             + f'<div class="shot-title" id="{prefix}-title">{_esc(title)}</div>'
-            + f'<div class="shot-grid {layout}">{cards}</div>'
+            + f'<div class="shot-grid {layout}">{"".join(cards)}</div>'
             + (f'<div class="shot-credit">{_esc(shot["credit"])}</div>' if shot.get("credit") else "")
             + '</div>'
         )
         # Clip visibility is owned by HyperFrames. Animate inner content only;
         # no timed parent wraps a video and no video seeks beyond its source.
-        entrance = min(.55, duration * .3)
+        entrance = min(.65, max(0, cues["reveal_end"] - cues["reveal_start"]))
         timeline += [
-            f'inAt("#{prefix}-rule", {{scaleX:.15}}, {{scaleX:1,duration:{entrance:.2f},ease:"power3.out"}}, {start + .08:.2f});',
-            f'inAt("#{prefix}-kicker", {{x:-20}}, {{x:0,duration:{entrance:.2f},ease:"sine.out"}}, {start + .1:.2f});',
-            f'inAt("#{prefix}-title", {{y:24}}, {{y:0,duration:{entrance:.2f},ease:"expo.out"}}, {start + .1:.2f});',
+            f'inAt("#{prefix}-rule", {{scaleX:.15}}, {{scaleX:1,duration:{entrance:.3f},ease:"power3.out"}}, {cues["reveal_start"]:.3f});',
+            f'inAt("#{prefix}-kicker", {{x:-20}}, {{x:0,duration:{entrance:.3f},ease:"sine.out"}}, {cues["reveal_start"]:.3f});',
+            f'inAt("#{prefix}-title", {{y:24}}, {{y:0,duration:{entrance:.3f},ease:"expo.out"}}, {cues["reveal_start"]:.3f});',
         ]
+        # Establish the title first, then follow the relation through the
+        # action window. A short title reveal must not collapse a flow into
+        # simultaneous entrances merely because reveal_end is only .55s away.
+        action_end = cues["emphasis"] if layout == "flow" else cues["reveal_end"]
+        item_entrance = min(entrance, max(0, action_end - cues["reveal_start"]) / max(1, len(texts)))
+        available = max(0, action_end - cues["reveal_start"] - item_entrance)
         for i in range(len(texts)):
-            timeline.append(f'inAt("#{prefix}-card-{i}", {{x:35,opacity:.35}}, {{x:0,opacity:1,duration:{entrance:.2f},ease:"power2.out"}}, {start + .12 + i * .06:.2f});')
-        if editorial:
-            timeline.append(f'inAt("#{prefix}-orbit", {{scale:.85}}, {{scale:1.08,duration:{duration:.2f},ease:"none"}}, {start:.2f});')
+            at = cues["reveal_start"] + available * i / max(1, len(texts) - 1)
+            offset = "y:24" if layout == "flow" and plan.frame.orientation == "portrait" else ("x:-30" if layout == "flow" or i % 2 == 0 else "x:30")
+            axis = offset.split(":")[0]
+            timeline.append(f'inAt("#{prefix}-card-{i}", {{{offset},opacity:.18}}, {{{axis}:0,opacity:1,duration:{item_entrance:.3f},ease:"power2.out"}}, {at:.3f});')
+            if layout == "flow" and i:
+                scale = "scaleY" if plan.frame.orientation == "portrait" else "scaleX"
+                timeline.append(f'inAt("#{prefix}-link-{i}", {{{scale}:0}}, {{{scale}:1,duration:{item_entrance:.3f},ease:"sine.inOut"}}, {at:.3f});')
+            if editorial and layout in {"flow", "comparison", "focus"}:
+                scale = "scaleY" if layout == "flow" and plan.frame.orientation == "portrait" else "scaleX"
+                attention_span = max(0, cues["settle"] - cues["emphasis"])
+                hold = attention_span / max(1, len(texts)) if layout == "comparison" else attention_span
+                attention_at = cues["emphasis"] + (i * hold if layout == "comparison" else 0)
+                timeline.append(f'inAt("#{prefix}-emphasis-{i}", {{{scale}:0}}, {{{scale}:1,duration:{hold:.3f},ease:"sine.inOut"}}, {attention_at:.3f});')
         if index:
             # A cover transition spans the cut; outgoing content remains intact
             # until the source ends, so even the boundary frame has content.

@@ -17,6 +17,7 @@ its deterministic draft before the render starts.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -41,6 +42,7 @@ from backend.pipeline import (
     news_images,
     news_webpages,
     outros,
+    production_plan,
     scene_kit,
     storyboard as sb,
     subtitles,
@@ -226,7 +228,8 @@ def _visual_plan_planner_input(board: dict) -> dict:
                 "keywords": keywords,
             }
         )
-    return {"thesis": thesis, "scenes": semantic_scenes}
+    return {"thesis": thesis, "scenes": semantic_scenes,
+            "director_brief": board.get("director_brief", {})}
 
 
 def _canonical_sha256(value: object) -> str:
@@ -412,6 +415,7 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
 
 def _review_rejected_media(
     output_dir: Path, board: dict, source_hash: str, *, report: dict | None = None,
+    include_prior: bool = True,
 ) -> dict:
     """Quarantine only the asset visible in a hash-bound failed media sample.
 
@@ -468,7 +472,9 @@ def _review_rejected_media(
                     path = (output_dir / "compositions" / src).resolve()
                     if not path.is_relative_to(output_dir.resolve()) or not path.is_file() or _sha256_path(path) != digest:
                         continue
-                    prior = rejected.get(scene_id, plans[scene_id].get("review_rejected_media", []))
+                    prior = rejected.get(
+                        scene_id, plans[scene_id].get("review_rejected_media", []) if include_prior else [],
+                    )
                     if any(item.get("src") == src and item.get("sha256") == digest for item in prior):
                         continue
                     rejected[scene_id] = [*prior, {
@@ -695,6 +701,35 @@ async def _load_or_plan_scene_visuals(
             _write_visual_plan_checkpoint(output_dir, board, plans)
         return plans
 
+    # Creative prompt changes invalidate the plan, not a current pixel review
+    # of exact media bytes. Rebuild exclusions from that review before replacing
+    # the old checkpoint; never import its arbitrary prior exclusion arrays.
+    migration_rejected = {}
+    try:
+        saved_plan = (output_dir / "visual_plan.json").read_bytes()
+        saved_cache = _strict_json_loads((output_dir / VISUAL_PLAN_CACHE_FILENAME).read_bytes())
+        planner_input = _visual_plan_planner_input(board)
+        legacy_input = {key: value for key, value in planner_input.items() if key != "director_brief"}
+        same_narration = saved_cache.get("planner_input_sha256") in {
+            _canonical_sha256(planner_input), _canonical_sha256(legacy_input),
+        }
+        if (same_narration and saved_cache.get("visual_plan_bytes") == len(saved_plan)
+                and saved_cache.get("visual_plan_sha256") == hashlib.sha256(saved_plan).hexdigest()):
+            source_hash, _ = _pending_visual_repairs(output_dir, [])
+            saved_report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
+            multimodal = saved_report.get("multimodal", {})
+            if source_hash and multimodal.get("sampling_contract") == multimodal_review.SAMPLING_CONTRACT:
+                # Legacy scene-level denials need their normal attribution
+                # recovery; migration alone must not invent source verdicts.
+                bound_report = {**saved_report, "multimodal": {**multimodal, "scenes": [
+                    row for row in multimodal.get("scenes", [])
+                    if row.get("media_sample_contract") == multimodal_review.MEDIA_SAMPLE_CONTRACT
+                ]}}
+                migration_rejected = _review_rejected_media(
+                    output_dir, board, source_hash, report=bound_report, include_prior=False,
+                )
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
     plans = await visual_plan.plan_scene_visuals(
         board,
         ai_endpoint=ai_endpoint,
@@ -702,6 +737,10 @@ async def _load_or_plan_scene_visuals(
         provider_id=provider_id,
         log=log,
     )
+    for plan in plans:
+        if plan["id"] in migration_rejected:
+            plan["review_rejected_media"] = migration_rejected[plan["id"]]
+            log(f"Visual plan {plan['id']}: retained current candidate-bound media exclusions after creative replan")
     # Direction is the expensive checkpoint. Commit it before any footage,
     # collage, image, or music stage can fail so a retry does not repeat the
     # planner call. Runtime placement fields are added only to the later rewrite.
@@ -1419,11 +1458,20 @@ def _finalize_quality_report(
     # Exact scene bindings cannot overrule a later rendered-frame rejection:
     # a correctly bound scene can still omit a narrated claim from its pixels.
     multimodal_passed = multimodal.get("passed") is True if multimodal_enabled else True
+    production = report.get("production_method")
+    production_passed = not production or (
+        report.get("production_preflight", {}).get("passed") is True
+        and report.get("delivery_timeline", {}).get("passed") is True
+        and report["delivery_timeline"].get("timeline_sha256") == production.get("timeline_sha256")
+    )
     quality_passed = (
         alignment.get("passed") is True
         and visual_grounding.get("passed") is True
         and multimodal_passed
         and report.get("visual_coverage", {}).get("passed", True) is True
+        and report.get("production_preflight", {}).get("passed", True) is True
+        and report.get("delivery_timeline", {}).get("passed", True) is True
+        and production_passed
     )
     warnings = _quality_warnings(
         alignment,
@@ -1540,7 +1588,7 @@ def _available_collage_storyboard(board: dict, plans: list[dict], count: int | N
 def _review_retry_fingerprint(directory: Path, request: dict, render: RenderSpec | None = None) -> str:
     """Bind review-only recovery to the unchanged render inputs and settings."""
     paths = {Path(request[key]) for key in ("script_path", "audio_path", "background_music_path") if request.get(key)}
-    for name in ("index.html", "storyboard.json", "visual_plan.json", "footage/manifest.json",
+    for name in ("index.html", "storyboard.json", "visual_plan.json", "production_timeline.json", "footage/manifest.json",
                  "audio/paced_narration.wav", "audio/program_mix.wav"):
         paths.add(directory / name)
     for name in ("compositions", "assets", "news_images"):
@@ -1549,7 +1597,8 @@ def _review_retry_fingerprint(directory: Path, request: dict, render: RenderSpec
     paths.update(Path(__file__).parent / name for name in (
         "scene_kit.py", "assembler.py", "storyboard.py", "intros.py", "outros.py",
         "composer.py", "news_images.py", "news_webpages.py", "collage_broll.py", "visual_plan.py",
-        "media_shots.py", "video_format.py",
+        "production_plan.py", "media_shots.py", "director.py",
+        "video_format.py",
     ))
     paths.add(config.PROMPTS_DIR / "media_shots.txt")
     evidence = {
@@ -1591,7 +1640,7 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
         ):
             return None
         board = json.loads((directory / "storyboard.json").read_text())
-        if _rendered_video_failures(candidate, frame=frame, expected_duration=float(board["total_duration"]), render=render):
+        if await asyncio.to_thread(_rendered_video_failures, candidate, frame=frame, expected_duration=float(board["total_duration"]), render=render):
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -1637,7 +1686,8 @@ def _director_scene_plans(plans: list[dict], *, quality_retry: bool) -> list[dic
             plan.get("archetype") in {"intro", "outro"}
             and (not quality_retry or bool(plan.get("visual_review_feedback")))
         ) or (
-            not plan.get("footage_src")
+            not plan.get("media_shots")
+            and not plan.get("footage_src")
             and not plan.get("news_image")
             and not plan.get("news_webpage")
         ))
@@ -1755,6 +1805,8 @@ async def compose_video(
     # Mirror to the task log (pipeline.log + LogPanel) when available, else the
     # module logger (start.sh log). Prefer the callback to avoid double-logging.
     emit = lambda message: log(message) if log else logger.info(message)
+    event_loop = asyncio.get_running_loop()
+    thread_emit = lambda message: event_loop.call_soon_threadsafe(emit, message)
 
     # --- 1. Storyboard -----------------------------------------------------
     effective_tts_model = tts_model or config.TTS_DEFAULT_MODEL
@@ -1916,6 +1968,12 @@ async def compose_video(
     emit(f"Composition {board['total_duration']:.1f}s over {board['scene_count']} scenes")
 
     # --- 2. Direction ------------------------------------------------------
+    board["director_brief"] = production_plan.director_brief(
+        board, theme=video_template, frame=frame, render=render,
+        captions=captions_enabled, music_enabled=bool(background_music_path),
+    )
+    production_plan.write_json(output_dir_path / "director_brief.json", board["director_brief"])
+    emit(f"Production method: {production_plan.CONTRACT}; configured-provider shot direction")
     plans = await _load_or_plan_scene_visuals(
         output_dir_path,
         board,
@@ -2218,6 +2276,14 @@ async def compose_video(
     )
     plans = scene_plans
     sb.write_storyboard(output_dir_path, board)
+    production_timeline = production_plan.build_timeline(board, scene_plans, fps=render.fps)
+    production_plan.write_json(output_dir_path / "production_timeline.json", production_timeline)
+    quality_report["production_method"] = {
+        "contract": production_plan.CONTRACT,
+        "brief": "director_brief.json", "timeline": "production_timeline.json",
+        "timeline_sha256": production_timeline["input_sha256"],
+        "shot_count": len(production_timeline["shots"]),
+    }
     emit(
         f"Intro: {intro_plan['intro_label']} bound to the "
         f"{intro_plan['duration']:.2f}s spoken opening; "
@@ -2350,12 +2416,15 @@ async def compose_video(
         if not clean:
             raise RuntimeError(f"Composition failed HyperFrames lint:\n{lint_output[-1200:]}")
 
-    # Layout check. Overlapping text and content spilling out of a card do not
-    # stop a render — they just make it look broken — so this loop is advisory:
-    # give the agents HyperFrames' own findings, and revert anything still
-    # failing afterwards rather than blocking the video.
+    # Give authored overlays one layout repair/revert pass. The mandatory
+    # representative-frame gate below then blocks unresolved layout failures.
+    layout_checked = False
     if config.INSPECT_ENABLED:
-        layout_ok, findings = assembler.inspect_project(output_dir_path, emit)
+        layout_ok, findings = await asyncio.to_thread(assembler.inspect_project,
+            output_dir_path, thread_emit, timestamps=production_plan.preview_times(production_timeline),
+            report_path=output_dir_path / "production_preflight.json",
+        )
+        layout_checked = True
         blamed = director.scenes_named_in_findings(findings, outcome.authored, mounts)
         if not layout_ok and blamed:
             bookend_ids = {
@@ -2366,6 +2435,7 @@ async def compose_video(
             blamed_bookends = [scene_id for scene_id in blamed if scene_id in bookend_ids]
             if blamed_bookends:
                 director.revert_scenes(output_dir_path, blamed_bookends, kit_plans)
+                layout_checked = False
                 emit(
                     "Layout: reverted the branded bookend overlay to its verified editable draft "
                     "instead of letting a generic caption-safe repair rewrite it"
@@ -2389,12 +2459,18 @@ async def compose_video(
             clean, lint_output = assembler.lint_project(output_dir_path, emit)
             if not clean:
                 director.revert_scenes(output_dir_path, blamed, kit_plans)
+                layout_checked = False
                 emit("Repair broke lint; reverted those scenes to the deterministic draft")
             else:
-                layout_ok, findings = assembler.inspect_project(output_dir_path, emit)
+                layout_ok, findings = await asyncio.to_thread(assembler.inspect_project,
+                    output_dir_path, thread_emit, timestamps=production_plan.preview_times(production_timeline),
+                    report_path=output_dir_path / "production_preflight.json",
+                )
+                layout_checked = True
                 still_bad = director.scenes_named_in_findings(findings, blamed, mounts)
                 if still_bad:
                     director.revert_scenes(output_dir_path, still_bad, kit_plans)
+                    layout_checked = False
                     emit(
                         f"Layout still failing for {len(still_bad)} scene(s); "
                         "reverted them to the deterministic draft"
@@ -2404,10 +2480,37 @@ async def compose_video(
     # Gemini plate or exact ByteFront logo after the initial authoring gate.
     _assert_locked_visual_assets(output_dir_path, scene_plans)
 
+    # Inspect the actual settled/action states before paying for a full export.
+    # This is mandatory for the directed production contract even when the old
+    # optional layout-polish pass is disabled. Final pixel/A/V review still runs.
+    preview_times = production_plan.preview_times(production_timeline)
+    if not layout_checked:
+        layout_ok, findings = await asyncio.to_thread(assembler.inspect_project,
+            output_dir_path, thread_emit, timestamps=preview_times,
+            report_path=output_dir_path / "production_preflight.json",
+        )
+    quality_report["production_preflight"] = {
+        "passed": layout_ok, "report": "production_preflight.json", "sample_count": len(preview_times),
+    }
+    if not layout_ok:
+        production_plan.write_json(quality_report_path, quality_report)
+        raise RuntimeError("Production preflight failed before full render: " + "; ".join(findings)[:1800])
+    pixels_ok, pixel_findings = await asyncio.to_thread(assembler.snapshot_project,
+        output_dir_path, thread_emit, timestamps=preview_times,
+        report_path=output_dir_path / "production_preview.json",
+    )
+    quality_report["production_preflight"].update({
+        "passed": pixels_ok, "pixel_report": "production_preview.json",
+        "visual_acceptance": "final rendered-frame review required",
+    })
+    production_plan.write_json(quality_report_path, quality_report)
+    if not pixels_ok:
+        raise RuntimeError("Production preview failed before full render: " + "; ".join(pixel_findings)[:1800])
+
     # --- 5. Render ---------------------------------------------------------
     staged_video_path = output_dir_path / "video.next.mp4"
     staged_video_path.unlink(missing_ok=True)
-    total_frames = max(1, round(float(board["total_duration"]) * render.fps))
+    total_frames = production_timeline["duration_frames"]
     render_timeout = _render_timeout(float(board["total_duration"]), render)
     stall_timeout = _render_stall_timeout(float(board["total_duration"]), render)
     emit(
@@ -2436,7 +2539,7 @@ async def compose_video(
     if not staged_video_path.exists():
         raise RuntimeError("Video render produced no output file")
 
-    probe_failures = _rendered_video_failures(
+    probe_failures = await asyncio.to_thread(_rendered_video_failures,
         staged_video_path,
         frame=frame,
         expected_duration=float(board["total_duration"]),
@@ -2447,6 +2550,13 @@ async def compose_video(
         raise RuntimeError(
             "Staged video failed validation: " + "; ".join(probe_failures)
         )
+    delivery_timeline = await asyncio.to_thread(production_plan.verify_delivery,
+        staged_video_path, production_timeline, output_dir_path / "delivery_timeline.next.json",
+    )
+    quality_report["delivery_timeline"] = delivery_timeline
+    production_plan.write_json(quality_report_path, quality_report)
+    if not delivery_timeline["passed"]:
+        raise RuntimeError("Staged video timing failed validation: " + "; ".join(delivery_timeline["failures"]))
     emit(
         f"Video rendered: {staged_video_path} "
         f"({staged_video_path.stat().st_size / 1024 / 1024:.1f} MB)"

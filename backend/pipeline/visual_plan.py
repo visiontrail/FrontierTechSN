@@ -442,6 +442,8 @@ def _batch_prompt_payload(storyboard: dict, scenes: list[dict]) -> str:
         ],
     }
     feedback = storyboard.get("visual_review_feedback")
+    if storyboard.get("director_brief"):
+        payload["director_brief"] = storyboard["director_brief"]
     if feedback:
         scene_ids = {scene["id"] for scene in scenes}
         payload["visual_review_feedback"] = [

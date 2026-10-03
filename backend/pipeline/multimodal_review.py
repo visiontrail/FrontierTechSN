@@ -2,8 +2,8 @@
 
 Acoustic word alignment proves *when* each sentence is spoken. It cannot prove
 that the pixels rendered at that time depict the same subject. This module
-samples the final MP4 at every planned shot midpoint, labels compact contact sheets
-with scene ids/timecodes, and sends each sheet together with the corresponding
+samples the final MP4 at every planned shot midpoint and editorial motion cues,
+labels compact contact sheets with scene ids/timecodes, and sends each sheet with the corresponding
 narration excerpts to the signed-in Gemini web product through the repository's
 project-local OpenCLI wrapper.
 
@@ -47,6 +47,7 @@ FRAME_TIMEOUT_SECONDS = 45
 FRAME_WORKERS = 4
 SAMPLING_CONTRACT = "complete-shot-sequence-v1"
 MEDIA_SAMPLE_CONTRACT = "source-media-mismatch-v1"
+MOTION_SAMPLING_CONTRACT = "editorial-action-settled-v1"
 
 
 def shot_fingerprint(shot: dict) -> str:
@@ -65,6 +66,23 @@ def _scene_timestamp(scene: dict) -> float:
     start = max(0.0, float(scene.get("start") or 0))
     duration = max(0.0, float(scene.get("duration") or 0))
     return round(start + duration * 0.5, 3)
+
+
+def _editorial_sample_times(shot: dict) -> list[tuple[str, float]]:
+    """Bound extra sampling to actual editorial animation, preserving every midpoint."""
+    cues = shot.get("motion_cues")
+    if shot.get("kind") != "editorial" or cues is None:
+        return []
+    if not isinstance(cues, dict):
+        raise ValueError("invalid editorial motion cues for review")
+    try:
+        duration = float(shot["duration"])
+        phases = [float(cues[key]) for key in ("reveal_start", "reveal_end", "emphasis", "settle")]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("invalid editorial motion cues for review") from exc
+    if any(not math.isfinite(value) or not 0 <= value < duration for value in phases) or phases != sorted(phases):
+        raise ValueError("invalid editorial motion cues for review")
+    return [("action", (phases[0] + phases[1]) / 2), ("settled", phases[3])]
 
 
 async def _extract_frame_once(video_path: Path, output_path: Path, timestamp: float) -> None:
@@ -129,7 +147,7 @@ async def extract_scene_frames(
     storyboard: dict,
     review_dir: str | Path,
 ) -> list[dict]:
-    """Sample every shot; a scene midpoint cannot represent a timed sequence."""
+    """Sample every shot and bounded editorial cues; keep source attribution exact."""
     video = Path(video_path).resolve()
     directory = Path(review_dir).resolve()
     frame_dir = directory / "frames"
@@ -160,11 +178,26 @@ async def extract_scene_frames(
                 samples.append({
                     "id": sample_id, "timestamp": timestamp,
                     "path": frame_dir / f"{sample_id}.jpg",
+                    "phase": "midpoint",
                     "shot_sha256": shot_fingerprint(shot),
                     "media": {key: shot.get(key) for key in ("src", "sha256", "kind")},
                 })
+                seen = {timestamp}
+                for phase, local_time in _editorial_sample_times(shot):
+                    cue_time = round(float(scene["start"]) + start + local_time, 3)
+                    if cue_time in seen:
+                        continue
+                    seen.add(cue_time)
+                    cue_id = f"{sample_id}-{phase}"
+                    samples.append({
+                        "id": cue_id, "timestamp": cue_time,
+                        "path": frame_dir / f"{cue_id}.jpg", "phase": phase,
+                        "shot_sha256": shot_fingerprint(shot),
+                        "media": {key: shot.get(key) for key in ("src", "sha256", "kind")},
+                    })
             if abs(cursor - float(scene["duration"])) > 0.02:
                 raise ValueError(f"{scene_id}: incomplete review shot coverage")
+            samples.sort(key=lambda sample: sample["timestamp"])
 
             async def extract(sample: dict) -> None:
                 async with semaphore:
@@ -279,7 +312,8 @@ def _review_prompt(
             "narration": str(frame["scene"].get("text") or "").strip(),
             "rendered_samples": [
                 {"id": sample["id"], "timestamp": sample.get("timestamp"),
-                 "kind": (sample.get("media") or {}).get("kind", "editorial")}
+                 "kind": (sample.get("media") or {}).get("kind", "editorial"),
+                 "phase": sample.get("phase", "midpoint")}
                 for sample in frame.get("samples") or [frame]
             ],
             "program_segment_kind": frame["scene"].get("program_segment_kind")
@@ -298,10 +332,15 @@ def _review_prompt(
     return (
         "You are the final semantic continuity reviewer for a narrated video. "
         "The attached contact sheet contains actual rendered frames, one from each "
-        "planned shot (or the scene midpoint when there is no shot sequence). "
+        "planned shot (or the scene midpoint when there is no shot sequence), "
+        "plus action and settled frames for editorial animation. "
         "Each frame is visibly labeled with its sample id and timecode. The "
         "rendered_samples list maps all frames to their scene. Evaluate all of a "
         "scene's frames together, in time order, against its complete narration. "
+        "An action-phase frame can intentionally show a partial reveal; use its "
+        "settled and midpoint frames to judge the complete claim. Check whether "
+        "the progression visibly explains the stated relationship and whether "
+        "the settled message is readable. Contradictions at any phase still count. "
         "Judge semantic subject, "
         "objects, setting, quantities, and claim—not lip sync or photographic realism. "
         "A well-designed text/data card can match when its visible message accurately "
@@ -1102,6 +1141,7 @@ async def review_video(
         "passed": passed,
         "analyzer": "gemini-web-via-opencli",
         "sampling_contract": SAMPLING_CONTRACT,
+        "motion_sampling_contract": MOTION_SAMPLING_CONTRACT,
         "minimum_scene_score": minimum_scene_score,
         "minimum_average_score": minimum_average_score,
         "average_score": average,

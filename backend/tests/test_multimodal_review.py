@@ -191,6 +191,41 @@ def test_contact_sheet_budget_never_splits_or_truncates_a_scene_sequence():
     assert [frame for batch in batches for frame in batch] == frames
 
 
+def test_editorial_motion_samples_preserve_midpoints_and_source_attribution(tmp_path):
+    scene = _scene("scene-09", 100, "A cause and its measured effect.")
+    cues = {"reveal_start": 0.2, "reveal_end": 1, "emphasis": 2.3, "settle": 3.4}
+    shots = [
+        {"start": 0, "duration": 4, "kind": "editorial", "motion_cues": cues},
+        {"start": 4, "duration": 4, "kind": "public_footage", "src": "source.mp4",
+         "sha256": "source-hash", "motion_cues": cues},
+    ]
+    (tmp_path / "visual_plan.json").write_text(json.dumps([{"id": "scene-09", "media_shots": shots}]))
+    with patch.object(multimodal_review, "_extract_frame", AsyncMock()) as extract:
+        frames = asyncio.run(multimodal_review.extract_scene_frames(
+            tmp_path / "video.next.mp4", {"scenes": [scene]}, tmp_path / "review",
+        ))
+    samples = frames[0]["samples"]
+    assert extract.await_count == 4
+    assert [(sample["id"], sample["timestamp"]) for sample in samples] == [
+        ("scene-09-shot-01-action", 100.6), ("scene-09-shot-01", 102),
+        ("scene-09-shot-01-settled", 103.4), ("scene-09-shot-02", 106),
+    ]
+    assert samples[-1]["shot_sha256"] == multimodal_review.shot_fingerprint(shots[-1])
+    assert samples[-1]["media"] == {"kind": "public_footage", "src": "source.mp4", "sha256": "source-hash"}
+    prompt = multimodal_review._review_prompt("Causes", frames, 70, 82)
+    assert "partial reveal" in prompt and "Contradictions at any phase still count" in prompt
+
+
+@pytest.mark.parametrize("cues", [
+    {}, [], {"reveal_start": 0, "reveal_end": 2, "emphasis": 1, "settle": 3},
+    {"reveal_start": 0, "reveal_end": 1, "emphasis": 2, "settle": 4},
+    {"reveal_start": 0, "reveal_end": 1, "emphasis": 2, "settle": float("nan")},
+])
+def test_review_rejects_malformed_editorial_motion_evidence(cues):
+    with pytest.raises(ValueError, match="motion cues"):
+        multimodal_review._editorial_sample_times({"kind": "editorial", "duration": 4, "motion_cues": cues})
+
+
 @pytest.mark.parametrize("verdict", ["match", "partial", "omitted"])
 def test_sequence_review_still_requires_complete_contract_valid_scene_results(tmp_path, verdict):
     scenes = [_scene("scene-09", 0, "Motor specs. Price and range. Charging and jobs.")]
@@ -876,6 +911,17 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                 scenes[0]["text"] = "A different narrated claim"
                 await multimodal_review._review_batch(**args)
                 self.assertEqual(call.await_count, 3)
+                # Even identical pixels must be reviewed again when their
+                # interpretation changes from a midpoint to a motion phase.
+                frames[0]["samples"] = [{
+                    "id": "scene-01-shot-01", "timestamp": frames[0]["timestamp"],
+                    "phase": "action", "media": {"kind": "editorial"},
+                }]
+                await multimodal_review._review_batch(**args)
+                self.assertEqual(call.await_count, 4)
+                frames[0]["samples"][0]["phase"] = "settled"
+                await multimodal_review._review_batch(**args)
+                self.assertEqual(call.await_count, 5)
 
     async def test_low_scene_score_rejects_video_even_when_average_is_high(self):
         with TemporaryDirectory() as temporary:

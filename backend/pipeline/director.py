@@ -140,8 +140,11 @@ video, which is the exact bug this system was built to fix.
 - Build the end state in CSS first, then animate INTO it with `fromTo`.
 - Entrances only. Do not animate elements out; the cut to the next scene is the
   exit. Motion should settle well before the scene ends.
-- Stagger entrances by 0.1–0.3s. Vary easing — use at least three different
-  eases per scene. Never start a tween at exactly t=0.
+- Establish the subject, reveal the supported change, then settle for reading.
+  Offset secondary actions so the main explanation stays dominant. Choose easing
+  for the material: rigid geometry, type and signals need different responses.
+  Do not animate on a beat unless it serves the explanation. Avoid perpetual
+  decorative movement and arbitrary counts of effects or easing styles.
 - Type for video: headlines 70–130px, body 32–46px, labels 20px+. Long headlines
   need a smaller size — text must never overflow the frame.
 - Layout: a full-size container with `padding: 130px 150px 210px` and flexbox.
@@ -328,6 +331,8 @@ def _batch_prompt(
     briefs = "\n\n".join(_scene_brief(scene, plan, theme) for scene, plan in batch)
     ids = ", ".join(scene["id"] for scene, _ in batch)
     return f"""Overall thesis: {storyboard.get('thesis', '')}
+
+Director brief: {storyboard.get('director_brief', {})}
 
 You are crew {batch_no} of {batch_total}. Author these scenes and only these: {ids}
 

@@ -525,6 +525,23 @@ def group_lines_into_scenes(lines: list[dict], offset: float = 0.0) -> list[dict
     return merged
 
 
+def normalize_scene_intervals(scenes: list[dict], total_duration: float) -> None:
+    """Quantize shared visual boundaries once; leave spoken-line timing intact.
+
+    Independently rounding a start and duration creates centisecond holes with
+    ASR timing. Adjacent scenes share a boundary; narration pauses remain covered
+    by the outgoing scene rather than an empty frame.
+    """
+    for index, scene in enumerate(scenes):
+        start = 0.0 if index == 0 else round(float(scene["start"]), 2)
+        end = (round(float(scenes[index + 1]["start"]), 2)
+               if index + 1 < len(scenes) else round(total_duration, 2))
+        duration = round(end - start, 2)
+        if duration <= 0:
+            raise ValueError(f"nonpositive visual interval for {scene['id']}")
+        scene.update(start=start, duration=duration)
+
+
 def build_storyboard(
     *,
     script_path: str | Path,
@@ -556,6 +573,7 @@ def build_storyboard(
             "failure_reasons": ["word-level transcript unavailable"],
         }
     scenes = group_lines_into_scenes(lines, offset=CONTENT_START)
+    normalize_scene_intervals(scenes, CONTENT_START + audio_duration)
 
     if log:
         log(
@@ -639,6 +657,7 @@ def build_program_storyboard(
             previous_source = source_label
         scenes.append(scene)
 
+    normalize_scene_intervals(scenes, audio_duration)
     if log:
         log(
             f"Program storyboard: {len(rows)} physical segments -> "

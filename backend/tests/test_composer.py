@@ -687,6 +687,71 @@ def test_sequence_exclusion_fails_closed_on_stale_or_incomplete_binding(tmp_path
     assert composer._review_rejected_media(tmp_path, board, digest) == {}
 
 
+@pytest.mark.parametrize("defect", [None, "changed_narration", "changed_video", "changed_media", "unbound_plan", "wrong_report"])
+def test_creative_migration_reconstructs_only_current_bound_media_exclusions(tmp_path, monkeypatch, defect):
+    from unittest.mock import AsyncMock
+    board, digest = _attributed_sequence_candidate(tmp_path)
+    path = tmp_path / "visual_plan.json"
+    original = json.loads(path.read_text())
+    # Even an old list carrying the current candidate hash must not be copied
+    # unless the rendered shot's current attributed sample independently proves it.
+    original[1]["review_rejected_media"] = [
+        {"src": "../unreviewed.jpg", "sha256": "unproven", "rendered_video_sha256": digest},
+        {"src": "../historical.jpg", "sha256": original[1]["media_shots"][0]["sha256"],
+         "rendered_video_sha256": digest, "issues": ["Untrusted prior array"]},
+    ]
+    composer._write_visual_plan_checkpoint(tmp_path, board, original)
+    if defect == "changed_narration": board["scenes"][1]["text"] = "A different story now describes this event."
+    if defect == "changed_video": (tmp_path / "video.next.mp4").write_bytes(b"new candidate")
+    if defect == "changed_media": (tmp_path / "historical.jpg").write_bytes(b"replacement asset")
+    if defect == "unbound_plan": path.write_text(json.dumps(original) + " ")
+    if defect == "wrong_report":
+        report_path = tmp_path / "av_sync_report.next.json"
+        report = json.loads(report_path.read_text())
+        report["rendered_video_sha256"] = "stale"
+        report_path.write_text(json.dumps(report))
+    monkeypatch.setattr(composer, "VISUAL_PLAN_PROMPT_CONTRACT_VERSION", composer.VISUAL_PLAN_PROMPT_CONTRACT_VERSION + 1)
+    planned = [{"id": scene["id"], "headline": "Fresh creative copy", "grounding_source": "model"}
+               for scene in board["scenes"]]
+    planner = AsyncMock(return_value=planned)
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", planner)
+    result = asyncio.run(composer._load_or_plan_scene_visuals(
+        tmp_path, board, ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None,
+    ))
+    planner.assert_awaited_once()
+    assert result[1]["headline"] == "Fresh creative copy"
+    exclusions = result[1].get("review_rejected_media", [])
+    if defect:
+        assert exclusions == []
+    else:
+        assert len(exclusions) == 1
+        assert exclusions[0]["src"] == "../historical.jpg"
+        assert exclusions[0]["sample_id"] == "scene-02-shot-01"
+        assert exclusions[0]["rendered_video_sha256"] == digest
+        assert exclusions[0]["issues"] != ["Untrusted prior array"]
+        assert composer._load_cached_scene_plans(tmp_path, board)[1]["review_rejected_media"] == exclusions
+
+
+def test_creative_migration_accepts_a_bound_pre_brief_semantic_hash(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    board, _ = _attributed_sequence_candidate(tmp_path)
+    sidecar = tmp_path / composer.VISUAL_PLAN_CACHE_FILENAME
+    cache = json.loads(sidecar.read_text())
+    legacy = composer._visual_plan_planner_input(board)
+    legacy.pop("director_brief", None)
+    cache["planner_input_sha256"] = composer._canonical_sha256(legacy)
+    cache["prompt_contract_version"] = -1
+    sidecar.write_text(json.dumps(cache))
+    board["director_brief"] = {"purpose": "Explain the unchanged story"}
+    monkeypatch.setattr(visual_plan, "plan_scene_visuals", AsyncMock(return_value=[
+        {"id": scene["id"], "headline": "Fresh copy"} for scene in board["scenes"]
+    ]))
+    result = asyncio.run(composer._load_or_plan_scene_visuals(
+        tmp_path, board, ai_endpoint=None, ai_model=None, provider_id=None, log=lambda _: None,
+    ))
+    assert result[1]["review_rejected_media"][0]["src"] == "../historical.jpg"
+
+
 @pytest.mark.parametrize("grounding_source", ["model", "narration_fallback"])
 def test_quality_retry_repairs_proven_article_assignment_without_rewriting_copy(tmp_path, monkeypatch, grounding_source):
     from unittest.mock import AsyncMock
