@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.pipeline import media_shots as ms, scene_kit, composer
+from backend.pipeline.video_format import LANDSCAPE, PORTRAIT
 from PIL import Image
 
 
@@ -347,6 +348,82 @@ def test_rendered_mixed_scene_has_timed_media_and_substantive_editorial_panels(t
         ms.assert_rendered_shots(plan, html.replace('data-duration="15.01"', 'data-duration="26.50"'))
     with pytest.raises(ValueError, match="looped"):
         ms.assert_rendered_shots(plan, html.replace("muted playsinline", "loop muted playsinline"))
+
+
+@pytest.mark.parametrize("layout", ["cards", "split"])
+@pytest.mark.parametrize("kind", ["editorial", "public_footage", "image"])
+@pytest.mark.parametrize("orientation", ["landscape", "portrait"])
+def test_two_selected_claims_render_as_distinct_panels(layout, kind, orientation):
+    copy = ["First supported assertion", "Second supported assertion"]
+    shot = {"start": 0, "duration": 9, "kind": kind, "layout": layout, "copy": copy,
+            "motion_cues": ms.motion_cues(9), "source_start": 2, "source_duration": 15,
+            "src": "../verified.mp4" if kind == "public_footage" else "../verified.png",
+            "credit": "Source: Verified source"}
+    plan = {"id": "scene-02", "headline": "Scene context", "media_shots": [shot]}
+    kit = scene_kit.ScenePlan.from_dict(
+        plan, duration=9, scene_id="scene-02",
+        frame=PORTRAIT if orientation == "portrait" else LANDSCAPE,
+    )
+    html = scene_kit.render_scene(kit)
+    ms.assert_rendered_shots(plan, html)
+    doc = ms._Elements(html)
+    prefix = "scene-02-shot-1"
+    assert doc.parents[prefix + "-title-panel"] == prefix + "-pair"
+    assert doc.parents[prefix + "-card-0"] == prefix + "-pair"
+    assert doc.parents[prefix + "-title"] == prefix + "-title-panel"
+    assert doc.elements[prefix + "-panel"][1]["data-shot-layout"] == layout
+    assert all(html.count(text) == 1 for text in copy)
+    assert html.count("Source: Verified source") == 1
+    assert f'inAt("#{prefix}-title",' in html
+    assert f'inAt("#{prefix}-card-0",' in html
+    assert 'data-cue-reveal-start="0.100"' in html
+    assert 'data-cue-settle="1.750"' in html
+    assert '.visual .shot-grid.shot-pair { display:grid; max-width:1400px; }' in html
+    assert '.shot-pair > .shot-card { min-width:0;' in html
+    if orientation == "portrait":
+        assert '.shot-grid.shot-pair, #scene-02 .shot-grid.shot-pair.split { grid-template-columns:1fr; }' in html
+    if kind != "editorial":
+        media = doc.elements[prefix + "-media"][1]
+        assert media["src"] == shot["src"]
+        assert media["data-duration"] == "9.00"
+        if kind == "public_footage":
+            assert media["data-media-start"] == "2.00"
+    # A renamed attribute or two nested nodes is not proof of two rendered panels.
+    for invalid in [
+        html.replace(f'data-shot-layout="{layout}"', 'data-shot-layout="focus"'),
+        html.replace(f'class="shot-grid {layout} shot-pair"', 'class="shot-grid focus"'),
+        html.replace(f'<div id="{prefix}-pair"', f'<div><div id="{prefix}-pair"', 1),
+        html.replace(f'<div class="shot-card " id="{prefix}-card-0"',
+                     f'<div><div class="shot-card " id="{prefix}-card-0"', 1),
+    ]:
+        with pytest.raises(ValueError, match="paired"):
+            ms.assert_rendered_shots(plan, invalid)
+
+
+@pytest.mark.parametrize("layout,copy", [
+    ("cards", ["Only one assertion"]),
+    ("split", ["Only one assertion"]),
+    ("focus", ["The title", "One support"]),
+    ("cards", ["The title", "First support", "Second support"]),
+    ("split", ["The title", "First support", "Second support"]),
+])
+def test_other_selected_copy_layouts_keep_existing_structure(layout, copy):
+    shot = {"start": 0, "duration": 12, "kind": "editorial", "layout": layout,
+            "copy": copy, "motion_cues": ms.motion_cues(12)}
+    plan = {"id": "scene-02", "media_shots": [shot]}
+    html = scene_kit.render_scene(scene_kit.ScenePlan.from_dict(plan, duration=12, scene_id="scene-02"))
+    ms.assert_rendered_shots(plan, html)
+    doc = ms._Elements(html)
+    assert "scene-02-shot-1-pair" not in doc.elements
+    assert doc.parents["scene-02-shot-1-title"] == "scene-02-shot-1-panel"
+    assert doc.elements["scene-02-shot-1-panel"][1]["data-shot-layout"] == ("focus" if len(copy) < 3 else layout)
+    assert all(html.count(text) == 1 for text in copy)
+
+
+def test_pair_guard_parser_does_not_nest_following_elements_under_void_tags():
+    doc = ms._Elements('<div id="root"><img id="image" src="x"><br/><source src="y">'
+                       '<div id="first"></div><span id="empty"/><div id="second"></div></div>')
+    assert doc.parents["first"] == doc.parents["second"] == "root"
 
 
 def test_live_planner_repairs_invalid_output_and_reuses_only_valid_checkpoint(tmp_path):

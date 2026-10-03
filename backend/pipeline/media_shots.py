@@ -97,6 +97,8 @@ class _Elements(HTMLParser):
     def __init__(self, source: str):
         super().__init__()
         self.elements = {}
+        self.parents = {}
+        self._stack = []
         self.feed(source)
 
     def handle_starttag(self, tag, attrs):
@@ -105,19 +107,46 @@ class _Elements(HTMLParser):
             if attrs["id"] in self.elements:
                 raise ValueError(f"duplicate rendered id: {attrs['id']}")
             self.elements[attrs["id"]] = (tag, attrs)
+            self.parents[attrs["id"]] = self._stack[-1][1] if self._stack else None
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self._stack.append((tag, attrs.get("id")))
+
+    def handle_endtag(self, tag):
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                del self._stack[index:]
+                break
 
 
 def assert_rendered_shots(plan: dict, source: str) -> None:
     """Audit actual emitted media intervals, not a source mentioned in a comment."""
     if not plan.get("media_shots"):
         return
-    elements = _Elements(source).elements
+    document = _Elements(source)
+    elements = document.elements
     cursor = 0
     for i, shot in enumerate(plan["media_shots"]):
         if ticks(shot["start"]) != cursor:
             raise ValueError(f"shot gap or overlap in {plan['id']}")
         cursor += ticks(shot["duration"])
         prefix = f"{plan['id']}-shot-{i + 1}"
+        selected = list(dict.fromkeys(shot.get("copy", [])))
+        layout = shot.get("layout", "cards")
+        if len(selected) == 2 and layout in {"cards", "split"}:
+            pair = prefix + "-pair"
+            required = {
+                pair: ({"shot-grid", "shot-pair", layout}, prefix + "-panel"),
+                prefix + "-title-panel": ({"shot-card", "shot-pair-title"}, pair),
+                prefix + "-title": ({"shot-title"}, prefix + "-title-panel"),
+                prefix + "-card-0": ({"shot-card"}, pair),
+            }
+            if elements.get(prefix + "-panel", (None, {}))[1].get("data-shot-layout") != layout:
+                raise ValueError(f"rendered paired layout changed: {prefix}")
+            for element_id, (classes, parent_id) in required.items():
+                tag, attrs = elements.get(element_id, (None, {}))
+                if (tag != "div" or not classes.issubset(attrs.get("class", "").split())
+                        or document.parents.get(element_id) != parent_id):
+                    raise ValueError(f"missing rendered paired panel: {element_id}")
         expected = [(prefix + "-panel", "div")]
         if shot["kind"] != "editorial":
             expected.append((prefix + "-media", "video" if shot["kind"] in {"public_footage", "paper_collage"} else "img"))
