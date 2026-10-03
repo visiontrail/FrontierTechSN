@@ -1,18 +1,19 @@
 """Compose the narration into a rendered video.
 
-The stage runs in five steps:
+The stage combines model-planned shots with deterministic media rendering:
 
 1. **Storyboard** — cut the script into timed scenes against the audio.
 2. **Direction** — an art director model decides what each scene shows.
-3. **Authoring** — Claude Agent SDK crews write the HyperFrames scene files,
+3. **3D production** — the configured project model plans bounded Three.js / R3F
+   scenes; the local Remotion renderer produces verified silent MP4 shots.
+4. **Authoring** — Claude Agent SDK crews write the HyperFrames scene files,
    starting from deterministic drafts and falling back to them scene-by-scene.
-4. **Assembly** — a generated spine mounts the scenes on the audio timeline.
-5. **Render** — the HyperFrames CLI captures the composition to MP4.
+5. **Assembly** — a generated spine mounts the scenes on the audio timeline.
+6. **Render** — the HyperFrames CLI captures the composition to MP4.
 
-Steps 2 and 3 are the only places a model is involved, and neither can produce a
-blank video: the spine is generated, every authored scene is gated against the
-HyperFrames runtime contract, and lint failures revert the offending scene to
-its deterministic draft before the render starts.
+The spine is generated and authored HTML is gated against the HyperFrames
+runtime contract. The enabled 3D stage must produce real rendered geometry;
+its failures never fall back to a two-dimensional scene.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from backend.pipeline import (
     scene_kit,
     storyboard as sb,
     subtitles,
+    three_d,
     visual_plan,
 )
 from backend.pipeline.process_logging import run_capture_logged, stream_subprocess
@@ -1546,6 +1548,20 @@ def _finalize_quality_report(
         and report.get("delivery_timeline", {}).get("passed") is True
         and report["delivery_timeline"].get("timeline_sha256") == production.get("timeline_sha256")
     )
+    three_d_report = report.get("three_d") or {}
+    three_d_required = bool(three_d_report.get("enabled") or (production or {}).get("three_d_shot_count"))
+    three_d_passed = not three_d_required or (
+        three_d_report.get("enabled") is True
+        and three_d_report.get("contract") == three_d.CONTRACT
+        and three_d_report.get("passed") is True
+        and int(three_d_report.get("rendered_count") or 0) > 0
+        and (not production or production.get("three_d_shot_count") == three_d_report.get("rendered_count"))
+        and (not multimodal_enabled or (
+            multimodal.get("three_d_sampling_contract") == multimodal_review.THREE_D_SAMPLING_CONTRACT
+            and multimodal.get("reviewed_three_d_shots") == three_d_report.get("rendered_count")
+            and int(multimodal.get("three_d_sample_count") or 0) >= three_d_report.get("rendered_count")
+        ))
+    )
     quality_passed = (
         alignment.get("passed") is True
         and visual_grounding.get("passed") is True
@@ -1554,6 +1570,7 @@ def _finalize_quality_report(
         and report.get("production_preflight", {}).get("passed", True) is True
         and report.get("delivery_timeline", {}).get("passed", True) is True
         and production_passed
+        and three_d_passed
     )
     warnings = _quality_warnings(
         alignment,
@@ -1673,18 +1690,25 @@ def _review_retry_fingerprint(directory: Path, request: dict, render: RenderSpec
     for name in ("index.html", "storyboard.json", "visual_plan.json", "production_timeline.json", "footage/manifest.json",
                  "audio/paced_narration.wav", "audio/program_mix.wav"):
         paths.add(directory / name)
-    for name in ("compositions", "assets", "news_images"):
+    for name in ("compositions", "assets", "news_images", "three_d"):
         paths.update(path for path in (directory / name).rglob("*") if path.is_file())
     paths.update((directory / "footage").glob("*-render.mp4"))
     paths.update(Path(__file__).parent / name for name in (
         "scene_kit.py", "assembler.py", "storyboard.py", "intros.py", "outros.py",
         "composer.py", "news_images.py", "news_webpages.py", "collage_broll.py", "visual_plan.py",
         "production_plan.py", "media_shots.py", "director.py",
-        "video_format.py",
+        "video_format.py", "three_d.py",
     ))
     paths.add(config.PROMPTS_DIR / "media_shots.txt")
+    paths.add(config.PROMPTS_DIR / "three_d.txt")
+    for name in ("three_d_plan.json", "three_d_render_report.json"):
+        paths.add(directory / name)
+    for name in ("src", "scripts"):
+        paths.update(path for path in (config.REMOTION_DIR / name).rglob("*") if path.is_file())
+    paths.update(config.REMOTION_DIR / name for name in ("package.json", "package-lock.json"))
     evidence = {
         "request": request,
+        "three_d_enabled": config.THREE_D_ENABLED,
         "render": (render or resolve_render_spec(
             resolve_frame_spec(request.get("video_orientation"))
         )).to_dict(),
@@ -2350,6 +2374,13 @@ async def compose_video(
         plans, board, output_dir_path, provider_id=provider_id,
         ai_endpoint=ai_endpoint, ai_model=ai_model, log=emit,
     )
+    three_d_report = {"enabled": False, "passed": True, "rendered_count": 0}
+    if config.THREE_D_ENABLED:
+        three_d_report = await three_d.render_story_shots(
+            plans, board, output_dir_path, width=render.width, height=render.height,
+            fps=render.fps, provider_id=provider_id,
+            ai_endpoint=ai_endpoint, ai_model=ai_model, log=emit,
+        )
     _require_public_footage_placement(plans, manifest, output_dir_path, rendered_shots=True)
     scene_plans = list(plans)
     visual_grounding = visual_plan.visual_grounding_report(scene_plans, board)
@@ -2380,6 +2411,7 @@ async def compose_video(
         "background_music": {"enabled": bool(background_music_path), "passed": None},
         "news_images": news_image_quality,
         "visual_coverage": shot_report,
+        "three_d": three_d_report,
     }
     quality_report_path = output_dir_path / "av_sync_report.next.json"
     quality_report_path.unlink(missing_ok=True)
@@ -2479,6 +2511,7 @@ async def compose_video(
         "brief": "director_brief.json", "timeline": "production_timeline.json",
         "timeline_sha256": production_timeline["input_sha256"],
         "shot_count": len(production_timeline["shots"]),
+        "three_d_shot_count": production_timeline.get("three_d_shot_count", 0),
     }
     emit(
         f"Intro: {intro_plan['intro_label']} bound to the "

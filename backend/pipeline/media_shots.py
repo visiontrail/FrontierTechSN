@@ -62,7 +62,7 @@ def _copy_identity(text: str) -> str:
 
 
 def _default_direction(kind: str, copy: list[str]) -> dict[str, str]:
-    evidence = ("illustration" if kind == "paper_collage" else
+    evidence = ("illustration" if kind in {"paper_collage", "three_d"} else
                 "editorial" if kind == "editorial" else "captured_evidence")
     subject = next((value for value in copy if value), "Narrated subject")[:400]
     return {"purpose": "Explain the supplied narration with its selected copy",
@@ -174,7 +174,7 @@ def assert_rendered_shots(plan: dict, source: str) -> None:
                     raise ValueError(f"missing rendered paired panel: {element_id}")
         expected = [(prefix + "-panel", "div")]
         if shot["kind"] != "editorial":
-            expected.append((prefix + "-media", "video" if shot["kind"] in {"public_footage", "paper_collage"} else "img"))
+            expected.append((prefix + "-media", "video" if shot["kind"] in {"public_footage", "paper_collage", "three_d"} else "img"))
         for element_id, tag in expected:
             actual_tag, attrs = elements.get(element_id, (None, {}))
             if actual_tag != tag or "clip" not in attrs.get("class", "").split():

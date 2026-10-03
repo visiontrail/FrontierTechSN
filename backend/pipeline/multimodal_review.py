@@ -30,6 +30,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from backend import config
+from backend.pipeline import production_plan
 from backend.pipeline.timing import timed
 from backend.pipeline.opencli import OpenCLIError, run_opencli
 from backend.pipeline.review_response import ReviewResponseError, parse_review_response
@@ -48,6 +49,7 @@ FRAME_WORKERS = 4
 SAMPLING_CONTRACT = "complete-shot-sequence-v1"
 MEDIA_SAMPLE_CONTRACT = "source-media-mismatch-v1"
 MOTION_SAMPLING_CONTRACT = "editorial-action-settled-v1"
+THREE_D_SAMPLING_CONTRACT = "three-d-geometry-camera-v1"
 
 
 def shot_fingerprint(shot: dict) -> str:
@@ -69,7 +71,9 @@ def _scene_timestamp(scene: dict) -> float:
 
 
 def _editorial_sample_times(shot: dict) -> list[tuple[str, float]]:
-    """Bound extra sampling to actual editorial animation, preserving every midpoint."""
+    """Sample meaningful editorial and procedural phases, preserving every midpoint."""
+    if shot.get("kind") == "three_d":
+        return production_plan.three_d_sample_times(shot)
     cues = shot.get("motion_cues")
     if shot.get("kind") != "editorial" or cues is None:
         return []
@@ -184,6 +188,8 @@ async def extract_scene_frames(
                     "selected_copy": shot.get("copy", []),
                     "relationship_excerpt": shot.get("relationship_excerpt", ""),
                 })
+                if shot.get("kind") == "three_d":
+                    planned_shots[-1]["three_d"] = production_plan.three_d_review_context(shot)
                 timestamp = round(float(scene["start"]) + start + duration / 2, 3)
                 samples.append({
                     "id": sample_id, "shot_id": sample_id, "timestamp": timestamp,
@@ -346,7 +352,8 @@ def _review_prompt(
         "You are the final semantic continuity reviewer for a narrated video. "
         "The attached contact sheet contains actual rendered frames, one from each "
         "planned shot (or the scene midpoint when there is no shot sequence), "
-        "plus action and settled frames for editorial animation. "
+        "plus action and settled frames for editorial animation, and onset, "
+        "action and settled frames for procedural three_d shots. "
         "Each frame is visibly labeled with its sample id and timecode. The "
         "rendered_samples list maps all frames to their scene. Evaluate all of a "
         "scene's frames together, in time order, against its complete narration. "
@@ -371,6 +378,19 @@ def _review_prompt(
         "or contradictory planned claims as well as missing execution. Report these "
         "direction defects in issues for editorial repair, not source_media_mismatches "
         "unless a supplied source image/video itself visibly contradicts narration. "
+        "A planned_shots.three_d entry describes a procedural illustration made "
+        "with Three.js geometry, React Three Fiber and Remotion. Its actors, links "
+        "and camera are the intended explanatory scene, not captured footage or "
+        "a measured physical simulation. Check that actual rendered geometry, "
+        "spatial relationships, movement and camera framing explain the supplied "
+        "narration and semantic_intent; inspect onset, action, midpoint and settled "
+        "samples together. The geometry must remain visible behind the final "
+        "text overlays. Text alone or a decorative orbit cannot satisfy a promised "
+        "geometric explanation. Do not treat illustrative size, distance or speed "
+        "as measured quantities or demand photorealism; reject unsupported causal "
+        "links, misleading relative scales or identity claims. Report a defective "
+        "three_d scene in issues and suggested_visual for geometry/camera repair, "
+        "never in source_media_mismatches. "
         "Judge semantic subject, "
         "objects, setting, quantities, and claim—not lip sync or photographic realism. "
         "A well-designed text/data card can match when its visible message accurately "
@@ -401,7 +421,7 @@ def _review_prompt(
         "Set source_media_mismatches=[] unless a specific sampled source image/video "
         "itself depicts the wrong subject, event, material or setting. Identify only "
         "exact supplied sample ids and explain the visible contradiction. Do not "
-        "list editorial cards, missing coverage, unreadable overlays or incorrect "
+        "list editorial cards, procedural three_d illustrations, missing coverage, unreadable overlays or incorrect "
         "overlay copy here; report those in issues for editorial repair. Never "
         "infer a source mismatch from a whole-scene verdict. A match must have "
         "source_media_mismatches=[]. "
@@ -1169,12 +1189,21 @@ async def review_video(
         and not failed
         and (average >= minimum_average_score or calibration_fallback)
     )
+    three_d_samples = [
+        sample
+        for frame in frames for sample in frame.get("samples") or [frame]
+        if (sample.get("media") or {}).get("kind") == "three_d"
+    ]
+    three_d_shots = {sample.get("shot_id", sample["id"]) for sample in three_d_samples}
     return {
         "status": "passed" if passed else "failed",
         "passed": passed,
         "analyzer": "gemini-web-via-opencli",
         "sampling_contract": SAMPLING_CONTRACT,
         "motion_sampling_contract": MOTION_SAMPLING_CONTRACT,
+        **({"three_d_sampling_contract": THREE_D_SAMPLING_CONTRACT,
+            "reviewed_three_d_shots": len(three_d_shots),
+            "three_d_sample_count": len(three_d_samples)} if three_d_shots else {}),
         "minimum_scene_score": minimum_scene_score,
         "minimum_average_score": minimum_average_score,
         "average_score": average,

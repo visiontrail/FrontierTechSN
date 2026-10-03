@@ -15,6 +15,87 @@ from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 
 CONTRACT = "directed-explainer-v1"
+THREE_D_CONTRACT = "three-d-explainer-v1"
+
+
+def three_d_review_context(shot: dict) -> dict:
+    """Expose bounded declarative geometry, never classify generated pixels as footage."""
+    spec = shot.get("three_d_spec")
+    if (
+        not isinstance(spec, dict) or spec.get("contract") != THREE_D_CONTRACT
+        or spec.get("representation") != "illustration"
+        or not isinstance(spec.get("camera"), dict)
+        or not isinstance(spec.get("actors"), list) or not 1 <= len(spec["actors"]) <= 12
+        or any(not isinstance(actor, dict) for actor in spec["actors"])
+    ):
+        raise ValueError("three_d shot lacks a valid procedural illustration spec")
+    actor_keys = (
+        "id", "kind", "primitive", "position", "end_position", "rotation", "end_rotation",
+        "scale", "color", "explode", "end_explode", "motion_start", "motion_end", "action",
+    )
+    context = {
+        "representation": "illustration",
+        "provenance": "Procedural Three.js geometry rendered with React Three Fiber and Remotion",
+        "contract": spec["contract"],
+        "spec_sha256": shot.get("three_d_spec_sha256"),
+        "renderer_sha256": shot.get("three_d_renderer_sha256"),
+        "semantic_intent": spec.get("semantic_intent", ""),
+        "camera": {key: spec["camera"][key] for key in (
+            "position", "target", "end_position", "end_target", "fov",
+        ) if key in spec["camera"]},
+        "actors": [{key: actor[key] for key in actor_keys if key in actor} for actor in spec["actors"]],
+        "links": spec.get("links", []),
+    }
+    # A copy avoids tying the immutable timeline to later mutations of a plan.
+    encoded = json.dumps(context, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    if len(encoded) > 18000:
+        raise ValueError("three_d review context exceeds the bounded scene specification")
+    return json.loads(encoded)
+
+
+def three_d_sample_times(shot: dict) -> list[tuple[str, float]]:
+    """Follow Remotion's frame-driven actor/camera phases, not overlay reveal cues."""
+    three_d_review_context(shot)
+    spec = shot["three_d_spec"]
+    fps, count = spec.get("fps"), spec.get("duration_frames")
+    if type(fps) is not int or fps <= 0 or type(count) is not int or count < 2:
+        raise ValueError("three_d sampling requires a finite frame timeline")
+    duration = float(shot["duration"])
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("three_d shot duration must be finite and positive")
+    span = (count - 1) / fps
+    if span >= duration + .001 or count / fps < duration - .001:
+        raise ValueError("three_d clip frame timeline differs from its shot duration")
+    windows = []
+    for actor in spec["actors"]:
+        start, end = actor.get("motion_start", .12), actor.get("motion_end", .72)
+        if (
+            type(start) not in (float, int) or type(end) not in (float, int)
+            or not math.isfinite(start) or not math.isfinite(end) or not 0 <= start < end <= 1
+        ):
+            raise ValueError("three_d actor motion window is invalid")
+        windows.append((start, end))
+    # sceneState() holds its camera and connector flow at the latest actor's
+    # motion_end, including hold actors; the render contract uses this same rule.
+    first = min(start for start, _ in windows)
+    last = max(end for _, end in windows)
+    onset = min(.25, span * .05)
+    action = span * (first + last) / 2
+    settled = min(span, span * last + 1 / fps)
+    declared = shot.get("three_d_motion_cues")
+    if declared is not None:
+        expected = {"motion_start": span * first, "action": action, "settle": span * last}
+        if not isinstance(declared, dict) or any(
+            type(declared.get(key)) not in (int, float) or not math.isfinite(declared[key])
+            or abs(declared[key] - value) > .001 for key, value in expected.items()
+        ):
+            raise ValueError("three_d motion cues disagree with the rendered frame timeline")
+    # Remotion may emit an IEEE-ceil tail at exactly the shot end; that instant
+    # belongs to the next shot in the assembly, so select the preceding frame.
+    limit = min(span, max(0, duration - 1 / fps)) if span >= duration else span
+    return [(phase, round(min(value, limit), 6)) for phase, value in (
+        ("onset", onset), ("action", action), ("settled", settled),
+    )]
 
 
 def director_brief(board: dict, *, theme: str, frame, render, captions: bool,
@@ -97,6 +178,8 @@ def build_timeline(board: dict, plans: list[dict], *, fps: int) -> dict:
                           "source": shot.get("src"), "source_sha256": shot.get("sha256"),
                           "source_start": shot.get("source_start"),
                           "copy": shot.get("copy", []), "layout": shot.get("layout")})
+            if shot["kind"] == "three_d":
+                shots[-1]["three_d"] = three_d_review_context(shot)
             for name, offset in shot.get("motion_cues", {}).items():
                 cue = _number(offset)
                 if cue >= length:
@@ -105,6 +188,13 @@ def build_timeline(board: dict, plans: list[dict], *, fps: int) -> dict:
                 events.append({"id": f"{shot_id}-{name}", "shot_id": shot_id, "name": name,
                                "time_seconds": float(event_time),
                                "frame": min(last - 1, int((event_time * fps).to_integral_value(rounding=ROUND_CEILING)))})
+            if shot["kind"] == "three_d":
+                for phase, offset in three_d_sample_times(shot):
+                    event_time = absolute + _number(offset)
+                    name = f"three_d_{phase}"
+                    events.append({"id": f"{shot_id}-{name}", "shot_id": shot_id, "name": name,
+                                   "time_seconds": float(event_time),
+                                   "frame": min(last - 1, int((event_time * fps).to_integral_value(rounding=ROUND_CEILING)))})
             local_cursor = local + length
         if abs(local_cursor - duration) > Decimal("0.001"):
             raise ValueError(f"incomplete shot coverage in {scene['id']}")
@@ -119,7 +209,8 @@ def build_timeline(board: dict, plans: list[dict], *, fps: int) -> dict:
     payload = {"contract": CONTRACT, "fps": fps, "duration_frames": frames,
                "duration_seconds": float(total), "timing_authority": "storyboard.json + media_shots.json",
                "projection": "ceil(seconds * fps), clipped to rendered frame count; half-open intervals",
-               "shots": shots, "events": events}
+               "shots": shots, "events": events,
+               "three_d_shot_count": sum(shot["kind"] == "three_d" for shot in shots)}
     payload["input_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return payload
 
@@ -129,8 +220,12 @@ def preview_times(timeline: dict) -> list[float]:
     fps = timeline["fps"]
     selected = {(s["start"] + s["end"] - 1) // 2 for s in timeline["shots"]}
     editorial = {s["id"] for s in timeline["shots"] if s["kind"] == "editorial"}
+    procedural = {s["id"] for s in timeline["shots"] if s["kind"] == "three_d"}
     selected.update(e["frame"] for e in timeline["events"]
-                    if e["shot_id"] in editorial and e["name"] in {"emphasis", "settle"})
+                    if (e["shot_id"] in editorial and e["name"] in {"emphasis", "settle"})
+                    or (e["shot_id"] in procedural and e["name"] in {
+                        "three_d_onset", "three_d_action", "three_d_settled",
+                    }))
     return [round(frame / fps, 6) for frame in sorted(selected)]
 
 

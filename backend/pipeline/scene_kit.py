@@ -2015,6 +2015,17 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .article-panel .shot-pair {{ --pair-copy-size:32px; }}
   #{sid} .article-panel .shot-pair[data-pair-density="dense"] {{ --pair-copy-size:28px; }}
   #{sid} .shot-panel .shot-pair[data-pair-density] .shot-title, #{sid} .shot-panel .shot-pair[data-pair-density] .shot-copy {{ font-size:var(--pair-copy-size); line-height:1.16; font-weight:700; color:inherit; }}
+  #{sid} .shot-media.three_d {{ width:58%; object-fit:contain; background:#101f24; }}
+  #{sid} .shot-panel.three-d-panel {{ left:58%; padding:80px 54px 170px 46px; justify-content:center; background:{bg}; color:{ink}; }}
+  #{sid} .three-d-panel .shot-kicker {{ color:{label_ink}; }}
+  #{sid} .three-d-panel .shot-title {{ font-size:46px; line-height:1.16; }}
+  #{sid} .three-d-panel[data-copy-density="dense"] .shot-title {{ font-size:36px; }}
+  #{sid} .three-d-panel .shot-copy {{ font-size:30px; line-height:1.25; }}
+  #{sid} .three-d-panel .shot-grid, #{sid} .three-d-panel .shot-grid.shot-pair {{ grid-template-columns:1fr; }}
+  #{sid} .three-d-panel .shot-pair > .shot-card {{ background:{card}; padding:22px; }}
+  #{sid} .three-d-panel .shot-pair {{ --pair-copy-size:36px; }}
+  #{sid} .three-d-panel .shot-pair[data-pair-density="dense"] {{ --pair-copy-size:29px; }}
+  #{sid} .three-d-panel .shot-credit {{ position:static; align-self:flex-start; order:10; margin-top:24px; max-width:100%; font-size:18px; }}
   #{sid} .contained-photo .shot-grid.shot-pair {{ grid-template-columns:1fr; }}
   #{sid} .shot-wipe {{ position:absolute; inset:0; background:{accent}; pointer-events:none; }}
 """
@@ -2045,6 +2056,8 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .shot-grid.shot-pair, #{sid} .shot-grid.shot-pair.split {{ grid-template-columns:1fr; }}
   #{sid} .shot-media.article {{ width:100%; height:52%; padding:60px 64px 24px; }}
   #{sid} .shot-panel.article-panel {{ left:0; top:52%; padding:32px 64px 170px; justify-content:flex-start; }}
+  #{sid} .shot-media.three_d {{ width:100%; height:55%; }}
+  #{sid} .shot-panel.three-d-panel {{ left:0; top:55%; padding:36px 64px 240px; justify-content:flex-start; }}
 """
     markup = []
     timeline = []
@@ -2064,7 +2077,7 @@ def _render_media_shots(plan: ScenePlan) -> str:
         panel_track = media_track + 1
         timing = f'data-start="{start:.2f}" data-duration="{duration:.2f}"'
         if not editorial:
-            video = kind in {"public_footage", "paper_collage"}
+            video = kind in {"public_footage", "paper_collage", "three_d"}
             tag = "video" if video else "img"
             extra = (f'muted playsinline data-media-start="{float(shot.get("source_start", 0)):.2f}"'
                      if video else 'alt=""')
@@ -2112,12 +2125,12 @@ def _render_media_shots(plan: ScenePlan) -> str:
         else:
             content = title_html + f'<div class="shot-grid {layout}">{"".join(cards)}</div>'
         markup.append(
-            f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}{" contained-photo" if portrait_photo else ""}{" article-panel" if kind == "article" else ""}" '
+            f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}{" contained-photo" if portrait_photo else ""}{" article-panel" if kind == "article" else ""}{" three-d-panel" if kind == "three_d" else ""}" '
             f'{timing} data-track-index="{panel_track}" data-shot-layout="{layout}" data-copy-density="{"dense" if len(title) > 100 else "normal"}" {cue_attributes}>'
             + f'<div class="shot-kicker" id="{prefix}-kicker">{_esc(plan.kicker)}</div>'
             + f'<div class="shot-rule" id="{prefix}-rule"></div>'
             + content
-            + (f'<div class="shot-credit">{_esc(shot["credit"])}</div>' if shot.get("credit") else "")
+            + (f'<div class="shot-credit">{_esc(shot.get("credit") or "3D illustration · Not to scale")}</div>' if shot.get("credit") or kind == "three_d" else "")
             + '</div>'
         )
         # Clip visibility is owned by HyperFrames. Animate inner content only;
