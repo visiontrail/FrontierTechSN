@@ -436,6 +436,65 @@ def test_cached_scene_plans_require_exact_current_checkpoint_and_strip_placement
     assert isinstance(json.loads((tmp_path / "visual_plan.json").read_text()), list)
 
 
+@pytest.mark.parametrize("archetype", ["quote", "stat"])
+def test_cached_inline_news_image_preserves_picture_editor_cache_contract(tmp_path, archetype):
+    board = _cache_board()
+    directed = [
+        {"id": scene["id"], "archetype": archetype, "headline": scene["text"]}
+        for scene in board["scenes"]
+    ]
+    enriched = copy.deepcopy(directed)
+    for plan in enriched:
+        plan.update({
+            "news_image": True,
+            "news_image_mode": "inline",
+            "news_image_src": "../news_images/verified.jpg",
+            "news_image_sha256": "verified-image-hash",
+            "news_webpage_src": "../news_webpages/verified.png",
+            "media_shots": [{"id": "runtime-shot"}],
+        })
+    _write_cache(tmp_path, board, enriched)
+
+    recovered = composer._load_cached_scene_plans(tmp_path, board)
+
+    assert recovered == directed
+    original_hints = {plan["id"]: plan for plan in directed}
+    recovered_hints = {plan["id"]: plan for plan in recovered}
+    assert composer.news_images._planner_prompt(
+        board["scenes"], None, recovered_hints,
+    ) == composer.news_images._planner_prompt(
+        board["scenes"], None, original_hints,
+    )
+    contract_args = {
+        "storyboard_sha256": composer.news_images.storyboard_fingerprint(board),
+        "requested_count": 2, "target_count": 2,
+        "eligible_scene_ids": list(original_hints), "excluded_scene_ids": set(),
+    }
+    assert composer.news_images.acquisition_contract_fingerprint(
+        **contract_args, scene_hints=recovered_hints,
+    ) == composer.news_images.acquisition_contract_fingerprint(
+        **contract_args, scene_hints=original_hints,
+    )
+
+
+@pytest.mark.parametrize("original", [None, "quote", "stat"])
+def test_cached_fullscreen_news_image_restores_replaced_archetype(tmp_path, original):
+    board = _cache_board()
+    plans = _cache_plans()
+    if original is None:
+        plans[1].pop("news_image_original_archetype")
+    else:
+        plans[1]["news_image_original_archetype"] = original
+    _write_cache(tmp_path, board, plans)
+
+    recovered = composer._load_cached_scene_plans(tmp_path, board)
+
+    assert recovered[1] == {
+        "id": "scene-02", "archetype": original or "topic",
+        "headline": "Living circuit boards",
+    }
+
+
 def _failed_visual_candidate(root):
     (root / "video.next.mp4").write_bytes(b"reviewed candidate")
     digest = hashlib.sha256(b"reviewed candidate").hexdigest()

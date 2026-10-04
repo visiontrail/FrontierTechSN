@@ -354,9 +354,12 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
                 if key.startswith("footage_") or key.startswith("collage_"):
                     plan.pop(key, None)
         if plan.get("news_image") or plan.get("archetype") == "news_image":
-            plan["archetype"] = str(
-                plan.get("news_image_original_archetype") or "topic"
-            )
+            # Only fullscreen attachment replaces the directed archetype.
+            # Inline images retain it and do not save an original value.
+            if plan.get("archetype") == "news_image":
+                plan["archetype"] = str(
+                    plan.get("news_image_original_archetype") or "topic"
+                )
             for key in tuple(plan):
                 if key.startswith("news_image"):
                     plan.pop(key, None)
