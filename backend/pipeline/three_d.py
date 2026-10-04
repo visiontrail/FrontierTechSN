@@ -27,6 +27,7 @@ from backend.pipeline.timing import timed
 CONTRACT = "three-d-explainer-v1"
 RENDER_CONTRACT = "three-d-render-v1"
 MAX_BATCH = 3
+MAX_PLAN_ATTEMPTS = 3
 _KINDS = {"chip", "rack", "satellite", "robot", "data", "object"}
 _ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,47}$")
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -40,6 +41,14 @@ _ACTOR_CONTRACT = {
     "scale": "Every coordinate must be between 0.1 and 4 inclusive, including thin surfaces.",
     "explode": "Nonzero explode/end_explode is supported only by chip, rack and satellite.",
 }
+_REPAIR_CONTRACT = (
+    "Repair the rejected scene using the exact field paths and values in validation_feedback. "
+    "Keep valid fields unchanged, including camera, actors and motion, unless the reported "
+    "failure requires changing them. Copy narration_excerpt verbatim from the supplied shot, "
+    "including punctuation; do not normalize apostrophes or quotes. Recheck all numeric bounds "
+    "before returning the complete repaired scene. Never clamp values automatically or change "
+    "the narrated meaning to satisfy validation."
+)
 logger = logging.getLogger(__name__)
 
 
@@ -68,19 +77,34 @@ def _read(path: Path) -> dict:
         return {}
 
 
-def _number(value, low: float, high: float) -> float:
+def _rejection(scene_id: str, raw, error: Exception) -> dict:
+    # Invalid nonfinite numbers remain rejected. Only the diagnostic copy is
+    # converted so the original failure can be persisted as strict JSON.
+    diagnostic = json.loads(json.dumps(raw), parse_constant=str)
+    return {"id": scene_id, "error": str(error), "spec": diagnostic}
+
+
+def _number(value, low: float, high: float, *, field: str = "value") -> float:
     if isinstance(value, bool) or not isinstance(value, (float, int)):
-        raise ValueError("3D coordinates must be numeric")
+        raise ValueError(f"3D {field}={value!r}: coordinates must be numeric")
     value = float(value)
     if not math.isfinite(value) or not low <= value <= high:
-        raise ValueError(f"3D numeric value must lie within {low}..{high}")
+        raise ValueError(f"3D {field}={value!r}: numeric value must lie within {low}..{high}")
     return value
 
 
-def _vector(value, low: float, high: float) -> list[float]:
+def _vector(value, low: float, high: float, *, field: str = "vector") -> list[float]:
     if not isinstance(value, list) or len(value) != 3:
-        raise ValueError("3D vector needs exactly three coordinates")
-    return [_number(item, low, high) for item in value]
+        raise ValueError(f"3D {field}={value!r}: vector needs exactly three coordinates")
+    result, errors = [], []
+    for index, item in enumerate(value):
+        try:
+            result.append(_number(item, low, high, field=f"{field}[{index}]"))
+        except ValueError as exc:
+            errors.append(str(exc))
+    if errors:
+        raise ValueError("; ".join(errors))
+    return result
 
 
 def _color(value) -> str:
@@ -115,16 +139,18 @@ def validate_spec(raw: dict, context: dict, *, width: int, height: int, fps: int
             raise ValueError("3D render dimensions must be even, within 320..3840")
     if type(fps) is not int or not 24 <= fps <= 60:
         raise ValueError("3D fps must be an integer within 24..60")
-    duration = _number(context["duration"], 4, 60)
+    duration = _number(context["duration"], 4, 60, field="duration")
     frames = math.ceil(duration * fps)
     camera_raw = raw.get("camera")
     if not isinstance(camera_raw, dict):
         raise ValueError("3D camera is required")
-    camera = {"position": _vector(camera_raw.get("position"), -30, 30),
-              "target": _vector(camera_raw.get("target"), -12, 12),
-              "fov": _number(camera_raw.get("fov", 40), 20, 75)}
-    camera["end_position"] = _vector(camera_raw.get("end_position", camera["position"]), -30, 30)
-    camera["end_target"] = _vector(camera_raw.get("end_target", camera["target"]), -12, 12)
+    camera = {"position": _vector(camera_raw.get("position"), -30, 30, field="camera.position"),
+              "target": _vector(camera_raw.get("target"), -12, 12, field="camera.target"),
+              "fov": _number(camera_raw.get("fov", 40), 20, 75, field="camera.fov")}
+    camera["end_position"] = _vector(camera_raw.get("end_position", camera["position"]), -30, 30,
+                                     field="camera.end_position")
+    camera["end_target"] = _vector(camera_raw.get("end_target", camera["target"]), -12, 12,
+                                   field="camera.end_target")
     for position, target in ((camera["position"], camera["target"]),
                              (camera["end_position"], camera["end_target"])):
         if math.dist(position, target) < 2:
@@ -139,7 +165,7 @@ def validate_spec(raw: dict, context: dict, *, width: int, height: int, fps: int
     if not isinstance(actors_raw, list) or not 1 <= len(actors_raw) <= 12:
         raise ValueError("3D scene requires 1..12 substantive actors")
     actors, ids = [], set()
-    for actor_raw in actors_raw:
+    for actor_index, actor_raw in enumerate(actors_raw):
         if not isinstance(actor_raw, dict):
             raise ValueError("3D actor must be an object")
         actor_id, kind = actor_raw.get("id"), actor_raw.get("kind")
@@ -148,17 +174,22 @@ def validate_spec(raw: dict, context: dict, *, width: int, height: int, fps: int
         if kind not in _KINDS:
             raise ValueError("unsupported 3D actor kind")
         ids.add(actor_id)
+        field = f"actors[{actor_index}]({actor_id})"
         actor = {"id": actor_id, "kind": kind,
-                 "position": _vector(actor_raw.get("position"), -12, 12),
-                 "scale": _vector(actor_raw.get("scale", [1, 1, 1]), .1, 4),
-                 "rotation": _vector(actor_raw.get("rotation", [0, 0, 0]), -12.566, 12.566),
+                 "position": _vector(actor_raw.get("position"), -12, 12, field=f"{field}.position"),
+                 "scale": _vector(actor_raw.get("scale", [1, 1, 1]), .1, 4, field=f"{field}.scale"),
+                 "rotation": _vector(actor_raw.get("rotation", [0, 0, 0]), -12.566, 12.566,
+                                     field=f"{field}.rotation"),
                  "color": _color(actor_raw.get("color", raw.get("accent", "#59C4D8"))),
-                 "explode": _number(actor_raw.get("explode", 0), 0, 1),
-                 "motion_start": _number(actor_raw.get("motion_start", .12), 0, 1),
-                 "motion_end": _number(actor_raw.get("motion_end", .72), 0, 1)}
-        actor["end_position"] = _vector(actor_raw.get("end_position", actor["position"]), -12, 12)
-        actor["end_rotation"] = _vector(actor_raw.get("end_rotation", actor["rotation"]), -12.566, 12.566)
-        actor["end_explode"] = _number(actor_raw.get("end_explode", actor["explode"]), 0, 1)
+                 "explode": _number(actor_raw.get("explode", 0), 0, 1, field=f"{field}.explode"),
+                 "motion_start": _number(actor_raw.get("motion_start", .12), 0, 1, field=f"{field}.motion_start"),
+                 "motion_end": _number(actor_raw.get("motion_end", .72), 0, 1, field=f"{field}.motion_end")}
+        actor["end_position"] = _vector(actor_raw.get("end_position", actor["position"]), -12, 12,
+                                        field=f"{field}.end_position")
+        actor["end_rotation"] = _vector(actor_raw.get("end_rotation", actor["rotation"]), -12.566, 12.566,
+                                        field=f"{field}.end_rotation")
+        actor["end_explode"] = _number(actor_raw.get("end_explode", actor["explode"]), 0, 1,
+                                       field=f"{field}.end_explode")
         if kind not in {"chip", "rack", "satellite"} and (actor["explode"] or actor["end_explode"]):
             raise ValueError("exploded views are only supported for chip, rack and satellite actors")
         if actor["motion_start"] >= actor["motion_end"]:
@@ -205,7 +236,8 @@ def validate_spec(raw: dict, context: dict, *, width: int, height: int, fps: int
         raise ValueError("3D shot must demonstrate spatial motion, not only a static object or text reveal")
     excerpt = _text(raw.get("narration_excerpt"), "narration_excerpt", maximum=5000)
     if excerpt not in context["narration_excerpt"]:
-        raise ValueError("3D narration excerpt is not from the selected shot")
+        raise ValueError("3D narration excerpt is not from the selected shot: narration_excerpt "
+                         "must preserve the supplied shot's exact characters, including punctuation")
     if raw.get("representation") != "illustration":
         raise ValueError("generated 3D must be explicitly classified as illustration")
     return {"contract": CONTRACT, "id": context["id"], "width": width, "height": height,
@@ -384,8 +416,43 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
                               "shots": [selected[row["id"]] for row in contexts if row["id"] in selected]})
 
         rejected = {}
-        for attempt in range(2):
-            pending = [row for row in contexts if row["id"] not in selected]
+        # Resume the exact rejected input, not a fresh creative request. The
+        # context hash includes narration, review feedback/candidate, route and
+        # delivery settings. Recompute the error with the current validator.
+        unresolved = {row["id"]: row for row in contexts if row["id"] not in selected}
+        for path in sorted((task_dir / "three_d_planning").glob("*.json"),
+                           key=lambda item: item.stat().st_mtime_ns, reverse=True):
+            if len(rejected) == len(unresolved):
+                break
+            evidence = _read(path)
+            if evidence.get("status") != "validated":
+                continue
+            prior_request, prior_errors = evidence.get("request"), evidence.get("validation_errors")
+            if (not isinstance(prior_request, dict) or not isinstance(prior_request.get("shots"), list)
+                    or not isinstance(prior_errors, dict) or not isinstance(evidence.get("response"), str)):
+                continue
+            prior_contexts = {row.get("id"): row for row in prior_request["shots"]
+                              if isinstance(row, dict) and isinstance(row.get("id"), str)}
+            matched = [row for scene_id, row in unresolved.items()
+                       if scene_id not in rejected and scene_id in prior_errors
+                       and prior_contexts.get(scene_id, {}).get("input_sha256") == row["input_sha256"]]
+            if not matched:
+                continue
+            prior_raw = _first_json_array(evidence.get("response", "")) or []
+            indexed = {row["id"]: row for row in prior_raw
+                       if isinstance(row, dict) and isinstance(row.get("id"), str)}
+            for context in matched:
+                raw_scene = indexed.get(context["id"])
+                try:
+                    validate_spec(raw_scene, context, width=width, height=height, fps=fps)
+                except (TypeError, ValueError) as exc:
+                    errors[context["id"]] = str(exc)
+                    rejected[context["id"]] = _rejection(context["id"], raw_scene, exc)
+                    if log:
+                        log(f"3D {context['id']}: resuming rejected direction from {path.name}: {exc}")
+        previous_attempt_rejections, exhausted = {}, set()
+        for attempt in range(MAX_PLAN_ATTEMPTS):
+            pending = [row for row in contexts if row["id"] not in selected and row["id"] not in exhausted]
             if not pending:
                 break
             for offset in range(0, len(pending), MAX_BATCH):
@@ -397,6 +464,7 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
 
                 batch_ids = {row["id"] for row in batch}
                 request = {"shots": batch, "actor_contract": _ACTOR_CONTRACT,
+                           "repair_contract": _REPAIR_CONTRACT,
                            "validation_feedback": {key: value for key, value in errors.items() if key in batch_ids},
                            "rejected_scenes": [value for key, value in rejected.items() if key in batch_ids]}
                 evidence_path = task_dir / "three_d_planning" / f"{uuid4().hex}.json"
@@ -405,12 +473,13 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
                             "requested_route": requested_route, "request": request}
                 _write(evidence_path, evidence)
                 answer = await _chat(prompt, json.dumps(request, ensure_ascii=False),
-                    *provider, log, f"3D director {offset // MAX_BATCH + 1} ({attempt + 1}/2)",
+                    *provider, log, f"3D director {offset // MAX_BATCH + 1} ({attempt + 1}/{MAX_PLAN_ATTEMPTS})",
                     max_tokens=16384, enable_skills=False, disable_thinking=True, route_selected=remember_route)
                 evidence.update(status="responded", response=answer, planner_route=actual_route.copy())
                 _write(evidence_path, evidence)
                 raw = _first_json_array(answer) or []
-                indexed = {row.get("id"): row for row in raw if isinstance(row, dict)}
+                indexed = {row["id"]: row for row in raw
+                           if isinstance(row, dict) and isinstance(row.get("id"), str)}
                 for context in batch:
                     try:
                         spec = validate_spec(indexed.get(context["id"]), context,
@@ -424,15 +493,14 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
                         save_plans()
                     except (TypeError, ValueError) as exc:
                         errors[context["id"]] = str(exc)
-                        # Invalid nonfinite numbers remain rejected. Convert only
-                        # the diagnostic copy so it can be persisted as strict JSON
-                        # and sent back for repair instead of aborting the retry.
-                        diagnostic = json.loads(json.dumps(indexed.get(context["id"])),
-                                                parse_constant=str)
-                        rejected[context["id"]] = {"id": context["id"], "error": str(exc),
-                                                  "spec": diagnostic}
+                        failure = _rejection(context["id"], indexed.get(context["id"]), exc)
+                        if previous_attempt_rejections.get(context["id"]) == failure:
+                            exhausted.add(context["id"])
+                        previous_attempt_rejections[context["id"]] = failure
+                        rejected[context["id"]] = failure
                 evidence.update(status="validated", accepted_ids=sorted(batch_ids & selected.keys()),
-                                validation_errors={key: value for key, value in errors.items() if key in batch_ids})
+                                validation_errors={key: value for key, value in errors.items() if key in batch_ids},
+                                unchanged_rejected_ids=sorted(batch_ids & exhausted))
                 _write(evidence_path, evidence)
         missing = [row["id"] for row in contexts if row["id"] not in selected]
         if missing:
