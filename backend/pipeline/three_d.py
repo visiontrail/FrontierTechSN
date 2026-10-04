@@ -16,6 +16,7 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from PIL import Image
 
@@ -29,6 +30,16 @@ MAX_BATCH = 3
 _KINDS = {"chip", "rack", "satellite", "robot", "data", "object"}
 _ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,47}$")
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+# Clarifies the existing validator; changing creative direction still belongs in
+# the versioned base prompt, whose hash invalidates saved model plans.
+_ACTOR_CONTRACT = {
+    "primitive": "Only kind=object may contain primitive (box, sphere, cylinder, torus). "
+                 "Omit primitive entirely for chip, rack, satellite, robot and data; "
+                 "these kinds already select a fixed mesh assembly. Choose object only "
+                 "when generic geometry is the intended subject, preserving narration meaning.",
+    "scale": "Every coordinate must be between 0.1 and 4 inclusive, including thin surfaces.",
+    "explode": "Nonzero explode/end_explode is supported only by chip, rack and satellite.",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -162,7 +173,9 @@ def validate_spec(raw: dict, context: dict, *, width: int, height: int, fps: int
                 raise ValueError("unsupported 3D object primitive")
             actor["primitive"] = primitive
         elif actor_raw.get("primitive") is not None:
-            raise ValueError("primitives are only permitted for generic object actors")
+            raise ValueError(f"actor {actor_id} (kind={kind}): primitives are only permitted "
+                             "for generic object actors; omit primitive for this fixed mesh "
+                             "kind, or explicitly choose object if generic geometry was intended")
         if kind not in {"chip", "rack", "satellite"}:
             actor.pop("explode")
             actor.pop("end_explode")
@@ -361,6 +374,8 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
                     selected[context["id"]] = {"id": context["id"], "input_sha256": context["input_sha256"],
                         "spec": spec, "planner_model": old.get("planner_model"), "planner": "cache",
                         "planner_route": old.get("planner_route", {}), "requested_route": requested_route}
+                    if log:
+                        log(f"3D {context['id']}: reused validated configured-provider direction")
                 except (KeyError, TypeError, ValueError):
                     pass
 
@@ -368,6 +383,7 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
             _write(plan_path, {"contract": CONTRACT, "renderer": identity, "skipped_scenes": skipped,
                               "shots": [selected[row["id"]] for row in contexts if row["id"] in selected]})
 
+        rejected = {}
         for attempt in range(2):
             pending = [row for row in contexts if row["id"] not in selected]
             if not pending:
@@ -379,9 +395,20 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
                 def remember_route(endpoint, model, _api_key):
                     actual_route.update(_route_receipt(endpoint, model))
 
-                answer = await _chat(prompt, json.dumps({"shots": batch, "validation_feedback": errors}, ensure_ascii=False),
+                batch_ids = {row["id"] for row in batch}
+                request = {"shots": batch, "actor_contract": _ACTOR_CONTRACT,
+                           "validation_feedback": {key: value for key, value in errors.items() if key in batch_ids},
+                           "rejected_scenes": [value for key, value in rejected.items() if key in batch_ids]}
+                evidence_path = task_dir / "three_d_planning" / f"{uuid4().hex}.json"
+                evidence = {"status": "requested", "attempt": attempt + 1,
+                            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                            "requested_route": requested_route, "request": request}
+                _write(evidence_path, evidence)
+                answer = await _chat(prompt, json.dumps(request, ensure_ascii=False),
                     *provider, log, f"3D director {offset // MAX_BATCH + 1} ({attempt + 1}/2)",
                     max_tokens=16384, enable_skills=False, disable_thinking=True, route_selected=remember_route)
+                evidence.update(status="responded", response=answer, planner_route=actual_route.copy())
+                _write(evidence_path, evidence)
                 raw = _first_json_array(answer) or []
                 indexed = {row.get("id"): row for row in raw if isinstance(row, dict)}
                 for context in batch:
@@ -392,9 +419,21 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
                             "spec": spec, "planner_model": actual_route.get("model"),
                             "planner_route": actual_route.copy(), "requested_route": requested_route,
                             "planner": "configured_provider"}
+                        errors.pop(context["id"], None)
+                        rejected.pop(context["id"], None)
                         save_plans()
                     except (TypeError, ValueError) as exc:
                         errors[context["id"]] = str(exc)
+                        # Invalid nonfinite numbers remain rejected. Convert only
+                        # the diagnostic copy so it can be persisted as strict JSON
+                        # and sent back for repair instead of aborting the retry.
+                        diagnostic = json.loads(json.dumps(indexed.get(context["id"])),
+                                                parse_constant=str)
+                        rejected[context["id"]] = {"id": context["id"], "error": str(exc),
+                                                  "spec": diagnostic}
+                evidence.update(status="validated", accepted_ids=sorted(batch_ids & selected.keys()),
+                                validation_errors={key: value for key, value in errors.items() if key in batch_ids})
+                _write(evidence_path, evidence)
         missing = [row["id"] for row in contexts if row["id"] not in selected]
         if missing:
             raise RuntimeError("Configured provider did not return valid 3D direction: "

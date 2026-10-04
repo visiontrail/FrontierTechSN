@@ -367,6 +367,57 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
     return recovered
 
 
+def _resuming_failed_three_d(output_dir: Path, board: dict, plans: list[dict], render) -> bool:
+    """Keep a completed asset inventory while repairing a downstream 3D failure.
+
+    This only enables the collage cache's existing fingerprint-bound failure
+    reuse. Shot plans and 3D specs still pass their current input/schema checks
+    later; missing collages remain recorded as unavailable, never as delivered.
+    """
+    if not config.THREE_D_ENABLED:
+        return False
+    try:
+        report = _strict_json_loads((output_dir / "three_d_render_report.json").read_bytes())
+        shots = _strict_json_loads((output_dir / "media_shots.json").read_bytes())
+        direction = _strict_json_loads((output_dir / "three_d_plan.json").read_bytes())
+        if (
+            report.get("contract") != three_d.CONTRACT
+            or report.get("enabled") is not True
+            or report.get("status") not in {"failed", "interrupted"}
+            or shots.get("contract_version") != media_shots.CONTRACT_VERSION
+            or shots.get("passed") is not True
+            or direction.get("contract") != three_d.CONTRACT
+            or not direction.get("shots")
+        ):
+            return False
+        scenes = [scene for scene in board["scenes"]
+                  if scene.get("program_segment_kind") not in {"opening", "closing"}]
+        saved = shots["scenes"]
+        if not scenes or [scene["id"] for scene in saved] != [scene["id"] for scene in scenes]:
+            return False
+        by_id = {plan["id"]: plan for plan in plans}
+        restored = []
+        for scene, checkpoint in zip(scenes, saved):
+            if (checkpoint.get("passed") is not True or checkpoint.get("coverage") != 1
+                    or media_shots.ticks(checkpoint["duration"]) != media_shots.ticks(scene["duration"])
+                    or not checkpoint.get("shots")):
+                return False
+            restored.append({**by_id[scene["id"]], "media_shots": checkpoint["shots"]})
+        contexts, _ = three_d.select_shots(restored, board)
+        if not contexts or report.get("required_shots") != len(contexts):
+            return False
+        context_by_id = {context["id"]: context for context in contexts}
+        receipts = direction["shots"]
+        if len({receipt["id"] for receipt in receipts}) != len(receipts):
+            return False
+        for receipt in receipts:
+            three_d.validate_spec(receipt["spec"], context_by_id[receipt["id"]],
+                                 width=render.width, height=render.height, fps=render.fps)
+        return True
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, list[dict]]:
     """Use feedback only for the retained candidate, once per scene checkpoint."""
     try:
@@ -2219,6 +2270,10 @@ async def compose_video(
     if collage_broll_enabled or force_collage_opening:
         requested_collages = collage_broll_count if collage_broll_enabled else 1
         collage_board = _available_collage_storyboard(board, plans, requested_collages)
+        resume_three_d = _resuming_failed_three_d(output_dir_path, board, plans, render)
+        if resume_three_d:
+            emit("3D recovery: retaining the completed asset inventory; unchanged unavailable "
+                 "collages remain recorded while saved shot direction is revalidated")
         collage_manifest = await collage_broll.generate_collage_broll(
             collage_board,
             output_dir_path,
@@ -2228,7 +2283,7 @@ async def compose_video(
             provider_id=provider_id,
             ai_endpoint=ai_endpoint,
             ai_model=ai_model,
-            reuse_failed=bool(quality_retry_source),
+            reuse_failed=bool(quality_retry_source) or resume_three_d,
             log=emit,
         )
         collage_attached = collage_broll.attach_collage(

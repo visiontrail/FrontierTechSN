@@ -69,6 +69,22 @@ def test_robot_spec_omits_unsupported_exploded_properties():
     assert "explode" not in actor and "end_explode" not in actor
 
 
+@pytest.mark.parametrize("kind", ["chip", "rack", "satellite", "robot", "data"])
+def test_primitive_cannot_override_a_semantic_mesh(kind):
+    raw = raw_spec()
+    raw["actors"][0].update(kind=kind, primitive="sphere")
+    with pytest.raises(ValueError, match=f"actor chip .*kind={kind}.*omit primitive"):
+        td.validate_spec(raw, context(), width=3840, height=2160, fps=30)
+
+
+@pytest.mark.parametrize("primitive", ["box", "sphere", "cylinder", "torus"])
+def test_generic_object_retains_its_requested_primitive(primitive):
+    raw = raw_spec()
+    raw["actors"][0].update(kind="object", primitive=primitive)
+    spec = td.validate_spec(raw, context(), width=3840, height=2160, fps=30)
+    assert spec["actors"][0]["primitive"] == primitive
+
+
 def test_unsafe_context_scene_id_is_rejected_before_renderer():
     supplied = context()
     supplied["id"] = "../../scene"
@@ -182,6 +198,85 @@ def test_live_path_uses_configured_provider_and_reuses_only_bound_render(tmp_pat
     provider.return_value = ("new configured endpoint", "new configured model", "new key")
     asyncio.run(td.render_story_shots(plans, board, directory, width=3840, height=2160, fps=30))
     assert chat.await_count == 4
+
+
+@pytest.mark.parametrize("defect,error", [("primitive", "primitives are only permitted"),
+                                         ("nonfinite", "numeric value")])
+def test_invalid_scene_repair_is_targeted_and_resume_preserves_valid_plans(tmp_path, monkeypatch, defect, error):
+    _renderer(tmp_path)
+    monkeypatch.setattr(td.config, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("backend.pipeline.digester._resolve_provider",
+                        AsyncMock(return_value=("endpoint", "configured model", "key")))
+    plans, board = [], {"scenes": []}
+    for index in range(2, 8):
+        p, b = inputs()
+        p[0]["id"] = b["scenes"][0]["id"] = f"scene-{index:02d}"
+        plans.extend(p)
+        board["scenes"].extend(b["scenes"])
+    failed_id = "scene-07-shot-01"
+    repair_requests = []
+
+    async def completion(_prompt, payload, *args, **kwargs):
+        request = json.loads(payload)
+        kwargs["route_selected"]("endpoint", "configured model", "key")
+        assert "Omit primitive entirely" in request["actor_contract"]["primitive"]
+        if request["validation_feedback"]:
+            repair_requests.append(request)
+            assert [row["id"] for row in request["shots"]] == [failed_id]
+            assert set(request["validation_feedback"]) == {failed_id}
+            rejected = request["rejected_scenes"][0]
+            assert rejected["id"] == failed_id
+            actor = rejected["spec"]["actors"][0]
+            assert (actor["primitive"] == "sphere" if defect == "primitive" else actor["scale"][0] == "NaN")
+        results = []
+        for row in request["shots"]:
+            raw = {**raw_spec(), "id": row["id"]}
+            if row["id"] == failed_id:
+                if defect == "primitive":
+                    raw["actors"][0].update(kind="data", primitive="sphere")
+                else:
+                    raw["actors"][0]["scale"] = [float("nan"), 1, 1]
+            results.append(raw)
+        return json.dumps(results)
+
+    chat = AsyncMock(side_effect=completion)
+    monkeypatch.setattr("backend.pipeline.digester._chat", chat)
+    command = AsyncMock()
+    monkeypatch.setattr(td, "_command", command)
+    directory = tmp_path / "task"
+    with pytest.raises(RuntimeError, match=error):
+        asyncio.run(td.render_story_shots(plans, board, directory))
+    command.assert_not_awaited()
+    assert len(repair_requests) == 1
+    saved = json.loads((directory / "three_d_plan.json").read_text())
+    assert len(saved["shots"]) == 5
+    saved_hashes = {row["id"]: row["input_sha256"] for row in saved["shots"]}
+    evidence = [json.loads(path.read_text()) for path in (directory / "three_d_planning").glob("*.json")]
+    assert len(evidence) == 3
+    assert sum(failed_id in row["validation_errors"] for row in evidence) == 2
+    assert all(row["response"] and row["planner_route"]["model"] == "configured model" for row in evidence)
+
+    async def repair(_prompt, payload, *args, **kwargs):
+        assert [row["id"] for row in json.loads(payload)["shots"]] == [failed_id]
+        kwargs["route_selected"]("endpoint", "configured model", "key")
+        return json.dumps([{**raw_spec(), "id": failed_id}])
+
+    async def render(_name, args, **kwargs):
+        Path(args[args.index("--output") + 1]).write_bytes(b"real renderer boundary mocked")
+
+    async def verify(output, spec, **kwargs):
+        return {"passed": True, "sha256": td._file_hash(output),
+                "duration": spec["duration_frames"] / spec["fps"], "frames": spec["duration_frames"]}
+
+    chat.side_effect = repair
+    command.side_effect = render
+    monkeypatch.setattr(td, "validate_render", verify)
+    report = asyncio.run(td.render_story_shots(plans, board, directory))
+    assert report["passed"] and report["rendered_count"] == 6
+    assert chat.await_count == 4  # Two batches, one invalid-scene retry, one resumed missing scene.
+    resumed = json.loads((directory / "three_d_plan.json").read_text())
+    reused = [row for row in resumed["shots"] if row["planner"] == "cache"]
+    assert {row["id"]: row["input_sha256"] for row in reused} == saved_hashes
 
 
 @pytest.mark.parametrize("failure", ["model", "render", "cancel"])

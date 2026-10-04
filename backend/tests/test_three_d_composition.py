@@ -1,12 +1,13 @@
 """3D inserts must survive assembly as bounded, silent video clips."""
 
 import copy
+import json
 
 import pytest
 
 from backend import config
 from backend.pipeline import composer, media_shots, multimodal_review, scene_kit, three_d
-from backend.pipeline.video_format import LANDSCAPE, PORTRAIT
+from backend.pipeline.video_format import LANDSCAPE, PORTRAIT, resolve_render_spec
 
 
 @pytest.mark.parametrize("frame", [LANDSCAPE, PORTRAIT])
@@ -100,3 +101,97 @@ def test_review_cache_binds_three_d_code_setting_and_clip(tmp_path, monkeypatch)
     assert after_clip != after_code
     monkeypatch.setattr(config, "THREE_D_ENABLED", False)
     assert composer._review_retry_fingerprint(tmp_path, {}) != after_clip
+
+
+@pytest.fixture
+def failed_three_d_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "THREE_D_ENABLED", True)
+    board = {"scenes": [
+        {"id": "scene-01", "duration": 2, "text": "Welcome", "program_segment_kind": "opening"},
+        {"id": "scene-02", "duration": 8, "text": "The chip remains in service."},
+        {"id": "scene-03", "duration": 8, "text": "The rack contains several modules."},
+    ]}
+    plans = [{"id": scene["id"], "archetype": "topic"} for scene in board["scenes"]]
+    saved = []
+    for scene in board["scenes"][1:]:
+        shot = {"kind": "editorial", "duration": 8, "layout": "focus",
+                "copy": [scene["text"]], "script_excerpt": scene["text"]}
+        saved.append({"id": scene["id"], "duration": 8, "passed": True, "coverage": 1,
+                      "shots": [shot]})
+    spec = {
+        "id": "scene-02-shot-01", "representation": "illustration",
+        "narration_excerpt": board["scenes"][1]["text"],
+        "semantic_intent": "Show the chip structure as a schematic illustration",
+        "camera": {"position": [6, 4, 9], "end_position": [7, 4, 9], "target": [0, 0, 0]},
+        "actors": [{"id": "chip", "kind": "chip", "position": [0, 0, 0]}],
+    }
+    payloads = {
+        "three_d_render_report.json": {"contract": three_d.CONTRACT, "enabled": True,
+            "status": "failed", "passed": False, "required_shots": 2, "rendered_count": 0},
+        "media_shots.json": {"contract_version": media_shots.CONTRACT_VERSION,
+                             "passed": True, "scenes": saved},
+        "three_d_plan.json": {"contract": three_d.CONTRACT,
+                               "shots": [{"id": spec["id"], "spec": spec}]},
+    }
+    for name, payload in payloads.items():
+        (tmp_path / name).write_text(json.dumps(payload))
+    return board, plans, resolve_render_spec(), payloads
+
+
+@pytest.mark.parametrize("status", ["failed", "interrupted"])
+def test_three_d_resume_preserves_inventory_after_partial_valid_direction(
+    tmp_path, failed_three_d_checkpoint, status,
+):
+    board, plans, render, payloads = failed_three_d_checkpoint
+    report = payloads["three_d_render_report.json"]
+    report["status"] = status
+    (tmp_path / "three_d_render_report.json").write_text(json.dumps(report))
+    before = copy.deepcopy((board, plans))
+    assert composer._resuming_failed_three_d(tmp_path, board, plans, render)
+    assert (board, plans) == before
+    assert json.loads((tmp_path / "media_shots.json").read_text()) == payloads["media_shots.json"]
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing", "malformed", "ready", "disabled", "contract", "unfinished_shots", "partial_coverage",
+    "changed_duration", "changed_narration", "missing_scene", "missing_spec", "duplicate_spec",
+    "invalid_geometry", "required_count",
+])
+def test_three_d_recovery_does_not_reuse_failures_without_current_valid_checkpoint(
+    tmp_path, monkeypatch, failed_three_d_checkpoint, mutation,
+):
+    board, plans, render, payloads = failed_three_d_checkpoint
+    report = payloads["three_d_render_report.json"]
+    shots = payloads["media_shots.json"]
+    direction = payloads["three_d_plan.json"]
+    if mutation == "ready":
+        report["status"] = "ready"
+    elif mutation == "disabled":
+        monkeypatch.setattr(config, "THREE_D_ENABLED", False)
+    elif mutation == "contract":
+        shots["contract_version"] = -1
+    elif mutation == "unfinished_shots":
+        shots["passed"] = False
+    elif mutation == "partial_coverage":
+        shots["scenes"][0]["coverage"] = .5
+    elif mutation == "changed_duration":
+        board["scenes"][1]["duration"] = 9
+    elif mutation == "changed_narration":
+        board["scenes"][1]["text"] = "A new unrelated story."
+    elif mutation == "missing_scene":
+        shots["scenes"].pop()
+    elif mutation == "missing_spec":
+        direction["shots"] = []
+    elif mutation == "duplicate_spec":
+        direction["shots"].append(copy.deepcopy(direction["shots"][0]))
+    elif mutation == "invalid_geometry":
+        direction["shots"][0]["spec"]["actors"][0]["kind"] = "unsupported_mesh"
+    elif mutation == "required_count":
+        report["required_shots"] = 1
+    for name, payload in payloads.items():
+        (tmp_path / name).write_text(json.dumps(payload))
+    if mutation == "missing":
+        (tmp_path / "three_d_render_report.json").unlink()
+    elif mutation == "malformed":
+        (tmp_path / "three_d_plan.json").write_text("[]")
+    assert not composer._resuming_failed_three_d(tmp_path, board, plans, render)
