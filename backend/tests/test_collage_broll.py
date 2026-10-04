@@ -876,6 +876,144 @@ def _stuck_gemini_video_input_error(signature: str) -> collage_broll.OpenCLIErro
     )
 
 
+def _exhausted_input_discovery_state():
+    # Recorded idle discovery failure from task 20261003-165128-fbd7a1.
+    # This payload has no errorCode/stuckSignature.
+    return json.loads('''{
+        "fileName":"first-frame.png","exhausted":true,"pollAttempts":30,
+        "pollIntervalMs":500,"inputReadyTimeoutMs":15000,"reopened":false,
+        "baselineState":{"attachments":0,"inputs":[]},
+        "clickAttempts":[{"reason":"initial","ok":true,"error":""}],
+        "inputState":{"baselineInputCount":0,"busy":false,"busyCount":0,
+            "button":{"connected":true,"disabled":false,"visible":true},
+            "documentHasFocus":true,"freshInputCount":0,"inputs":[],"ok":false}
+    }''')
+
+
+def _exhausted_input_discovery_error(state=None, *, keyframe=1):
+    payload = _exhausted_input_discovery_state() if state is None else state
+    return collage_broll.OpenCLIError(
+        "OpenCLI gemini video failed with exit 1: ok: false\n"
+        "error:\n  code: COMMAND_EXEC\n  message: >-\n"
+        f"    Gemini keyframe {keyframe} upload failed at discover_live_input:\n"
+        f"    {json.dumps(payload)}\n  exitCode: 1\n"
+        "help: Keep the failed acquisition available for diagnosis."
+    )
+
+
+@pytest.mark.parametrize("repeated", [False, True])
+def test_legacy_discovery_failure_allows_one_retry_then_preserves_failure(
+    tmp_path, monkeypatch, repeated,
+):
+    first = tmp_path / "first.png"
+    first.write_bytes(b"first")
+    attempts = 0
+
+    async def browser(args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if repeated or attempts == 1:
+            state = _exhausted_input_discovery_state()
+            # A different serialization of the same structured state is still
+            # the same failure; the surrounding CLI output is not JSON.
+            if attempts == 2:
+                state = dict(reversed(list(state.items())))
+            raise _exhausted_input_discovery_error(state)
+        Path(args[args.index("--output") + 1]).write_bytes(b"v" * 2048)
+        from backend.pipeline.opencli import OpenCLIResult
+        return OpenCLIResult(tuple(args), 0, "[]", "")
+
+    monkeypatch.setattr(collage_broll, "run_opencli", browser)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 10)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", AsyncMock())
+    if repeated:
+        with pytest.raises(collage_broll.GeminiVideoUploadCapabilityError) as raised:
+            asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
+        assert raised.value.error_code == collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE
+        assert "discover_live_input" in str(raised.value.__cause__)
+    else:
+        raw, _ = asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
+        assert raw.is_file()
+    assert attempts == 2
+
+
+@pytest.mark.parametrize("path,value", [
+    (("exhausted",), False),
+    (("exhausted",), 1),
+    (("pollAttempts",), 1),
+    (("pollIntervalMs",), 50),
+    (("inputReadyTimeoutMs",), 1500),
+    (("reopened",), True),
+    (("fileName",), "last-frame.jpg"),
+    (("baselineState", "attachments"), 1),
+    (("baselineState", "inputs"), [{}]),
+    (("inputState", "busy"), True),
+    (("inputState", "busy"), 0),
+    (("inputState", "busyCount"), 1),
+    (("inputState", "baselineInputCount"), 1),
+    (("inputState", "freshInputCount"), 1),
+    (("inputState", "inputs"), [{}]),
+    (("inputState", "ok"), True),
+    (("inputState", "documentHasFocus"), False),
+    (("inputState", "button", "connected"), False),
+    (("inputState", "button", "disabled"), True),
+    (("inputState", "button", "visible"), False),
+    (("clickAttempts",), []),
+    (("newField",), "unknown adapter schema"),
+])
+def test_legacy_discovery_classifier_requires_complete_observed_state(path, value):
+    state = _exhausted_input_discovery_state()
+    target = state
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    assert collage_broll._gemini_video_input_hydration_stuck_signature(
+        _exhausted_input_discovery_error(state)
+    ) is None
+
+
+def test_legacy_discovery_classifier_rejects_missing_malformed_or_other_keyframe():
+    state = _exhausted_input_discovery_state()
+    del state["inputState"]["busyCount"]
+    errors = [
+        _exhausted_input_discovery_error(state),
+        _exhausted_input_discovery_error(keyframe=2),
+        collage_broll.OpenCLIError(
+            'Gemini keyframe 1 upload failed at discover_live_input: {"exhausted":'
+        ),
+    ]
+    assert all(
+        collage_broll._gemini_video_input_hydration_stuck_signature(error) is None
+        for error in errors
+    )
+
+
+def test_legacy_discovery_retry_streak_resets_for_changed_or_transient_state(monkeypatch):
+    busy = _exhausted_input_discovery_state()
+    busy["inputState"]["busy"] = True
+    result = object()
+    run = AsyncMock(side_effect=[
+        _exhausted_input_discovery_error(),
+        _exhausted_input_discovery_error(busy),
+        _exhausted_input_discovery_error(),
+        _stuck_gemini_video_input_error("a different signed adapter state"),
+        _exhausted_input_discovery_error(),
+        collage_broll.OpenCLIError("temporary browser connection interruption"),
+        _exhausted_input_discovery_error(),
+        result,
+    ])
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.config, "OPENCLI_MAX_ATTEMPTS", 10)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", AsyncMock())
+    observed = asyncio.run(collage_broll._run_opencli_retry(
+        ["gemini", "video", "prompt"], timeout=10, label="video",
+        repeated_failure_signature=collage_broll._gemini_video_input_hydration_stuck_signature,
+        repeated_failure_error_code=collage_broll.GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE,
+    ))
+    assert observed is result
+    assert run.await_count == 8
+
+
 def test_opencli_collage_operation_does_not_retry_stable_upload_capability_failure(
     monkeypatch,
 ):

@@ -1102,6 +1102,38 @@ def _gemini_video_input_hydration_stuck_signature(
     if GEMINI_VIDEO_INPUT_HYDRATION_STUCK_CODE in message:
         match = re.search(r'"stuckSignature":"([^"]+)"', message)
         return match.group(1) if match else None
+    discovery = re.search(
+        r"Gemini keyframe 1 upload failed at discover_live_input:\s*(\{)",
+        message,
+    )
+    if discovery:
+        try:
+            state, _ = json.JSONDecoder().raw_decode(message[discovery.start(1):])
+        except ValueError:
+            return None
+        # The adapter reports this exhausted idle discovery state without an
+        # error code. Recognize only the complete state observed repeatedly in
+        # production; partial, busy, changing, or newly shaped states retry.
+        expected = {
+            "fileName": "first-frame.png", "exhausted": True,
+            "pollAttempts": 30, "pollIntervalMs": 500,
+            "inputReadyTimeoutMs": 15000, "reopened": False,
+            "baselineState": {"attachments": 0, "inputs": []},
+            "clickAttempts": [{"reason": "initial", "ok": True, "error": ""}],
+            "inputState": {
+                "baselineInputCount": 0, "busy": False, "busyCount": 0,
+                "button": {"connected": True, "disabled": False, "visible": True},
+                "documentHasFocus": True, "freshInputCount": 0,
+                "inputs": [], "ok": False,
+            },
+        }
+        # Canonical JSON also distinguishes false from 0 and true from 1.
+        canonical = json.dumps(state, sort_keys=True, separators=(",", ":"))
+        if canonical == json.dumps(expected, sort_keys=True, separators=(",", ":")):
+            return "keyframe=1;discover_live_input=" + hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()
+        return None
     compact = re.sub(r"\s+", "", message).casefold()
     keyframe = re.search(r"geminikeyframe([12])uploadfailedatdata_transfer_fallback:", compact)
     if keyframe and all(token in compact for token in (
