@@ -69,6 +69,25 @@ def test_robot_spec_omits_unsupported_exploded_properties():
     assert "explode" not in actor and "end_explode" not in actor
 
 
+@pytest.mark.parametrize("field,maximum", [("semantic_intent", 600), ("narration_excerpt", 5000)])
+def test_text_bounds_are_exact_and_report_length_without_truncation(field, maximum):
+    raw = raw_spec()
+    supplied = context()
+    raw[field] = "x" * maximum
+    if field == "narration_excerpt":
+        supplied[field] = raw[field]
+    assert td.validate_spec(raw, supplied, width=3840, height=2160, fps=30)[field] == raw[field]
+    raw[field] += "x"
+    original = copy.deepcopy(raw)
+    with pytest.raises(ValueError, match=rf"{field} length={maximum + 1}.*at most {maximum} characters"):
+        td.validate_spec(raw, supplied, width=3840, height=2160, fps=30)
+    assert raw == original
+    for invalid in (None, "", "   "):
+        raw[field] = invalid
+        with pytest.raises(ValueError, match=rf"{field} must be nonempty text.*{maximum} characters"):
+            td.validate_spec(raw, supplied, width=3840, height=2160, fps=30)
+
+
 @pytest.mark.parametrize("kind", ["chip", "rack", "satellite", "robot", "data"])
 def test_primitive_cannot_override_a_semantic_mesh(kind):
     raw = raw_spec()
@@ -219,7 +238,8 @@ def test_live_path_uses_configured_provider_and_reuses_only_bound_render(tmp_pat
 
 @pytest.mark.parametrize("defect,error", [("primitive", "primitives are only permitted"),
                                          ("nonfinite", "numeric value"),
-                                         ("thin", "numeric value")])
+                                         ("thin", "numeric value"),
+                                         ("long_intent", "semantic_intent length=603")])
 def test_invalid_scene_repair_is_targeted_and_resume_preserves_valid_plans(tmp_path, monkeypatch, defect, error):
     _renderer(tmp_path)
     monkeypatch.setattr(td.config, "PROJECT_ROOT", tmp_path)
@@ -234,26 +254,31 @@ def test_invalid_scene_repair_is_targeted_and_resume_preserves_valid_plans(tmp_p
     failed_id = "scene-08-shot-01"
     repair_requests = []
 
-    def assert_original_rejected_actor(actor):
+    def assert_original_rejected_spec(spec):
+        actor = spec["actors"][0]
         if defect == "primitive":
             assert actor["primitive"] == "sphere"
         elif defect == "nonfinite":
             assert actor["scale"][0] == "NaN"
-        else:
+        elif defect == "thin":
             assert actor["scale"][2] == .08
+        else:
+            assert spec["semantic_intent"] == "x" * 603
+            assert actor == raw_spec()["actors"][0]
 
     async def completion(_prompt, payload, *args, **kwargs):
         request = json.loads(payload)
         kwargs["route_selected"]("endpoint", "configured model", "key")
         assert "Omit primitive entirely" in request["actor_contract"]["primitive"]
+        assert request["text_contract"]["maximum_characters"] == {
+            "semantic_intent": 600, "narration_excerpt": 5000}
         if request["validation_feedback"]:
             repair_requests.append(request)
             assert [row["id"] for row in request["shots"]] == [failed_id]
             assert set(request["validation_feedback"]) == {failed_id}
             rejected = request["rejected_scenes"][0]
             assert rejected["id"] == failed_id
-            actor = rejected["spec"]["actors"][0]
-            assert_original_rejected_actor(actor)
+            assert_original_rejected_spec(rejected["spec"])
         results = []
         for row in request["shots"]:
             raw = {**raw_spec(), "id": row["id"]}
@@ -262,8 +287,10 @@ def test_invalid_scene_repair_is_targeted_and_resume_preserves_valid_plans(tmp_p
                     raw["actors"][0].update(kind="data", primitive="sphere")
                 elif defect == "nonfinite":
                     raw["actors"][0]["scale"] = [float("nan"), 1, 1]
-                else:
+                elif defect == "thin":
                     raw["actors"][0]["scale"] = [1, 1, .08]
+                else:
+                    raw["semantic_intent"] = "x" * 603
             results.append(raw)
         return json.dumps(results)
 
@@ -288,6 +315,10 @@ def test_invalid_scene_repair_is_targeted_and_resume_preserves_valid_plans(tmp_p
     # One malformed model row must not hide the matching, still-invalid scene.
     persisted["response"] = json.dumps([{"id": []}, *json.loads(persisted["response"])])
     persisted["request"]["shots"].append({"id": []})
+    if defect == "long_intent":
+        # Old runs persisted a vague error; resume must recompute the exact
+        # observed length and unchanged bound before asking the model to repair.
+        persisted["validation_errors"][failed_id] = "3D semantic_intent must be concise nonempty text"
     latest.write_text(json.dumps(persisted))
     # Incomplete/corrupt diagnostic envelopes are ignored while older valid
     # matching evidence still seeds the repair request.
@@ -304,8 +335,9 @@ def test_invalid_scene_repair_is_targeted_and_resume_preserves_valid_plans(tmp_p
         assert set(request["validation_feedback"]) == {failed_id}
         assert error in request["validation_feedback"][failed_id]
         assert request["rejected_scenes"][0]["id"] == failed_id
-        rejected_actor = request["rejected_scenes"][0]["spec"]["actors"][0]
-        assert_original_rejected_actor(rejected_actor)
+        assert_original_rejected_spec(request["rejected_scenes"][0]["spec"])
+        if defect == "long_intent":
+            assert "at most 600 characters" in request["validation_feedback"][failed_id]
         kwargs["route_selected"]("endpoint", "configured model", "key")
         return json.dumps([{**raw_spec(), "id": failed_id}])
 

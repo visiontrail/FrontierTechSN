@@ -49,6 +49,15 @@ _REPAIR_CONTRACT = (
     "before returning the complete repaired scene. Never clamp values automatically or change "
     "the narrated meaning to satisfy validation."
 )
+_TEXT_LIMITS = {"semantic_intent": 600, "narration_excerpt": 5000}
+_TEXT_CONTRACT = {
+    "maximum_characters": _TEXT_LIMITS,
+    "requirements": "Both fields must be nonempty strings. Character counts include punctuation "
+                    "and whitespace. Keep semantic_intent within its limit by summarizing the "
+                    "narration-supported purpose and spatial action; do not repeat numeric "
+                    "transforms or validation repairs there. Preserve narration_excerpt verbatim "
+                    "from the supplied shot. Never silently truncate either field.",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -113,9 +122,12 @@ def _color(value) -> str:
     return value
 
 
-def _text(value, label: str, maximum: int = 600) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
-        raise ValueError(f"3D {label} must be concise nonempty text")
+def _text(value, label: str) -> str:
+    maximum = _TEXT_LIMITS[label]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"3D {label} must be nonempty text of at most {maximum} characters")
+    if len(value) > maximum:
+        raise ValueError(f"3D {label} length={len(value)}: text must be at most {maximum} characters")
     return value.strip()
 
 
@@ -234,7 +246,7 @@ def validate_spec(raw: dict, context: dict, *, width: int, height: int, fps: int
               or any(link["particles"] for link in links))
     if not moving:
         raise ValueError("3D shot must demonstrate spatial motion, not only a static object or text reveal")
-    excerpt = _text(raw.get("narration_excerpt"), "narration_excerpt", maximum=5000)
+    excerpt = _text(raw.get("narration_excerpt"), "narration_excerpt")
     if excerpt not in context["narration_excerpt"]:
         raise ValueError("3D narration excerpt is not from the selected shot: narration_excerpt "
                          "must preserve the supplied shot's exact characters, including punctuation")
@@ -464,6 +476,7 @@ async def render_story_shots(plans: list[dict], board: dict, task_dir: Path, *,
 
                 batch_ids = {row["id"] for row in batch}
                 request = {"shots": batch, "actor_contract": _ACTOR_CONTRACT,
+                           "text_contract": _TEXT_CONTRACT,
                            "repair_contract": _REPAIR_CONTRACT,
                            "validation_feedback": {key: value for key, value in errors.items() if key in batch_ids},
                            "rejected_scenes": [value for key, value in rejected.items() if key in batch_ids]}
