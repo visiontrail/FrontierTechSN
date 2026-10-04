@@ -176,6 +176,20 @@ def validate_spec(raw: dict, context: dict, *, width: int, height: int, fps: int
     actors_raw = raw.get("actors")
     if not isinstance(actors_raw, list) or not 1 <= len(actors_raw) <= 12:
         raise ValueError("3D scene requires 1..12 substantive actors")
+    # Report every invalid surface thickness/extent in the same repair turn.
+    # Stopping at the first actor conceals later violations and can exhaust the
+    # bounded model attempts even when it fixes every field we reported.
+    scales, scale_errors = [], []
+    for actor_index, actor_raw in enumerate(actors_raw):
+        if not isinstance(actor_raw, dict):
+            raise ValueError("3D actor must be an object")
+        field = f"actors[{actor_index}]({actor_raw.get('id')}).scale"
+        try:
+            scales.append(_vector(actor_raw.get("scale", [1, 1, 1]), .1, 4, field=field))
+        except ValueError as exc:
+            scale_errors.append(str(exc))
+    if scale_errors:
+        raise ValueError("; ".join(scale_errors))
     actors, ids = [], set()
     for actor_index, actor_raw in enumerate(actors_raw):
         if not isinstance(actor_raw, dict):
@@ -189,7 +203,7 @@ def validate_spec(raw: dict, context: dict, *, width: int, height: int, fps: int
         field = f"actors[{actor_index}]({actor_id})"
         actor = {"id": actor_id, "kind": kind,
                  "position": _vector(actor_raw.get("position"), -12, 12, field=f"{field}.position"),
-                 "scale": _vector(actor_raw.get("scale", [1, 1, 1]), .1, 4, field=f"{field}.scale"),
+                 "scale": scales[actor_index],
                  "rotation": _vector(actor_raw.get("rotation", [0, 0, 0]), -12.566, 12.566,
                                      field=f"{field}.rotation"),
                  "color": _color(actor_raw.get("color", raw.get("accent", "#59C4D8"))),

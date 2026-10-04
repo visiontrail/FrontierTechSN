@@ -136,6 +136,58 @@ def test_invalid_scale_identifies_every_bad_coordinate_without_clamping(scale, e
     assert raw == original
 
 
+def test_scale_feedback_covers_all_actors_and_preserves_rejected_candidate(tmp_path, monkeypatch):
+    _renderer(tmp_path)
+    monkeypatch.setattr(td.config, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("backend.pipeline.digester._resolve_provider",
+                        AsyncMock(return_value=("endpoint", "model", "key")))
+    raw = raw_spec()
+    raw["actors"] = [
+        {"id": "mapBase", "kind": "object", "position": [0, 0, 0], "scale": [4.6, .12, 3.2]},
+        {"id": "phoneBody", "kind": "object", "position": [0, 1, 0], "scale": [.75, .08, 1.4]},
+        {"id": "phoneScreen", "kind": "object", "position": [0, 1.2, 0], "scale": [.65, .03, 1.25]},
+    ]
+    raw["camera"]["end_position"] = [5, 4, 9]
+    original = copy.deepcopy(raw)
+    command = _mock_successful_render_boundary(monkeypatch)
+    requests = []
+
+    async def completion(_prompt, payload, *args, **kwargs):
+        request = json.loads(payload)
+        requests.append(request)
+        command.assert_not_awaited()
+        kwargs["route_selected"]("endpoint", "model", "key")
+        if len(requests) == 1:
+            return json.dumps([raw])
+        assert len(requests) == 2
+        feedback = request["validation_feedback"][raw["id"]]
+        for error in ("actors[0](mapBase).scale[0]=4.6",
+                      "actors[1](phoneBody).scale[1]=0.08",
+                      "actors[2](phoneScreen).scale[1]=0.03"):
+            assert error in feedback
+        assert feedback.count("within 0.1..4") == 3
+        assert request["rejected_scenes"][0]["spec"] == original
+        # Only the configured provider repairs the rejected numeric values.
+        repaired = copy.deepcopy(raw)
+        repaired["actors"][0]["scale"][0] = 4
+        repaired["actors"][1]["scale"][1] = .12
+        repaired["actors"][2]["scale"][1] = .1
+        return json.dumps([repaired])
+
+    chat = AsyncMock(side_effect=completion)
+    monkeypatch.setattr("backend.pipeline.digester._chat", chat)
+    plans, board = inputs()
+    directory = tmp_path / "task"
+    report = asyncio.run(td.render_story_shots(plans, board, directory))
+    assert report["passed"] and report["rendered_count"] == 1
+    assert chat.await_count == 2
+    command.assert_awaited_once()
+    evidence = [json.loads(path.read_text()) for path in (directory / "three_d_planning").glob("*.json")]
+    rejected = next(row for row in evidence if row["validation_errors"])
+    assert json.loads(rejected["response"]) == [original]
+    assert raw == original
+
+
 def inputs():
     scene = {"id": "scene-02", "duration": 18.01, "text": context()["narration_excerpt"],
              "program_segment_kind": "news"}
