@@ -61,6 +61,15 @@ Each scene object has:
   motion_start/motion_end: normalized shot progress 0..1 with start<end,
   normally .12 and .72. Hold the final spatial relationship for reading.
   action: "reveal", "translate", "rotate", "explode", or "hold".
+  Explicit "reveal" hides that actor through motion_start, then grows it from
+  zero to full size at motion_end. Use it only for later additional subjects;
+  keep the primary subject visible from frame zero with explicit "hold",
+  "translate", "rotate", or "explode". An omitted action is normalized to
+  "reveal" by the production planner and must not be used for that primary.
+  Never start with all subjects hidden. Links appear only when both endpoints
+  are visible. Stage connected subjects before the narrated signal moves.
+  Coordinate component and accessory reveal windows so parts do not float
+  before their assembled subject appears.
 - links: optional list of {from:actor_id,to:actor_id,color:"#RRGGBB",particles:5}.
   Maximum24 links, particles integer0..12, endpoints must differ. Links are
   real 3D tubes with moving signal spheres. They are allowed ONLY when the

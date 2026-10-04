@@ -4,7 +4,7 @@ import {ThreeCanvas} from '@remotion/three'
 import {useThree} from '@react-three/fiber'
 import * as THREE from 'three'
 import {Curve, Model} from './Models'
-import {sceneState} from './state.ts'
+import {linkVisible, sceneState} from './state.ts'
 import type {SceneSpec, Vec3} from './spec.ts'
 
 function Camera({state}: {state: ReturnType<typeof sceneState>['camera']}) {
@@ -47,11 +47,15 @@ export function Scene({spec}: {spec: SceneSpec}) {
       <directionalLight position={[-6, 4, -5]} intensity={1.8} color={'#f6e8c8'}/>
       {spec.actors.map((actor, i) => {
         const a = state.actors[i]
-        return <group key={actor.id} position={a.position} rotation={a.rotation} scale={a.scale}>
+        return <group key={actor.id} position={a.position} rotation={a.rotation} scale={a.scale} visible={a.visible}>
           <Model actor={actor} color={actor.color ?? spec.accent} explode={a.explode} progress={a.progress} phase={state.flowPhase}/>
         </group>
       })}
-      {(spec.links ?? []).map((link, i) => <Link key={i} from={state.actors.find((a) => a.id === link.from)!.position} to={state.actors.find((a) => a.id === link.to)!.position} color={link.color ?? spec.accent} particles={link.particles ?? 5} phase={state.flowPhase}/>)}
+      {(spec.links ?? []).map((link, i) => {
+        const from = state.actors.find((a) => a.id === link.from)!
+        const to = state.actors.find((a) => a.id === link.to)!
+        return linkVisible(from, to) ? <Link key={i} from={from.position} to={to.position} color={link.color ?? spec.accent} particles={link.particles ?? 5} phase={state.flowPhase}/> : null
+      })}
       <mesh position={[0, -2, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow><planeGeometry args={[200, 200]}/><meshStandardMaterial color={spec.background} roughness={1}/></mesh>
     </ThreeCanvas>
   </AbsoluteFill>

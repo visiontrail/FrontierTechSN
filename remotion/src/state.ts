@@ -9,15 +9,20 @@ export function actorState(actor: Actor, frame: number, durationFrames: number) 
   const start = actor.motion_start ?? .12; const end = actor.motion_end ?? .72
   const progress = actor.action === 'hold' ? 0 : smooth((t - start) / (end - start))
   const rotation = actor.rotation ?? [0, 0, 0]
-  const reveal = actor.action === 'reveal' || actor.action === undefined ? mix(.86, 1, smooth(t / Math.min(end, Math.max(.08, start)))) : 1
+  // Explicit reveals stage later subjects inside the declared motion window.
+  // An omitted action retains the recognizable entrance used by older plans.
+  const reveal = actor.action === 'reveal' ? progress
+    : actor.action === undefined ? mix(.86, 1, smooth(t / Math.min(end, Math.max(.08, start)))) : 1
   return {
     position: mix3(actor.position, actor.end_position ?? actor.position, progress),
     rotation: mix3(rotation, actor.end_rotation ?? rotation, progress),
     scale: (actor.scale ?? [1, 1, 1]).map((v) => v * reveal) as Vec3,
+    visible: reveal > 0,
     explode: mix(actor.explode ?? 0, actor.end_explode ?? actor.explode ?? 0, progress),
     progress,
   }
 }
+export const linkVisible = (from: ReturnType<typeof actorState>, to: ReturnType<typeof actorState>) => from.visible && to.visible
 export function sceneState(spec: SceneSpec, frame: number) {
   const f = Math.min(spec.duration_frames - 1, Math.max(0, frame))
   const settle = Math.max(...spec.actors.map((a) => a.motion_end ?? .72))

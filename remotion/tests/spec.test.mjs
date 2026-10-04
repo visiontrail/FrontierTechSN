@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import {validateSpec} from '../src/spec.ts'
-import {sceneState} from '../src/state.ts'
+import {actorState, linkVisible, sceneState} from '../src/state.ts'
 const sample = () => JSON.parse(fs.readFileSync(new URL('../examples/compute-flow.json', import.meta.url), 'utf8'))
 test('validated spec is detached and preserves semantic metadata', () => {
   const source = sample(); source.copy = ['Source-bound supplied label']
@@ -48,4 +48,36 @@ test('frame-derived translation and rotation have finite exact endpoints', () =>
   assert.deepEqual(a.position, [1, 2, 3]); assert.deepEqual(a.rotation, [0, Math.PI, 0])
   assert.deepEqual(sceneState(spec, -99), sceneState(spec, 0))
   assert.deepEqual(sceneState(spec, 999), sceneState(spec, 89))
+})
+test('explicit reveals stage distinct subjects in their declared motion windows', () => {
+  const first = {id: 'first', kind: 'robot', position: [-1, 0, 0], action: 'hold'}
+  const second = {id: 'second', kind: 'robot', position: [1, 0, 0], action: 'reveal',
+    scale: [1, 2, 3], motion_start: .32, motion_end: .62}
+  for (const frame of [0, 20, 32]) {
+    assert.deepEqual(actorState(first, frame, 101).scale, [1, 1, 1])
+    assert.equal(actorState(first, frame, 101).visible, true)
+    assert.deepEqual(actorState(second, frame, 101).scale, [0, 0, 0])
+    assert.equal(actorState(second, frame, 101).visible, false)
+  }
+  const halfway = actorState(second, 47, 101).scale
+  assert.equal(actorState(second, 47, 101).visible, true)
+  for (const [i, value] of halfway.entries()) assert.ok(Math.abs(value - (i + 1) / 2) < 1e-12)
+  for (const frame of [62, 85, 100]) assert.deepEqual(actorState(second, frame, 101).scale, [1, 2, 3])
+  // A backwards seek must hide the subject again, independently of render order.
+  assert.deepEqual(actorState(second, 20, 101).scale, [0, 0, 0])
+})
+test('omitted actions retain their recognizable gentle entrance', () => {
+  const actor = {id: 'subject', kind: 'robot', position: [0, 0, 0], motion_start: .32, motion_end: .62}
+  assert.deepEqual(actorState(actor, 0, 101).scale, [.86, .86, .86])
+  assert.deepEqual(actorState(actor, 32, 101).scale, [1, 1, 1])
+})
+test('links wait for both revealed endpoints and hide again on backwards seeking', () => {
+  const actor = {id: 'source', kind: 'data', position: [0, 0, 0], action: 'reveal', motion_start: .2, motion_end: .4}
+  const target = {...actor, id: 'target', position: [2, 0, 0], motion_start: .4, motion_end: .6}
+  for (const frame of [0, 30, 40, 80, 30]) {
+    const from = actorState(actor, frame, 101)
+    const to = actorState(target, frame, 101)
+    assert.equal(linkVisible(from, to), frame > 40)
+    assert.equal(linkVisible(to, from), frame > 40)
+  }
 })
