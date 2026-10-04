@@ -91,7 +91,7 @@ def test_missing_keywords_do_not_create_a_generic_chapter_label():
     assert visual_plan.fallback_plan({"scenes": [scene]})[0]["kicker"] == ""
 
 
-def test_normalise_clamps_copy_to_what_fits_a_frame():
+def test_normalise_rejects_all_copy_overflows_without_truncating():
     scene = board(1)["scenes"][0]
     items = [
         "Summarize annual reports across multiple documents",
@@ -101,21 +101,86 @@ def test_normalise_clamps_copy_to_what_fits_a_frame():
         "Generate marketing posters from reference images",
         "This sixth item must not reach the renderer",
     ]
-    plan = visual_plan._normalise(
-        {
-            "headline": "h" * 400,
-            "body": "b" * 900,
-            "kicker": "k" * 90,
-            "items": items,
-        },
-        scene,
-        0,
-    )
-    assert len(plan["headline"]) <= 110
-    assert len(plan["body"]) <= 260
-    assert len(plan["kicker"]) <= 30
-    assert plan["items"] == items[: scene_kit.MAX_NARRATIVE_ITEMS]
-    assert plan["items"][-1] == "Generate marketing posters from reference images"
+    raw = {
+        "headline": "h" * 400,
+        "body": "b" * 900,
+        "kicker": "k" * 90,
+        "items": items,
+    }
+    before = json.dumps(raw)
+    with pytest.raises(visual_plan.CopyLimitError) as error:
+        visual_plan._normalise(raw, scene, 0)
+    for field, length, limit in [("headline", 400, 110), ("body", 900, 260), ("kicker", 90, 30)]:
+        assert f"{field}: {length} characters exceeds maximum {limit}" in str(error.value)
+    assert "items: 6 entries exceeds maximum 5" in str(error.value)
+    assert json.dumps(raw) == before
+
+
+@pytest.mark.parametrize("field,limit", [
+    ("quote", 260), ("attribution", 90), ("stat", 48), ("stat_label", 120),
+    ("items[0]", 90), ("left.label", 48), ("left.text", 150),
+    ("right.label", 48), ("right.text", 150),
+])
+def test_normalise_checks_every_copy_field_without_changing_valid_copy(field, limit):
+    scene = board(1)["scenes"][0]
+    def payload(value):
+        if field == "items[0]":
+            return {"items": [value]}
+        if "." in field:
+            side, key = field.split(".")
+            return {side: {key: value}}
+        return {field: value}
+    value = "x" * limit
+    normalized = visual_plan._normalise(payload(value), scene, 0)
+    assert value in json.dumps(normalized)
+    with pytest.raises(visual_plan.CopyLimitError, match="exceeds maximum"):
+        visual_plan._normalise(payload(value + "x"), scene, 0)
+
+
+def test_visual_copy_repair_keeps_valid_scenes_and_sends_complete_rejected_copy(monkeypatch):
+    data = board(2)
+    long_copy = "Sentence 0: " + "Agents read answers, forge requests and overwrite the shell. " * 2
+    calls = []
+
+    async def resolve(*_args):
+        return "http://provider.test", "model", "key"
+
+    async def chat(_system, payload, *_args, **_kwargs):
+        calls.append(json.loads(payload))
+        if len(calls) == 1:
+            return json.dumps([
+                {"id": "scene-01", "items": [long_copy]},
+                {"id": "scene-02", "headline": "Sentence 1 retained"},
+            ])
+        return json.dumps([{"id": "scene-01", "items": ["Sentence 0: agents forge requests"]}])
+
+    monkeypatch.setattr(digester, "_resolve_provider", resolve)
+    monkeypatch.setattr(digester, "_chat", chat)
+    plans = asyncio.run(visual_plan.plan_scene_visuals(data))
+    assert len(calls) == 2
+    assert [x["id"] for x in calls[1]["scenes"]] == ["scene-01"]
+    rejection = calls[1]["copy_validation_feedback"]["scene-01"]
+    assert rejection["rejected_plan"]["items"] == [long_copy]
+    assert "maximum 90" in rejection["errors"]
+    assert plans[0]["items"] == ["Sentence 0: agents forge requests"]
+    assert plans[1]["headline"] == "Sentence 1 retained"
+
+
+def test_visual_copy_repair_exhaustion_never_releases_truncated_or_fallback_copy(monkeypatch):
+    calls = []
+
+    async def resolve(*_args):
+        return "http://provider.test", "model", "key"
+
+    async def chat(*_args, **_kwargs):
+        calls.append(1)
+        return json.dumps([{"id": "scene-01", "items": ["Sentence 0 " * 20]}])
+
+    monkeypatch.setattr(digester, "_resolve_provider", resolve)
+    monkeypatch.setattr(digester, "_chat", chat)
+    with pytest.raises(visual_plan.CopyLimitError, match="repair exhausted"):
+        asyncio.run(visual_plan.plan_scene_visuals(board(1)))
+    assert len(calls) == 2
 
 
 def test_normalise_restores_exact_scaled_number_precision_from_narration():
