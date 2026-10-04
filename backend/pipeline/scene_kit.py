@@ -1957,7 +1957,7 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .shot-title {{ font-size:{headline_size(plan.headline, base=86, floor=54)}px; line-height:1.08; font-weight:800; letter-spacing:-.025em; max-width:1530px; margin:0 0 35px; }}
   #{sid} .visual .shot-title {{ max-width:1400px; margin-bottom:24px; font-size:66px; }}
   #{sid} .shot-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px; }}
-  #{sid} .shot-grid.cards .shot-card:last-child:nth-child(odd) {{ grid-column:1 / -1; }}
+  #{sid} .shot-grid.cards:not(.shot-triplet) .shot-card:last-child:nth-child(odd) {{ grid-column:1 / -1; }}
   #{sid} .shot-card {{ position:relative; background:{card}; border-left:5px solid {accent}; padding:30px 34px; min-height:126px; display:flex; align-items:center; gap:24px; }}
   #{sid} .shot-number {{ color:{label_ink}; font-family:Georgia,serif; font-size:54px; font-variant-numeric:tabular-nums; flex-shrink:0; }}
   #{sid} .shot-copy {{ font-size:34px; line-height:1.3; overflow-wrap:anywhere; }}
@@ -2027,6 +2027,14 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .three-d-panel .shot-pair[data-pair-density="dense"] {{ --pair-copy-size:29px; }}
   #{sid} .three-d-panel .shot-credit {{ position:static; align-self:flex-start; order:10; margin-top:24px; max-width:100%; font-size:18px; }}
   #{sid} .contained-photo .shot-grid.shot-pair {{ grid-template-columns:1fr; }}
+  #{sid} .shot-grid.shot-triplet, #{sid} .visual .shot-grid.shot-triplet {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:22px; max-width:100%; }}
+  #{sid} .shot-grid.shot-triplet > .shot-card {{ grid-column:auto; min-width:0; min-height:180px; margin:0; padding:26px; box-sizing:border-box; align-items:flex-start; border-left:4px solid {accent}; background:{card}; }}
+  #{sid} .visual .shot-triplet > .shot-card {{ background:rgba(9,11,19,.82); }}
+  #{sid} .shot-triplet .shot-number {{ display:none; }}
+  #{sid} .shot-panel .shot-triplet .shot-title, #{sid} .shot-panel .shot-triplet .shot-copy {{ margin:0; max-width:none; font-size:34px; line-height:1.3; font-weight:600; color:inherit; overflow-wrap:anywhere; }}
+  #{sid} .article-panel .shot-grid.shot-triplet, #{sid} .three-d-panel .shot-grid.shot-triplet, #{sid} .contained-photo .shot-grid.shot-triplet {{ grid-template-columns:1fr; gap:16px; }}
+  #{sid} .article-panel .shot-triplet > .shot-card, #{sid} .three-d-panel .shot-triplet > .shot-card, #{sid} .contained-photo .shot-triplet > .shot-card {{ min-height:0; padding:18px 22px; background:{card}; }}
+  #{sid} .article-panel .shot-triplet .shot-title, #{sid} .article-panel .shot-triplet .shot-copy, #{sid} .three-d-panel .shot-triplet .shot-title, #{sid} .three-d-panel .shot-triplet .shot-copy, #{sid} .contained-photo .shot-triplet .shot-title, #{sid} .contained-photo .shot-triplet .shot-copy {{ font-size:28px; }}
   #{sid} .shot-wipe {{ position:absolute; inset:0; background:{accent}; pointer-events:none; }}
 """
     if plan.frame.orientation == "portrait":
@@ -2054,6 +2062,8 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .shot-panel.editorial[data-shot-layout="focus"] .shot-title {{ font-size:76px; }}
   #{sid} .shot-panel.editorial[data-shot-layout="focus"][data-copy-density="dense"] .shot-title {{ font-size:56px; }}
   #{sid} .shot-grid.shot-pair, #{sid} .shot-grid.shot-pair.split {{ grid-template-columns:1fr; }}
+  #{sid} .shot-grid.shot-triplet, #{sid} .visual .shot-grid.shot-triplet {{ grid-template-columns:1fr; }}
+  #{sid} .shot-grid.shot-triplet > .shot-card {{ min-height:0; }}
   #{sid} .shot-media.article {{ width:100%; height:52%; padding:60px 64px 24px; }}
   #{sid} .shot-panel.article-panel {{ left:0; top:52%; padding:32px 64px 170px; justify-content:flex-start; }}
   #{sid} .shot-media.three_d {{ width:100%; height:55%; }}
@@ -2095,6 +2105,7 @@ def _render_media_shots(plan: ScenePlan) -> str:
         selected = list(dict.fromkeys(shot["copy"]))
         title, texts = selected[0], selected[1:]
         paired = len(selected) == 2 and shot.get("layout", "cards") in {"cards", "split"}
+        triplet = len(selected) == 3 and shot.get("layout", "cards") == "cards"
         layout = shot.get("layout", "cards") if len(texts) > 1 or paired else "focus"
         if not editorial and layout in {"flow", "comparison"}:
             layout = "cards"
@@ -2114,7 +2125,15 @@ def _render_media_shots(plan: ScenePlan) -> str:
             )
         cue_attributes = " ".join(f'data-cue-{name.replace("_", "-")}="{value:.3f}"' for name, value in cues.items())
         title_html = f'<div class="shot-title" id="{prefix}-title">{_esc(title)}</div>'
-        if paired:
+        if triplet:
+            # A three-fact cards shot must keep all three assertions in actual
+            # panels; the visual overlay's plain-text rules cannot flatten it.
+            content = (
+                f'<div id="{prefix}-triplet" class="shot-grid cards shot-triplet">'
+                f'<div id="{prefix}-title-panel" class="shot-card">'
+                + title_html + '</div>' + "".join(cards) + '</div>'
+            )
+        elif paired:
             # Two selected assertions need two actual panels. Keep the first
             # copy as the title and retain the existing animation target ids.
             content = (
@@ -2139,16 +2158,21 @@ def _render_media_shots(plan: ScenePlan) -> str:
         timeline += [
             f'inAt("#{prefix}-rule", {{scaleX:.15}}, {{scaleX:1,duration:{entrance:.3f},ease:"power3.out"}}, {cues["reveal_start"]:.3f});',
             f'inAt("#{prefix}-kicker", {{x:-20}}, {{x:0,duration:{entrance:.3f},ease:"sine.out"}}, {cues["reveal_start"]:.3f});',
-            f'inAt("#{prefix}-title", {{y:24}}, {{y:0,duration:{entrance:.3f},ease:"expo.out"}}, {cues["reveal_start"]:.3f});',
         ]
+        if not triplet:
+            timeline.append(f'inAt("#{prefix}-title", {{y:24}}, {{y:0,duration:{entrance:.3f},ease:"expo.out"}}, {cues["reveal_start"]:.3f});')
         # Establish the title first, then follow the relation through the
         # action window. A short title reveal must not collapse a flow into
         # simultaneous entrances merely because reveal_end is only .55s away.
         action_end = cues["emphasis"] if layout == "flow" else cues["reveal_end"]
-        item_entrance = min(entrance, max(0, action_end - cues["reveal_start"]) / max(1, len(texts)))
+        item_count = len(selected) if triplet else len(texts)
+        item_entrance = min(entrance, max(0, action_end - cues["reveal_start"]) / max(1, item_count))
         available = max(0, action_end - cues["reveal_start"] - item_entrance)
+        if triplet:
+            timeline.append(f'inAt("#{prefix}-title-panel", {{y:24,opacity:.18}}, {{y:0,opacity:1,duration:{item_entrance:.3f},ease:"power2.out"}}, {cues["reveal_start"]:.3f});')
         for i in range(len(texts)):
-            at = cues["reveal_start"] + available * i / max(1, len(texts) - 1)
+            item_index = i + 1 if triplet else i
+            at = cues["reveal_start"] + available * item_index / max(1, item_count - 1)
             offset = "y:24" if layout == "flow" and plan.frame.orientation == "portrait" else ("x:-30" if layout == "flow" or i % 2 == 0 else "x:30")
             axis = offset.split(":")[0]
             timeline.append(f'inAt("#{prefix}-card-{i}", {{{offset},opacity:.18}}, {{{axis}:0,opacity:1,duration:{item_entrance:.3f},ease:"power2.out"}}, {at:.3f});')

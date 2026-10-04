@@ -569,7 +569,7 @@ def test_two_selected_claims_render_as_distinct_panels(layout, kind, orientation
     ("cards", ["Only one assertion"]),
     ("split", ["Only one assertion"]),
     ("focus", ["The title", "One support"]),
-    ("cards", ["The title", "First support", "Second support"]),
+    ("cards", ["The title", "First support", "Second support", "Third support"]),
     ("split", ["The title", "First support", "Second support"]),
 ])
 def test_other_selected_copy_layouts_keep_existing_structure(layout, copy):
@@ -583,6 +583,50 @@ def test_other_selected_copy_layouts_keep_existing_structure(layout, copy):
     assert doc.parents["scene-02-shot-1-title"] == "scene-02-shot-1-panel"
     assert doc.elements["scene-02-shot-1-panel"][1]["data-shot-layout"] == ("focus" if len(copy) < 3 else layout)
     assert all(html.count(text) == 1 for text in copy)
+
+
+@pytest.mark.parametrize("kind", ["editorial", "public_footage", "image", "article", "three_d"])
+@pytest.mark.parametrize("orientation", ["landscape", "portrait"])
+def test_three_parallel_claims_keep_distinct_cards_and_shot_contract(kind, orientation):
+    copy = ["ShinyHunters claims data on every FBI employee — its own claim",
+            "NYT: internal FBI memo premised a threat actor stole data on all employees",
+            "ShinyHunters set a Tuesday deadline tied to its demands"]
+    shot = {"start": 0, "duration": 13, "kind": kind, "layout": "cards", "copy": copy,
+            "motion_cues": ms.motion_cues(13), "source_start": .5, "source_duration": 15,
+            "src": "../verified.mp4" if kind in {"public_footage", "three_d"} else "../verified.png",
+            "credit": "Source: Verified source"}
+    plan = {"id": "scene-02", "headline": "Scene context", "media_shots": [shot]}
+    html = scene_kit.render_scene(scene_kit.ScenePlan.from_dict(
+        plan, duration=13, scene_id="scene-02",
+        frame=PORTRAIT if orientation == "portrait" else LANDSCAPE,
+    ))
+    ms.assert_rendered_shots(plan, html)
+    doc = ms._Elements(html)
+    prefix = "scene-02-shot-1"
+    cards = [prefix + "-title-panel", prefix + "-card-0", prefix + "-card-1"]
+    assert all(doc.parents[card] == prefix + "-triplet" for card in cards)
+    assert doc.parents[prefix + "-title"] == cards[0]
+    assert doc.elements[prefix + "-panel"][1]["data-shot-layout"] == "cards"
+    assert all(html.count(text) == 1 for text in copy)
+    assert [html.index(text) for text in copy] == sorted(html.index(text) for text in copy)
+    assert html.count("Source: Verified source") == 1
+    # All three card entrances are ordered within the unchanged reveal window.
+    for target, at in zip(cards, ["0.100", "0.283", "0.467"]):
+        line = next(line for line in html.splitlines() if f'inAt("#{target}",' in line)
+        assert "duration:0.183" in line and line.endswith(f", {at});")
+    assert f'inAt("#{prefix}-title",' not in html
+    assert 'data-cue-reveal-end="0.650"' in html
+    assert 'data-cue-settle="1.750"' in html
+    assert '.visual .shot-grid.shot-triplet { display:grid;' in html
+    assert '.shot-grid.shot-triplet > .shot-card { grid-column:auto;' in html
+    if kind in {"article", "three_d"}:
+        panel = doc.elements[prefix + "-panel"][1]["class"]
+        assert ("article-panel" if kind == "article" else "three-d-panel") in panel
+    if kind != "editorial":
+        media = doc.elements[prefix + "-media"][1]
+        assert media["src"] == shot["src"] and media["data-duration"] == "13.00"
+        if kind in {"public_footage", "three_d"}:
+            assert media["data-media-start"] == "0.50"
 
 
 def test_pair_guard_parser_does_not_nest_following_elements_under_void_tags():
