@@ -564,10 +564,14 @@ def test_direction_constraints_repair_only_current_rejected_candidate(tmp_path):
         repaired = asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
         assert [scene["id"] for scene in batches[-1]] == ["scene-01"]
         feedback = batches[-1][0]["visual_review_feedback"]
-        assert len(feedback["production_constraints"]) == 3
+        assert len(feedback["production_constraints"]) == 4
         assert "indivisible" in feedback["production_constraints"][0]
         assert "actual selected asset" in feedback["production_constraints"][1]
         assert "Do not repeat exact copy-id groups" in feedback["production_constraints"][2]
+        assert "fixed planar typography" in feedback["production_constraints"][3]
+        assert "cannot add 3D thickness" in feedback["production_constraints"][3]
+        assert "configured model" in feedback["production_constraints"][3]
+        assert "do not replace or disable that stage" in feedback["production_constraints"][3]
         assert all("production_constraints" not in plan["visual_review_feedback"] for plan in plans)
         assert [row["input_sha256"] for row in repaired["scenes"]] == [
             row["input_sha256"] for row in original["scenes"]
@@ -575,6 +579,21 @@ def test_direction_constraints_repair_only_current_rejected_candidate(tmp_path):
         assert repaired["scenes"][1]["direction_repair"]["video_sha256"] == "current-video"
         asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
         assert len(batches) == 2  # Reuse this exact constrained repair on resume.
+
+        # A repair cached before the layout capability constraint must be sent
+        # back to the provider even for the same rejected candidate. Other scenes
+        # and the refreshed repair remain reusable.
+        checkpoint = tmp_path / "media_shots.json"
+        stale = json.loads(checkpoint.read_text())
+        stale["scenes"][1]["direction_repair"]["contract"] = "renderable-direction-repair-v1"
+        checkpoint.write_text(json.dumps(stale))
+        refreshed = asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+        assert len(batches) == 3
+        assert [scene["id"] for scene in batches[-1]] == ["scene-01"]
+        assert refreshed["scenes"][1]["direction_repair"]["contract"] == ms.DIRECTION_REPAIR_CONTRACT
+        assert batches[-1][0]["visual_review_feedback"] == feedback
+        asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+        assert len(batches) == 3
 
         # A later candidate rejects another scene. Historical feedback and the
         # repaired scene's unchanged context must not force both through the model.
@@ -584,7 +603,7 @@ def test_direction_constraints_repair_only_current_rejected_candidate(tmp_path):
             "multimodal": {"failed_scene_ids": ["scene-00"]},
         }))
         asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
-        assert len(batches) == 3
+        assert len(batches) == 4
         assert [scene["id"] for scene in batches[-1]] == ["scene-00"]
 
 

@@ -19,6 +19,7 @@ from backend.pipeline.image_layout import image_layout
 from backend.pipeline.timing import timed
 
 CONTRACT_VERSION = 3
+DIRECTION_REPAIR_CONTRACT = "renderable-direction-repair-v2"
 MAX_CONCURRENT_BATCHES = 2
 _RELATIONSHIP_MARKERS = {
     "flow": re.compile(
@@ -92,6 +93,13 @@ def _repair_feedback(plan: dict, review: dict) -> dict | None:
         "Do not repeat exact copy-id groups across the repair sequence or reuse an "
         "introductory line as support for an unrelated later claim. Select relevant "
         "existing copy that advances the explanation; preserve attribution and limits.",
+        "Editorial cards/focus/split/flow/comparison are fixed planar typography "
+        "layouts with whole-item reveal, trace or comparison motion. Direction text "
+        "cannot add 3D thickness, inward-angled slabs, arbitrary camera moves or "
+        "geometry to these layouts. Describe the supported layout and motion. "
+        "Real 3D illustrations remain authored separately by the configured model "
+        "in the three_d stage; do not replace or disable that stage, or claim an "
+        "editorial card itself provides its 3D geometry.",
     ]}
 
 
@@ -577,7 +585,7 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
         }
         if scene["id"] in repair_feedback:
             results[scene["id"]]["direction_repair"] = {
-                "contract": "renderable-direction-repair-v1",
+                "contract": DIRECTION_REPAIR_CONTRACT,
                 "video_sha256": review["rendered_video_sha256"],
             }
         checkpoint.write_text(json.dumps({"input_sha256": fingerprint, "passed": False,
@@ -588,7 +596,7 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
     for scene in contexts:
         selected = cached.get(scene["id"], {})
         if scene["id"] in repair_feedback and selected.get("direction_repair") != {
-            "contract": "renderable-direction-repair-v1",
+            "contract": DIRECTION_REPAIR_CONTRACT,
             "video_sha256": review["rendered_video_sha256"],
         }:
             continue

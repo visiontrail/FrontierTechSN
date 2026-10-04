@@ -46,9 +46,21 @@ Each scene object has:
   kind is "chip", "rack", "satellite", "robot", "data", or "object".
   These are recognizable local mesh assemblies: chip has board/package/pins,
   rack has stacked server bays, satellite has a body and solar wings, robot has
-  a head/torso/arms/legs, and data depicts a physical signal object.
+  a head/torso/arms/legs. The fixed "data" mesh has a central polyhedron, a
+  metallic orbital ring and seven orbiting balls: it looks like an atom-shaped
+  data token, not a plain particle, air puff, fluid stream or heat wave. An actor
+  id or color cannot change that assembly. Use it only when that visible symbol
+  fits the narrated subject; otherwise choose appropriate "object" primitives.
   For unfamiliar subjects, "object" may specify primitive "box", "sphere",
   "cylinder", or "torus". Prefer a recognizable assembly when appropriate.
+  Before actor scale is applied, a box measures 1.2 on each axis; a sphere has
+  radius .7; a cylinder has radius .65 and height 1.2 along Y; a torus has major
+  radius .65 and tube radius .2 in the XY plane. Scale multiplies these local
+  dimensions, not world-space dimensions or pixel sizes. Plan connected parts,
+  spacing and camera framing using the actual geometry; avoid hiding small
+  essential components behind larger subjects or the floor. Place an attached
+  display or panel just beyond its supporting surface with positive clearance;
+  coincident faces produce flickering patterns instead of a readable surface.
   position/end_position: [x,y,z], coordinates -12..12. Keep a small uncluttered
   arrangement around the origin. Typical positions are within -3..3.
   scale: [x,y,z], each .1..4, normally [.8,.8,.8] or [1,1,1].
