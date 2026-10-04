@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -9,6 +10,99 @@ import pytest
 from backend.pipeline import media_shots as ms, scene_kit, composer
 from backend.pipeline.video_format import LANDSCAPE, PORTRAIT
 from PIL import Image
+
+
+def test_shot_response_rejects_nested_arrays_in_truncated_json():
+    # A real SDK continuation began inside direction; the old bracket scanner
+    # accepted the first nested copy_ids array and obscured the actual error.
+    response = ': {"purpose":"Anchor the story"}, "copy_ids":["copy-1"]}]}]'
+    indexed, errors, issues = ms._response_scenes(response, ["scene-02", "scene-05"])
+    assert indexed == {}
+    assert all("complete JSON scene array" in error for error in errors.values())
+    assert "not valid JSON" in issues[0]
+
+
+def test_shot_response_retains_unambiguous_siblings():
+    valid = {"id": "scene-02", "shots": [{"asset_id": "editorial"}]}
+    response = json.dumps([valid, {"id": "scene-03", "shots": []},
+                           {"id": "scene-03", "shots": [{}]},
+                           {"id": "scene-99", "shots": [{}]}, "copy-1"])
+    indexed, errors, issues = ms._response_scenes(response, ["scene-02", "scene-03", "scene-04"])
+    assert indexed == {"scene-02": valid}
+    assert "Duplicate scene id scene-03" in errors["scene-03"]
+    assert "Missing scene id scene-04" in errors["scene-04"]
+    assert "unexpected scene id scene-99" in issues
+    assert "entry 4 must be a scene object" in issues[1]
+    indexed, errors, _ = ms._response_scenes('{"scenes":[{"id":"scene-02","shots":[{}]}]}', ["scene-02"])
+    assert indexed["scene-02"]["shots"] == [{}]
+    assert not errors
+
+
+@pytest.mark.parametrize("response", ['["copy-1"]', '[{"id":"scene-02","shots":[]}]',
+                                      '[{"id":"scene-02","shots":["invalid"]}]'])
+def test_shot_response_reports_schema_errors_before_timeline_validation(response):
+    indexed, errors, _ = ms._response_scenes(response, ["scene-02"])
+    assert not indexed and errors["scene-02"]
+    assert "coverage ends" not in errors["scene-02"]
+
+
+def test_shot_attempt_evidence_preserves_precise_feedback_and_valid_scenes(tmp_path):
+    plans = [{"id": "scene-01"}, {"id": "scene-02"}]
+    board = {"scenes": [{"id": p["id"], "duration": 5, "text": "A cooling tower."} for p in plans]}
+    requests = []
+
+    async def respond(prompt, user, *args, **kwargs):
+        request = json.loads(user)
+        requests.append(request)
+        entries = [{"id": s["id"], "shots": [{
+            "asset_id": "editorial", "duration": 5, "script_excerpt": s["text"],
+            "copy_ids": ["copy-1"], "direction": ms._default_direction("editorial", [s["text"]]),
+        }]} for s in request["scenes"]]
+        return json.dumps(entries[:1] + ["copy-1"] if len(requests) == 1 else entries)
+
+    with patch("backend.pipeline.digester._resolve_provider", AsyncMock(return_value=("url", "model", "secret"))), \
+            patch("backend.pipeline.digester._chat", side_effect=respond):
+        report = asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+    assert [s["id"] for s in requests[1]["scenes"]] == ["scene-02"]
+    assert "Missing scene id scene-02" in requests[1]["validation_feedback"]["scene-02"][0]
+    assert all(s["planner"] == "ai" for s in report["scenes"])
+    records = sorted((json.loads(p.read_text()) for p in (tmp_path / "media_shot_planning").glob("*.json")),
+                     key=lambda row: row["attempt"])
+    assert len(records) == 2
+    assert records[0]["accepted_ids"] == ["scene-01"]
+    assert records[1]["accepted_ids"] == ["scene-02"]
+    assert all(row["status"] == "validated" and row["response_seconds"] >= 0 for row in records)
+    assert json.loads(records[1]["request"]["text"]) == requests[1]
+    assert "secret" not in json.dumps(records)
+    assert records[0]["response"]["sha256"] == hashlib.sha256(records[0]["response"]["text"].encode()).hexdigest()
+
+
+def test_shot_diagnostic_write_failure_does_not_fail_planning(tmp_path):
+    original_write = Path.write_text
+
+    def write(path, text, *args, **kwargs):
+        if path.parent.name == "media_shot_planning":
+            raise OSError("read-only diagnostic directory")
+        return original_write(path, text, *args, **kwargs)
+
+    logs = []
+    with patch.object(Path, "write_text", write), \
+            patch("backend.pipeline.digester._resolve_provider", AsyncMock(return_value=("url", "model", "key"))), \
+            patch("backend.pipeline.digester._chat", AsyncMock(return_value='["copy-1"]')):
+        report = asyncio.run(ms.plan_media_shots(
+            [{"id": "scene-01"}], {"scenes": [{"id": "scene-01", "duration": 5, "text": "A cooling tower."}]},
+            tmp_path, log=logs.append))
+    assert report["passed"]
+    assert report["scenes"][0]["planner"] == "recovery"
+    assert any("diagnostic evidence unavailable" in entry for entry in logs)
+
+
+def test_shot_planning_evidence_bounds_text_without_losing_identity():
+    text = "x" * (ms.PLANNING_EVIDENCE_TEXT_LIMIT + 1)
+    evidence = ms._planning_text(text)
+    assert evidence["truncated"] and len(evidence["text"]) == ms.PLANNING_EVIDENCE_TEXT_LIMIT
+    assert evidence["chars"] == len(text)
+    assert evidence["sha256"] == hashlib.sha256(text.encode()).hexdigest()
 
 
 @pytest.mark.parametrize("invalid", [None, "changed_bytes", "wrong_path", "unreviewed", "no_image"])

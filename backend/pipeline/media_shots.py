@@ -8,9 +8,12 @@ import json
 import math
 import re
 import subprocess
+import time
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
 from html.parser import HTMLParser
 from pathlib import Path
+from uuid import uuid4
 
 from PIL import Image
 
@@ -21,6 +24,7 @@ from backend.pipeline.timing import timed
 CONTRACT_VERSION = 3
 DIRECTION_REPAIR_CONTRACT = "renderable-direction-repair-v2"
 MAX_CONCURRENT_BATCHES = 2
+PLANNING_EVIDENCE_TEXT_LIMIT = 262_144
 _RELATIONSHIP_MARKERS = {
     "flow": re.compile(
         r"\b(?:then|before|after|first|next|finally|because|therefore|leads? to|results? in|"
@@ -525,11 +529,70 @@ def fallback(scene: dict, assets: list[dict], copy: list[dict]) -> dict:
     return {"id": scene["id"], "rationale": "Provider/plan recovery using verified assets and grounded editorial graphics", "shots": shots}
 
 
+def _response_scenes(answer: str, expected_ids: list[str]) -> tuple[dict, dict, list[str]]:
+    """Read a complete scene response, never a nested array from broken JSON."""
+    text = answer.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3].rstrip()
+    try:
+        entries = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        detail = f"Return the complete JSON scene array; response is not valid JSON: {exc}"
+        return {}, dict.fromkeys(expected_ids, detail), [detail]
+    if isinstance(entries, dict):
+        entries = entries.get("scenes")
+    if not isinstance(entries, list):
+        detail = "Response must be a JSON array of scene objects, each with id and shots"
+        return {}, dict.fromkeys(expected_ids, detail), [detail]
+    indexed, errors, issues = {}, {}, []
+    seen = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            issues.append(f"entry {index} must be a scene object with a string id")
+            continue
+        scene_id = entry["id"]
+        if scene_id not in expected_ids:
+            issues.append(f"unexpected scene id {scene_id[:80]}")
+            continue
+        if scene_id in seen:
+            errors[scene_id] = f"Duplicate scene id {scene_id}; return this scene exactly once"
+            indexed.pop(scene_id, None)
+            continue
+        seen.add(scene_id)
+        shots = entry.get("shots")
+        if not isinstance(shots, list) or not shots or any(not isinstance(shot, dict) for shot in shots):
+            errors[scene_id] = f"Scene {scene_id} shots must be a nonempty array of shot objects"
+            continue
+        indexed[scene_id] = entry
+    for scene_id in expected_ids:
+        if scene_id not in indexed and scene_id not in errors:
+            detail = f"Missing scene id {scene_id}; return an object with this exact id and a shots array"
+            if issues:
+                detail += "; " + "; ".join(issues)[:400]
+            errors[scene_id] = detail
+    return indexed, errors, issues
+
+
+def _planning_text(text: str) -> dict:
+    return {"text": text[:PLANNING_EVIDENCE_TEXT_LIMIT], "chars": len(text),
+            "truncated": len(text) > PLANNING_EVIDENCE_TEXT_LIMIT,
+            "sha256": hashlib.sha256(text.encode()).hexdigest()}
+
+
+def _write_planning_evidence(path: Path, evidence: dict, emit) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False))
+    except OSError as exc:
+        emit(f"Shot editor diagnostic evidence unavailable: {exc}")
+
+
 @timed("media_shots")
 async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
                            provider_id=None, ai_endpoint=None, ai_model=None, log=None) -> dict:
     from backend.pipeline.digester import _chat, _resolve_provider
-    from backend.pipeline.visual_plan import _first_json_array
 
     def emit(message):
         if log:
@@ -610,33 +673,56 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
 
     async def plan_batch(batch, batch_index, attempt):
         async with gate:
+            request = json.dumps({"scenes": [
+                {**scene, "visual_review_feedback": repair_feedback[scene["id"]]}
+                if scene["id"] in repair_feedback else scene for scene in batch
+            ], "validation_feedback": {
+                scene["id"]: failures[scene["id"]] for scene in batch
+            }}, ensure_ascii=False)
+            expected_ids = [scene["id"] for scene in batch]
+            evidence_path = task_dir / "media_shot_planning" / f"{uuid4().hex}.json"
+            evidence = {"status": "requested", "attempt": attempt + 1, "batch": batch_index,
+                        "scene_ids": expected_ids, "requested_at": datetime.now(timezone.utc).isoformat(),
+                        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                        "request": _planning_text(request)}
+            _write_planning_evidence(evidence_path, evidence, emit)
+            started = time.monotonic()
             try:
                 answer = await _chat(
-                    prompt, json.dumps({"scenes": [
-                        {**scene, "visual_review_feedback": repair_feedback[scene["id"]]}
-                        if scene["id"] in repair_feedback else scene for scene in batch
-                    ], "validation_feedback":
-                                        {scene["id"]: failures[scene["id"]] for scene in batch}}, ensure_ascii=False),
+                    prompt, request,
                     *provider, log, f"Shot editor batch {batch_index} ({attempt + 1}/2)",
                     # Complete direction can exceed 14k; avoid a truncated
                     # first response before the provider doubles its budget.
                     max_tokens=28000, enable_skills=False, disable_thinking=True,
                 )
-                entries = _first_json_array(answer) or []
-                indexed = {entry["id"]: entry for entry in entries}
+                evidence.update(response=_planning_text(answer), status="responded",
+                                response_seconds=round(time.monotonic() - started, 3))
+                _write_planning_evidence(evidence_path, evidence, emit)
+                indexed, response_errors, issues = _response_scenes(answer, expected_ids)
+                evidence["response_issues"] = issues[:20]
+                evidence["response_issue_count"] = len(issues)
             except Exception as exc:
                 indexed = {}
-                for scene in batch:
-                    failures[scene["id"]].append(str(exc))
+                response_errors = dict.fromkeys(expected_ids, str(exc))
+                evidence.update(status="response_error", response_seconds=round(time.monotonic() - started, 3))
             # Validation and checkpoint writes are synchronous on this event
             # loop. Each batch owns disjoint scenes; completed work is retained
             # even while another batch is still awaiting its model response.
             for scene in batch:
                 try:
-                    accept(scene, indexed.get(scene["id"], {}), "ai")
+                    if scene["id"] in response_errors:
+                        raise ValueError(response_errors[scene["id"]])
+                    accept(scene, indexed[scene["id"]], "ai")
                 except (ValueError, TypeError, KeyError, AttributeError, OSError, subprocess.SubprocessError) as exc:
                     failures[scene["id"]].append(str(exc))
                     emit(f"Shot editor {scene['id']}: replanning after {exc}")
+            evidence.update(status="validated", completed_at=datetime.now(timezone.utc).isoformat(),
+                            elapsed_seconds=round(time.monotonic() - started, 3),
+                            passed=all(scene_id in results for scene_id in expected_ids),
+                            accepted_ids=[scene_id for scene_id in expected_ids if scene_id in results],
+                            validation_errors={scene_id: [error[:4000] for error in failures[scene_id][-1:]]
+                                               for scene_id in expected_ids if scene_id not in results})
+            _write_planning_evidence(evidence_path, evidence, emit)
 
     # Batch normal direction; only rejected scenes return for the repair round.
     for attempt in range(2):
