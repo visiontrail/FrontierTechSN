@@ -585,11 +585,25 @@ def test_unavailable_visual_review_does_not_replan_scene_content(tmp_path):
     assert composer._pending_visual_repairs(tmp_path, _cache_plans())[1] == []
 
 
-@pytest.mark.parametrize("mutation", [None, "video", "script", "setting", "report_hash", "missing_checkpoint", "news_images.py", "collage_broll.py", "visual_plan.py", "composer.py"])
+@pytest.mark.parametrize("mutation", [None, "video", "script", "setting", "report_hash", "missing_checkpoint", "news_images.py", "collage_broll.py", "visual_plan.py", "composer.py", "hyperframes_cli", "hyperframes_patch", "hyperframes_missing", "hyperframes_unknown"])
 @pytest.mark.parametrize("interrupted", [False, True])
 @pytest.mark.parametrize("accepted", [False, True])
 def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, monkeypatch, mutation, interrupted, accepted):
     from unittest.mock import AsyncMock
+    hyperframes = tmp_path / "hyperframe"
+    cli = hyperframes / "node_modules/hyperframes/dist/cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("old snapshot timing")
+    executable = hyperframes / "node_modules/.bin/hyperframes"
+    executable.parent.mkdir()
+    executable.symlink_to(cli)
+    patch = hyperframes / "scripts/patch-snapshot-media-timing.mjs"
+    patch.parent.mkdir()
+    patch.write_text("old patch input")
+    monkeypatch.setattr(composer.config, "HYPERFRAME_DIR", hyperframes)
+    if mutation == "hyperframes_unknown":
+        # Even an unchanged fallback command cannot prove which npx bytes ran.
+        executable.unlink()
     policy_path = None
     if mutation and mutation.endswith(".py"):
         code_dir = tmp_path / "pipeline_source"
@@ -626,6 +640,9 @@ def test_visual_review_resume_is_bound_to_candidate_and_render_inputs(tmp_path, 
     if mutation == "script": script.write_text("Changed narration")
     if mutation == "setting": request["captions_enabled"] = True
     if mutation == "missing_checkpoint": (tmp_path / "render_review_checkpoint.json").unlink()
+    if mutation == "hyperframes_cli": cli.write_text("composition-aware snapshot timing")
+    if mutation == "hyperframes_patch": patch.write_text("corrected patch input")
+    if mutation == "hyperframes_missing": cli.unlink()
     if policy_path is not None: policy_path.write_text("corrected generation policy")
     if mutation is None and not accepted:
         with pytest.raises(composer.QualityGateRetry):

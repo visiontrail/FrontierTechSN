@@ -271,6 +271,48 @@ def _asset(task_dir: Path, raw: str, kind: str, **metadata) -> dict:
     return result
 
 
+def _reviewed_footage_visuals(task_dir: Path) -> dict:
+    """Keep source observations bound to the exact reviewed clip bytes."""
+    try:
+        manifest = json.loads((task_dir / "footage" / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("clips"), list):
+        return {}
+    observations = {}
+    root = task_dir.resolve()
+    for clip in manifest["clips"]:
+        if not isinstance(clip, dict):
+            continue
+        analysis = clip.get("analysis")
+        raw = clip.get("local_path")
+        digest = clip.get("sha256")
+        if (not isinstance(analysis, dict) or analysis.get("status") != "analyzed"
+                or analysis.get("image_received") is not True
+                or analysis.get("suitable") is not True
+                or not isinstance(raw, str) or not raw
+                or not isinstance(digest, str) or not digest):
+            continue
+        visible = analysis.get("visible_content")
+        path = (task_dir / raw).resolve()
+        if (not isinstance(visible, str) or not visible.strip()
+                or not path.is_relative_to(root)):
+            continue
+        observations[("../" + path.relative_to(root).as_posix(), digest)] = {
+            "source": "footage/manifest.json:analysis",
+            "clip_sha256": digest,
+            "visible_content": visible,
+            "usage_constraint": (
+                "Direct this immutable clip from its reviewed visible content, not its "
+                "title, search query or narration. Public footage identifies an external "
+                "source and can contain drawings or animation; captured_evidence does "
+                "not establish live-action photography. Do not promise objects, motion "
+                "or documentary imagery absent from the reviewed clip."
+            ),
+        }
+    return observations
+
+
 def inventory(plan: dict, task_dir: Path) -> list[dict]:
     assets = []
     public = plan.get("footage_sequence") or []
@@ -278,9 +320,14 @@ def inventory(plan: dict, task_dir: Path) -> list[dict]:
         plan.get("collage_src") and plan["footage_src"] != plan["collage_src"]
     )):
         public = [{"src": plan["footage_src"], "credit": plan.get("footage_credit", "")}]
+    observations = _reviewed_footage_visuals(task_dir) if public else {}
     for item in public:
-        assets.append(_asset(task_dir, item["src"], "public_footage",
-                             credit=item.get("credit", ""), script_excerpt=item.get("script_excerpt", "")))
+        asset = _asset(task_dir, item["src"], "public_footage",
+                       credit=item.get("credit", ""), script_excerpt=item.get("script_excerpt", ""))
+        observation = observations.get((asset["src"], asset["sha256"]))
+        if observation is not None:
+            asset["visual_evidence"] = observation
+        assets.append(asset)
     collage_src = plan.get("collage_src") or (plan.get("footage_src") if plan.get("collage_broll") else "")
     if collage_src:
         assets.append(_asset(task_dir, collage_src, "paper_collage", credit="Illustration · Paper-Collage"))

@@ -1760,9 +1760,21 @@ def _review_retry_fingerprint(directory: Path, request: dict, render: RenderSpec
     for name in ("src", "scripts"):
         paths.update(path for path in (config.REMOTION_DIR / name).rglob("*") if path.is_file())
     paths.update(config.REMOTION_DIR / name for name in ("package.json", "package-lock.json"))
+    # Preview fixes patch the installed CLI without changing composition files.
+    # Bind both the executable we actually launch and its local patch inputs so
+    # review-only recovery cannot retain previews made with the old renderer.
+    hyperframes_command = assembler._hyperframes_bin()
+    if len(hyperframes_command) == 1:
+        paths.add(Path(hyperframes_command[0]))
+    paths.update(config.HYPERFRAME_DIR / name for name in (
+        "package.json", "package-lock.json", "node_modules/hyperframes/dist/cli.js",
+        "scripts/media-response.mjs",
+    ))
+    paths.update((config.HYPERFRAME_DIR / "scripts").glob("patch-*.mjs"))
     evidence = {
         "request": request,
         "three_d_enabled": config.THREE_D_ENABLED,
+        "hyperframes_command": hyperframes_command,
         "render": (render or resolve_render_spec(
             resolve_frame_spec(request.get("video_orientation"))
         )).to_dict(),
@@ -1786,6 +1798,8 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
         candidate = directory / "video.next.mp4"
         if (
             not config.AV_SYNC_GEMINI_REVIEW_ENABLED
+            # An npx fallback has no locally verified executable identity.
+            or len(assembler._hyperframes_bin()) != 1
             or not (unavailable or interrupted)
             or checkpoint.get("input_sha256") != _review_retry_fingerprint(directory, request, render)
             or not candidate.is_file()

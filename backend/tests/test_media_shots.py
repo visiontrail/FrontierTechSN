@@ -11,6 +11,77 @@ from backend.pipeline.video_format import LANDSCAPE, PORTRAIT
 from PIL import Image
 
 
+@pytest.mark.parametrize("invalid", [None, "changed_bytes", "wrong_path", "unreviewed", "no_image"])
+def test_footage_inventory_binds_reviewed_visual_content_to_clip(tmp_path, invalid):
+    (tmp_path / "footage").mkdir()
+    path = tmp_path / "footage" / "clip.mp4"
+    path.write_bytes(b"reviewed tower animation")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    analysis = {"status": "analyzed", "image_received": True, "suitable": True,
+                "visible_content": "A cooling tower sketch becomes an animated model."}
+    clip = {"local_path": "footage/clip.mp4", "sha256": digest, "analysis": analysis}
+    if invalid == "changed_bytes":
+        path.write_bytes(b"replacement footage")
+    elif invalid == "wrong_path":
+        clip["local_path"] = "footage/another.mp4"
+    elif invalid == "unreviewed":
+        analysis["status"] = "pending"
+    elif invalid == "no_image":
+        analysis["image_received"] = False
+    (tmp_path / "footage" / "manifest.json").write_text(json.dumps({"clips": [clip]}))
+    plan = {"footage_sequence": [{"src": "../footage/clip.mp4", "credit": "Cooling tower"}]}
+    probe = subprocess.CompletedProcess([], 0, json.dumps({"streams": [{"duration": "15"}]}))
+    with patch.object(ms.subprocess, "run", return_value=probe):
+        asset = ms.inventory(plan, tmp_path)[0]
+    if invalid:
+        assert "visual_evidence" not in asset
+    else:
+        assert asset["visual_evidence"]["visible_content"] == analysis["visible_content"]
+        assert asset["visual_evidence"]["clip_sha256"] == digest
+    # Attaching source observations neither substitutes nor removes a required asset.
+    assert asset["src"] == "../footage/clip.mp4"
+    assert asset["kind"] == "public_footage" and asset["duration"] == 15
+
+
+def test_footage_visual_observation_reaches_model_and_invalidates_only_affected_cache(tmp_path):
+    (tmp_path / "footage").mkdir()
+    path = tmp_path / "footage" / "clip.mp4"
+    path.write_bytes(b"reviewed animation")
+    manifest_path = tmp_path / "footage" / "manifest.json"
+    analysis = {"status": "analyzed", "image_received": True, "suitable": True,
+                "visible_content": "A drawing of a cooling tower."}
+    manifest = {"clips": [{"local_path": "footage/clip.mp4",
+                          "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "analysis": analysis}]}
+    manifest_path.write_text(json.dumps(manifest))
+    plans = [{"id": "scene-01", "footage_src": "footage/clip.mp4"}, {"id": "scene-02"}]
+    board = {"scenes": [{"id": p["id"], "duration": 5, "text": "Cooling tower analogy."} for p in plans]}
+    calls = []
+
+    async def respond(prompt, user, *args, **kwargs):
+        scenes = json.loads(user)["scenes"]
+        calls.append(scenes)
+        return json.dumps([{"id": s["id"], "shots": [{
+            "asset_id": s["assets"][0]["id"] if s["assets"] else "editorial",
+            "duration": 5, "script_excerpt": s["text"], "copy_ids": ["copy-1"],
+            "direction": ms._default_direction("public_footage" if s["assets"] else "editorial", [s["text"]]),
+        }]} for s in scenes])
+
+    probe = subprocess.CompletedProcess([], 0, json.dumps({"streams": [{"duration": "15"}]}))
+    with patch.object(ms.subprocess, "run", return_value=probe), \
+            patch("backend.pipeline.digester._resolve_provider", AsyncMock(return_value=("url", "key", "model"))), \
+            patch("backend.pipeline.digester._chat", side_effect=respond):
+        asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+        assert calls[0][0]["assets"][0]["visual_evidence"]["visible_content"] == analysis["visible_content"]
+        asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+        assert len(calls) == 1
+        analysis["visible_content"] = "A tower sketch transitions into a 3D animation."
+        manifest_path.write_text(json.dumps(manifest))
+        asyncio.run(ms.plan_media_shots(plans, board, tmp_path))
+    assert len(calls) == 2
+    assert [s["id"] for s in calls[1]] == ["scene-01"]
+    assert calls[1][0]["assets"][0]["visual_evidence"]["visible_content"] == analysis["visible_content"]
+
+
 def test_reviewed_wrong_media_is_replaced_by_complete_editorial_shots(tmp_path):
     (tmp_path / "compositions").mkdir()
     asset = tmp_path / "historical.jpg"
