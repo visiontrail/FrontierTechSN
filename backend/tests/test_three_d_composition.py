@@ -6,7 +6,7 @@ import json
 import pytest
 
 from backend import config
-from backend.pipeline import composer, media_shots, multimodal_review, scene_kit, three_d
+from backend.pipeline import composer, media_shots, multimodal_review, production_plan, scene_kit, three_d
 from backend.pipeline.video_format import LANDSCAPE, PORTRAIT, resolve_render_spec
 
 
@@ -40,6 +40,69 @@ def test_three_d_clip_is_visible_silent_and_locked(frame):
     ):
         with pytest.raises(ValueError):
             media_shots.assert_rendered_shots(plan, invalid)
+
+
+@pytest.mark.parametrize("duration,count", [(10.23, 307), (14.56, 437), (3, 90)])
+@pytest.mark.parametrize("transition", ["wipe", "iris"])
+def test_three_d_boundary_covers_cannot_hide_real_motion_phases(duration, count, transition):
+    # The 307/437-frame production shots settle on their last source frame:
+    # hold actors also control the moving camera's endpoint. Sampling earlier
+    # would hide that endpoint instead of fixing the outgoing cover collision.
+    def editorial(start):
+        return {"kind": "editorial", "start": start, "duration": 4,
+                "copy": ["A grounded claim"], "layout": "focus",
+                "transition": transition, "motion_cues": media_shots.motion_cues(4)}
+
+    shot = {
+        "kind": "three_d", "start": 4, "duration": duration,
+        "source_duration": count / 30, "source_start": 0,
+        "src": "../three_d/content-address/clip.mp4", "sha256": "verified-clip",
+        "copy": ["A spatial explanation"], "layout": "focus",
+        "transition": transition, "motion_cues": media_shots.motion_cues(duration),
+        "three_d_spec": {
+            "contract": three_d.CONTRACT, "representation": "illustration",
+            "fps": 30, "duration_frames": count,
+            "camera": {"position": [6, 4, 9], "end_position": [7, 4, 9], "target": [0, 0, 0]},
+            "actors": [{"id": "ground", "kind": "object", "action": "hold",
+                        "motion_start": 0, "motion_end": 1}],
+        },
+    }
+    shots = [editorial(0), shot, editorial(4 + duration), editorial(8 + duration)]
+    plan = {"id": "scene-02", "media_shots": shots}
+    board = {"total_duration": duration + 12, "scenes": [
+        {"id": "scene-02", "start": 0, "duration": duration + 12},
+    ]}
+    original = copy.deepcopy(plan)
+    timeline = production_plan.build_timeline(board, [plan], fps=30)
+    phases = dict(production_plan.three_d_sample_times(shot))
+    assert phases["settled"] == pytest.approx((count - 1) / 30, abs=1e-6)
+    assert phases["settled"] > duration - .18
+    if duration == 3:
+        # A short 3D shot's onset falls inside the old incoming cover too.
+        assert phases["onset"] < .18
+
+    html = scene_kit.render_scene(scene_kit.ScenePlan.from_dict(
+        plan, duration=duration + 12, scene_id="scene-02", frame=LANDSCAPE,
+    ))
+    media_shots.assert_rendered_shots(plan, html)
+    elements = media_shots._Elements(html).elements
+    covers = {name: attrs for name, (_, attrs) in elements.items()
+              if "shot-wipe" in attrs.get("class", "").split()}
+    # Keep the ordinary editorial-to-editorial transition, with the same
+    # 180ms cover on each side of its cut and the chosen animation shape.
+    assert set(covers) == {"scene-02-shot-4-wipe"}
+    cover = covers["scene-02-shot-4-wipe"]
+    assert float(cover["data-start"]) == pytest.approx(duration + 8 - .18)
+    assert float(cover["data-duration"]) == .36
+    assert ('clipPath:"circle(0% at 50% 50%)"' in html) == (transition == "iris")
+    for phase in phases.values():
+        sample_time = shot["start"] + phase
+        assert all(not float(c["data-start"]) <= sample_time
+                   < float(c["data-start"]) + float(c["data-duration"]) for c in covers.values())
+    # Geometry, source ownership, copy, cues and shared preview/final sample
+    # events retain their original timing; only the occluding layer is removed.
+    assert plan == original
+    assert production_plan.build_timeline(board, [plan], fps=30) == timeline
 
 
 @pytest.mark.parametrize("status,passed", [

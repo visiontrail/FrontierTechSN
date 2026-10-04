@@ -2161,7 +2161,10 @@ def _render_media_shots(plan: ScenePlan) -> str:
                 hold = attention_span / max(1, len(texts)) if layout == "comparison" else attention_span
                 attention_at = cues["emphasis"] + (i * hold if layout == "comparison" else 0)
                 timeline.append(f'inAt("#{prefix}-emphasis-{i}", {{{scale}:0}}, {{{scale}:1,duration:{hold:.3f},ease:"sine.inOut"}}, {attention_at:.3f});')
-        if index:
+        # A 3D camera can settle on the final source frame, and a short shot's
+        # onset can fall inside the incoming cover. Keep these shot boundaries
+        # clear instead of obscuring the geometry or moving its review samples.
+        if index and kind != "three_d" and plan.media_shots[index - 1].get("kind") != "three_d":
             # A cover transition spans the cut; outgoing content remains intact
             # until the source ends, so even the boundary frame has content.
             half = min(.18, float(plan.media_shots[index - 1]["duration"]) / 3, duration / 3)
