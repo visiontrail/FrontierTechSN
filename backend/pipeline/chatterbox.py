@@ -328,6 +328,24 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
                     expanded = [prefix, *suffix_parts]
                     break
             observed.extend(expanded if expanded is not None else [value])
+    # ASR can attach the first spoken letter to the exact preceding source
+    # word ("observed US" -> "ObserveDU S"). Restore that boundary while
+    # retaining every observed letter, including any following repetition.
+    boundaries = sorted(
+        {(expected[index - 1], expected[index]) for index in targets
+         if index > 0 and index - 1 not in targets},
+        key=lambda pair: len(pair[0]), reverse=True,
+    )
+    separated = []
+    for token in observed:
+        for prefix, initialism in boundaries:
+            fragment = token[len(prefix):] if token.startswith(prefix) else ""
+            if fragment and initialism.startswith(fragment):
+                separated.extend([prefix, fragment])
+                break
+        else:
+            separated.append(token)
+    observed = separated
     # Collapse exact split spellings without discarding any observed letters.
     replacements = {}
     for tag, start, end, left, right in SequenceMatcher(

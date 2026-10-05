@@ -1027,6 +1027,26 @@ def test_pronunciation_guard_brand_alias_never_hides_wrong_or_extra_letters(obse
     )["passed"] is False
 
 
+@pytest.mark.parametrize("observed", [
+    "By ObserveDU S consumer spending.", "By observedUS consumer spending.",
+])
+def test_pronunciation_guard_restores_exact_source_word_letter_boundary(observed):
+    assert chatterbox._pronunciation_report(
+        "By observed US consumer spending.", [{"text": word} for word in observed.split()],
+    )["passed"] is True
+
+
+@pytest.mark.parametrize("observed", [
+    "By observedU S US consumer spending.", "By observedU S U S consumer spending.",
+    "By observedI S consumer spending.", "By observedU consumer spending.",
+    "By observedU S S consumer spending.",
+])
+def test_pronunciation_guard_preserves_missing_wrong_and_repeated_attached_letters(observed):
+    assert chatterbox._pronunciation_report(
+        "By observed US consumer spending.", [{"text": word} for word in observed.split()],
+    )["passed"] is False
+
+
 def test_pronunciation_guard_keeps_model_selected_word_acronyms_advisory():
     source = "CoRL reports on AI."
     _, edits = tts_pronunciation.validate_decisions(source, [
