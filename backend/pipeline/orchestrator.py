@@ -503,32 +503,55 @@ async def run_regenerate(task: TaskResponse, log: LogCallback | None = None):
     )
     title = title_artifact.title
 
-    # Keep cover art aligned with an edited script. This still precedes the TTS
-    # subprocess, so a thumbnail failure consumes no model-synthesis memory.
-    if task.config.thumbnail_enabled:
-        task_log("Regenerate: Updating viral thumbnail from edited script")
+    async def prepare_thumbnail():
+        if task.config.thumbnail_enabled:
+            task_log("Regenerate: Updating viral thumbnail from edited script")
+            try:
+                await _generate_task_thumbnail(
+                    task,
+                    task_dir,
+                    task_log,
+                    title=title,
+                    allow_legacy_regeneration=True,
+                )
+            except Exception as exc:
+                task_log(f"Regenerate: Thumbnail update failed; retaining prior cover: {exc}")
+
+    async def prepare_audio():
+        task_log(f"Regenerate: Generating TTS audio with {task.config.tts_model}")
+        await update_task(task.id, status=TaskStatus.TTS.value, error_message=None)
+        voices = [task.config.voice_1]
+        if task.config.script_format == ScriptFormat.DIALOGUE:
+            voices.append(task.config.voice_2)
+        audio_path = await generate_tts(
+            script_path, str(task_dir / "audio"), voices, task.config.tts_model, log=task_log,
+        )
+        await update_task(task.id, audio_path=audio_path)
+        task.audio_path = audio_path
+        return audio_path
+
+    if task.config.tts_model == "chatterbox-multilingual" and task.config.auto_render:
+        # Review recovery enters here too. Remote synthesis can overlap the
+        # serial browser branch just as in run_pipeline. Use the ordinary
+        # prerequisite so current verified footage is reused and failures still
+        # block composition; run_compose rechecks it before rendering.
+        async def prepare_media():
+            await prepare_thumbnail()
+            await _ensure_task_footage(task, task_dir, task_log)
+
+        branches = [asyncio.create_task(prepare_media()), asyncio.create_task(prepare_audio())]
         try:
-            await _generate_task_thumbnail(
-                task,
-                task_dir,
-                task_log,
-                title=title,
-                allow_legacy_regeneration=True,
-            )
-        except Exception as exc:
-            task_log(f"Regenerate: Thumbnail update failed; retaining prior cover: {exc}")
-
-    # Stage 6: TTS
-    task_log(f"Regenerate: Generating TTS audio with {task.config.tts_model}")
-    await update_task(task.id, status=TaskStatus.TTS.value, error_message=None)
-
-    voices = [task.config.voice_1]
-    if task.config.script_format == ScriptFormat.DIALOGUE:
-        voices.append(task.config.voice_2)
-
-    audio_dir = str(task_dir / "audio")
-    audio_path = await generate_tts(script_path, audio_dir, voices, task.config.tts_model, log=task_log)
-    await update_task(task.id, audio_path=audio_path)
+            results = await asyncio.gather(*branches)
+        except BaseException:
+            for branch in branches:
+                branch.cancel()
+            await asyncio.gather(*branches, return_exceptions=True)
+            raise
+        audio_path = results[1]
+    else:
+        # Retain local model resource ordering and manual audio-review behavior.
+        await prepare_thumbnail()
+        audio_path = await prepare_audio()
 
     # Pause for audio review, same as the full pipeline.
     await _after_audio(

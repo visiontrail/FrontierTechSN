@@ -37,8 +37,10 @@ def task_and_manifest(root):
 
 
 @pytest.mark.parametrize("entry", ["run_regenerate", "run_tts_resume", "run_compose", "run_daily_review_resume"])
-def test_all_resume_paths_acquire_enabled_footage_before_composition(tmp_path, entry):
+@pytest.mark.parametrize("model", ["pocket-tts", "chatterbox-multilingual"])
+def test_all_resume_paths_acquire_enabled_footage_before_composition(tmp_path, entry, model):
     task, manifest = task_and_manifest(tmp_path)
+    task.config.tts_model = model
     if entry == "run_daily_review_resume":
         (tmp_path / "research").mkdir()
         (tmp_path / "research/dossier.json").write_text(

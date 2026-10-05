@@ -61,8 +61,10 @@ def pipeline(tmp_path):
         id='parallel-worker', created_at='2026-09-15T00:00:00Z',
         updated_at='2026-09-15T00:00:00Z', source_type='youtube',
         source_url='https://example.com', status='queued', output_dir=str(tmp_path),
-        config=TaskConfig(footage_enabled=True, thumbnail_enabled=False, auto_render=True),
+        config=TaskConfig(footage_enabled=True, thumbnail_enabled=False, auto_render=True,
+                          tts_model='chatterbox-multilingual'),
     )
+    (tmp_path / 'script.txt').write_text('Approved narration.')
     with (
         patch.object(orchestrator, 'update_task', AsyncMock()) as update,
         patch.object(orchestrator, 'extract_youtube', AsyncMock(return_value=SimpleNamespace(title='Test', text='Source', metadata={}))),
@@ -133,7 +135,8 @@ def test_worker_reports_parallel_failure_without_waiting_for_sibling(
     asyncio.run(run())
 
 
-def test_parallel_success_waits_for_both_branches(pipeline, tmp_path):
+@pytest.mark.parametrize('entry', ['run_pipeline', 'run_regenerate'])
+def test_parallel_success_waits_for_both_branches(pipeline, tmp_path, entry):
     async def run():
         task, _, after = pipeline
         audio_ready = asyncio.Event()
@@ -152,7 +155,7 @@ def test_parallel_success_waits_for_both_branches(pipeline, tmp_path):
             patch.object(orchestrator, 'generate_tts', audio),
             patch.object(orchestrator, '_acquire_task_footage', media),
         ):
-            pending = asyncio.create_task(orchestrator.run_pipeline(task))
+            pending = asyncio.create_task(getattr(orchestrator, entry)(task))
             try:
                 await asyncio.wait_for(audio_ready.wait(), timeout=1)
                 assert not pending.done()
@@ -169,7 +172,8 @@ def test_parallel_success_waits_for_both_branches(pipeline, tmp_path):
     asyncio.run(run())
 
 
-def test_pipeline_cancellation_cleans_up_both_branches(pipeline):
+@pytest.mark.parametrize('entry', ['run_pipeline', 'run_regenerate'])
+def test_pipeline_cancellation_cleans_up_both_branches(pipeline, entry):
     async def run():
         task, _, after = pipeline
         entered = {name: asyncio.Event() for name in ('audio', 'media')}
@@ -187,7 +191,7 @@ def test_pipeline_cancellation_cleans_up_both_branches(pipeline):
             patch.object(orchestrator, 'generate_tts', lambda *a, **kw: wait('audio')),
             patch.object(orchestrator, '_acquire_task_footage', lambda *a, **kw: wait('media')),
         ):
-            pending = asyncio.create_task(orchestrator.run_pipeline(task))
+            pending = asyncio.create_task(getattr(orchestrator, entry)(task))
             try:
                 await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), timeout=1)
                 pending.cancel()
@@ -198,5 +202,106 @@ def test_pipeline_cancellation_cleans_up_both_branches(pipeline):
                 await asyncio.gather(pending, return_exceptions=True)
         assert cleaned == {'audio', 'media'}
         after.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('failed_branch', ['audio', 'footage'])
+def test_regenerate_failure_cancels_sibling_without_discarding_artifacts(pipeline, tmp_path, failed_branch):
+    async def run():
+        task, _, after = pipeline
+        entered = asyncio.Event()
+        cleaned = asyncio.Event()
+        artifact = tmp_path / 'verified-part'
+
+        async def waiting(*args, **kwargs):
+            artifact.write_bytes(b'preserved')
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        async def failing(*args, **kwargs):
+            await entered.wait()
+            raise TtsIntegrityError('audio rejected') if failed_branch == 'audio' else RuntimeError('footage rejected')
+
+        with (
+            patch.object(orchestrator, 'generate_tts', failing if failed_branch == 'audio' else waiting),
+            patch.object(orchestrator, '_acquire_task_footage', failing if failed_branch == 'footage' else waiting),
+        ):
+            with pytest.raises(RuntimeError, match=failed_branch + ' rejected'):
+                await asyncio.wait_for(orchestrator.run_regenerate(task), timeout=1)
+        assert cleaned.is_set()
+        assert artifact.read_bytes() == b'preserved'
+        after.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('thumbnail_fails', [False, True])
+def test_regenerate_overlaps_audio_with_serial_browser_work(pipeline, thumbnail_fails):
+    async def run():
+        task, _, after = pipeline
+        task.config.thumbnail_enabled = True
+        audio_entered = asyncio.Event()
+        media_finished = asyncio.Event()
+        events = []
+
+        async def thumbnail(*args, **kwargs):
+            assert kwargs['allow_legacy_regeneration'] is True
+            await audio_entered.wait()
+            events.append('thumbnail')
+            if thumbnail_fails:
+                raise RuntimeError('cover unavailable')
+
+        async def media(*args, **kwargs):
+            assert events == ['thumbnail']
+            events.append('footage')
+            media_finished.set()
+
+        async def audio(*args, **kwargs):
+            audio_entered.set()
+            await media_finished.wait()
+            return 'audio.wav'
+
+        with (
+            patch.object(orchestrator, '_generate_task_thumbnail', thumbnail),
+            patch.object(orchestrator, '_acquire_task_footage', media),
+            patch.object(orchestrator, 'generate_tts', audio),
+        ):
+            await asyncio.wait_for(orchestrator.run_regenerate(task), timeout=1)
+        assert events == ['thumbnail', 'footage']
+        after.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('model,auto_render', [('chatterbox-multilingual', False), ('pocket-tts', True)])
+def test_regenerate_preserves_manual_review_and_local_model_order(pipeline, model, auto_render):
+    async def run():
+        task, _, after = pipeline
+        task.config.tts_model = model
+        task.config.auto_render = auto_render
+        task.config.thumbnail_enabled = True
+        events = []
+
+        async def thumbnail(*args, **kwargs):
+            await asyncio.sleep(0)
+            events.append('thumbnail')
+
+        async def audio(*args, **kwargs):
+            assert events == ['thumbnail']
+            events.append('audio')
+            return 'audio.wav'
+
+        with (
+            patch.object(orchestrator, '_generate_task_thumbnail', thumbnail),
+            patch.object(orchestrator, '_ensure_task_footage', AsyncMock()) as media,
+            patch.object(orchestrator, 'generate_tts', audio),
+        ):
+            await orchestrator.run_regenerate(task)
+        media.assert_not_awaited()
+        after.assert_awaited_once()
 
     asyncio.run(run())
