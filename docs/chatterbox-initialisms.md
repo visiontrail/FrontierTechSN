@@ -66,7 +66,7 @@ The transformation applies only to Chatterbox's English synthesis request:
   remain excluded. This recognition gate is evidence of the decoded pronunciation,
   not a universal guarantee against recognition errors.
 - The separate trailing-speech gate rejects a single extra phrase of at least
-  three words after an exact complete source utterance. Its version participates
+  one word after an exact complete source utterance. Its version participates
   in the outer cache contract. Existing hash-bound ASR observations are rechecked
   without changing submitted job identities; good audio is reused and rejected
   speech advances through the same bounded seed attempts.

@@ -909,7 +909,8 @@ def test_pronunciation_guard_detects_a_repeated_initialism_away_from_its_source(
     ("From materials science.", True),
     ("From materials science. GPM POSPIR to and SES and.", False),
     ("From materials science. Thank you everyone.", False),
-    ("From materials science. Thank you.", True),
+    ("From materials science. Thank you.", False),
+    ("From materials science. If", False),
     ("From material science.", True),
     ("From materials GPM POSPIR to science.", True),
 ])
@@ -931,8 +932,9 @@ async def test_tail_gate_upgrade_reuses_completed_good_audio_without_resynthesis
         guard.pop("trailing_speech")
     else:
         guard["trailing_speech"] = {
-            "null": None, "stale": {"version": 0, "passed": True},
-            "failed": {"version": 1, "passed": False}, "missing_passed": {"version": 1},
+            "null": None, "stale": {"version": 1, "passed": True},
+            "failed": {"version": chatterbox.TRAILING_SPEECH_VERIFIER_VERSION, "passed": False},
+            "missing_passed": {"version": chatterbox.TRAILING_SPEECH_VERIFIER_VERSION},
         }[defect]
     path.write_text(json.dumps(metadata))
     await generate()
@@ -942,18 +944,19 @@ async def test_tail_gate_upgrade_reuses_completed_good_audio_without_resynthesis
 
 
 @pytest.mark.asyncio
-async def test_tail_gate_rejects_legacy_extra_speech_and_preserves_bounded_retry(setup_client, monkeypatch):
+@pytest.mark.parametrize("extra", ["GPM POSPIR to and SES and.", "If"])
+async def test_tail_gate_rejects_legacy_extra_speech_and_preserves_bounded_retry(setup_client, monkeypatch, extra):
     server, script, directory, verifier, generate = setup_client
     script.write_text("From materials science.")
     await generate()
     path = directory / "tts_input_part_001_generated.json"
     metadata = json.loads(path.read_text())
     bad = tts._orpheus_transcript_report(script.read_text(), [{"text": word} for word in
-        "From materials science. GPM POSPIR to and SES and.".split()])
+        f"From materials science. {extra}".split()])
     metadata["integrity"].update(bad)
     guard = metadata["integrity"]["pronunciation"]
     guard.pop("trailing_speech")
-    guard["transcript"] = "From materials science. GPM POSPIR to and SES and."
+    guard["transcript"] = f"From materials science. {extra}"
     path.write_text(json.dumps(metadata))
     verifier.side_effect = [{**advisory_report(), **bad}, advisory_report()]
     monkeypatch.setattr(av_sync, "ensure_word_transcript", AsyncMock(side_effect=[

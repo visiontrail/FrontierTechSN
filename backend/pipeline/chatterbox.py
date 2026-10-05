@@ -25,7 +25,7 @@ from backend.pipeline import tts, tts_pronunciation as pronunciation
 
 MODEL_ID = "chatterbox-multilingual"
 VERIFIER_VERSION = 3
-TRAILING_SPEECH_VERIFIER_VERSION = 1
+TRAILING_SPEECH_VERIFIER_VERSION = 2
 SYNTHESIS_LETTER_SEPARATOR_RE = re.compile(r"(?<=[A-Za-z])[-.]+(?=[A-Za-z])")
 MAX_INTEGRITY_ATTEMPTS = 3
 RETRYABLE_SERVICE_ERRORS = frozenset({
@@ -247,7 +247,7 @@ def _trailing_speech_report(text: str, words: list[dict]) -> dict:
     """Reject a clearly observed extra phrase after an exact complete source.
 
     Ordinary spelling/recognition differences retain their advisory policy.
-    A single insertion of at least three words, with every source word matched
+    A final insertion of any word, with every source word matched
     and the exact opening retained but closing displaced, is extra speech.
     """
     expected = tts._lexical_tokens(text)
@@ -255,7 +255,7 @@ def _trailing_speech_report(text: str, words: list[dict]) -> dict:
     opcodes = SequenceMatcher(a=expected, b=observed, autojunk=False).get_opcodes()
     exact_prefix = len(opcodes) == 2 and opcodes[0] == ("equal", 0, len(expected), 0, len(expected))
     extra = observed[len(expected):] if exact_prefix and opcodes[-1][0] == "insert" else []
-    rejected = len(extra) >= 3
+    rejected = bool(extra)
     return {"version": TRAILING_SPEECH_VERIFIER_VERSION,
             "required": bool(words), "passed": not rejected,
             "extra_words": extra if rejected else [],
