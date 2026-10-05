@@ -1086,8 +1086,10 @@ def test_pronunciation_guard_preserves_missing_wrong_and_repeated_attached_lette
 
 @pytest.mark.parametrize("observed,passed", [
     ("AI R&D reports.", True), ("AI R and D reports.", True),
+    ("AIR &D reports.", True), ("AIR&D reports.", True),
     ("AI RAN reports.", False), ("AI R and reports.", False),
     ("AI R and D D reports.", False), ("AI R and D reports R.", False),
+    ("AI AIR &D reports.", False), ("AIR & reports.", False),
 ])
 def test_pronunciation_guard_checks_both_symbol_initialism_letters(observed, passed):
     report = chatterbox._pronunciation_report(

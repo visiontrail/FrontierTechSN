@@ -303,9 +303,10 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     def normalize(value: str) -> str:
         return value.replace(".", "").replace("’", "'").casefold()
 
-    expected, targets, embedded, compound_suffixes = [], set(), {}, {}
+    expected, targets, embedded, compound_suffixes, symbol_conjunctions = [], set(), {}, {}, set()
     for token in source:
         if token.start() - 1 in ampersands:
+            symbol_conjunctions.add(len(expected))
             expected.append("and")
         local = [candidate for candidate in found if
                  candidate["start"] < token.end() and candidate["end"] > token.start()]
@@ -377,6 +378,16 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         a=expected, b=observed, autojunk=False,
     ).get_opcodes():
         if tag != "replace":
+            continue
+        # "AI R&D" may be decoded as "AIR &D". Repartition only an
+        # aligned block of initialisms and the source ampersand conjunction;
+        # all observed letters must match, with none omitted or repeated.
+        indices = range(start, end)
+        if (any(index in symbol_conjunctions for index in indices)
+                and all(index in targets or index in symbol_conjunctions for index in indices)
+                and "".join(observed[left:right]) == "".join(
+                    expected[index] for index in indices if index not in symbol_conjunctions)):
+            replacements[left] = (right, expected[start:end])
             continue
         cursor, aligned = left, []
         for index in range(start, end):
