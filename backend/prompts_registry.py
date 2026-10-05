@@ -41,15 +41,6 @@ class PromptSpec:
 # (plus its .txt file) is all it takes to expose it in the admin console.
 PROMPT_REGISTRY: list[PromptSpec] = [
     PromptSpec(
-        key="three_d",
-        file="three_d.txt",
-        label="Three-dimensional scene planning",
-        stage="Compose",
-        description="Plans bounded Three.js / React Three Fiber geometry and camera motion "
-                    "for the local Remotion renderer, using the configured project model. "
-                    "Generated scenes illustrate narration and are never source footage.",
-    ),
-    PromptSpec(
         key="social_copy",
         file="social_copy.txt",
         label="Social upload copy",

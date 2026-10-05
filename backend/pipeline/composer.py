@@ -1,24 +1,22 @@
 """Compose the narration into a rendered video.
 
-The stage combines model-planned shots with deterministic media rendering:
+The stage runs in five steps:
 
 1. **Storyboard** — cut the script into timed scenes against the audio.
 2. **Direction** — an art director model decides what each scene shows.
-3. **3D production** — the configured project model plans bounded Three.js / R3F
-   scenes; the local Remotion renderer produces verified silent MP4 shots.
-4. **Authoring** — Claude Agent SDK crews write the HyperFrames scene files,
+3. **Authoring** — Claude Agent SDK crews write the HyperFrames scene files,
    starting from deterministic drafts and falling back to them scene-by-scene.
-5. **Assembly** — a generated spine mounts the scenes on the audio timeline.
-6. **Render** — the HyperFrames CLI captures the composition to MP4.
+4. **Assembly** — a generated spine mounts the scenes on the audio timeline.
+5. **Render** — the HyperFrames CLI captures the composition to MP4.
 
-The spine is generated and authored HTML is gated against the HyperFrames
-runtime contract. The enabled 3D stage must produce real rendered geometry;
-its failures never fall back to a two-dimensional scene.
+Steps 2 and 3 are the only places a model is involved, and neither can produce a
+blank video: the spine is generated, every authored scene is gated against the
+HyperFrames runtime contract, and lint failures revert the offending scene to
+its deterministic draft before the render starts.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -43,11 +41,9 @@ from backend.pipeline import (
     news_images,
     news_webpages,
     outros,
-    production_plan,
     scene_kit,
     storyboard as sb,
     subtitles,
-    three_d,
     visual_plan,
 )
 from backend.pipeline.process_logging import run_capture_logged, stream_subprocess
@@ -230,8 +226,7 @@ def _visual_plan_planner_input(board: dict) -> dict:
                 "keywords": keywords,
             }
         )
-    return {"thesis": thesis, "scenes": semantic_scenes,
-            "director_brief": board.get("director_brief", {})}
+    return {"thesis": thesis, "scenes": semantic_scenes}
 
 
 def _canonical_sha256(value: object) -> str:
@@ -370,57 +365,6 @@ def _load_cached_scene_plans(output_dir: Path, board: dict) -> list[dict] | None
     return recovered
 
 
-def _resuming_failed_three_d(output_dir: Path, board: dict, plans: list[dict], render) -> bool:
-    """Keep a completed asset inventory while repairing a downstream 3D failure.
-
-    This only enables the collage cache's existing fingerprint-bound failure
-    reuse. Shot plans and 3D specs still pass their current input/schema checks
-    later; missing collages remain recorded as unavailable, never as delivered.
-    """
-    if not config.THREE_D_ENABLED:
-        return False
-    try:
-        report = _strict_json_loads((output_dir / "three_d_render_report.json").read_bytes())
-        shots = _strict_json_loads((output_dir / "media_shots.json").read_bytes())
-        direction = _strict_json_loads((output_dir / "three_d_plan.json").read_bytes())
-        if (
-            report.get("contract") != three_d.CONTRACT
-            or report.get("enabled") is not True
-            or report.get("status") not in {"failed", "interrupted"}
-            or shots.get("contract_version") != media_shots.CONTRACT_VERSION
-            or shots.get("passed") is not True
-            or direction.get("contract") != three_d.CONTRACT
-            or not direction.get("shots")
-        ):
-            return False
-        scenes = [scene for scene in board["scenes"]
-                  if scene.get("program_segment_kind") not in {"opening", "closing"}]
-        saved = shots["scenes"]
-        if not scenes or [scene["id"] for scene in saved] != [scene["id"] for scene in scenes]:
-            return False
-        by_id = {plan["id"]: plan for plan in plans}
-        restored = []
-        for scene, checkpoint in zip(scenes, saved):
-            if (checkpoint.get("passed") is not True or checkpoint.get("coverage") != 1
-                    or media_shots.ticks(checkpoint["duration"]) != media_shots.ticks(scene["duration"])
-                    or not checkpoint.get("shots")):
-                return False
-            restored.append({**by_id[scene["id"]], "media_shots": checkpoint["shots"]})
-        contexts, _ = three_d.select_shots(restored, board)
-        if not contexts or report.get("required_shots") != len(contexts):
-            return False
-        context_by_id = {context["id"]: context for context in contexts}
-        receipts = direction["shots"]
-        if len({receipt["id"] for receipt in receipts}) != len(receipts):
-            return False
-        for receipt in receipts:
-            three_d.validate_spec(receipt["spec"], context_by_id[receipt["id"]],
-                                 width=render.width, height=render.height, fps=render.fps)
-        return True
-    except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
-        return False
-
-
 def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, list[dict]]:
     """Use feedback only for the retained candidate, once per scene checkpoint."""
     try:
@@ -471,7 +415,6 @@ def _pending_visual_repairs(output_dir: Path, plans: list[dict]) -> tuple[str, l
 
 def _review_rejected_media(
     output_dir: Path, board: dict, source_hash: str, *, report: dict | None = None,
-    include_prior: bool = True,
 ) -> dict:
     """Quarantine only the asset visible in a hash-bound failed media sample.
 
@@ -528,9 +471,7 @@ def _review_rejected_media(
                     path = (output_dir / "compositions" / src).resolve()
                     if not path.is_relative_to(output_dir.resolve()) or not path.is_file() or _sha256_path(path) != digest:
                         continue
-                    prior = rejected.get(
-                        scene_id, plans[scene_id].get("review_rejected_media", []) if include_prior else [],
-                    )
+                    prior = rejected.get(scene_id, plans[scene_id].get("review_rejected_media", []))
                     if any(item.get("src") == src and item.get("sha256") == digest for item in prior):
                         continue
                     rejected[scene_id] = [*prior, {
@@ -671,78 +612,6 @@ def _review_misassigned_webpages(output_dir: Path, board: dict, source_hash: str
         return {}
 
 
-def _scene_render_signature(source: str) -> str:
-    """Ignore annotation-only changes when checking a deferred render repair.
-
-    This proves only that authored render input changed, never that the visual
-    denial was resolved. Preflight and the full rendered-frame gate still run.
-    """
-    source = re.sub(r"<!--.*?-->", "", source, flags=re.S)
-    source = re.sub(r'\sdata-cue-[\w-]+="[^"]*"', "", source)
-    source = re.sub(r"(?m)^\s*//[^\n]*$", "", source)
-    source = re.sub(r">\s+<", "><", source).strip()
-    return hashlib.sha256(source.encode()).hexdigest()
-
-
-def _directed_render_repair_baselines(
-    output_dir: Path, board: dict, source_hash: str, scene_ids: set[str],
-) -> dict:
-    """Defer a copy no-op only for current, reviewed directed shot sequences."""
-    if not scene_ids or (board.get("director_brief") or {}).get("contract") != production_plan.CONTRACT:
-        return {}
-    try:
-        report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
-        if (report.get("rendered_video_sha256") != source_hash
-                or (report.get("production_method") or {}).get("contract") != production_plan.CONTRACT):
-            return {}
-        denied = {row["id"] for row in report.get("multimodal", {}).get("scenes", [])
-                  if row.get("passed") is False and row.get("rubric_consistent") is True}
-        rendered = _strict_json_loads((output_dir / "visual_plan.json").read_bytes())
-        baselines = {}
-        for plan in rendered:
-            scene_id = plan["id"]
-            if scene_id not in scene_ids or scene_id not in denied or not plan.get("media_shots"):
-                continue
-            path = output_dir / "compositions" / f"{scene_id}.html"
-            if not path.resolve().is_relative_to((output_dir / "compositions").resolve()):
-                continue
-            source = path.read_text(encoding="utf-8")
-            media_shots.assert_rendered_shots(plan, source)
-            baselines[scene_id] = {
-                "rendered_video_sha256": source_hash,
-                "scene_render_sha256": _scene_render_signature(source),
-            }
-        return baselines
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        return {}
-
-
-def _assert_render_repairs_changed(output_dir: Path, plans: list[dict], source_hash: str) -> None:
-    """Stop a deferred copy no-op before preflight/export if nothing rendered changed."""
-    if not source_hash:
-        return
-    unchanged = []
-    for plan in plans:
-        baseline = plan.get("review_render_repair") or {}
-        if baseline.get("rendered_video_sha256") != source_hash:
-            continue
-        path = output_dir / "compositions" / f"{plan['id']}.html"
-        try:
-            signature = _scene_render_signature(path.read_text(encoding="utf-8"))
-        except OSError:
-            signature = None
-        original = baseline.get("scene_render_sha256")
-        if (not isinstance(original, str) or re.fullmatch(r"[0-9a-f]{64}", original) is None
-                or not signature or signature == original):
-            unchanged.append(plan["id"])
-    if unchanged:
-        raise RuntimeError(
-            "Visual review repair returned unchanged shot composition for "
-            + ", ".join(unchanged)
-            + "; retaining the rejected candidate and requiring a concrete render repair"
-        )
-
-
 async def _load_or_plan_scene_visuals(
     output_dir: Path,
     board: dict,
@@ -811,21 +680,11 @@ async def _load_or_plan_scene_visuals(
                 and all(by_id[row["id"]].get(key) == value
                        for key, value in row["previous_copy"].items())
             ]
-            render_repairs = _directed_render_repair_baselines(
-                output_dir, board, source_hash, set(unchanged),
-            )
-            unrepairable = [scene_id for scene_id in unchanged if scene_id not in render_repairs]
-            if unrepairable:
+            if unchanged:
                 raise RuntimeError(
                     "Visual review repair returned unchanged visible content for "
-                    + ", ".join(unrepairable)
+                    + ", ".join(unchanged)
                 )
-            for scene_id, baseline in render_repairs.items():
-                # Layout, timing and animation denials may leave factual copy
-                # intact. Let the shot editor/renderer apply that feedback, but
-                # require changed authored output before another full export.
-                by_id[scene_id]["review_render_repair"] = baseline
-                log(f"Visual plan {scene_id}: retaining grounded copy; requiring a changed shot composition before render")
             for repaired_plan in repaired:
                 repaired_plan["review_repair_source_sha256"] = source_hash
                 repaired_plan["review_repair_kind"] = (
@@ -839,35 +698,6 @@ async def _load_or_plan_scene_visuals(
             _write_visual_plan_checkpoint(output_dir, board, plans)
         return plans
 
-    # Creative prompt changes invalidate the plan, not a current pixel review
-    # of exact media bytes. Rebuild exclusions from that review before replacing
-    # the old checkpoint; never import its arbitrary prior exclusion arrays.
-    migration_rejected = {}
-    try:
-        saved_plan = (output_dir / "visual_plan.json").read_bytes()
-        saved_cache = _strict_json_loads((output_dir / VISUAL_PLAN_CACHE_FILENAME).read_bytes())
-        planner_input = _visual_plan_planner_input(board)
-        legacy_input = {key: value for key, value in planner_input.items() if key != "director_brief"}
-        same_narration = saved_cache.get("planner_input_sha256") in {
-            _canonical_sha256(planner_input), _canonical_sha256(legacy_input),
-        }
-        if (same_narration and saved_cache.get("visual_plan_bytes") == len(saved_plan)
-                and saved_cache.get("visual_plan_sha256") == hashlib.sha256(saved_plan).hexdigest()):
-            source_hash, _ = _pending_visual_repairs(output_dir, [])
-            saved_report = _strict_json_loads((output_dir / "av_sync_report.next.json").read_bytes())
-            multimodal = saved_report.get("multimodal", {})
-            if source_hash and multimodal.get("sampling_contract") == multimodal_review.SAMPLING_CONTRACT:
-                # Legacy scene-level denials need their normal attribution
-                # recovery; migration alone must not invent source verdicts.
-                bound_report = {**saved_report, "multimodal": {**multimodal, "scenes": [
-                    row for row in multimodal.get("scenes", [])
-                    if row.get("media_sample_contract") == multimodal_review.MEDIA_SAMPLE_CONTRACT
-                ]}}
-                migration_rejected = _review_rejected_media(
-                    output_dir, board, source_hash, report=bound_report, include_prior=False,
-                )
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        pass
     plans = await visual_plan.plan_scene_visuals(
         board,
         ai_endpoint=ai_endpoint,
@@ -875,10 +705,6 @@ async def _load_or_plan_scene_visuals(
         provider_id=provider_id,
         log=log,
     )
-    for plan in plans:
-        if plan["id"] in migration_rejected:
-            plan["review_rejected_media"] = migration_rejected[plan["id"]]
-            log(f"Visual plan {plan['id']}: retained current candidate-bound media exclusions after creative replan")
     # Direction is the expensive checkpoint. Commit it before any footage,
     # collage, image, or music stage can fail so a retry does not repeat the
     # planner call. Runtime placement fields are added only to the later rewrite.
@@ -1596,35 +1422,11 @@ def _finalize_quality_report(
     # Exact scene bindings cannot overrule a later rendered-frame rejection:
     # a correctly bound scene can still omit a narrated claim from its pixels.
     multimodal_passed = multimodal.get("passed") is True if multimodal_enabled else True
-    production = report.get("production_method")
-    production_passed = not production or (
-        report.get("production_preflight", {}).get("passed") is True
-        and report.get("delivery_timeline", {}).get("passed") is True
-        and report["delivery_timeline"].get("timeline_sha256") == production.get("timeline_sha256")
-    )
-    three_d_report = report.get("three_d") or {}
-    three_d_required = bool(three_d_report.get("enabled") or (production or {}).get("three_d_shot_count"))
-    three_d_passed = not three_d_required or (
-        three_d_report.get("enabled") is True
-        and three_d_report.get("contract") == three_d.CONTRACT
-        and three_d_report.get("passed") is True
-        and int(three_d_report.get("rendered_count") or 0) > 0
-        and (not production or production.get("three_d_shot_count") == three_d_report.get("rendered_count"))
-        and (not multimodal_enabled or (
-            multimodal.get("three_d_sampling_contract") == multimodal_review.THREE_D_SAMPLING_CONTRACT
-            and multimodal.get("reviewed_three_d_shots") == three_d_report.get("rendered_count")
-            and int(multimodal.get("three_d_sample_count") or 0) >= three_d_report.get("rendered_count")
-        ))
-    )
     quality_passed = (
         alignment.get("passed") is True
         and visual_grounding.get("passed") is True
         and multimodal_passed
         and report.get("visual_coverage", {}).get("passed", True) is True
-        and report.get("production_preflight", {}).get("passed", True) is True
-        and report.get("delivery_timeline", {}).get("passed", True) is True
-        and production_passed
-        and three_d_passed
     )
     warnings = _quality_warnings(
         alignment,
@@ -1741,40 +1543,20 @@ def _available_collage_storyboard(board: dict, plans: list[dict], count: int | N
 def _review_retry_fingerprint(directory: Path, request: dict, render: RenderSpec | None = None) -> str:
     """Bind review-only recovery to the unchanged render inputs and settings."""
     paths = {Path(request[key]) for key in ("script_path", "audio_path", "background_music_path") if request.get(key)}
-    for name in ("index.html", "storyboard.json", "visual_plan.json", "production_timeline.json", "footage/manifest.json",
+    for name in ("index.html", "storyboard.json", "visual_plan.json", "footage/manifest.json",
                  "audio/paced_narration.wav", "audio/program_mix.wav"):
         paths.add(directory / name)
-    for name in ("compositions", "assets", "news_images", "three_d"):
+    for name in ("compositions", "assets", "news_images"):
         paths.update(path for path in (directory / name).rglob("*") if path.is_file())
     paths.update((directory / "footage").glob("*-render.mp4"))
     paths.update(Path(__file__).parent / name for name in (
         "scene_kit.py", "assembler.py", "storyboard.py", "intros.py", "outros.py",
         "composer.py", "news_images.py", "news_webpages.py", "collage_broll.py", "visual_plan.py",
-        "production_plan.py", "media_shots.py", "director.py",
-        "video_format.py", "three_d.py",
+        "media_shots.py", "video_format.py",
     ))
     paths.add(config.PROMPTS_DIR / "media_shots.txt")
-    paths.add(config.PROMPTS_DIR / "three_d.txt")
-    for name in ("three_d_plan.json", "three_d_render_report.json"):
-        paths.add(directory / name)
-    for name in ("src", "scripts"):
-        paths.update(path for path in (config.REMOTION_DIR / name).rglob("*") if path.is_file())
-    paths.update(config.REMOTION_DIR / name for name in ("package.json", "package-lock.json"))
-    # Preview fixes patch the installed CLI without changing composition files.
-    # Bind both the executable we actually launch and its local patch inputs so
-    # review-only recovery cannot retain previews made with the old renderer.
-    hyperframes_command = assembler._hyperframes_bin()
-    if len(hyperframes_command) == 1:
-        paths.add(Path(hyperframes_command[0]))
-    paths.update(config.HYPERFRAME_DIR / name for name in (
-        "package.json", "package-lock.json", "node_modules/hyperframes/dist/cli.js",
-        "scripts/media-response.mjs",
-    ))
-    paths.update((config.HYPERFRAME_DIR / "scripts").glob("patch-*.mjs"))
     evidence = {
         "request": request,
-        "three_d_enabled": config.THREE_D_ENABLED,
-        "hyperframes_command": hyperframes_command,
         "render": (render or resolve_render_spec(
             resolve_frame_spec(request.get("video_orientation"))
         )).to_dict(),
@@ -1798,8 +1580,6 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
         candidate = directory / "video.next.mp4"
         if (
             not config.AV_SYNC_GEMINI_REVIEW_ENABLED
-            # An npx fallback has no locally verified executable identity.
-            or len(assembler._hyperframes_bin()) != 1
             or not (unavailable or interrupted)
             or checkpoint.get("input_sha256") != _review_retry_fingerprint(directory, request, render)
             or not candidate.is_file()
@@ -1814,7 +1594,7 @@ async def _resume_unavailable_visual_review(directory: Path, request: dict, fram
         ):
             return None
         board = json.loads((directory / "storyboard.json").read_text())
-        if await asyncio.to_thread(_rendered_video_failures, candidate, frame=frame, expected_duration=float(board["total_duration"]), render=render):
+        if _rendered_video_failures(candidate, frame=frame, expected_duration=float(board["total_duration"]), render=render):
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -1850,136 +1630,21 @@ def _previous_rejection_used_fallback(output_dir: Path) -> bool:
         return False
 
 
-def _director_scene_plans(
-    plans: list[dict], *, quality_retry: bool, reused_bookends: set[str] | None = None,
-) -> list[dict]:
+def _director_scene_plans(plans: list[dict], *, quality_retry: bool) -> list[dict]:
     # Preserve unrelated bookends on retry, but route rejected bookends to the
     # overlay editor: staging their locked media cannot apply layout feedback.
     # Source rolls retain their measured geometry and complete attribution.
     return [
         plan for plan in plans
-        if plan.get("id") not in (reused_bookends or set())
-        and not plan.get("outro_credits") and ((
+        if not plan.get("outro_credits") and ((
             plan.get("archetype") in {"intro", "outro"}
             and (not quality_retry or bool(plan.get("visual_review_feedback")))
         ) or (
-            not plan.get("media_shots")
-            and not plan.get("footage_src")
+            not plan.get("footage_src")
             and not plan.get("news_image")
             and not plan.get("news_webpage")
         ))
     ]
-
-
-def _bookend_input_fingerprints(
-    board: dict, plans: list[dict], kit_plans: list[scene_kit.ScenePlan], render: RenderSpec,
-) -> dict[str, str]:
-    scenes = {scene["id"]: scene for scene in board.get("scenes", [])}
-    kits = {plan.id: plan for plan in kit_plans}
-    return {
-        plan["id"]: _canonical_sha256({
-            "version": 1, "plan": plan, "scene": scenes.get(plan["id"]),
-            "draft": scene_kit.render_scene(kits[plan["id"]]),
-            "director_prompt": director.SYSTEM_PROMPT,
-            "production_contract": production_plan.CONTRACT, "render": render.to_dict(),
-            "variables": board.get("intro_variables"),
-        })
-        for plan in plans
-        if plan.get("archetype") in {"intro", "outro"}
-        and not plan.get("outro_credits") and plan.get("id") in kits
-    }
-
-
-def _bookend_asset_hashes(output_dir: Path, source: str) -> dict[str, str]:
-    """Hash each file actually loaded by a bookend, including its GSAP runtime."""
-    assets = {}
-    sources = re.findall(r'(?:src|poster|href)\s*=\s*[\"\']([^\"\']+)[\"\']', source)
-    sources += re.findall(r'url\(\s*[\"\']?([^\"\'\s)]+)', source)
-    for src in sources:
-        # Media paths follow the project root; the vendor script uses the
-        # composition-relative path required by the HyperFrames contract.
-        root = output_dir / "compositions" if src.startswith("../") else output_dir
-        assets[src] = _sha256_path(root / src)
-    return assets
-
-
-def _cache_reviewed_bookends(
-    output_dir: Path, fingerprints: dict[str, str], plans: list[dict], frame: FrameSpec,
-    report: dict, video_sha256: str, rendered_sources: dict[str, dict],
-) -> None:
-    """Retain source only after this candidate's complete pixel review approved it."""
-    review = report.get("multimodal") or {}
-    approved = {
-        row.get("id") for row in review.get("scenes") or []
-        if row.get("passed") is True and row.get("rubric_consistent") is True
-        and row.get("verdict") == "match"
-        and row.get("id") not in (review.get("failed_scene_ids") or [])
-    }
-    entries = {}
-    if (
-        report.get("production_preflight", {}).get("passed") is True
-        and report.get("delivery_timeline", {}).get("passed") is True
-        and report.get("delivery_timeline", {}).get("video_sha256") == video_sha256
-        and review.get("sampling_contract") == multimodal_review.SAMPLING_CONTRACT
-    ):
-        for plan in plans:
-            scene_id = plan["id"]
-            if scene_id not in fingerprints or scene_id not in approved:
-                continue
-            try:
-                source = (output_dir / "compositions" / f"{scene_id}.html").read_text(encoding="utf-8")
-                assets = _bookend_asset_hashes(output_dir, source)
-                if (
-                    rendered_sources.get(scene_id) != {"source": source, "assets": assets}
-                    or director.validate_scene_html(source, scene_id, frame, plan=plan)
-                ):
-                    continue
-                entries[scene_id] = {
-                    "input_sha256": fingerprints[scene_id], "source": source,
-                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-                    "assets": assets,
-                }
-            except (OSError, ValueError):
-                continue
-    try:
-        _atomic_write_bytes(output_dir / "reviewed_bookends.cache.json", json.dumps({
-            "version": 1, "rendered_video_sha256": video_sha256, "scenes": entries,
-        }, ensure_ascii=False, indent=2).encode("utf-8"))
-    except OSError as exc:
-        logger.warning("Could not retain optional reviewed bookend cache: %s", exc)
-
-
-def _restore_reviewed_bookends(
-    output_dir: Path, fingerprints: dict[str, str], plans: list[dict], frame: FrameSpec,
-    quality_retry_source: str,
-) -> set[str]:
-    """Reuse only sources approved in the exact retained retry candidate."""
-    restored = set()
-    if not quality_retry_source:
-        return restored
-    try:
-        cache = _strict_json_loads((output_dir / "reviewed_bookends.cache.json").read_bytes())
-        if cache.get("version") != 1 or cache.get("rendered_video_sha256") != quality_retry_source:
-            return restored
-        for plan in plans:
-            scene_id = plan["id"]
-            entry = cache.get("scenes", {}).get(scene_id) or {}
-            source = entry.get("source")
-            if (
-                scene_id not in fingerprints or not isinstance(source, str)
-                or (plan.get("visual_review_feedback")
-                    and plan.get("review_repair_source_sha256") == quality_retry_source)
-                or entry.get("input_sha256") != fingerprints[scene_id]
-                or entry.get("source_sha256") != hashlib.sha256(source.encode("utf-8")).hexdigest()
-                or entry.get("assets") != _bookend_asset_hashes(output_dir, source)
-                or director.validate_scene_html(source, scene_id, frame, plan=plan)
-            ):
-                continue
-            _atomic_write_bytes(output_dir / "compositions" / f"{scene_id}.html", source.encode("utf-8"))
-            restored.add(scene_id)
-    except (OSError, ValueError, TypeError, AttributeError):
-        pass
-    return restored
 
 
 def _retain_bookend_review_feedback(staged: dict, previous: dict) -> dict:
@@ -2093,8 +1758,6 @@ async def compose_video(
     # Mirror to the task log (pipeline.log + LogPanel) when available, else the
     # module logger (start.sh log). Prefer the callback to avoid double-logging.
     emit = lambda message: log(message) if log else logger.info(message)
-    event_loop = asyncio.get_running_loop()
-    thread_emit = lambda message: event_loop.call_soon_threadsafe(emit, message)
 
     # --- 1. Storyboard -----------------------------------------------------
     effective_tts_model = tts_model or config.TTS_DEFAULT_MODEL
@@ -2256,12 +1919,6 @@ async def compose_video(
     emit(f"Composition {board['total_duration']:.1f}s over {board['scene_count']} scenes")
 
     # --- 2. Direction ------------------------------------------------------
-    board["director_brief"] = production_plan.director_brief(
-        board, theme=video_template, frame=frame, render=render,
-        captions=captions_enabled, music_enabled=bool(background_music_path),
-    )
-    production_plan.write_json(output_dir_path / "director_brief.json", board["director_brief"])
-    emit(f"Production method: {production_plan.CONTRACT}; configured-provider shot direction")
     plans = await _load_or_plan_scene_visuals(
         output_dir_path,
         board,
@@ -2287,10 +1944,6 @@ async def compose_video(
     if collage_broll_enabled or force_collage_opening:
         requested_collages = collage_broll_count if collage_broll_enabled else 1
         collage_board = _available_collage_storyboard(board, plans, requested_collages)
-        resume_three_d = _resuming_failed_three_d(output_dir_path, board, plans, render)
-        if resume_three_d:
-            emit("3D recovery: retaining the completed asset inventory; unchanged unavailable "
-                 "collages remain recorded while saved shot direction is revalidated")
         collage_manifest = await collage_broll.generate_collage_broll(
             collage_board,
             output_dir_path,
@@ -2300,7 +1953,7 @@ async def compose_video(
             provider_id=provider_id,
             ai_endpoint=ai_endpoint,
             ai_model=ai_model,
-            reuse_failed=bool(quality_retry_source) or resume_three_d,
+            reuse_failed=bool(quality_retry_source),
             log=emit,
         )
         collage_attached = collage_broll.attach_collage(
@@ -2446,13 +2099,6 @@ async def compose_video(
         plans, board, output_dir_path, provider_id=provider_id,
         ai_endpoint=ai_endpoint, ai_model=ai_model, log=emit,
     )
-    three_d_report = {"enabled": False, "passed": True, "rendered_count": 0}
-    if config.THREE_D_ENABLED:
-        three_d_report = await three_d.render_story_shots(
-            plans, board, output_dir_path, width=render.width, height=render.height,
-            fps=render.fps, provider_id=provider_id,
-            ai_endpoint=ai_endpoint, ai_model=ai_model, log=emit,
-        )
     _require_public_footage_placement(plans, manifest, output_dir_path, rendered_shots=True)
     scene_plans = list(plans)
     visual_grounding = visual_plan.visual_grounding_report(scene_plans, board)
@@ -2483,7 +2129,6 @@ async def compose_video(
         "background_music": {"enabled": bool(background_music_path), "passed": None},
         "news_images": news_image_quality,
         "visual_coverage": shot_report,
-        "three_d": three_d_report,
     }
     quality_report_path = output_dir_path / "av_sync_report.next.json"
     quality_report_path.unlink(missing_ok=True)
@@ -2576,15 +2221,6 @@ async def compose_video(
     )
     plans = scene_plans
     sb.write_storyboard(output_dir_path, board)
-    production_timeline = production_plan.build_timeline(board, scene_plans, fps=render.fps)
-    production_plan.write_json(output_dir_path / "production_timeline.json", production_timeline)
-    quality_report["production_method"] = {
-        "contract": production_plan.CONTRACT,
-        "brief": "director_brief.json", "timeline": "production_timeline.json",
-        "timeline_sha256": production_timeline["input_sha256"],
-        "shot_count": len(production_timeline["shots"]),
-        "three_d_shot_count": production_timeline.get("three_d_shot_count", 0),
-    }
     emit(
         f"Intro: {intro_plan['intro_label']} bound to the "
         f"{intro_plan['duration']:.2f}s spoken opening; "
@@ -2607,13 +2243,6 @@ async def compose_video(
     character_src = assembler.stage_character(output_dir_path) if include_character else None
     assembler.write_scene_files(output_dir_path, kit_plans)
     emit(f"Wrote {len(kit_plans)} deterministic scene draft(s)")
-    bookend_fingerprints = _bookend_input_fingerprints(board, scene_plans, kit_plans, render)
-    reused_bookends = _restore_reviewed_bookends(
-        output_dir_path, bookend_fingerprints, scene_plans, frame, quality_retry_source,
-    )
-    if reused_bookends:
-        emit("Director: reused pixel-reviewed bookend sources with unchanged inputs/assets: "
-             + ", ".join(sorted(reused_bookends)))
 
     # The crews talk to the same provider as the digest stage, so they need its
     # resolved credentials — not just the task's overrides.
@@ -2633,7 +2262,6 @@ async def compose_video(
         quality_retry=bool(quality_retry_source) or any(
             plan.get("visual_review_feedback") for plan in scene_plans
         ),
-        reused_bookends=reused_bookends,
     )
     if quality_retry_source:
         emit("Quality retry: preserving bookend media and directing overlays with frame feedback")
@@ -2671,28 +2299,24 @@ async def compose_video(
                 log=emit,
                 frame=frame,
             )
+            (output_dir_path / "director_report.json").write_text(
+                json.dumps(
+                    {
+                        "authored": outcome.authored,
+                        "rejected": outcome.rejected,
+                        "failures": outcome.failures,
+                        "agents_run": outcome.agents_run,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
         except Exception as exc:  # noqa: BLE001 - the deterministic scenes still stand
             emit(f"Director unavailable ({exc}); rendering the deterministic scenes")
             outcome = director.DirectorOutcome()
     else:
-        if reused_bookends and not director_plans:
-            emit("Director: no new authoring required after verified bookend reuse")
-        else:
-            emit("Director agents disabled; rendering the deterministic scenes")
+        emit("Director agents disabled; rendering the deterministic scenes")
         outcome = director.DirectorOutcome()
-
-    try:
-        production_plan.write_json(output_dir_path / "director_report.json", {
-            "authored": outcome.authored, "rejected": outcome.rejected,
-            "failures": outcome.failures, "agents_run": outcome.agents_run,
-            "reused_bookends": sorted(reused_bookends),
-        })
-    except OSError as exc:
-        emit(f"Could not write optional director report: {exc}")
-
-    # Reused sources still take the same lint/layout repair and fallback paths
-    # as newly authored scenes, followed by fresh preview and final pixel gates.
-    outcome.authored.extend(sorted(reused_bookends))
 
     # --- 4. Assembly -------------------------------------------------------
     _assert_locked_visual_assets(output_dir_path, scene_plans)
@@ -2729,15 +2353,12 @@ async def compose_video(
         if not clean:
             raise RuntimeError(f"Composition failed HyperFrames lint:\n{lint_output[-1200:]}")
 
-    # Give authored overlays one layout repair/revert pass. The mandatory
-    # representative-frame gate below then blocks unresolved layout failures.
-    layout_checked = False
+    # Layout check. Overlapping text and content spilling out of a card do not
+    # stop a render — they just make it look broken — so this loop is advisory:
+    # give the agents HyperFrames' own findings, and revert anything still
+    # failing afterwards rather than blocking the video.
     if config.INSPECT_ENABLED:
-        layout_ok, findings = await asyncio.to_thread(assembler.inspect_project,
-            output_dir_path, thread_emit, timestamps=production_plan.preview_times(production_timeline),
-            report_path=output_dir_path / "production_preflight.json",
-        )
-        layout_checked = True
+        layout_ok, findings = assembler.inspect_project(output_dir_path, emit)
         blamed = director.scenes_named_in_findings(findings, outcome.authored, mounts)
         if not layout_ok and blamed:
             bookend_ids = {
@@ -2748,7 +2369,6 @@ async def compose_video(
             blamed_bookends = [scene_id for scene_id in blamed if scene_id in bookend_ids]
             if blamed_bookends:
                 director.revert_scenes(output_dir_path, blamed_bookends, kit_plans)
-                layout_checked = False
                 emit(
                     "Layout: reverted the branded bookend overlay to its verified editable draft "
                     "instead of letting a generic caption-safe repair rewrite it"
@@ -2772,18 +2392,12 @@ async def compose_video(
             clean, lint_output = assembler.lint_project(output_dir_path, emit)
             if not clean:
                 director.revert_scenes(output_dir_path, blamed, kit_plans)
-                layout_checked = False
                 emit("Repair broke lint; reverted those scenes to the deterministic draft")
             else:
-                layout_ok, findings = await asyncio.to_thread(assembler.inspect_project,
-                    output_dir_path, thread_emit, timestamps=production_plan.preview_times(production_timeline),
-                    report_path=output_dir_path / "production_preflight.json",
-                )
-                layout_checked = True
+                layout_ok, findings = assembler.inspect_project(output_dir_path, emit)
                 still_bad = director.scenes_named_in_findings(findings, blamed, mounts)
                 if still_bad:
                     director.revert_scenes(output_dir_path, still_bad, kit_plans)
-                    layout_checked = False
                     emit(
                         f"Layout still failing for {len(still_bad)} scene(s); "
                         "reverted them to the deterministic draft"
@@ -2792,51 +2406,11 @@ async def compose_video(
     # A repair or future agent implementation must never drop the selected
     # Gemini plate or exact ByteFront logo after the initial authoring gate.
     _assert_locked_visual_assets(output_dir_path, scene_plans)
-    _assert_render_repairs_changed(output_dir_path, scene_plans, quality_retry_source)
-
-    # Inspect the actual settled/action states before paying for a full export.
-    # This is mandatory for the directed production contract even when the old
-    # optional layout-polish pass is disabled. Final pixel/A/V review still runs.
-    preview_times = production_plan.preview_times(production_timeline)
-    if not layout_checked:
-        layout_ok, findings = await asyncio.to_thread(assembler.inspect_project,
-            output_dir_path, thread_emit, timestamps=preview_times,
-            report_path=output_dir_path / "production_preflight.json",
-        )
-    quality_report["production_preflight"] = {
-        "passed": layout_ok, "report": "production_preflight.json", "sample_count": len(preview_times),
-    }
-    if not layout_ok:
-        production_plan.write_json(quality_report_path, quality_report)
-        raise RuntimeError("Production preflight failed before full render: " + "; ".join(findings)[:1800])
-    pixels_ok, pixel_findings = await asyncio.to_thread(assembler.snapshot_project,
-        output_dir_path, thread_emit, timestamps=preview_times,
-        report_path=output_dir_path / "production_preview.json",
-    )
-    quality_report["production_preflight"].update({
-        "passed": pixels_ok, "pixel_report": "production_preview.json",
-        "visual_acceptance": "final rendered-frame review required",
-    })
-    production_plan.write_json(quality_report_path, quality_report)
-    if not pixels_ok:
-        raise RuntimeError("Production preview failed before full render: " + "; ".join(pixel_findings)[:1800])
-
-    # Bind reuse to the source/assets that entered this render, not files edited
-    # while the export or its asynchronous pixel review was running.
-    bookend_render_sources = {}
-    for scene_id in bookend_fingerprints:
-        try:
-            source = (output_dir_path / "compositions" / f"{scene_id}.html").read_text(encoding="utf-8")
-            bookend_render_sources[scene_id] = {
-                "source": source, "assets": _bookend_asset_hashes(output_dir_path, source),
-            }
-        except (OSError, ValueError):
-            pass
 
     # --- 5. Render ---------------------------------------------------------
     staged_video_path = output_dir_path / "video.next.mp4"
     staged_video_path.unlink(missing_ok=True)
-    total_frames = production_timeline["duration_frames"]
+    total_frames = max(1, round(float(board["total_duration"]) * render.fps))
     render_timeout = _render_timeout(float(board["total_duration"]), render)
     stall_timeout = _render_stall_timeout(float(board["total_duration"]), render)
     emit(
@@ -2865,7 +2439,7 @@ async def compose_video(
     if not staged_video_path.exists():
         raise RuntimeError("Video render produced no output file")
 
-    probe_failures = await asyncio.to_thread(_rendered_video_failures,
+    probe_failures = _rendered_video_failures(
         staged_video_path,
         frame=frame,
         expected_duration=float(board["total_duration"]),
@@ -2876,13 +2450,6 @@ async def compose_video(
         raise RuntimeError(
             "Staged video failed validation: " + "; ".join(probe_failures)
         )
-    delivery_timeline = await asyncio.to_thread(production_plan.verify_delivery,
-        staged_video_path, production_timeline, output_dir_path / "delivery_timeline.next.json",
-    )
-    quality_report["delivery_timeline"] = delivery_timeline
-    production_plan.write_json(quality_report_path, quality_report)
-    if not delivery_timeline["passed"]:
-        raise RuntimeError("Staged video timing failed validation: " + "; ".join(delivery_timeline["failures"]))
     emit(
         f"Video rendered: {staged_video_path} "
         f"({staged_video_path.stat().st_size / 1024 / 1024:.1f} MB)"
@@ -2920,10 +2487,6 @@ async def compose_video(
     )
     quality_report_path.write_text(
         json.dumps(quality_report, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    _cache_reviewed_bookends(
-        output_dir_path, bookend_fingerprints, scene_plans, frame,
-        quality_report, rendered_video_sha256, bookend_render_sources,
     )
     if gemini_review.get("passed"):
         emit(

@@ -114,11 +114,6 @@ trap 'exit 130' INT TERM
 
 echo "=== Starting FrontierTechSN ==="
 node "$PROJECT_ROOT/hyperframe/scripts/patch-media-server.mjs"
-# Keep the service reachable for diagnostics when a renderer is missing.
-# The enabled 3D pipeline itself fails closed before producing any candidate.
-if ! (cd "$PROJECT_ROOT/remotion" && node -e 'for (const p of ["three", "@react-three/fiber", "@remotion/three", "@remotion/renderer", "@remotion/bundler"]) require.resolve(p)'); then
-    echo "3D renderer dependencies missing: run npm ci --prefix remotion. Enabled 3D generation will be blocked."
-fi
 echo "Run log: $LOG_FILE"
 echo "Latest log: $LATEST_LOG"
 if [ -n "${YTDLP_JS_RUNTIME:-}" ]; then

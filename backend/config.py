@@ -651,11 +651,6 @@ def voice_preview_supported(voice: str, tts_model: str | None = None) -> bool:
 
 HYPERFRAME_DIR = resolve_project_path(os.getenv("HYPERFRAME_DIR", "hyperframe"))
 
-# Procedural Three.js / React Three Fiber scenes rendered by pinned Remotion.
-# Scene planning uses the existing project model provider, never a Codex session.
-THREE_D_ENABLED = _env_bool("THREE_D_ENABLED", "1")
-REMOTION_DIR = PROJECT_ROOT / "remotion"
-
 # HyperFrames render tuning. The CLI is pinned and installed locally under
 # HYPERFRAME_DIR/node_modules so a render never triggers an on-demand `npx`
 # install (the old unpinned `npx hyperframes` re-installed latest every run —

@@ -70,16 +70,6 @@ scene's exact `id`. No prose, no markdown fences, no explanation.
   in the headline/body and use `items` for the remaining dates, figures,
   mechanism, and qualifications. Items may accompany a topic or media scene.
   A source-page screenshot does not replace readable editorial copy.
-- For an explicit process or mechanism, give the later shot editor concise
-  `items` naming its meaningful stages or actors (normally 3-12 words each).
-  For an explicit comparison, supply two concise parallel claims. These become
-  readable diagram nodes or comparison panels, so do not bury the complete
-  mechanism in one paragraph. Preserve reported/expected/proposed qualifiers
-  and attribution in the headline, body or relevant item. Use only relationships
-  the narration actually supports. Do not invent a causal chain from a list.
-- Use the supplied director_brief to establish the subject, expose the supported
-  change, then explain the consequence and limits. Select copy that makes this
-  progression visible; repeating one title across every shot is not direction.
 - Preserve every factual number at the narration's exact precision. Never round
   or shorten a source value such as `2.751 billion` to `2.75B`.
 - Every string must be in the same language as the narration.

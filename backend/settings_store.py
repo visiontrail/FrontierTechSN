@@ -640,13 +640,6 @@ SPECS: tuple[SettingSpec, ...] = (
                     "CLI decide.",
         allow_blank=False,
     ),
-    SettingSpec(
-        "THREE_D_ENABLED", "render", "Three-dimensional explainers", "bool",
-        description="Use the configured project model to plan real Three.js / "
-                    "React Three Fiber scenes, rendered by local Remotion. "
-                    "Enabled scenes must render and pass review; failures do not "
-                    "silently fall back to two-dimensional graphics.",
-    ),
     # ── Direction ────────────────────────────────────────────────────────
     SettingSpec(
         "DIRECTOR_ENABLED", "director", "Agent direction", "bool",

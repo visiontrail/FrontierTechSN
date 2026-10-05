@@ -191,96 +191,6 @@ def test_contact_sheet_budget_never_splits_or_truncates_a_scene_sequence():
     assert [frame for batch in batches for frame in batch] == frames
 
 
-def test_editorial_motion_samples_preserve_midpoints_and_source_attribution(tmp_path):
-    scene = _scene("scene-09", 100, "A cause and its measured effect.")
-    cues = {"reveal_start": 0.2, "reveal_end": 1, "emphasis": 2.3, "settle": 3.4}
-    shots = [
-        {"start": 0, "duration": 4, "kind": "editorial", "motion_cues": cues},
-        {"start": 4, "duration": 4, "kind": "public_footage", "src": "source.mp4",
-         "sha256": "source-hash", "motion_cues": cues},
-    ]
-    (tmp_path / "visual_plan.json").write_text(json.dumps([{"id": "scene-09", "media_shots": shots}]))
-    with patch.object(multimodal_review, "_extract_frame", AsyncMock()) as extract:
-        frames = asyncio.run(multimodal_review.extract_scene_frames(
-            tmp_path / "video.next.mp4", {"scenes": [scene]}, tmp_path / "review",
-        ))
-    samples = frames[0]["samples"]
-    assert extract.await_count == 4
-    assert [(sample["id"], sample["timestamp"]) for sample in samples] == [
-        ("scene-09-shot-01-action", 100.6), ("scene-09-shot-01", 102),
-        ("scene-09-shot-01-settled", 103.4), ("scene-09-shot-02", 106),
-    ]
-    assert samples[-1]["shot_sha256"] == multimodal_review.shot_fingerprint(shots[-1])
-    assert samples[-1]["media"] == {"kind": "public_footage", "src": "source.mp4", "sha256": "source-hash"}
-    prompt = multimodal_review._review_prompt("Causes", frames, 70, 82)
-    assert "partial reveal" in prompt and "Contradictions at any phase still count" in prompt
-
-
-def test_review_binds_selected_shot_direction_to_its_actual_sample_window(tmp_path):
-    scene = _scene("scene-06", 100, "Blue light steers the swimmer through a maze.")
-    direction = {
-        "purpose": "Explain how the swimmer is steered", "subject": "The swimmer",
-        "action": "Trace the swimmer through an illustrated maze with an external blue beam",
-        "continuity": "Keep the same swimmer identifiable", "evidence_kind": "editorial",
-        "motion": "reveal",
-    }
-    shot = {
-        "start": 0, "duration": 8, "kind": "editorial", "layout": "focus",
-        "copy": ["Blue light steers the swimmer"], "direction": direction,
-        "relationship_excerpt": scene["text"],
-        "motion_cues": {"reveal_start": .2, "reveal_end": 1, "emphasis": 2, "settle": 3},
-    }
-    (tmp_path / "visual_plan.json").write_text(json.dumps([
-        {"id": "scene-06", "media_shots": [shot]},
-        {"id": "unrelated", "media_shots": [{"direction": {"action": "Unrelated intent"}}]},
-    ]))
-    with patch.object(multimodal_review, "_extract_frame", AsyncMock()):
-        frames = asyncio.run(multimodal_review.extract_scene_frames(
-            tmp_path / "video.next.mp4", {"scenes": [scene]}, tmp_path / "review",
-        ))
-    prompt = multimodal_review._review_prompt("Robotics", frames, 70, 82)
-    segment = json.loads(prompt.split("Segments: ", 1)[1].split("\n\n", 1)[0])[0]
-    assert segment["planned_shots"] == [{
-        "id": "scene-06-shot-01", "start_seconds": 100, "end_seconds": 108,
-        "direction": direction, "layout": "focus", "selected_copy": shot["copy"],
-        "relationship_excerpt": scene["text"],
-    }]
-    assert {sample["shot_id"] for sample in segment["rendered_samples"]} == {"scene-06-shot-01"}
-    assert {sample["phase"] for sample in segment["rendered_samples"]} == {"action", "settled", "midpoint"}
-    assert "Unrelated intent" not in prompt
-    assert "Accurate text alone cannot substitute" in prompt
-    assert "can be satisfied by a legible text card" in prompt
-    assert "and the supplied direction is fulfilled" in prompt
-    assert "return partial or mismatch" in prompt
-    assert "match requires score 70-100 and issues=[]" in prompt
-    assert "release average is 82/100" in prompt
-
-
-def test_unrealized_direction_is_an_editorial_failure_without_rejecting_source_media(tmp_path):
-    scenes = [_scene("scene-06", 0, "Blue light steers the swimmer through a maze.")]
-    frames = _frames(tmp_path, scenes)
-    payload = _matching_payload(scenes, 60)
-    payload["reviews"][0].update(
-        verdict="partial", issues=["scene-06-shot-01: promised maze and blue beam are absent"],
-        suggested_visual="Render the planned maze and blue beam around the swimmer",
-        source_media_mismatches=[],
-    )
-    result = multimodal_review.normalise_batch(payload, frames, 70)
-    assert result["contract_valid"] is True
-    assert result["reviews"][0]["passed"] is False
-    assert result["reviews"][0]["rejected_media_samples"] == []
-
-
-@pytest.mark.parametrize("cues", [
-    {}, [], {"reveal_start": 0, "reveal_end": 2, "emphasis": 1, "settle": 3},
-    {"reveal_start": 0, "reveal_end": 1, "emphasis": 2, "settle": 4},
-    {"reveal_start": 0, "reveal_end": 1, "emphasis": 2, "settle": float("nan")},
-])
-def test_review_rejects_malformed_editorial_motion_evidence(cues):
-    with pytest.raises(ValueError, match="motion cues"):
-        multimodal_review._editorial_sample_times({"kind": "editorial", "duration": 4, "motion_cues": cues})
-
-
 @pytest.mark.parametrize("verdict", ["match", "partial", "omitted"])
 def test_sequence_review_still_requires_complete_contract_valid_scene_results(tmp_path, verdict):
     scenes = [_scene("scene-09", 0, "Motor specs. Price and range. Charging and jobs.")]
@@ -944,7 +854,7 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("ChatGPT upload unavailable", json.loads(fallback.read_text())["stderr"])
             self.assertTrue(any("exhausted" in message and "disabled button" in message for message in messages))
 
-    async def test_completed_review_is_reused_only_for_identical_pixels_narration_and_direction(self):
+    async def test_completed_review_is_reused_only_for_identical_pixels_and_narration(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             scenes = [_scene("scene-01", 0, "Gold reaches a record price.")]
@@ -966,41 +876,6 @@ class ReviewVideoTests(unittest.IsolatedAsyncioTestCase):
                 scenes[0]["text"] = "A different narrated claim"
                 await multimodal_review._review_batch(**args)
                 self.assertEqual(call.await_count, 3)
-                # Even identical pixels must be reviewed again when their
-                # interpretation changes from a midpoint to a motion phase.
-                frames[0]["samples"] = [{
-                    "id": "scene-01-shot-01", "timestamp": frames[0]["timestamp"],
-                    "phase": "action", "media": {"kind": "editorial"},
-                }]
-                await multimodal_review._review_batch(**args)
-                self.assertEqual(call.await_count, 4)
-                frames[0]["samples"][0]["phase"] = "settled"
-                await multimodal_review._review_batch(**args)
-                self.assertEqual(call.await_count, 5)
-                planned = {
-                    "id": "scene-01-shot-01", "start_seconds": 0, "end_seconds": 8,
-                    "direction": {"action": "Reveal the price claim and hold for reading"},
-                    "layout": "focus", "selected_copy": [scenes[0]["text"]],
-                    "relationship_excerpt": "",
-                }
-                frames[0]["planned_shots"] = [planned]
-                await multimodal_review._review_batch(**args)
-                cached = await multimodal_review._review_batch(**args)
-                self.assertEqual(call.await_count, 6)
-                self.assertEqual(cached[1], 0)
-                # Identical pixels and narration are not evidence that a newly
-                # promised graphic, emphasis or continuity was implemented.
-                planned["direction"]["action"] = "Emphasize the price with a large numeral"
-                await multimodal_review._review_batch(**args)
-                self.assertEqual(call.await_count, 7)
-                for count, (key, value) in enumerate([
-                    ("layout", "comparison"), ("selected_copy", ["Changed selected copy"]),
-                    ("relationship_excerpt", "Compared with the previous price"),
-                    ("end_seconds", 9),
-                ], start=8):
-                    planned[key] = value
-                    await multimodal_review._review_batch(**args)
-                    self.assertEqual(call.await_count, count)
 
     async def test_low_scene_score_rejects_video_even_when_average_is_high(self):
         with TemporaryDirectory() as temporary:

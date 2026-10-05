@@ -16,7 +16,7 @@ Each daily run follows these steps and stops if a required check fails:
 6. Synthesize speech with WAV integrity checks and advisory ASR transcript comparisons.
 7. Generate four Paper-Collage B-roll clips by default. Stop if the number of placed clips differs from the requested count.
 8. Generate instrumental music with Gemini Create Music, using deterministic local music as a fallback. Duck it to `-25 dB` under narration, side-chain it against speech, and match the program mix to the required duration.
-9. Plan real Three.js / React Three Fiber shots with the configured project model, render them locally with Remotion, then assemble with HyperFrames and run final A/V validation.
+9. Render with HyperFrames and run final A/V validation.
 10. When publishing is enabled, use the accounts currently signed into the browser. Discover and record account identities and exact URLs at runtime rather than hard-coding them.
 
 ### Reviews and browser requests
@@ -52,32 +52,6 @@ After acquisition, an AI shot editor uses the available media to choose each sto
 The pipeline measures video durations with ffprobe and plays each video once. Any remaining narration gets a complete information layout, avoiding empty gradients and long frozen frames. An incomplete or invalid schedule gets validation feedback and one repair attempt. If the provider remains unavailable, the pipeline records a recovery plan that keeps verified assets and fills the remaining time with editorial graphics based on the story's evidence. Automatic collage selection can replan after a generation failure; an explicitly requested clip count must still be delivered.
 
 `media_shots.json` records the AI's reasoning, exact shot intervals, source hashes, measured durations, recovery diagnostics, and coverage checks. A story's checkpoints become invalid when its narration, assets, or editor prompt changes. Before capture, the renderer checks the generated media elements against the schedule. The `av_sync_report.json` report includes `visual_coverage` along with audio and semantic quality checks.
-
-### Real three-dimensional explainers
-
-`THREE_D_ENABLED=1` (also **Admin → System → Render → Three-dimensional explainers**)
-adds a Three.js + React Three Fiber + Remotion stage to the actual episode pipeline.
-It selects one eligible editorial interval of 4–60 seconds per story, preserves
-the narration, copy, timing and acquired footage, and asks the existing configured
-model provider for a bounded scene specification. No Codex session generates
-episode content. Typed mesh actors, perspective cameras, lighting and spatial
-motion are rendered locally; labels and captions remain in the final compositor.
-
-Install the committed dependencies with `npm ci --prefix remotion` (included in
-`scripts/setup.sh`). The first render prepares Remotion's headless browser; an
-installed compatible binary may be selected with `REMOTION_BROWSER_EXECUTABLE`.
-See [renderer details](remotion/README.md). Animation uses Remotion's current
-frame as required by [ThreeCanvas](https://www.remotion.dev/docs/three-canvas),
-so seeking does not depend on elapsed playback time.
-
-`three_d_plan.json` records model-planned geometry and source excerpts;
-`three_d_render_report.json` records the code/dependency fingerprint, clip hashes,
-exact dimensions, cadence, frame count and representative rendered PNGs. Clips
-are content-addressed and hash-checked before reuse. Failed rendering or zero
-eligible clips blocks the enabled stage. Generated geometry is explicitly marked
-as illustrative, not measured simulation or captured evidence. The final
-HyperFrames output is sampled during 3D action and after settlement and still
-must pass the complete scene, audio/video and final-artifact gates.
 
 Public-footage retries resume the saved shot plan if the script, orientation, provider, and requested count still match. Hybrid and YouTube clips must pass checksum and narration-binding checks before reuse. A changed binding requires a fresh review. When a search runs out of candidates, the pipeline uses the rejection evidence to choose new search directions.
 

@@ -82,29 +82,6 @@ _MODEL_TEXT_FIELDS = (
     "motif",
 )
 
-_COPY_LIMITS = {
-    "headline": 110, "body": 260, "kicker": 30, "quote": 260,
-    "attribution": 90, "stat": 48, "stat_label": 120,
-}
-
-
-class CopyLimitError(ValueError):
-    """Copy must be rewritten by the configured model, never cut mid-claim."""
-
-
-def _validate_copy_limits(plan: dict) -> None:
-    fields = [(key, plan.get(key, ""), limit) for key, limit in _COPY_LIMITS.items()]
-    fields.extend((f"items[{i}]", value, 90) for i, value in enumerate(plan["items"]))
-    for side in ("left", "right"):
-        fields.extend((f"{side}.{key}", plan[side][key], limit)
-                      for key, limit in (("label", 48), ("text", 150)))
-    errors = [f"{key}: {len(value)} characters exceeds maximum {limit}"
-              for key, value, limit in fields if len(value) > limit]
-    if len(plan["items"]) > scene_kit.MAX_NARRATIVE_ITEMS:
-        errors.append(f"items: {len(plan['items'])} entries exceeds maximum {scene_kit.MAX_NARRATIVE_ITEMS}")
-    if errors:
-        raise CopyLimitError("; ".join(errors))
-
 
 def _emit(log: LogCallback | None, message: str) -> None:
     if log:
@@ -326,10 +303,30 @@ def _normalise(raw: dict, scene: dict, index: int) -> dict:
     motif = str(plan.get("motif") or "").lower()
     plan["motif"] = motif if motif in scene_kit.MOTIFS else _MOTIF_CYCLE[index % len(_MOTIF_CYCLE)]
 
-    # Reject all overflowing fields together before planning shots or rendering.
-    # Slicing made incomplete claims become the apparent review source of truth.
-    _validate_copy_limits(plan)
+    # Trim copy to what actually fits a 1920x1080 frame. The model is told the
+    # limits, but enforcing them here is what keeps `hyperframes inspect` clean.
+    plan["headline"] = str(plan["headline"])[:110]
+    plan["body"] = str(plan.get("body") or "")[:260]
+    plan["kicker"] = str(plan["kicker"])[:30]
+    plan["items"] = [item[:90] for item in plan["items"]][
+        : scene_kit.MAX_NARRATIVE_ITEMS
+    ]
+    for key, limit in (
+        ("quote", 260),
+        ("attribution", 90),
+        ("stat", 48),
+        ("stat_label", 120),
+        ("left_label", 48),
+        ("left_text", 150),
+        ("right_label", 48),
+        ("right_text", 150),
+    ):
+        plan[key] = plan.get(key, "")[:limit]
     for side in ("left", "right"):
+        plan[side] = {
+            "label": plan[side]["label"][:48],
+            "text": plan[side]["text"][:150],
+        }
         plan[f"{side}_label"] = plan[side]["label"]
         plan[f"{side}_text"] = plan[side]["text"]
     plan["grounding_source"] = "model"
@@ -445,8 +442,6 @@ def _batch_prompt_payload(storyboard: dict, scenes: list[dict]) -> str:
         ],
     }
     feedback = storyboard.get("visual_review_feedback")
-    if storyboard.get("director_brief"):
-        payload["director_brief"] = storyboard["director_brief"]
     if feedback:
         scene_ids = {scene["id"] for scene in scenes}
         payload["visual_review_feedback"] = [
@@ -496,23 +491,14 @@ async def plan_scene_visuals(
     repair_ids = {row["id"] for row in storyboard.get("visual_review_feedback", [])}
     for n, batch in enumerate(batches, start=1):
         pending = batch
-        copy_rejections: dict[str, dict] = {}
         for attempt in range(2):
             label = f"Visual plan {n}/{len(batches)}"
             if attempt:
                 label += " validation retry"
             try:
-                payload = json.loads(_batch_prompt_payload(storyboard, pending))
-                if copy_rejections:
-                    payload["copy_validation_feedback"] = copy_rejections
-                    payload["copy_repair_instruction"] = (
-                        "Rewrite each rejected field into complete, concise wording within its unchanged limit. "
-                        "Preserve factual precision, attribution and qualifications from the narration. "
-                        "Do not truncate words, claims or list entries. Return only the requested scenes."
-                    )
                 reply = await _chat(
                     system_prompt,
-                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    _batch_prompt_payload(storyboard, pending),
                     endpoint,
                     model,
                     api_key,
@@ -534,10 +520,6 @@ async def plan_scene_visuals(
                     continue
                 try:
                     normalised = _normalise(raw, scene, scene["index"])
-                except CopyLimitError as exc:
-                    copy_rejections[scene["id"]] = {"errors": str(exc), "rejected_plan": raw}
-                    _emit(log, f"Visual plan {scene['id']}: copy rejected without truncation ({exc})")
-                    continue
                 except (TypeError, ValueError) as exc:
                     _emit(
                         log,
@@ -548,7 +530,6 @@ async def plan_scene_visuals(
                 grounded, _ = _plan_grounding(normalised, scene)
                 if grounded:
                     by_id[scene["id"]] = normalised
-                    copy_rejections.pop(scene["id"], None)
 
             pending = [scene for scene in pending if scene["id"] not in by_id]
             if pending:
@@ -557,16 +538,11 @@ async def plan_scene_visuals(
                     f"{label}: no usable model direction for "
                     + ", ".join(scene["id"] for scene in pending),
                 )
-            pending = [scene for scene in pending if scene["id"] in repair_ids or scene["id"] in copy_rejections]
+            pending = [scene for scene in pending if scene["id"] in repair_ids]
             if not pending or attempt:
                 break
             _emit(log, f"{label}: retrying only {len(pending)} unresolved repair scene(s) "
                   f"once with max_tokens={VISUAL_PLAN_REPAIR_MAX_TOKENS}")
-
-        if copy_rejections:
-            raise CopyLimitError("Visual copy repair exhausted; retaining original copy: " + "; ".join(
-                f"{scene_id}: {row['errors']}" for scene_id, row in copy_rejections.items()
-            ))
 
     derived = {plan["id"]: plan for plan in fallback_plan(storyboard)}
     plans = [by_id.get(scene["id"]) or derived[scene["id"]] for scene in scenes]

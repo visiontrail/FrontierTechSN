@@ -8,12 +8,9 @@ import json
 import math
 import re
 import subprocess
-import time
-from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
 from html.parser import HTMLParser
 from pathlib import Path
-from uuid import uuid4
 
 from PIL import Image
 
@@ -21,121 +18,14 @@ from backend import config
 from backend.pipeline.image_layout import image_layout
 from backend.pipeline.timing import timed
 
-CONTRACT_VERSION = 3
-DIRECTION_REPAIR_CONTRACT = "renderable-direction-repair-v2"
+CONTRACT_VERSION = 2
 MAX_CONCURRENT_BATCHES = 2
-PLANNING_EVIDENCE_TEXT_LIMIT = 262_144
-_RELATIONSHIP_MARKERS = {
-    "flow": re.compile(
-        r"\b(?:then|before|after|first|next|finally|because|therefore|leads? to|results? in|"
-        r"causes?|produces?|converts?|transforms?)\b|首先|然后|随后|最后|导致|因此|转化|转换", re.I),
-    "comparison": re.compile(
-        r"\b(?:versus|vs\.?|compared (?:with|to)|whereas|while|unlike|rather than|more than|"
-        r"less than|higher than|lower than|from .+ to)\b|相比|对比|而非|高于|低于|从.+到", re.I),
-}
-
-
-def motion_cues(duration: float) -> dict[str, float]:
-    """One shot-local, centisecond schedule shared by motion and review.
-
-    Keep the existing audio-owned centisecond convention; do not round each
-    consumer independently or retime narration to fit a visual beat.
-    """
-    total = ticks(duration)
-    if total < 20:
-        raise ValueError("shot shorter than 0.20 seconds")
-    reveal = max(1, min(10, total // 12))
-    revealed = max(reveal, min(total * 28 // 100, reveal + 55))
-    emphasis = max(revealed, min(total * 42 // 100, revealed + 65))
-    settled = max(emphasis, min(total * 55 // 100, emphasis + 45))
-    return {"reveal_start": reveal / 100, "reveal_end": revealed / 100,
-            "emphasis": emphasis / 100, "settle": settled / 100}
-
-
-def _reading_units(text: str) -> int:
-    # CJK glyphs carry more information than Latin letters; count the unspaced
-    # characters individually so a Chinese paragraph cannot count as one word.
-    return len(re.findall(r"[\u3400-\u9fff]|[A-Za-z0-9]+(?:['’.-][A-Za-z0-9]+)*", text))
-
-
-def _reading_budget(duration: float) -> int:
-    return max(0, int(float(duration) * 3))
-
-
-def _copy_identity(text: str) -> str:
-    return re.sub(r"\W+", " ", text.casefold()).strip()
-
-
-def _default_direction(kind: str, copy: list[str]) -> dict[str, str]:
-    evidence = ("illustration" if kind in {"paper_collage", "three_d"} else
-                "editorial" if kind == "editorial" else "captured_evidence")
-    subject = next((value for value in copy if value), "Narrated subject")[:400]
-    return {"purpose": "Explain the supplied narration with its selected copy",
-            "subject": subject, "action": "Reveal the selected information, then hold for reading",
-            "continuity": subject, "evidence_kind": evidence, "motion": "reveal"}
-
-
-def _repair_feedback(plan: dict, review: dict) -> dict | None:
-    """Constrain the current repair without invalidating unrelated shot caches."""
-    feedback = plan.get("visual_review_feedback", {})
-    source_hash = review.get("rendered_video_sha256")
-    multimodal = review.get("multimodal") or {}
-    if (not isinstance(feedback, dict) or not feedback or not source_hash
-            or not isinstance(multimodal, dict)
-            or plan.get("review_repair_source_sha256") != source_hash
-            or plan.get("id") not in (multimodal.get("failed_scene_ids") or [])):
-        return None
-    return {**feedback, "production_constraints": [
-        "Each supplied copy item is indivisible and must remain verbatim. The renderer "
-        "reveals a whole item, not individual clauses. Never promise to reveal one part "
-        "of a single copy item before another part. A staged explanation requires "
-        "distinct existing copy ids or separate shots; do not split or invent copy.",
-        "Describe only subjects and actions supported by the actual selected asset "
-        "inventory. Narration does not prove that a clip or collage depicts its named "
-        "product, event or mechanism. Do not promise to add objects to immutable media "
-        "or present related illustrative footage as the specific reported event.",
-        "Do not repeat exact copy-id groups across the repair sequence or reuse an "
-        "introductory line as support for an unrelated later claim. Select relevant "
-        "existing copy that advances the explanation; preserve attribution and limits.",
-        "Editorial cards/focus/split/flow/comparison are fixed planar typography "
-        "layouts with whole-item reveal, trace or comparison motion. Direction text "
-        "cannot add 3D thickness, inward-angled slabs, arbitrary camera moves or "
-        "geometry to these layouts. Describe the supported layout and motion. "
-        "Real 3D illustrations remain authored separately by the configured model "
-        "in the three_d stage; do not replace or disable that stage, or claim an "
-        "editorial card itself provides its 3D geometry.",
-    ]}
-
-
-def _direction(item: dict, kind: str, copy: list[str], *, required: bool) -> dict:
-    defaults = _default_direction(kind, copy)
-    supplied = item.get("direction")
-    if supplied is None and not required:
-        return defaults
-    if not isinstance(supplied, dict):
-        raise ValueError("each shot needs a direction object")
-    result = {}
-    for key in ("purpose", "subject", "action", "continuity"):
-        value = supplied.get(key)
-        if not isinstance(value, str) or not value.strip() or len(value) > 400:
-            raise ValueError(f"direction {key} must be concise nonempty text")
-        result[key] = value.strip()
-    if supplied.get("evidence_kind") != defaults["evidence_kind"]:
-        raise ValueError("direction evidence_kind conflicts with the actual asset")
-    result["evidence_kind"] = defaults["evidence_kind"]
-    motion = supplied.get("motion")
-    if motion not in {"reveal", "compare", "trace"}:
-        raise ValueError("unknown direction motion")
-    result["motion"] = motion
-    return result
 
 
 class _Elements(HTMLParser):
     def __init__(self, source: str):
         super().__init__()
         self.elements = {}
-        self.parents = {}
-        self._stack = []
         self.feed(source)
 
     def handle_starttag(self, tag, attrs):
@@ -144,49 +34,22 @@ class _Elements(HTMLParser):
             if attrs["id"] in self.elements:
                 raise ValueError(f"duplicate rendered id: {attrs['id']}")
             self.elements[attrs["id"]] = (tag, attrs)
-            self.parents[attrs["id"]] = self._stack[-1][1] if self._stack else None
-        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
-            self._stack.append((tag, attrs.get("id")))
-
-    def handle_endtag(self, tag):
-        for index in range(len(self._stack) - 1, -1, -1):
-            if self._stack[index][0] == tag:
-                del self._stack[index:]
-                break
 
 
 def assert_rendered_shots(plan: dict, source: str) -> None:
     """Audit actual emitted media intervals, not a source mentioned in a comment."""
     if not plan.get("media_shots"):
         return
-    document = _Elements(source)
-    elements = document.elements
+    elements = _Elements(source).elements
     cursor = 0
     for i, shot in enumerate(plan["media_shots"]):
         if ticks(shot["start"]) != cursor:
             raise ValueError(f"shot gap or overlap in {plan['id']}")
         cursor += ticks(shot["duration"])
         prefix = f"{plan['id']}-shot-{i + 1}"
-        selected = list(dict.fromkeys(shot.get("copy", [])))
-        layout = shot.get("layout", "cards")
-        if len(selected) == 2 and layout in {"cards", "split"}:
-            pair = prefix + "-pair"
-            required = {
-                pair: ({"shot-grid", "shot-pair", layout}, prefix + "-panel"),
-                prefix + "-title-panel": ({"shot-card", "shot-pair-title"}, pair),
-                prefix + "-title": ({"shot-title"}, prefix + "-title-panel"),
-                prefix + "-card-0": ({"shot-card"}, pair),
-            }
-            if elements.get(prefix + "-panel", (None, {}))[1].get("data-shot-layout") != layout:
-                raise ValueError(f"rendered paired layout changed: {prefix}")
-            for element_id, (classes, parent_id) in required.items():
-                tag, attrs = elements.get(element_id, (None, {}))
-                if (tag != "div" or not classes.issubset(attrs.get("class", "").split())
-                        or document.parents.get(element_id) != parent_id):
-                    raise ValueError(f"missing rendered paired panel: {element_id}")
         expected = [(prefix + "-panel", "div")]
         if shot["kind"] != "editorial":
-            expected.append((prefix + "-media", "video" if shot["kind"] in {"public_footage", "paper_collage", "three_d"} else "img"))
+            expected.append((prefix + "-media", "video" if shot["kind"] in {"public_footage", "paper_collage"} else "img"))
         for element_id, tag in expected:
             actual_tag, attrs = elements.get(element_id, (None, {}))
             if actual_tag != tag or "clip" not in attrs.get("class", "").split():
@@ -237,14 +100,7 @@ def editorial_copy(plan: dict, scene: dict) -> list[dict]:
         boundaries.append(match.end())
     boundaries.append(len(narration))
     values += [narration[start:end].strip() for start, end in zip(boundaries, boundaries[1:])]
-    unique = []
-    identities = set()
-    for value in values:
-        text = str(value or "").strip()
-        identity = _copy_identity(text)
-        if text and identity not in identities:
-            unique.append(text)
-            identities.add(identity)
+    unique = list(dict.fromkeys(str(value).strip() for value in values if value and str(value).strip()))
     return [{"id": f"copy-{i + 1}", "text": text} for i, text in enumerate(unique)]
 
 
@@ -283,48 +139,6 @@ def _asset(task_dir: Path, raw: str, kind: str, **metadata) -> dict:
     return result
 
 
-def _reviewed_footage_visuals(task_dir: Path) -> dict:
-    """Keep source observations bound to the exact reviewed clip bytes."""
-    try:
-        manifest = json.loads((task_dir / "footage" / "manifest.json").read_text())
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("clips"), list):
-        return {}
-    observations = {}
-    root = task_dir.resolve()
-    for clip in manifest["clips"]:
-        if not isinstance(clip, dict):
-            continue
-        analysis = clip.get("analysis")
-        raw = clip.get("local_path")
-        digest = clip.get("sha256")
-        if (not isinstance(analysis, dict) or analysis.get("status") != "analyzed"
-                or analysis.get("image_received") is not True
-                or analysis.get("suitable") is not True
-                or not isinstance(raw, str) or not raw
-                or not isinstance(digest, str) or not digest):
-            continue
-        visible = analysis.get("visible_content")
-        path = (task_dir / raw).resolve()
-        if (not isinstance(visible, str) or not visible.strip()
-                or not path.is_relative_to(root)):
-            continue
-        observations[("../" + path.relative_to(root).as_posix(), digest)] = {
-            "source": "footage/manifest.json:analysis",
-            "clip_sha256": digest,
-            "visible_content": visible,
-            "usage_constraint": (
-                "Direct this immutable clip from its reviewed visible content, not its "
-                "title, search query or narration. Public footage identifies an external "
-                "source and can contain drawings or animation; captured_evidence does "
-                "not establish live-action photography. Do not promise objects, motion "
-                "or documentary imagery absent from the reviewed clip."
-            ),
-        }
-    return observations
-
-
 def inventory(plan: dict, task_dir: Path) -> list[dict]:
     assets = []
     public = plan.get("footage_sequence") or []
@@ -332,14 +146,9 @@ def inventory(plan: dict, task_dir: Path) -> list[dict]:
         plan.get("collage_src") and plan["footage_src"] != plan["collage_src"]
     )):
         public = [{"src": plan["footage_src"], "credit": plan.get("footage_credit", "")}]
-    observations = _reviewed_footage_visuals(task_dir) if public else {}
     for item in public:
-        asset = _asset(task_dir, item["src"], "public_footage",
-                       credit=item.get("credit", ""), script_excerpt=item.get("script_excerpt", ""))
-        observation = observations.get((asset["src"], asset["sha256"]))
-        if observation is not None:
-            asset["visual_evidence"] = observation
-        assets.append(asset)
+        assets.append(_asset(task_dir, item["src"], "public_footage",
+                             credit=item.get("credit", ""), script_excerpt=item.get("script_excerpt", "")))
     collage_src = plan.get("collage_src") or (plan.get("footage_src") if plan.get("collage_broll") else "")
     if collage_src:
         assets.append(_asset(task_dir, collage_src, "paper_collage", credit="Illustration · Paper-Collage"))
@@ -373,8 +182,7 @@ def review_rejected_sources(plan: dict, task_dir: Path) -> dict:
     return rejected
 
 
-def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict], *,
-             require_direction: bool = False) -> list[dict]:
+def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict]) -> list[dict]:
     allowed = {asset["id"]: asset for asset in assets}
     words = {item["id"]: item["text"] for item in copy}
     seen = set()
@@ -408,42 +216,17 @@ def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict], *,
         ids = item.get("copy_ids") or []
         if not isinstance(ids, list) or not ids or len(ids) > 5 or any(key not in words for key in ids):
             raise ValueError("each shot needs 1-5 supplied copy ids")
-        selected_copy = [words[key] for key in ids]
-        comparable_copy = [_copy_identity(text) for text in selected_copy]
-        if len(comparable_copy) != len(set(comparable_copy)):
-            raise ValueError("shot repeats the same title or copy")
-        if require_direction and sum(_reading_units(text) for text in selected_copy) > _reading_budget(duration / 100):
-            raise ValueError("shot copy exceeds its readable attention window; reduce copy or extend the shot")
         layout = item.get("layout", "cards")
         transition = item.get("transition", "wipe")
-        if layout not in {"cards", "focus", "split", "flow", "comparison"} or transition not in {"wipe", "iris"}:
+        if layout not in {"cards", "focus", "split"} or transition not in {"wipe", "iris"}:
             raise ValueError("unknown layout or transition")
-        relation = item.get("relationship_excerpt", "")
-        if not isinstance(relation, str):
-            raise ValueError("relationship_excerpt must be text")
-        if layout in _RELATIONSHIP_MARKERS:
-            if aid != "editorial":
-                raise ValueError("relationship layouts require an editorial shot; preserve captured media framing")
-            if len(ids) < 3 or (layout == "comparison" and len(ids) != 3):
-                raise ValueError("relationship layout needs a title and two distinct supplied claims")
-            if not relation or relation not in scene["text"] or not _RELATIONSHIP_MARKERS[layout].search(relation):
-                raise ValueError("relationship layout lacks an explicit grounded relationship_excerpt")
-        elif relation and relation not in scene["text"]:
-            raise ValueError("relationship_excerpt is not from its narration")
-        direction = _direction(item, asset.get("kind", "editorial"), selected_copy,
-                               required=require_direction)
-        expected_motion = {"flow": "trace", "comparison": "compare"}.get(layout, "reveal")
-        if direction["motion"] != expected_motion:
-            raise ValueError("direction motion must match the grounded layout")
         shots.append({
             **asset, "asset_id": aid, "kind": "hold" if hold else asset.get("kind", "editorial"),
             "start": cursor / 100, "duration": duration / 100,
             "source_start": source_start / 100, "treatment": "hold" if hold else "play",
             "source_duration": asset.get("duration"),
             "script_excerpt": excerpt, "copy_ids": ids,
-            "copy": selected_copy, "layout": layout, "transition": transition,
-            "direction": direction, "relationship_excerpt": relation,
-            "motion_cues": motion_cues(duration / 100),
+            "copy": [words[key] for key in ids], "layout": layout, "transition": transition,
         })
         cursor += duration
     if cursor != ticks(scene["duration"]):
@@ -477,149 +260,55 @@ def fallback(scene: dict, assets: list[dict], copy: list[dict]) -> dict:
     remaining = ticks(scene["duration"])
     shots = []
     excerpt = scene["text"]
-    copy_cursor = 0
-
-    def readable_copy(duration, *, kind):
-        nonlocal copy_cursor
-        selected = []
-        budget = _reading_budget(duration / 100)
-        for offset in range(len(copy)):
-            candidate = copy[(copy_cursor + offset) % len(copy)]
-            units = _reading_units(candidate["text"])
-            if units > budget:
-                continue
-            selected.append(candidate)
-            budget -= units
-            if len(selected) == (3 if kind == "editorial" else 1):
-                break
-        if not selected:
-            raise ValueError("No supplied copy fits the shot's reading window")
-        copy_cursor = (copy.index(selected[-1]) + 1) % len(copy)
-        return {"copy_ids": [entry["id"] for entry in selected],
-                "direction": _default_direction(kind, [entry["text"] for entry in selected])}
-
     for i, asset in enumerate(assets):
         reserve = 20 * (len(assets) - i - 1)
         duration = min(ticks(asset.get("duration", 6)), remaining - reserve)
         if duration < 20:
             raise ValueError("too many required assets for the scene duration")
         shots.append({"asset_id": asset["id"], "duration": duration / 100,
-                      **readable_copy(duration, kind=asset["kind"]), "script_excerpt": excerpt})
+                      "copy_ids": [copy[0]["id"]], "script_excerpt": excerpt})
         remaining -= duration
-    # Leave a readable tail, not a one-frame information flash. When a video
-    # almost fills the scene, shorten its trim rather than accelerating copy.
-    shortest = min((_reading_units(entry["text"]) for entry in copy), default=0)
-    minimum_reading_ticks = max(20, math.ceil(shortest / 3 * 100))
-    tail_minimum = max(120, minimum_reading_ticks)
-    if 0 < remaining < tail_minimum and shots:
-        trim = min(tail_minimum - remaining, ticks(shots[-1]["duration"]) - minimum_reading_ticks)
-        trim = max(0, trim)
+    # Avoid a one-frame information flash after centisecond/source rounding.
+    if 0 < remaining < 120 and shots:
+        trim = min(120 - remaining, ticks(shots[-1]["duration"]) - 20)
         shots[-1]["duration"] = (ticks(shots[-1]["duration"]) - trim) / 100
-        if trim:
-            shots[-1].update(readable_copy(ticks(shots[-1]["duration"]), kind=assets[-1]["kind"]))
         remaining += trim
+    n = 0
     while remaining:
-        parts = max(1, min(math.ceil(remaining / 1200), remaining // minimum_reading_ticks))
+        parts = max(1, math.ceil(remaining / 1200))
         duration = remaining // parts
-        selected = readable_copy(duration, kind="editorial")
+        selected = copy[n * 3:(n + 1) * 3] or copy[:3]
         shots.append({"asset_id": "editorial", "duration": duration / 100,
-                      **selected, "script_excerpt": excerpt,
-                      "layout": "cards" if len(selected["copy_ids"]) > 1 else "focus"})
+                      "copy_ids": [entry["id"] for entry in selected],
+                      "script_excerpt": excerpt, "layout": "cards" if len(selected) > 1 else "focus"})
         remaining -= duration
+        n += 1
     return {"id": scene["id"], "rationale": "Provider/plan recovery using verified assets and grounded editorial graphics", "shots": shots}
-
-
-def _response_scenes(answer: str, expected_ids: list[str]) -> tuple[dict, dict, list[str]]:
-    """Read a complete scene response, never a nested array from broken JSON."""
-    text = answer.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3].rstrip()
-    try:
-        entries = json.loads(text)
-    except (ValueError, RecursionError) as exc:
-        detail = f"Return the complete JSON scene array; response is not valid JSON: {exc}"
-        return {}, dict.fromkeys(expected_ids, detail), [detail]
-    if isinstance(entries, dict):
-        entries = entries.get("scenes")
-    if not isinstance(entries, list):
-        detail = "Response must be a JSON array of scene objects, each with id and shots"
-        return {}, dict.fromkeys(expected_ids, detail), [detail]
-    indexed, errors, issues = {}, {}, []
-    seen = set()
-    for index, entry in enumerate(entries):
-        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
-            issues.append(f"entry {index} must be a scene object with a string id")
-            continue
-        scene_id = entry["id"]
-        if scene_id not in expected_ids:
-            issues.append(f"unexpected scene id {scene_id[:80]}")
-            continue
-        if scene_id in seen:
-            errors[scene_id] = f"Duplicate scene id {scene_id}; return this scene exactly once"
-            indexed.pop(scene_id, None)
-            continue
-        seen.add(scene_id)
-        shots = entry.get("shots")
-        if not isinstance(shots, list) or not shots or any(not isinstance(shot, dict) for shot in shots):
-            errors[scene_id] = f"Scene {scene_id} shots must be a nonempty array of shot objects"
-            continue
-        indexed[scene_id] = entry
-    for scene_id in expected_ids:
-        if scene_id not in indexed and scene_id not in errors:
-            detail = f"Missing scene id {scene_id}; return an object with this exact id and a shots array"
-            if issues:
-                detail += "; " + "; ".join(issues)[:400]
-            errors[scene_id] = detail
-    return indexed, errors, issues
-
-
-def _planning_text(text: str) -> dict:
-    return {"text": text[:PLANNING_EVIDENCE_TEXT_LIMIT], "chars": len(text),
-            "truncated": len(text) > PLANNING_EVIDENCE_TEXT_LIMIT,
-            "sha256": hashlib.sha256(text.encode()).hexdigest()}
-
-
-def _write_planning_evidence(path: Path, evidence: dict, emit) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False))
-    except OSError as exc:
-        emit(f"Shot editor diagnostic evidence unavailable: {exc}")
 
 
 @timed("media_shots")
 async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
                            provider_id=None, ai_endpoint=None, ai_model=None, log=None) -> dict:
     from backend.pipeline.digester import _chat, _resolve_provider
+    from backend.pipeline.visual_plan import _first_json_array
 
     def emit(message):
         if log:
             log(message)
 
     by_id = {plan["id"]: plan for plan in plans}
-    try:
-        review = json.loads((task_dir / "av_sync_report.next.json").read_text())
-        if not isinstance(review, dict):
-            review = {}
-    except (OSError, ValueError):
-        review = {}
-    repair_feedback = {
-        plan["id"]: feedback for plan in plans
-        if (feedback := _repair_feedback(plan, review)) is not None
-    }
     contexts = []
     for scene in board.get("scenes", []):
         if scene.get("program_segment_kind") in {"opening", "closing"}:
             continue
         plan = by_id[scene["id"]]
         assets = inventory(plan, task_dir)
+        if not assets and not plan.get("review_rejected_media"):
+            continue
         contexts.append({"id": scene["id"], "duration": ticks(scene["duration"]) / 100,
                          "text": scene["text"], "lines": scene.get("lines", []),
                          "assets": assets, "editorial_copy": editorial_copy(plan, scene),
-                         "visual_review_feedback": plan.get("visual_review_feedback", {}),
-                         "director_brief": board.get("director_brief", {})})
+                         "visual_review_feedback": plan.get("visual_review_feedback", {})})
     prompt = (config.PROMPTS_DIR / "media_shots.txt").read_text()
     fingerprint = hashlib.sha256(json.dumps([CONTRACT_VERSION, prompt, contexts], sort_keys=True).encode()).hexdigest()
     checkpoint = task_dir / "media_shots.json"
@@ -637,7 +326,7 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
         ).hexdigest()
 
     def accept(scene, selected, planner):
-        shots = validate(selected, scene, scene["assets"], scene["editorial_copy"], require_direction=True)
+        shots = validate(selected, scene, scene["assets"], scene["editorial_copy"])
         _prepare_holds(shots, task_dir)
         by_id[scene["id"]]["media_shots"] = shots
         results[scene["id"]] = {
@@ -646,11 +335,6 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
             "duration": scene["duration"], "coverage": 1.0, "passed": True,
             "review_rejected_media": by_id[scene["id"]].get("review_rejected_media", []),
         }
-        if scene["id"] in repair_feedback:
-            results[scene["id"]]["direction_repair"] = {
-                "contract": DIRECTION_REPAIR_CONTRACT,
-                "video_sha256": review["rendered_video_sha256"],
-            }
         checkpoint.write_text(json.dumps({"input_sha256": fingerprint, "passed": False,
                                           "scenes": list(results.values())}, indent=2, ensure_ascii=False))
         emit(f"Shot editor {scene['id']}: {planner}, "
@@ -658,11 +342,6 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
 
     for scene in contexts:
         selected = cached.get(scene["id"], {})
-        if scene["id"] in repair_feedback and selected.get("direction_repair") != {
-            "contract": DIRECTION_REPAIR_CONTRACT,
-            "video_sha256": review["rendered_video_sha256"],
-        }:
-            continue
         if selected.get("input_sha256") == scene["input_sha256"]:
             try:
                 accept(scene, selected, selected.get("planner", "ai"))
@@ -673,56 +352,28 @@ async def plan_media_shots(plans: list[dict], board: dict, task_dir: Path, *,
 
     async def plan_batch(batch, batch_index, attempt):
         async with gate:
-            request = json.dumps({"scenes": [
-                {**scene, "visual_review_feedback": repair_feedback[scene["id"]]}
-                if scene["id"] in repair_feedback else scene for scene in batch
-            ], "validation_feedback": {
-                scene["id"]: failures[scene["id"]] for scene in batch
-            }}, ensure_ascii=False)
-            expected_ids = [scene["id"] for scene in batch]
-            evidence_path = task_dir / "media_shot_planning" / f"{uuid4().hex}.json"
-            evidence = {"status": "requested", "attempt": attempt + 1, "batch": batch_index,
-                        "scene_ids": expected_ids, "requested_at": datetime.now(timezone.utc).isoformat(),
-                        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-                        "request": _planning_text(request)}
-            _write_planning_evidence(evidence_path, evidence, emit)
-            started = time.monotonic()
             try:
                 answer = await _chat(
-                    prompt, request,
+                    prompt, json.dumps({"scenes": batch, "validation_feedback":
+                                        {scene["id"]: failures[scene["id"]] for scene in batch}}, ensure_ascii=False),
                     *provider, log, f"Shot editor batch {batch_index} ({attempt + 1}/2)",
-                    # Complete direction can exceed 14k; avoid a truncated
-                    # first response before the provider doubles its budget.
-                    max_tokens=28000, enable_skills=False, disable_thinking=True,
+                    max_tokens=14000, enable_skills=False, disable_thinking=True,
                 )
-                evidence.update(response=_planning_text(answer), status="responded",
-                                response_seconds=round(time.monotonic() - started, 3))
-                _write_planning_evidence(evidence_path, evidence, emit)
-                indexed, response_errors, issues = _response_scenes(answer, expected_ids)
-                evidence["response_issues"] = issues[:20]
-                evidence["response_issue_count"] = len(issues)
+                entries = _first_json_array(answer) or []
+                indexed = {entry["id"]: entry for entry in entries}
             except Exception as exc:
                 indexed = {}
-                response_errors = dict.fromkeys(expected_ids, str(exc))
-                evidence.update(status="response_error", response_seconds=round(time.monotonic() - started, 3))
+                for scene in batch:
+                    failures[scene["id"]].append(str(exc))
             # Validation and checkpoint writes are synchronous on this event
             # loop. Each batch owns disjoint scenes; completed work is retained
             # even while another batch is still awaiting its model response.
             for scene in batch:
                 try:
-                    if scene["id"] in response_errors:
-                        raise ValueError(response_errors[scene["id"]])
-                    accept(scene, indexed[scene["id"]], "ai")
+                    accept(scene, indexed.get(scene["id"], {}), "ai")
                 except (ValueError, TypeError, KeyError, AttributeError, OSError, subprocess.SubprocessError) as exc:
                     failures[scene["id"]].append(str(exc))
                     emit(f"Shot editor {scene['id']}: replanning after {exc}")
-            evidence.update(status="validated", completed_at=datetime.now(timezone.utc).isoformat(),
-                            elapsed_seconds=round(time.monotonic() - started, 3),
-                            passed=all(scene_id in results for scene_id in expected_ids),
-                            accepted_ids=[scene_id for scene_id in expected_ids if scene_id in results],
-                            validation_errors={scene_id: [error[:4000] for error in failures[scene_id][-1:]]
-                                               for scene_id in expected_ids if scene_id not in results})
-            _write_planning_evidence(evidence_path, evidence, emit)
 
     # Batch normal direction; only rejected scenes return for the repair round.
     for attempt in range(2):

@@ -11,7 +11,7 @@ export NVM_DIR="$HOME/.nvm"
 echo "=== FrontierTechSN Setup ==="
 
 # 1. Python venv
-echo "[1/6] Creating Python virtual environment..."
+echo "[1/5] Creating Python virtual environment..."
 if [ ! -d .venv ]; then
     ~/.pyenv/versions/3.11.9/bin/python3.11 -m venv .venv
 fi
@@ -32,14 +32,14 @@ else
 fi
 
 # 2. Frontend
-echo "[2/6] Installing frontend dependencies..."
+echo "[2/5] Installing frontend dependencies..."
 cd frontend
 npm install --silent
 cd "$PROJECT_ROOT"
 echo "  Frontend dependencies installed."
 
 # 3. HyperFrame
-echo "[3/6] Initializing HyperFrame project..."
+echo "[3/5] Initializing HyperFrame project..."
 if [ ! -d hyperframe ]; then
     npx hyperframes init hyperframe --example blank
 fi
@@ -47,17 +47,13 @@ echo "  HyperFrame initialized."
 
 # 4. Project-local OpenCLI. Skills are committed under .claude/skills; this
 # installs only the pinned runtime and never touches global Claude Code state.
-echo "[4/6] Installing project-local OpenCLI runtime..."
+echo "[4/5] Installing project-local OpenCLI runtime..."
 npm install --prefix tools/opencli --silent --no-audit --no-fund
 chmod +x scripts/opencli.sh
 echo "  OpenCLI installed locally. Install/enable its Chrome Browser Bridge extension, then run ./scripts/opencli.sh doctor."
 
-# 5. The local 3D renderer uses a committed lockfile, never on-demand npx.
-echo "[5/6] Installing Three.js / React Three Fiber / Remotion..."
-npm ci --prefix remotion --no-audit --no-fund
-
-# 6. Output directories
-echo "[6/6] Creating output directories..."
+# 5. Output directories
+echo "[5/5] Creating output directories..."
 mkdir -p outputs assets/lottie
 
 echo ""
