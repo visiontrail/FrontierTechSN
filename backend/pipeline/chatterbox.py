@@ -24,7 +24,7 @@ from backend import config
 from backend.pipeline import tts, tts_pronunciation as pronunciation
 
 MODEL_ID = "chatterbox-multilingual"
-VERIFIER_VERSION = 2
+VERIFIER_VERSION = 3
 SYNTHESIS_LETTER_SEPARATOR_RE = re.compile(r"(?<=[A-Za-z])[-.]+(?=[A-Za-z])")
 MAX_INTEGRITY_ATTEMPTS = 3
 RETRYABLE_SERVICE_ERRORS = frozenset({
@@ -305,13 +305,15 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         if tag == "equal":
             continue
         affected = any(index in targets for index in range(start, end))
-        # An extra word touching a target may be a repeated letter/name even
-        # when the intended occurrence itself matched exactly.
-        if tag == "insert":
+        # Extra initialisms can be inserted or replace distant ordinary words,
+        # even when the intended occurrence itself matched exactly.
+        if tag in {"insert", "replace"}:
             inserted = collapsed[left:right]
             repeated = any("".join(inserted[i:j]) in target_forms
                            for i in range(len(inserted)) for j in range(i + 1, len(inserted) + 1))
-            affected = start in targets or start - 1 in targets or repeated
+            affected = affected or repeated or (
+                tag == "insert" and (start in targets or start - 1 in targets)
+            )
         if affected:
             differences.append({"kind": tag, "source": expected[start:end],
                                 "asr": collapsed[left:right], "source_start": start})

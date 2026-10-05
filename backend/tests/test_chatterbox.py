@@ -898,9 +898,10 @@ def test_pronunciation_guard_checks_every_repeated_source_occurrence():
 
 
 @pytest.mark.parametrize("extra", ["AI", "A I"])
-def test_pronunciation_guard_detects_a_repeated_initialism_away_from_its_source(extra):
+@pytest.mark.parametrize("replacement", [False, True])
+def test_pronunciation_guard_detects_a_repeated_initialism_away_from_its_source(extra, replacement):
     source = "OpenAI reports the latest news today."
-    observed = f"OpenAI reports the latest {extra} news today."
+    observed = f"OpenAI reports the latest {extra} {'news ' if not replacement else ''}today."
     assert chatterbox._pronunciation_report(source, [{"text": word} for word in observed.split()])["passed"] is False
 
 
