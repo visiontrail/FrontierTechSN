@@ -26,6 +26,8 @@ from backend.pipeline import tts, tts_pronunciation as pronunciation
 MODEL_ID = "chatterbox-multilingual"
 VERIFIER_VERSION = 3
 TRAILING_SPEECH_VERIFIER_VERSION = 2
+SYMBOL_INITIALISM_POLICY_VERSION = 1
+SYMBOL_INITIALISM_RE = re.compile(r"\b([A-Z])&([A-Z])\b")
 SYNTHESIS_LETTER_SEPARATOR_RE = re.compile(r"(?<=[A-Za-z])[-.]+(?=[A-Za-z])")
 MAX_INTEGRITY_ATTEMPTS = 3
 RETRYABLE_SERVICE_ERRORS = frozenset({
@@ -57,6 +59,7 @@ def cache_contract() -> dict:
         "max_chars": config.CHATTERBOX_TTS_MAX_CHARS,
         "verifier_version": VERIFIER_VERSION,
         "trailing_speech_verifier_version": TRAILING_SPEECH_VERIFIER_VERSION,
+        "symbol_initialism_policy_version": SYMBOL_INITIALISM_POLICY_VERSION,
         "shared_verifier_version": tts.POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
         "synthesis_parameters": dict(SYNTHESIS_PARAMETERS),
         "pronunciation_policy": pronunciation.policy_contract(),
@@ -123,6 +126,21 @@ def _synthesis_word_count(text: str) -> int:
     return len(SYNTHESIS_LETTER_SEPARATOR_RE.sub(" ", text).split())
 
 
+def _symbol_initialisms(text: str) -> list[re.Match]:
+    protected = [(match.start(), match.end()) for match in pronunciation.PROTECTED_TEXT_RE.finditer(text)]
+    return [match for match in SYMBOL_INITIALISM_RE.finditer(text)
+            if not any(start < match.end() and end > match.start() for start, end in protected)]
+
+
+def _render_provider_span(text: str, start: int, end: int, edits: list[dict]) -> str:
+    rendered = pronunciation.render_span(text, start, end, edits)
+    for match in reversed(_symbol_initialisms(rendered)):
+        letters = [{"A": "eigh", "N": "N"}.get(letter, pronunciation.LETTER_NAMES[letter][0])
+                   for letter in match.groups()]
+        rendered = rendered[:match.start()] + " and ".join(letters) + rendered[match.end():]
+    return rendered
+
+
 def _split_text(
     text: str, *, max_words: int, max_chars: int,
     pronunciation_edits: list[dict] | None = None,
@@ -140,7 +158,7 @@ def _split_text(
         while remaining:
             limit = 0
             for word in re.finditer(r"\S+", remaining):
-                candidate = pronunciation.render_span(
+                candidate = _render_provider_span(
                     normalized, line_offset, line_offset + word.end(), pronunciation_edits or [],
                 )
                 if len(candidate) > max_chars or _synthesis_word_count(candidate) > max_words:
@@ -274,7 +292,12 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     Wrong letters and additional repetitions can never become a spelling alias.
     Other words retain the shared advisory policy.
     """
-    found = pronunciation.candidates(text) if edits is None else edits
+    found = list(pronunciation.candidates(text) if edits is None else edits)
+    symbols = _symbol_initialisms(text)
+    for match in symbols:
+        for group in (1, 2):
+            found.append({"source": match[group], "start": match.start(group), "end": match.end(group)})
+    ampersands = {match.start() + 1 for match in symbols}
     source = list(PRONUNCIATION_TOKEN_RE.finditer(text))
 
     def normalize(value: str) -> str:
@@ -282,6 +305,8 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
 
     expected, targets, embedded, compound_suffixes = [], set(), {}, {}
     for token in source:
+        if token.start() - 1 in ampersands:
+            expected.append("and")
         local = [candidate for candidate in found if
                  candidate["start"] < token.end() and candidate["end"] > token.start()]
         cursor, expanded = token.start(), []
@@ -516,7 +541,7 @@ async def _generate_chatterbox(
         for index, text in enumerate(chunks, 1):
             start = normalized.index(text, source_offset)
             source_offset = start + len(text)
-            synthesis_text = pronunciation.render_span(
+            synthesis_text = _render_provider_span(
                 normalized, start, source_offset, pronunciation_plan["edits"],
             )
             chunk_edits = [{**edit, "start": edit["start"] - start, "end": edit["end"] - start}

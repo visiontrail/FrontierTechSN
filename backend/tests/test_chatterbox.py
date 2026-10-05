@@ -242,6 +242,23 @@ def test_single_oversize_token_is_rejected_without_truncation():
         chatterbox._split_text("a" * 251, max_words=30, max_chars=250)
 
 
+def test_symbol_initialisms_expand_only_provider_input_outside_protected_text():
+    source = "R&D and M&A. N&D. See https://example.com/R&D and R&D@example.com."
+    spoken = chatterbox._render_provider_span(source, 0, len(source), [])
+    assert spoken == "ar and dee and em and eigh. N and dee. See https://example.com/R&D and R&D@example.com."
+    assert source.startswith("R&D and M&A.")
+
+
+def test_symbol_initialism_expansion_is_budgeted_without_changing_source():
+    source = "R&D makes tools. M&A follows."
+    chunks = chatterbox._split_text(source, max_words=4, max_chars=250)
+    assert " ".join(chunks) == source
+    assert all(chatterbox._synthesis_word_count(chatterbox._render_provider_span(chunk, 0, len(chunk), [])) <= 4
+               for chunk in chunks)
+    with pytest.raises(ValueError, match="token exceeds"):
+        chatterbox._split_text("R&D", max_words=2, max_chars=250)
+
+
 @pytest.mark.parametrize("max_words,max_chars", [(8, 250), (30, 24), (8, 24)])
 def test_initialism_expansion_is_budgeted_without_changing_or_splitting_source_names(max_words, max_chars):
     source = "CNBC TSMC report AI chip demand.\nCNBC explains the AI market."
@@ -267,6 +284,23 @@ def test_single_initialism_that_exceeds_expanded_budget_is_rejected(source, max_
     _decisions, edits = tts_pronunciation.validate_decisions(source, spelling_decisions(source))
     with pytest.raises(ValueError, match="token exceeds"):
         chatterbox._split_text(source, max_words=max_words, max_chars=max_chars, pronunciation_edits=edits)
+
+
+@pytest.mark.asyncio
+async def test_symbol_policy_change_reuses_other_completed_audio(setup_client, monkeypatch):
+    server, script, directory, _verifier, generate = setup_client
+    source = "R&D reports.\nAI news."
+    script.write_text(source)
+    render = chatterbox._render_provider_span
+    monkeypatch.setattr(chatterbox, "_render_provider_span", tts_pronunciation.render_span)
+    await generate()
+    second = json.loads((directory / "tts_input_part_002_generated.json").read_text())
+    monkeypatch.setattr(chatterbox, "_render_provider_span", render)
+    await generate()
+    assert len(server.jobs) == 3
+    assert list(server.jobs.values())[-1]["request"]["text"] == "ar and dee reports."
+    assert json.loads((directory / "tts_input_part_002_generated.json").read_text())["job_id"] == second["job_id"]
+    assert script.read_text() == source
 
 
 @pytest.mark.asyncio
@@ -1048,6 +1082,20 @@ def test_pronunciation_guard_preserves_missing_wrong_and_repeated_attached_lette
     assert chatterbox._pronunciation_report(
         "By observed US consumer spending.", [{"text": word} for word in observed.split()],
     )["passed"] is False
+
+
+@pytest.mark.parametrize("observed,passed", [
+    ("AI R&D reports.", True), ("AI R and D reports.", True),
+    ("AI RAN reports.", False), ("AI R and reports.", False),
+    ("AI R and D D reports.", False), ("AI R and D reports R.", False),
+])
+def test_pronunciation_guard_checks_both_symbol_initialism_letters(observed, passed):
+    report = chatterbox._pronunciation_report(
+        "AI R&D reports.", [{"text": word} for word in observed.split()],
+        [{"source": "AI", "start": 0, "end": 2}],
+    )
+    assert report["targets"] == ["ai", "r", "d"]
+    assert report["passed"] is passed
 
 
 def test_pronunciation_guard_keeps_model_selected_word_acronyms_advisory():

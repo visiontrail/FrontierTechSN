@@ -70,6 +70,10 @@ The transformation applies only to Chatterbox's English synthesis request:
   in the outer cache contract. Existing hash-bound ASR observations are rechecked
   without changing submitted job identities; good audio is reused and rejected
   speech advances through the same bounded seed attempts.
+- Single capital letters joined by `&`, such as `R&D`, are spoken as letter,
+  "and", letter in provider input, outside protected URLs and addresses. The
+  expanded input counts toward chunk limits, and both letters are verified.
+  This policy participates in the outer cache contract; source text stays intact.
 - A pronunciation rejection retains the WAV, transcript and reports before
   retrying with the next seed within the existing three-attempt limit. Resume
   never replenishes that limit. An unavailable recognizer stops verification
