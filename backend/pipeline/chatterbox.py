@@ -25,6 +25,7 @@ from backend.pipeline import tts, tts_pronunciation as pronunciation
 
 MODEL_ID = "chatterbox-multilingual"
 VERIFIER_VERSION = 3
+TRAILING_SPEECH_VERIFIER_VERSION = 1
 SYNTHESIS_LETTER_SEPARATOR_RE = re.compile(r"(?<=[A-Za-z])[-.]+(?=[A-Za-z])")
 MAX_INTEGRITY_ATTEMPTS = 3
 RETRYABLE_SERVICE_ERRORS = frozenset({
@@ -55,6 +56,7 @@ def cache_contract() -> dict:
         "chunk_words": config.CHATTERBOX_TTS_CHUNK_WORDS,
         "max_chars": config.CHATTERBOX_TTS_MAX_CHARS,
         "verifier_version": VERIFIER_VERSION,
+        "trailing_speech_verifier_version": TRAILING_SPEECH_VERIFIER_VERSION,
         "shared_verifier_version": tts.POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
         "synthesis_parameters": dict(SYNTHESIS_PARAMETERS),
         "pronunciation_policy": pronunciation.policy_contract(),
@@ -214,7 +216,50 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
             return None
     except tts.TtsIntegrityError:
         return None
+    if verify_text:
+        # The existing ASR observation is bound to this verified waveform hash.
+        # Recheck it when upgrading the tail gate, retaining the original job
+        # identity and avoiding resynthesis of accepted speech.
+        tail = guard.get("trailing_speech")
+        if not isinstance(tail, dict) or tail.get("version") != TRAILING_SPEECH_VERIFIER_VERSION:
+            transcript = guard.get("transcript")
+            if transcript:
+                words = [{"text": transcript}]
+            else:
+                observation = metadata["integrity"].get("transcription") or {}
+                stat = path.stat()
+                if (observation.get("audio_size"), observation.get("audio_mtime_ns")) != (stat.st_size, stat.st_mtime_ns):
+                    return None
+                try:
+                    words = json.loads((path.parent / "verification" / path.stem.removesuffix("_generated") / "transcript.json").read_text())
+                except (OSError, ValueError):
+                    return None
+                if not isinstance(words, list):
+                    return None
+            tail = _trailing_speech_report(identity["text"], words)
+        if tail.get("passed") is not True:
+            return None
+        guard["trailing_speech"] = tail
     return metadata
+
+
+def _trailing_speech_report(text: str, words: list[dict]) -> dict:
+    """Reject a clearly observed extra phrase after an exact complete source.
+
+    Ordinary spelling/recognition differences retain their advisory policy.
+    A single insertion of at least three words, with every source word matched
+    and the exact opening retained but closing displaced, is extra speech.
+    """
+    expected = tts._lexical_tokens(text)
+    observed, _ = tts._transcript_tokens(words)
+    opcodes = SequenceMatcher(a=expected, b=observed, autojunk=False).get_opcodes()
+    exact_prefix = len(opcodes) == 2 and opcodes[0] == ("equal", 0, len(expected), 0, len(expected))
+    extra = observed[len(expected):] if exact_prefix and opcodes[-1][0] == "insert" else []
+    rejected = len(extra) >= 3
+    return {"version": TRAILING_SPEECH_VERIFIER_VERSION,
+            "required": bool(words), "passed": not rejected,
+            "extra_words": extra if rejected else [],
+            "policy": "exact_complete_source_with_extra_tail"}
 
 
 PRONUNCIATION_TOKEN_RE = re.compile(
@@ -324,8 +369,6 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
 
 
 async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit, edits: list[dict]) -> dict:
-    if not edits:
-        return _pronunciation_report(text, [], edits)
     from backend.pipeline import av_sync
 
     directory.mkdir(parents=True, exist_ok=True)
@@ -333,13 +376,19 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
     # transcript rather than running a second recognition pass per chunk.
     words, transcription = await av_sync.ensure_word_transcript(path, directory, minimum_words=1)
     report = _pronunciation_report(text, words, edits)
+    report["trailing_speech"] = _trailing_speech_report(text, words)
     report["transcription"] = transcription
     _write_json(directory / "pronunciation_report.json", report)
-    if not words:
+    if not words and edits:
         raise RuntimeError("Chatterbox pronunciation verification unavailable; preserving the completed job for resume")
+    if not report["trailing_speech"]["passed"]:
+        raise tts.TtsIntegrityError(
+            "Chatterbox unrequested trailing speech: " + json.dumps(report["trailing_speech"]["extra_words"])
+        )
     if not report["passed"]:
         raise tts.TtsIntegrityError("Chatterbox initialism pronunciation mismatch: " + json.dumps(report["differences"]))
-    emit("Chatterbox pronunciation: initialism occurrences matched without repetition")
+    if edits:
+        emit("Chatterbox pronunciation: initialism occurrences matched without repetition")
     return report
 
 
@@ -454,6 +503,7 @@ async def _generate_chatterbox(
             cached = _cached_part(path, identity, verify_text=verify_text)
             if cached:
                 emit(f"Chatterbox part {index}/{len(chunks)}: reusing hash-validated audio")
+                _write_json(tts._part_metadata_path(path), cached)
                 parts.append(path)
                 metadata_rows.append(cached)
                 continue

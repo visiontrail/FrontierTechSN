@@ -65,6 +65,11 @@ The transformation applies only to Chatterbox's English synthesis request:
   word acronyms keep their advisory spelling policy. URLs and email addresses
   remain excluded. This recognition gate is evidence of the decoded pronunciation,
   not a universal guarantee against recognition errors.
+- The separate trailing-speech gate rejects a single extra phrase of at least
+  three words after an exact complete source utterance. Its version participates
+  in the outer cache contract. Existing hash-bound ASR observations are rechecked
+  without changing submitted job identities; good audio is reused and rejected
+  speech advances through the same bounded seed attempts.
 - A pronunciation rejection retains the WAV, transcript and reports before
   retrying with the next seed within the existing three-attempt limit. Resume
   never replenishes that limit. An unavailable recognizer stops verification

@@ -905,6 +905,73 @@ def test_pronunciation_guard_detects_a_repeated_initialism_away_from_its_source(
     assert chatterbox._pronunciation_report(source, [{"text": word} for word in observed.split()])["passed"] is False
 
 
+@pytest.mark.parametrize("observed,passed", [
+    ("From materials science.", True),
+    ("From materials science. GPM POSPIR to and SES and.", False),
+    ("From materials science. Thank you everyone.", False),
+    ("From materials science. Thank you.", True),
+    ("From material science.", True),
+    ("From materials GPM POSPIR to science.", True),
+])
+def test_trailing_speech_guard_rejects_extra_phrases_with_complete_source(observed, passed):
+    assert chatterbox._trailing_speech_report(
+        "From materials science.", [{"text": word} for word in observed.split()],
+    )["passed"] is passed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["missing", "null", "stale", "failed", "missing_passed"])
+async def test_tail_gate_upgrade_reuses_completed_good_audio_without_resynthesis(setup_client, defect):
+    server, _script, directory, verifier, generate = setup_client
+    await generate()
+    path = directory / "tts_input_part_001_generated.json"
+    metadata = json.loads(path.read_text())
+    guard = metadata["integrity"]["pronunciation"]
+    if defect == "missing":
+        guard.pop("trailing_speech")
+    else:
+        guard["trailing_speech"] = {
+            "null": None, "stale": {"version": 0, "passed": True},
+            "failed": {"version": 1, "passed": False}, "missing_passed": {"version": 1},
+        }[defect]
+    path.write_text(json.dumps(metadata))
+    await generate()
+    assert len(server.jobs) == 1
+    assert verifier.await_count == (2 if defect in {"failed", "missing_passed"} else 1)
+    assert json.loads(path.read_text())["integrity"]["pronunciation"]["trailing_speech"]["passed"]
+
+
+@pytest.mark.asyncio
+async def test_tail_gate_rejects_legacy_extra_speech_and_preserves_bounded_retry(setup_client, monkeypatch):
+    server, script, directory, verifier, generate = setup_client
+    script.write_text("From materials science.")
+    await generate()
+    path = directory / "tts_input_part_001_generated.json"
+    metadata = json.loads(path.read_text())
+    bad = tts._orpheus_transcript_report(script.read_text(), [{"text": word} for word in
+        "From materials science. GPM POSPIR to and SES and.".split()])
+    metadata["integrity"].update(bad)
+    guard = metadata["integrity"]["pronunciation"]
+    guard.pop("trailing_speech")
+    guard["transcript"] = "From materials science. GPM POSPIR to and SES and."
+    path.write_text(json.dumps(metadata))
+    verifier.side_effect = [{**advisory_report(), **bad}, advisory_report()]
+    monkeypatch.setattr(av_sync, "ensure_word_transcript", AsyncMock(side_effect=[
+        ([{"text": word} for word in guard["transcript"].split()], {"passed": True}),
+        ([{"text": word} for word in script.read_text().split()], {"passed": True}),
+    ]))
+    await generate()
+    assert len(server.jobs) == 2
+    assert [job["request"]["seed"] for job in server.jobs.values()] == [42, 43]
+    rejected = directory / "verification/tts_input_part_001/rejected-0.wav"
+    assert rejected.exists()
+    assert "unrequested trailing speech" in json.loads(
+        (directory / "tts_input_part_001.request-0.json").read_text()
+    )["rejected"]
+    await generate()
+    assert len(server.jobs) == 2
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("defect", ["missing", "null", "failed"])
 async def test_missing_cached_pronunciation_acceptance_rechecks_the_same_job(setup_client, defect):
