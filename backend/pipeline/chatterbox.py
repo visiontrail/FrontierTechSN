@@ -15,6 +15,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import httpx
@@ -23,7 +24,7 @@ from backend import config
 from backend.pipeline import tts, tts_pronunciation as pronunciation
 
 MODEL_ID = "chatterbox-multilingual"
-VERIFIER_VERSION = 1
+VERIFIER_VERSION = 2
 SYNTHESIS_LETTER_SEPARATOR_RE = re.compile(r"(?<=[A-Za-z])[-.]+(?=[A-Za-z])")
 MAX_INTEGRITY_ATTEMPTS = 3
 RETRYABLE_SERVICE_ERRORS = frozenset({
@@ -203,6 +204,8 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
         return None
     if verify_text and not tts._part_integrity_accepted(metadata.get("integrity")):
         return None
+    if verify_text and metadata.get("integrity", {}).get("pronunciation", {}).get("passed") is not True:
+        return None
     try:
         info = _validate_audio(path, identity["synthesis_text"])
         if metadata.get("audio_sha256") != tts._file_sha256(path) or metadata.get("wav") != asdict(info):
@@ -210,6 +213,126 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
     except tts.TtsIntegrityError:
         return None
     return metadata
+
+
+PRONUNCIATION_TOKEN_RE = re.compile(
+    r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
+)
+
+
+def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None = None) -> dict:
+    """Require source initialisms, including brand suffixes, exactly once in place.
+
+    Join only an aligned, letter-identical ASR split (Open AI / C N B C).
+    Wrong letters and additional repetitions can never become a spelling alias.
+    Other words retain the shared advisory policy.
+    """
+    found = pronunciation.candidates(text) if edits is None else edits
+    source = list(PRONUNCIATION_TOKEN_RE.finditer(text))
+
+    def normalize(value: str) -> str:
+        return value.replace(".", "").replace("’", "'").casefold()
+
+    expected, targets, embedded = [], set(), {}
+    for token in source:
+        local = [candidate for candidate in found if
+                 candidate["start"] < token.end() and candidate["end"] > token.start()]
+        cursor, expanded = token.start(), []
+        for candidate in local:
+            if candidate["start"] > cursor:
+                prefix = normalize(text[cursor:candidate["start"]])
+                expected.append(prefix)
+                expanded.append(prefix)
+            end = min(candidate["end"], token.end())
+            # Preserve the audible plural/possessive ending as part of the
+            # initialism, while ordinary brand prefixes remain advisory.
+            if text[end:token.end()] in {"s", "'s", "’s"}:
+                end = token.end()
+            target = normalize(text[candidate["start"]:end])
+            targets.add(len(expected))
+            expected.append(target)
+            expanded.append(target)
+            cursor = end
+        if cursor < token.end():
+            suffix = normalize(text[cursor:token.end()])
+            expected.append(suffix)
+            expanded.append(suffix)
+        if local and len(expanded) > 1:
+            embedded[normalize(token[0])] = expanded
+    observed = [normalize(token[0]) for word in words
+                for token in PRONUNCIATION_TOKEN_RE.finditer(str(word.get("text") or ""))]
+    observed = [part for token in observed for part in embedded.get(token, [token])]
+    # Collapse exact split spellings without discarding any observed letters.
+    replacements = {}
+    for tag, start, end, left, right in SequenceMatcher(
+        a=expected, b=observed, autojunk=False,
+    ).get_opcodes():
+        if tag != "replace":
+            continue
+        cursor = left
+        for index in range(start, end):
+            if index not in targets:
+                if cursor >= right or observed[cursor] != expected[index]:
+                    break
+                cursor += 1
+                continue
+            joined = ""
+            while cursor < right and expected[index].startswith(joined + observed[cursor]):
+                joined += observed[cursor]
+                cursor += 1
+                if joined == expected[index]:
+                    break
+            if joined != expected[index]:
+                break
+        else:
+            if cursor == right:
+                replacements[left] = (right, expected[start:end])
+    collapsed, cursor = [], 0
+    while cursor < len(observed):
+        if cursor in replacements:
+            cursor, tokens = replacements[cursor]
+            collapsed.extend(tokens)
+        else:
+            collapsed.append(observed[cursor])
+            cursor += 1
+    differences = []
+    for tag, start, end, left, right in SequenceMatcher(
+        a=expected, b=collapsed, autojunk=False,
+    ).get_opcodes():
+        if tag == "equal":
+            continue
+        affected = any(index in targets for index in range(start, end))
+        # An extra word touching a target may be a repeated letter/name even
+        # when the intended occurrence itself matched exactly.
+        if tag == "insert":
+            affected = start in targets or start - 1 in targets
+        if affected:
+            differences.append({"kind": tag, "source": expected[start:end],
+                                "asr": collapsed[left:right], "source_start": start})
+    return {"required": bool(targets), "passed": not targets or bool(words) and not differences,
+            "targets": [expected[index] for index in sorted(targets)],
+            "transcript": tts._raw_transcript(words), "differences": differences,
+            "policy": "exact_initialism_occurrences"}
+
+
+async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit, edits: list[dict]) -> dict:
+    if not edits:
+        return _pronunciation_report(text, [], edits)
+    from backend.pipeline import av_sync
+
+    directory.mkdir(parents=True, exist_ok=True)
+    # The preceding advisory check already decoded this exact WAV; reuse its
+    # transcript rather than running a second recognition pass per chunk.
+    words, transcription = await av_sync.ensure_word_transcript(path, directory, minimum_words=1)
+    report = _pronunciation_report(text, words, edits)
+    report["transcription"] = transcription
+    _write_json(directory / "pronunciation_report.json", report)
+    if not words:
+        raise RuntimeError("Chatterbox pronunciation verification unavailable; preserving the completed job for resume")
+    if not report["passed"]:
+        raise tts.TtsIntegrityError("Chatterbox initialism pronunciation mismatch: " + json.dumps(report["differences"]))
+    emit("Chatterbox pronunciation: initialism occurrences matched without repetition")
+    return report
 
 
 def _validate_job_identity(
@@ -300,6 +423,9 @@ async def _generate_chatterbox(
             synthesis_text = pronunciation.render_span(
                 normalized, start, source_offset, pronunciation_plan["edits"],
             )
+            chunk_edits = [{**edit, "start": edit["start"] - start, "end": edit["end"] - start}
+                           for edit in pronunciation_plan["edits"]
+                           if start <= edit["start"] and edit["end"] <= source_offset]
             stem = f"tts_input_part_{index:03d}"
             (directory / f"{stem}.txt").write_text(text, encoding="utf-8")
             (synthesis_directory / f"{stem}.txt").write_text(synthesis_text, encoding="utf-8")
@@ -337,7 +463,7 @@ async def _generate_chatterbox(
                     _write_json(request_path, checkpoint)
                 if checkpoint.get("rejected"):
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
-                        raise tts.TtsIntegrityError(f"Chatterbox part {index} exhausted physical audio validation attempts")
+                        raise tts.TtsIntegrityError(f"Chatterbox part {index} exhausted audio integrity attempts")
                     continue
                 if checkpoint.get("terminal_failure"):
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
@@ -401,18 +527,26 @@ async def _generate_chatterbox(
                             asr_advisory=True, provider_label="Chatterbox",
                             validate_pocket_continuity=True,
                         )
+                        integrity["pronunciation"] = await _verify_pronunciation(
+                            staged, text, directory / "verification" / stem, emit=emit,
+                            edits=chunk_edits,
+                        )
                     else:
                         integrity = {"method": "duration_only_preview", "verified": True,
                                      "internal_silence": tts._validate_pocket_internal_silence(staged)}
                 except tts.TtsIntegrityError as exc:
                     rejected = directory / "verification" / stem
                     rejected.mkdir(parents=True, exist_ok=True)
+                    evidence = rejected / f"rejected-{attempt}"
+                    evidence.mkdir(exist_ok=True)
+                    for report_path in rejected.glob("*.json"):
+                        (evidence / report_path.name).write_bytes(report_path.read_bytes())
                     os.replace(staged, rejected / f"rejected-{attempt}.wav")
                     checkpoint["rejected"] = str(exc)
                     _write_json(request_path, checkpoint)
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
                         raise
-                    emit(f"Chatterbox physical audio retry for part {index}: {exc}")
+                    emit(f"Chatterbox audio integrity retry for part {index}: {exc}")
                     continue
                 os.replace(staged, path)
                 metadata = {

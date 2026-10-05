@@ -63,7 +63,7 @@ def test_dotted_candidate_rendering_preserves_surrounding_source_punctuation():
         text, decisions_for(text, {"U.S": "you ess", "U.S.A": "you ess ay", "CNBC": "C-N-B-C"}),
     )
     assert pronunciation.render_span(text, 0, len(text), edits) == (
-        'The "you ess", (you ess ay), and C-N-B-C: all replied!'
+        'The "you ess", (you ess eigh), and C-N-B-C: all replied!'
     )
 
 
@@ -101,13 +101,13 @@ def test_decisions_are_contextual_per_occurrence_and_leave_canonical_source_inta
     ("QZV", "cue zee vee"),
     ("CNBC", "C-N-B-C"),
     ("CNBC", "c-n-b-c"),
-    ("API", "ay pee eye"),
+    ("API", "eigh pee eye"),
     ("API", "a.p.i"),
     ("GPU", "gee pee you"),
     ("U.S", "you ess"),
     ("U.S.", "you ess"),
-    ("U.S.A", "you ess ay"),
-    ("U.S.A.", "you ess ay"),
+    ("U.S.A", "you ess eigh"),
+    ("U.S.A.", "you ess eigh"),
     ("IEEE", "I triple E"),
     ("BBC", "double bee see"),
     ("WWW", "W-W-W"),
@@ -179,8 +179,19 @@ def test_embedded_letter_runs_get_readable_synthesis_boundaries():
     rows = decisions_for(text, {"AI": "ay eye", "GPT": "gee pee tee", "GPU": "gee pee you"})
     _, edits = pronunciation.validate_decisions(text, rows)
     assert pronunciation.render_span(text, 0, len(text), edits) == (
-        "Open ay eye ships gee pee tee 4 tools for gee pee yous and ay eye 2 research."
+        "Open eigh eye ships gee pee tee 4 tools for gee pee yous and eigh eye 2 research."
     )
+
+
+def test_ambiguous_a_letter_name_is_canonicalized_without_adding_letters():
+    text = "OpenAI uses AI and API tools."
+    rows = decisions_for(text, {"AI": "ay eye", "API": "ay pee eye"})
+    validated, edits = pronunciation.validate_decisions(text, rows)
+    assert [row["spoken"] for row in validated] == ["eigh eye", "eigh eye", "eigh pee eye"]
+    assert pronunciation.render_span(text, 0, len(text), edits) == (
+        "Open eigh eye uses eigh eye and eigh pee eye tools."
+    )
+    assert pronunciation.validate_decisions(text, validated) == (validated, edits)
 
 
 def test_render_span_rejects_splitting_inside_an_edit():

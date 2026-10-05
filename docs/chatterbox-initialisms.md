@@ -16,7 +16,10 @@ URLs, email addresses and domains are excluded.
 
 The prompt explains the installed voice's observed articulation behavior:
 explicit letter-name words generally work better than separated literal
-letters; an `N` can turn phonetic `en` into `and`, so candidates containing N
+letters. Policy 3 uses `eigh` for the letter A: the installed voice can read
+`ay` as `eye`, dropping A from AI or OpenAI. Validated spell decisions also
+normalize the old `ay` alias to `eigh`, including separated letter-name forms.
+An `N` can turn phonetic `en` into `and`, so candidates containing N
 use hyphens throughout. Conventional repeated-letter readings are allowed.
 These are general prompt rules derived from the samples below, not a complete
 acoustic guarantee for untested names. The model remains responsible for
@@ -50,8 +53,22 @@ The transformation applies only to Chatterbox's English synthesis request:
   another AI call when resuming. Changing the configured AI model does not
   rewrite an already accepted plan. A missing/stale plan beside submitted job
   checkpoints fails closed instead of rebinding their idempotency keys.
-- Natural 1.0x synthesis, voice reference, service build, physical audio checks
-  and the existing ASR-advisory policy are retained.
+- Natural 1.0x synthesis, voice reference, service build and physical audio
+  checks are retained. General ASR spelling differences remain advisory.
+- Chatterbox verifier 2 additionally requires each initialism occurrence selected
+  for spelling to match the transcript, including its plural/possessive suffix.
+  Only aligned splits with exactly the same letters can be joined (`Open AI`,
+  `C N B C`); wrong letters, omissions and repetitions are rejected. Adjacent
+  source initialisms are checked separately. Brand prefixes and model-selected
+  word acronyms keep their advisory spelling policy. URLs and email addresses
+  remain excluded. This recognition gate is evidence of the decoded pronunciation,
+  not a universal guarantee against recognition errors.
+- A pronunciation rejection retains the WAV, transcript and reports before
+  retrying with the next seed within the existing three-attempt limit. Resume
+  never replenishes that limit. An unavailable recognizer stops verification
+  while preserving the completed service job for resume, without resynthesis.
+  Accepted cache entries must contain a passing pronunciation report. Pocket
+  and Orpheus keep their existing advisory behavior.
 
 ## Real AI validation, 2026-10-02
 

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from backend import config
 
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -123,6 +123,9 @@ def validate_decisions(text: str, decisions: object) -> tuple[list[dict], list[d
                 raise ValueError("Spoken spelling must retain every source letter in its original order")
             if spoken == candidate["source"]:
                 raise ValueError("A spell decision must provide an explicit pronunciation hint")
+            # The installed voice can read "ay" as "eye", losing the A in
+            # AI/OpenAI. Use the letter-identical form accepted in live audio.
+            spoken = re.sub(r"\bay\b", "eigh", spoken, flags=re.IGNORECASE)
             edits.append({**candidate, "spoken": spoken})
         else:
             raise ValueError("Pronunciation action must be keep or spell")

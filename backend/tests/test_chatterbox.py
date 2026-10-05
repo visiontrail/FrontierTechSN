@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from backend import config
-from backend.pipeline import chatterbox, composer, digester, tts, tts_pronunciation
+from backend.pipeline import av_sync, chatterbox, composer, digester, tts, tts_pronunciation
 
 
 @pytest.mark.asyncio
@@ -173,6 +173,10 @@ def setup_client(tmp_path, monkeypatch):
     monkeypatch.setattr(chatterbox.asyncio, "sleep", AsyncMock())
     verifier = AsyncMock(side_effect=lambda *args, **kwargs: advisory_report())
     monkeypatch.setattr(tts, "_verify_orpheus_part", verifier)
+    def transcript(_path, verification_dir, **_kwargs):
+        source = (verification_dir.parents[1] / f"{verification_dir.name}.txt").read_text()
+        return ([{"text": word} for word in source.split()], {"passed": True})
+    monkeypatch.setattr(av_sync, "ensure_word_transcript", AsyncMock(side_effect=transcript))
     script = tmp_path / "script.txt"
     script.write_text("The complete narration remains available for the final video.", encoding="utf-8")
     directory = tmp_path / "audio"
@@ -377,7 +381,7 @@ async def test_initialism_heavy_audio_must_cover_spoken_letters_before_asr(setup
     ("CNBC", "C--N--B--C", 4),
     ("CNBC", "C.-N.-B.-C", 4),
     ("API", "a.p.i", 3),
-    ("API", "ay-pee-eye", 3),
+    ("API", "eigh-pee-eye", 3),
 ])
 async def test_model_hint_separators_count_for_chunk_budget_and_audio_duration(setup_client, source_name, spoken, letters):
     server, script, directory, verifier, generate = setup_client
@@ -862,6 +866,127 @@ async def test_asr_advisory_mismatch_is_accepted_without_resynthesis(setup_clien
     assert manifest["integrity"]["asr_warning_parts"] == 1
     assert verifier.await_args.kwargs["asr_advisory"] is True
     assert composer._narration_manifest_failures(script, output, chatterbox.MODEL_ID) == []
+
+
+@pytest.mark.parametrize("observed", [
+    "Open AI reports on A I chips.", "OpenAI reports on AI chips.",
+])
+def test_pronunciation_guard_accepts_only_identical_aligned_splits(observed):
+    report = chatterbox._pronunciation_report(
+        "OpenAI reports on AI chips.", [{"text": word} for word in observed.split()],
+    )
+    assert report["passed"] is True
+    assert report["targets"] == ["ai", "ai"]
+
+
+@pytest.mark.parametrize("observed", [
+    "Open II reports on AI chips.", "Open eye reports on AI chips.",
+    "Open AI AI reports on AI chips.", "OpenAI AI reports on AI chips.",
+    "OpenAI reports on AI AI chips.", "OpenAI reports on eye chips.",
+    "OpenAI reports on chips.", "reports on AI chips.", "",
+])
+def test_pronunciation_guard_rejects_wrong_missing_and_repeated_letters(observed):
+    assert chatterbox._pronunciation_report(
+        "OpenAI reports on AI chips.", [{"text": word} for word in observed.split()],
+    )["passed"] is False
+
+
+def test_pronunciation_guard_checks_every_repeated_source_occurrence():
+    assert chatterbox._pronunciation_report(
+        "AI and AI chips.", [{"text": word} for word in "AI and chips.".split()],
+    )["passed"] is False
+
+
+def test_pronunciation_guard_leaves_other_spelling_differences_advisory():
+    report = chatterbox._pronunciation_report(
+        "Techmeme reports that OpenAI made tools.",
+        [{"text": word} for word in "Tech meme reports that Open AI made tools.".split()],
+    )
+    assert report["passed"] is True
+
+
+def test_pronunciation_guard_preserves_suffixes_models_dotted_initialisms_and_urls():
+    source = "OpenAI's GPUs use GPT4 in the U.S. See https://API.example/AI."
+    observed = "Open AI's G P Us use G P T 4 in the U S. See https://API.example/AI."
+    report = chatterbox._pronunciation_report(source, [{"text": word} for word in observed.split()])
+    assert report["passed"] is True
+    assert report["targets"] == ["ai's", "gpus", "gpt", "us"]
+
+
+def test_pronunciation_guard_checks_suffix_without_rejecting_advisory_brand_spelling():
+    source = "QbitAI reports that ChatGPT is available."
+    observed = "Qubit AI reports that Chat GPT is available."
+    assert chatterbox._pronunciation_report(source, [{"text": word} for word in observed.split()])["passed"]
+
+
+def test_pronunciation_guard_keeps_model_selected_word_acronyms_advisory():
+    source = "CoRL reports on AI."
+    _, edits = tts_pronunciation.validate_decisions(source, [
+        {"id": 0, "source": "RL", "action": "keep", "spoken": "RL", "reason": "Word acronym."},
+        {"id": 1, "source": "AI", "action": "spell", "spoken": "eigh eye", "reason": "Letter reading."},
+    ])
+    report = chatterbox._pronunciation_report(source, [{"text": word} for word in "Coral reports on AI.".split()], edits)
+    assert report["passed"] is True
+    assert report["targets"] == ["ai"]
+
+
+@pytest.mark.asyncio
+async def test_pronunciation_mismatch_retries_and_reuses_the_accepted_audio(setup_client, monkeypatch):
+    server, script, directory, _verifier, generate = setup_client
+    source = "OpenAI reports on AI chips."
+    script.write_text(source)
+    transcribe = AsyncMock(side_effect=[
+        ([{"text": word} for word in "Open AI AI reports on AI chips.".split()], {}),
+        ([{"text": word} for word in source.split()], {}),
+    ])
+    monkeypatch.setattr(av_sync, "ensure_word_transcript", transcribe)
+    await generate()
+    assert len(server.jobs) == 2
+    assert [job["request"]["seed"] for job in server.jobs.values()] == [42, 43]
+    checkpoint = json.loads((directory / "tts_input_part_001.request-0.json").read_text())
+    assert "pronunciation mismatch" in checkpoint["rejected"]
+    assert (directory / "verification" / "tts_input_part_001" / "rejected-0.wav").is_file()
+    rejected = directory / "verification" / "tts_input_part_001" / "rejected-0" / "pronunciation_report.json"
+    assert json.loads(rejected.read_text())["passed"] is False
+    metadata = json.loads((directory / "tts_input_part_001_generated.json").read_text())
+    assert metadata["integrity"]["pronunciation"]["passed"] is True
+    transcribe.side_effect = AssertionError("Verified cache must not transcribe or submit again")
+    await generate()
+    assert len(server.jobs) == 2
+
+
+@pytest.mark.asyncio
+async def test_pronunciation_rejections_stop_at_persisted_attempt_limit(setup_client, monkeypatch):
+    server, script, directory, _verifier, generate = setup_client
+    script.write_text("OpenAI reports on AI chips.")
+    monkeypatch.setattr(av_sync, "ensure_word_transcript", AsyncMock(return_value=(
+        [{"text": word} for word in "Open II reports on eye chips.".split()], {},
+    )))
+    for _ in range(2):
+        with pytest.raises(tts.TtsIntegrityError):
+            await generate()
+    assert len(server.jobs) == chatterbox.MAX_INTEGRITY_ATTEMPTS
+    assert not (directory / "tts_manifest.json").exists()
+    assert not (directory / "tts_input_part_001_generated.wav").exists()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_pronunciation_verification_preserves_completed_job(setup_client, monkeypatch):
+    server, script, directory, _verifier, generate = setup_client
+    source = "OpenAI reports on AI chips."
+    script.write_text(source)
+    transcribe = AsyncMock(return_value=([], {"passed": False}))
+    monkeypatch.setattr(av_sync, "ensure_word_transcript", transcribe)
+    with pytest.raises(RuntimeError, match="verification unavailable"):
+        await generate()
+    original = (directory / "tts_input_part_001.request-0.json").read_bytes()
+    assert len(server.jobs) == 1
+    assert "rejected" not in json.loads(original)
+    assert not (directory / "tts_manifest.json").exists()
+    transcribe.return_value = ([{"text": word} for word in source.split()], {})
+    await generate()
+    assert len(server.jobs) == 1
+    assert (directory / "tts_input_part_001.request-0.json").read_bytes() == original
 
 
 @pytest.mark.asyncio
