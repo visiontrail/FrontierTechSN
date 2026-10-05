@@ -55,11 +55,13 @@ The transformation applies only to Chatterbox's English synthesis request:
   checkpoints fails closed instead of rebinding their idempotency keys.
 - Natural 1.0x synthesis, voice reference, service build and physical audio
   checks are retained. General ASR spelling differences remain advisory.
-- Chatterbox verifier 2 additionally requires each initialism occurrence selected
+- Chatterbox verifier 3 additionally requires each initialism occurrence selected
   for spelling to match the transcript, including its plural/possessive suffix.
   Only aligned splits with exactly the same letters can be joined (`Open AI`,
   `C N B C`); wrong letters, omissions and repetitions are rejected. Adjacent
-  source initialisms are checked separately. Brand prefixes and model-selected
+  source initialisms are checked separately. Distant repeated initialisms are
+  rejected both when inserted and when they replace ordinary source words.
+  Brand prefixes and model-selected
   word acronyms keep their advisory spelling policy. URLs and email addresses
   remain excluded. This recognition gate is evidence of the decoded pronunciation,
   not a universal guarantee against recognition errors.
