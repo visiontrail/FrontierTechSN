@@ -280,7 +280,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     def normalize(value: str) -> str:
         return value.replace(".", "").replace("’", "'").casefold()
 
-    expected, targets, embedded = [], set(), {}
+    expected, targets, embedded, compound_suffixes = [], set(), {}, {}
     for token in source:
         local = [candidate for candidate in found if
                  candidate["start"] < token.end() and candidate["end"] > token.start()]
@@ -306,9 +306,28 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             expanded.append(suffix)
         if local and len(expanded) > 1:
             embedded[normalize(token[0])] = expanded
-    observed = [normalize(token[0]) for word in words
-                for token in PRONUNCIATION_TOKEN_RE.finditer(str(word.get("text") or ""))]
-    observed = [part for token in observed for part in embedded.get(token, [token])]
+            if len(local) == 1 and local[0]["start"] > token.start():
+                suffix = normalize(text[local[0]["start"]:token.end()])
+                compound_suffixes.setdefault(suffix, []).append(
+                    (expanded[0], expanded[1:], normalize(local[0]["source"]))
+                )
+    observed = []
+    for word in words:
+        for token in PRONUNCIATION_TOKEN_RE.finditer(str(word.get("text") or "")):
+            value = normalize(token[0])
+            expanded = embedded.get(value)
+            # ASR may change the ordinary brand prefix while retaining the
+            # exact capitalized initialism suffix (QbitAI -> QubitAI).
+            compound = re.fullmatch(r"([A-Za-z][a-z]+)([A-Z]{2,}[0-9]*(?:s|['’]s)?)", token[0])
+            if expanded is None and compound:
+                prefix = normalize(compound[1])
+                for source_prefix, suffix_parts, initialism in compound_suffixes.get(normalize(compound[2]), []):
+                    # A new initialism hidden in the prefix remains a repeat.
+                    if prefix.endswith(initialism) and not source_prefix.endswith(initialism):
+                        continue
+                    expanded = [prefix, *suffix_parts]
+                    break
+            observed.extend(expanded if expanded is not None else [value])
     # Collapse exact split spellings without discarding any observed letters.
     replacements = {}
     for tag, start, end, left, right in SequenceMatcher(
@@ -316,11 +335,12 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     ).get_opcodes():
         if tag != "replace":
             continue
-        cursor = left
+        cursor, aligned = left, []
         for index in range(start, end):
             if index not in targets:
-                if cursor >= right or observed[cursor] != expected[index]:
+                if cursor >= right:
                     break
+                aligned.append(observed[cursor])
                 cursor += 1
                 continue
             joined = ""
@@ -331,9 +351,10 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
                     break
             if joined != expected[index]:
                 break
+            aligned.append(joined)
         else:
             if cursor == right:
-                replacements[left] = (right, expected[start:end])
+                replacements[left] = (right, aligned)
     collapsed, cursor = [], 0
     while cursor < len(observed):
         if cursor in replacements:

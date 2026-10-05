@@ -1006,10 +1006,25 @@ def test_pronunciation_guard_preserves_suffixes_models_dotted_initialisms_and_ur
     assert report["targets"] == ["ai's", "gpus", "gpt", "us"]
 
 
-def test_pronunciation_guard_checks_suffix_without_rejecting_advisory_brand_spelling():
+@pytest.mark.parametrize("observed", [
+    "Qubit AI reports that Chat GPT is available.",
+    "QubitAI reports that ChatGPT is available.",
+    "Qubit A I reports that Chat G P T is available.",
+])
+def test_pronunciation_guard_checks_suffix_without_rejecting_advisory_brand_spelling(observed):
     source = "QbitAI reports that ChatGPT is available."
-    observed = "Qubit AI reports that Chat GPT is available."
     assert chatterbox._pronunciation_report(source, [{"text": word} for word in observed.split()])["passed"]
+
+
+@pytest.mark.parametrize("observed", [
+    "QubitII reports on AI.", "QubitAIAI reports on AI.",
+    "QubitaiAI reports on AI.", "AI A I reports on AI.",
+    "Qubit A I I reports on AI.", "QubitAI AI reports on AI.",
+])
+def test_pronunciation_guard_brand_alias_never_hides_wrong_or_extra_letters(observed):
+    assert chatterbox._pronunciation_report(
+        "QbitAI reports on AI.", [{"text": word} for word in observed.split()],
+    )["passed"] is False
 
 
 def test_pronunciation_guard_keeps_model_selected_word_acronyms_advisory():
