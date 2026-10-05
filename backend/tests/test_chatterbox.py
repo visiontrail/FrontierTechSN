@@ -897,6 +897,31 @@ def test_pronunciation_guard_checks_every_repeated_source_occurrence():
     )["passed"] is False
 
 
+@pytest.mark.parametrize("extra", ["AI", "A I"])
+def test_pronunciation_guard_detects_a_repeated_initialism_away_from_its_source(extra):
+    source = "OpenAI reports the latest news today."
+    observed = f"OpenAI reports the latest {extra} news today."
+    assert chatterbox._pronunciation_report(source, [{"text": word} for word in observed.split()])["passed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["missing", "null", "failed"])
+async def test_missing_cached_pronunciation_acceptance_rechecks_the_same_job(setup_client, defect):
+    server, _script, directory, verifier, generate = setup_client
+    await generate()
+    path = directory / "tts_input_part_001_generated.json"
+    metadata = json.loads(path.read_text())
+    if defect == "missing":
+        metadata["integrity"].pop("pronunciation")
+    else:
+        metadata["integrity"]["pronunciation"] = None if defect == "null" else {"passed": False}
+    path.write_text(json.dumps(metadata))
+    await generate()
+    assert len(server.jobs) == 1
+    assert verifier.await_count == 2
+    assert json.loads(path.read_text())["integrity"]["pronunciation"]["passed"] is True
+
+
 def test_pronunciation_guard_leaves_other_spelling_differences_advisory():
     report = chatterbox._pronunciation_report(
         "Techmeme reports that OpenAI made tools.",

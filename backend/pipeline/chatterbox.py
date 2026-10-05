@@ -204,8 +204,10 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
         return None
     if verify_text and not tts._part_integrity_accepted(metadata.get("integrity")):
         return None
-    if verify_text and metadata.get("integrity", {}).get("pronunciation", {}).get("passed") is not True:
-        return None
+    if verify_text:
+        guard = metadata["integrity"].get("pronunciation")
+        if not isinstance(guard, dict) or guard.get("passed") is not True:
+            return None
     try:
         info = _validate_audio(path, identity["synthesis_text"])
         if metadata.get("audio_sha256") != tts._file_sha256(path) or metadata.get("wav") != asdict(info):
@@ -296,6 +298,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             collapsed.append(observed[cursor])
             cursor += 1
     differences = []
+    target_forms = {expected[index] for index in targets} | {normalize(row["source"]) for row in found}
     for tag, start, end, left, right in SequenceMatcher(
         a=expected, b=collapsed, autojunk=False,
     ).get_opcodes():
@@ -305,7 +308,10 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         # An extra word touching a target may be a repeated letter/name even
         # when the intended occurrence itself matched exactly.
         if tag == "insert":
-            affected = start in targets or start - 1 in targets
+            inserted = collapsed[left:right]
+            repeated = any("".join(inserted[i:j]) in target_forms
+                           for i in range(len(inserted)) for j in range(i + 1, len(inserted) + 1))
+            affected = start in targets or start - 1 in targets or repeated
         if affected:
             differences.append({"kind": tag, "source": expected[start:end],
                                 "asr": collapsed[left:right], "source_start": start})
