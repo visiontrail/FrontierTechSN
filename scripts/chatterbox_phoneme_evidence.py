@@ -17,7 +17,7 @@ from backend.pipeline import tts_pronunciation as pronunciation
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 2
+EVIDENCE_VERSION = 3
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -27,7 +27,7 @@ LETTER_PHONES = {
     'O': [('OW',)], 'P': [('P', 'IY')], 'Q': [('K', 'Y', 'UW')],
     'R': [('AA', 'R')], 'S': [('EH', 'S')], 'T': [('T', 'IY')],
     'U': [('Y', 'UW')], 'V': [('V', 'IY')],
-    'W': [('D', 'AH', 'B', 'AH', 'L', 'Y', 'UW')],
+    'W': [('D', 'AH', 'B', 'AH', 'L', 'Y', 'UW'), ('D', 'AH', 'B', 'L', 'Y', 'UW')],
     'X': [('EH', 'K', 'S')], 'Y': [('W', 'AY')],
     'Z': [('Z', 'IY'), ('Z', 'EH', 'D')],
 }
@@ -40,7 +40,7 @@ IPA = {
     'd': 'D', 'k': 'K', 'ɡ': 'G', 'g': 'G', 'f': 'F', 'v': 'V',
     'θ': 'TH', 'ð': 'DH', 's': 'S', 'z': 'Z', 'ʃ': 'SH', 'ʒ': 'ZH',
     'h': 'HH', 'm': 'M', 'n': 'N', 'ŋ': 'NG', 'l': 'L', 'ɹ': 'R',
-    'r': 'R', 'j': 'Y', 'w': 'W',
+    'r': 'R', 'j': 'Y', 'w': 'W', 'l̩': 'L',
 }
 VOWELS = {'AA', 'AE', 'AH', 'AO', 'AW', 'AY', 'EH', 'ER', 'EY', 'IH', 'IY', 'OW', 'OY', 'UH', 'UW'}
 
@@ -101,6 +101,12 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
             if not variants:
                 raise ValueError(f'No source pronunciation reference for {word}')
             references = {tuple(re.sub(r'\d', '', p) for p in variant) for variant in variants}
+            # Only an unstressed word-final schwa before L can merge into
+            # syllabic L. Named letter vowels (e.g. L /ɛl/) never lose theirs.
+            for variant in variants:
+                if (len(variant) >= 3 and variant[-2:] == ['AH0', 'L']
+                        and re.sub(r'\d', '', variant[-3]) not in VOWELS):
+                    references.add(tuple(re.sub(r'\d', '', p) for p in (*variant[:-2], 'L')))
             # A word-internal nasal/fricative transition may include the
             # homorganic stop (n-sh -> n-t-sh, decoded as n-ch). Apply only
             # inside dictionary words, never to independently named letters.

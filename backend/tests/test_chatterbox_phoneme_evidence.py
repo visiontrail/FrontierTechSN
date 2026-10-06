@@ -121,3 +121,22 @@ def test_dictionary_transition_variant_never_waives_an_extra_named_letter_or_wro
     prepared=edits(source,'NH','N aitch')
     assert not evidence.compare_source(source,prepared,PREFIX+'ɛ n t iː eɪ tʃ'+ENDING)['passed']
     assert not evidence.compare_source(source,prepared,PREFIX+'ɛ n eɪ dʒ'+ENDING)['passed']
+
+
+def test_double_you_retains_w_with_syllabic_l_without_losing_any_target_letter():
+    source='The report mentions WLAN today.'
+    prepared=edits(source,'WLAN','double you el eigh N')
+    phones=PREFIX+'d ʌ b l̩ j uː ɛ l eɪ ɛ n'+ENDING
+    assert evidence.compare_source(source,prepared,phones)['passed']
+    assert not evidence.compare_source(source,prepared,phones.replace('eɪ ɛ n','ɛ n'))['passed']
+    assert not evidence.compare_source(source,prepared,phones.replace('ɛ n','ɛ m'))['passed']
+
+
+def test_syllabic_l_reference_never_removes_the_stressed_named_letter_l_vowel():
+    source='The report mentions LL today.'
+    prepared=edits(source,'LL','el el')
+    assert not evidence.compare_source(source,prepared,PREFIX+'l l'+ENDING)['passed']
+    source='The report mentions SSH today.'
+    prepared=edits(source,'SSH','double ess H')
+    assert evidence.compare_source(source,prepared,PREFIX+'d ʌ b l ɛ s eɪ tʃ'+ENDING)['passed']
+    assert not evidence.compare_source(source,prepared,PREFIX+'d ʌ b l s eɪ tʃ'+ENDING)['passed']

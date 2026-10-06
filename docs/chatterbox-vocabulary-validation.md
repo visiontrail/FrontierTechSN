@@ -147,6 +147,13 @@ the observed pronunciation of `mentions`. Nasal/fricative stop epenthesis is
 documented in [MIT's pronunciation teaching material](https://ocw.mit.edu/courses/21g-223-listening-speaking-and-pronunciation-fall-2004/d54f3bba263684cab866eb7b25fe1533_MIT21G_223F04_epenthesis.pdf).
 This word transition rule never applies to independently named letters and
 does not discard vowels, additional letter names, wrong H affricates or tails.
+Evidence version 3 also retains the syllabic-L variant of `double` in ordinary
+words and the letter name W. This is an unstressed word-final schwa plus L,
+not the stressed vowel in the named letter L. The variant is exemplified by
+[Berkeley's English pronunciation workbook](https://linguistics.berkeley.edu/~kjohnson/English_Phonetics/cons_syllabic.html).
+Missing A, changed N/M, added named syllables and word omissions remain failures.
+Older phone-sequence rejections can be rechecked against the same completed
+waveform without new synthesis submissions.
 
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.

@@ -306,7 +306,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 5
+OBSERVATION_SPELLING_VERSION = 6
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -764,7 +764,10 @@ async def _generate_chatterbox(
                     checkpoint = {"identity": request_identity, "idempotency_key": uuid.uuid4().hex}
                     _write_json(request_path, checkpoint)
                 rechecking = bool(
-                    str(checkpoint.get('rejected') or '').startswith('Chatterbox initialism pronunciation mismatch:')
+                    str(checkpoint.get('rejected') or '').startswith((
+                        'Chatterbox initialism pronunciation mismatch:',
+                        'Required complete-source phone sequence differs from the source',
+                    ))
                     and checkpoint.get('job_id')
                     and checkpoint.get('rejection_observation_version', 0) < OBSERVATION_SPELLING_VERSION
                 )
