@@ -1242,6 +1242,7 @@ async def test_manifest_drives_composer_line_timing_and_detects_source_or_audio_
     assert any("WAV changed" in issue for issue in composer._narration_manifest_failures(script, output, chatterbox.MODEL_ID))
 @pytest.mark.parametrize(('source', 'observed'), [
     ('The report mentions UI today.', 'The report mentions you I today.'),
+    ('The report mentions UI today.', 'The report mentions you aye today.'),
     ('The report mentions UX today.', 'The report mentions you ex today.'),
     ('The report mentions AR today.', 'The report mentions A are today.'),
     ('The report mentions API today.', 'The report mentions eigh pee eye today.'),
@@ -1259,6 +1260,8 @@ def test_source_bound_letter_names_preserve_every_observed_letter(source, observ
     ('The report mentions UX today.', 'The report mentions you exited today.'),
     ('The report mentions UI today.', 'The report mentions you eye eye today.'),
     ('The report mentions AI today.', 'The report mentions eye eye today.'),
+    ('The report mentions AI today.', 'The report mentions aye eye today.'),
+    ('The report mentions UI today.', 'The report mentions you aye aye today.'),
     ('The report mentions API today.', 'The report mentions eigh eye today.'),
     ('The report mentions API today.', 'The report mentions eigh pee eye eye today.'),
     ('The report mentions WHO today.', 'The report mentions double U O today.'),
@@ -1303,7 +1306,7 @@ async def test_repaired_spelling_observation_rechecks_original_jobs_without_new_
         assert (record['job_id'], record['idempotency_key']) == checkpoints[path.name]
     accepted = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
     assert accepted['rejected']
-    assert accepted['revalidated_after_rejection']['observation_spelling_version'] == 1
+    assert accepted['revalidated_after_rejection']['observation_spelling_version'] == chatterbox.OBSERVATION_SPELLING_VERSION
 
 
 @pytest.mark.asyncio

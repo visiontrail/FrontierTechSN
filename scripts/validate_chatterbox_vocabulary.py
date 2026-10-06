@@ -110,19 +110,21 @@ def prepare(directory: Path, fixture: dict, observed: dict | None) -> dict:
                 'voice': 'space-en-f1', 'language': 'en',
                 'secondary_model': SECONDARY_MODEL, 'cache_contract': chatterbox.cache_contract(),
                 'batch_size': 12}
+    coverage = {'corpus_sha256': digest(identity), 'case_count': len(cases),
+                'term_count': len({r['term'] for r in cases}),
+                'uppercase_letters': ''.join(sorted({c for r in cases for c in r['term'] if 'A' <= c <= 'Z'})),
+                'batch_count': (len(cases) + 11) // 12}
     marker = directory / 'corpus.json'
     if marker.exists():
         saved = read(marker)
         if saved['identity'] != identity:
             raise ValueError('Frozen corpus or provider contract changed; preserve this run and use another output directory')
+        if any(saved.get(key) != value for key, value in coverage.items()):
+            raise ValueError('Frozen corpus coverage/hash metadata does not match its complete case list')
         return saved
     if directory.exists() and any(directory.iterdir()):
         raise ValueError('Output belongs to another run without a corpus marker')
-    result = {'identity': identity, 'corpus_sha256': digest(identity),
-              'created_at': datetime.now(timezone.utc).isoformat(),
-              'case_count': len(cases), 'term_count': len({r['term'] for r in cases}),
-              'uppercase_letters': ''.join(sorted({c for r in cases for c in r['term'] if 'A' <= c <= 'Z'})),
-              'batch_count': (len(cases) + 11) // 12}
+    result = {'identity': identity, 'created_at': datetime.now(timezone.utc).isoformat(), **coverage}
     write(marker, result)
     return result
 

@@ -284,7 +284,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 1
+OBSERVATION_SPELLING_VERSION = 2
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -295,6 +295,9 @@ def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) 
     """
     aliases = {name: letter.casefold() for letter, names in pronunciation.LETTER_NAMES.items()
                for name in names if ' ' not in name}
+    # English "aye" is /aɪ/, like I, not the letter A /eɪ/. Recognition can
+    # write this homophone for the unchanged provider hint "eye".
+    aliases['aye'] = 'i'
     pending = [(start, '')]
     visited = set()
     while pending:

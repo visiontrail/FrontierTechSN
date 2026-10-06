@@ -118,6 +118,16 @@ def test_frozen_corpus_cannot_rebind_submitted_provider_jobs(tmp_path):
         validation.prepare(tmp_path / 'run', value, None)
 
 
+@pytest.mark.parametrize('field', ['batch_count','case_count','term_count','corpus_sha256','uppercase_letters'])
+def test_resumed_manifest_cannot_claim_full_coverage_with_corrupt_counts(tmp_path, field):
+    directory = tmp_path / 'run'
+    saved = validation.prepare(directory, fixture(), None)
+    saved[field] = 1 if isinstance(saved[field], int) else 'incorrect'
+    validation.write(directory / 'corpus.json', saved)
+    with pytest.raises(ValueError, match='coverage/hash metadata'):
+        validation.prepare(directory, fixture(), None)
+
+
 @pytest.mark.asyncio
 async def test_mode_rejection_does_not_submit_audio_or_claim_acoustic_completion(tmp_path, monkeypatch):
     case = {'id': 'ai', 'term': 'AI', 'text': 'The AI report is ready.', 'expected_actions': {'AI': 'spell'}}
