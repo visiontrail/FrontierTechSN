@@ -87,6 +87,17 @@ and missing glyphs still reject. `double you` and `double U` remain the letter W
 and cannot silently satisfy two U glyphs. This observation change does not alter
 source text, provider hints, synthesis parameters or durable request identities.
 
+`scripts/chatterbox_phoneme_evidence.py` supplies an additional complete-source
+comparison for unconditioned phone observations from the pinned acoustic model.
+The WAV hash, model revision and absence of reference-conditioned recognition
+must match. It compares all source words and every validated spelling atom with
+CMU word references and English letter-name phones. Compound rhotic token
+continuations do not count twice; vowel repetitions are never collapsed.
+Missing letters, extra named syllables, wrong vowels and an incomplete closing
+remain differences. Unsupported phones, words, numbers or symbols remain
+unverified. Passing this additional comparison does not override production
+gates or claim overall audio acceptance.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and
