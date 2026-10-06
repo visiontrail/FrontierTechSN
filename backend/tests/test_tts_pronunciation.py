@@ -367,3 +367,55 @@ async def test_prompt_changed_after_policy_snapshot_blocks_model_call(tmp_path, 
         await pronunciation.prepare_pronunciation("QZV reported results.", tmp_path / "audio", policy=policy, emit=lambda _: None)
     resolve.assert_not_awaited()
     chat.assert_not_awaited()
+
+
+def test_numeric_models_include_every_isolated_capital_without_editing_digits():
+    text='A2A and B2B use C3I, 2D and 4G beside GPT4o.'
+    found=pronunciation.candidates(text)
+    assert [r['source'] for r in found]==['A','A','B','B','C','I','D','G','GPT']
+    assert len({(r['start'],r['end']) for r in found})==len(found)
+    rows=decisions_for(text,{'A':'eigh','B':'bee','C':'see','I':'eye','D':'dee','G':'gee','GPT':'gee pee tee'})
+    _,edits=pronunciation.validate_decisions(text,rows)
+    rendered=pronunciation.render_span(text,0,len(text),edits)
+    assert rendered=='eigh 2 eigh and bee 2 bee use see 3 eye, 2 dee and 4 gee beside gee pee tee 4o.'
+    assert text=='A2A and B2B use C3I, 2D and 4G beside GPT4o.'
+
+
+def test_numeric_candidates_remain_excluded_from_urls_domains_and_email_addresses():
+    text='https://A2A.example/A2A person+A2A@B2B.example A2A.example A2A'
+    assert [r['source'] for r in pronunciation.candidates(text)]==['A','A']
+
+
+def test_legacy_policy_retains_original_candidate_set_and_hash():
+    current=pronunciation.policy_contract()
+    legacy={k:current[k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    assert pronunciation.compatible_policy(legacy,current)
+    assert pronunciation.candidates('A2A uses API.',policy_version=3)[0]['source']=='API'
+    assert [r['source'] for r in pronunciation.candidates('A2A uses API.')]==['A','A','API']
+    identity={'source_sha256':hashlib.sha256(b'A2A').hexdigest(),'language':'en','policy':legacy}
+    plan=pronunciation._plan('A2A',[],identity)
+    assert plan['synthesis_text']=='A2A' and plan['decisions']==[]
+    with pytest.raises(ValueError,match='every candidate'):
+        pronunciation.validate_decisions('A2A',[])
+
+
+@pytest.mark.asyncio
+async def test_legacy_saved_plan_keeps_submitted_numeric_request_identity(tmp_path,mock_model):
+    _resolve,chat=mock_model
+    current=pronunciation.policy_contract();legacy={k:current[k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    text='A2A is available.'
+    identity={'source_sha256':hashlib.sha256(text.encode()).hexdigest(),'language':'en','policy':legacy}
+    plan=pronunciation._plan(text,[],identity)
+    pronunciation._write_json(tmp_path/'tts_pronunciation.json',plan)
+    checkpoint=tmp_path/'tts_input_part_001.request-0.json';checkpoint.write_text('{"job_id":"original","idempotency_key":"retained"}')
+    before=checkpoint.read_bytes()
+    saved=await pronunciation.prepare_pronunciation(text,tmp_path,policy=legacy,emit=lambda _m:None)
+    assert saved==plan and checkpoint.read_bytes()==before
+    chat.assert_not_awaited()
+
+
+@pytest.mark.parametrize('field',['prompt_sha256','validation_alphabet_sha256','version'])
+def test_legacy_compatibility_does_not_accept_changed_prompt_or_alphabet(field):
+    current=pronunciation.policy_contract();legacy={k:current[k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    legacy[field]='changed'
+    assert not pronunciation.compatible_policy(legacy,current)

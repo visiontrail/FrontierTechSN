@@ -287,3 +287,26 @@ def test_composition_window_rejects_other_queue_work(tmp_path,queue):
     task,_manifest = completed_composition_task(tmp_path)
     with pytest.raises(RuntimeError):
         validation.composition_audio_window([task],queue)
+
+
+def test_legacy_corpus_preserves_case_order_and_original_candidate_contract(tmp_path,monkeypatch):
+    value=fixture();current=validation.chatterbox.cache_contract()
+    legacy={k:current['pronunciation_policy'][k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    frozen={**current,'pronunciation_policy':legacy}
+    monkeypatch.setattr(validation.chatterbox,'cache_contract',lambda:frozen)
+    directory=tmp_path/'run';original=validation.prepare(directory,value,None)
+    raw=(directory/'corpus.json').read_bytes()
+    monkeypatch.setattr(validation.chatterbox,'cache_contract',lambda:current)
+    resumed=validation.prepare(directory,value,None)
+    assert resumed==original and (directory/'corpus.json').read_bytes()==raw
+
+
+def test_legacy_corpus_cannot_hide_a_changed_synthesis_contract(tmp_path,monkeypatch):
+    value=fixture();current=validation.chatterbox.cache_contract()
+    legacy={k:current['pronunciation_policy'][k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    frozen={**current,'pronunciation_policy':legacy}
+    monkeypatch.setattr(validation.chatterbox,'cache_contract',lambda:frozen)
+    directory=tmp_path/'run';validation.prepare(directory,value,None)
+    monkeypatch.setattr(validation.chatterbox,'cache_contract',lambda:{**current,'seed':current['seed']+1})
+    with pytest.raises(ValueError,match='Frozen corpus'):
+        validation.prepare(directory,value,None)

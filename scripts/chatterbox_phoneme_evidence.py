@@ -82,9 +82,20 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
     parts = []
 
     def ordinary(fragment):
-        if re.search(r'[^A-Za-z\s.,:;!?\-\u2014\u2013]', fragment):
-            raise ValueError('Source interval contains unsupported numbers or symbols')
-        for word in re.findall(r'[A-Za-z]+', fragment):
+        if re.search(r'[^A-Za-z0-9\s.,:;!?\-\u2014\u2013]', fragment):
+            raise ValueError('Source interval contains unsupported symbols')
+        for match in re.finditer(r'[A-Za-z]+|\d+', fragment):
+            word = match[0]
+            if (len(word) == 1 and word in LETTER_PHONES
+                    and ((match.start() and fragment[match.start() - 1].isdigit())
+                         or (match.end() < len(fragment) and fragment[match.end()].isdigit()))):
+                # A in A2A names the letter; it is not the indefinite article.
+                parts.append(LETTER_PHONES[word])
+                continue
+            if word.isdigit():
+                if len(word) != 1:
+                    raise ValueError('Multi-digit source number requires a supported numeric reference')
+                word = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine')[int(word)]
             variants = dictionary.get(word.casefold())
             if not variants:
                 raise ValueError(f'No source pronunciation reference for {word}')

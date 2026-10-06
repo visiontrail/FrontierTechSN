@@ -60,8 +60,9 @@ def spelling_decisions(source):
         {
             "id": candidate["id"], "source": candidate["source"],
             "action": "keep" if candidate["source"] == "NASA" else "spell",
-            "spoken": candidate["source"] if candidate["source"] == "NASA" else "-".join(
-                candidate["source"].replace(".", "")
+            "spoken": candidate["source"] if candidate["source"] == "NASA" else (
+                ('eigh' if candidate['source'] == 'A' else tts_pronunciation.LETTER_NAMES[candidate['source']][0])
+                if len(candidate['source']) == 1 else '-'.join(candidate['source'].replace('.', ''))
             ),
             "reason": "Fixture pronunciation decision in this sentence.",
         }
@@ -1656,3 +1657,33 @@ async def test_acoustic_observation_upgrade_rechecks_original_completed_jobs_wit
     assert m['job_id']=='job-1' and m['synthesis_request']['seed']==42
     assert m['integrity']['pronunciation']['passed']
     assert m['integrity']['pronunciation']['asr_spelling_passed'] is False
+
+
+@pytest.mark.asyncio
+async def test_existing_numeric_jobs_retain_legacy_policy_input_seed_and_identity(setup_client):
+    server,script,directory,_verifier,_generate=setup_client
+    script.write_text('The report mentions A2A today.')
+    current=tts_pronunciation.policy_contract()
+    legacy={k:current[k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    await chatterbox._generate_chatterbox(str(script),str(directory),'jane','en',log=None,
+        emit=lambda _m:None,verify_text=True,frozen_pronunciation_policy=legacy)
+    checkpoint=directory/'tts_input_part_001.request-0.json';before=checkpoint.read_bytes()
+    wav=directory/'tts_input_part_001_generated.wav';original=wav.read_bytes()
+    await chatterbox._generate_chatterbox(str(script),str(directory),'jane','en',log=None,
+        emit=lambda _m:None,verify_text=True)
+    assert len(server.jobs)==1 and checkpoint.read_bytes()==before and wav.read_bytes()==original
+    metadata=json.loads((directory/'tts_input_part_001_generated.json').read_text())
+    assert metadata['identity']['pronunciation_policy']['version']==3
+    assert metadata['synthesis_request']['text']==script.read_text()
+
+
+@pytest.mark.asyncio
+async def test_new_numeric_generation_spells_single_letters_but_retains_digit_and_canonical_text(setup_client):
+    server,script,directory,_verifier,generate=setup_client
+    script.write_text('The report mentions A2A today.')
+    await generate()
+    assert server.jobs['job-1']['request']['text']=='The report mentions eigh 2 eigh today.'
+    assert script.read_text()=='The report mentions A2A today.'
+    metadata=json.loads((directory/'tts_input_part_001_generated.json').read_text())
+    assert metadata['identity']['pronunciation_policy']['version']==4
+    assert metadata['identity']['text']==script.read_text()

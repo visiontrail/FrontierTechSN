@@ -12,13 +12,17 @@ from pathlib import Path
 
 from backend import config
 
-POLICY_VERSION = 3
+CANDIDATE_POLICY_VERSION = 4
+POLICY_VERSION = CANDIDATE_POLICY_VERSION
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
     re.IGNORECASE,
 )
-CANDIDATE_RE = re.compile(r"(?:[A-Z]\.)+[A-Z]\.?|(?<![A-Z])[A-Z]{2,}(?![A-Z])")
+LEGACY_CANDIDATE_RE = re.compile(r"(?:[A-Z]\.)+[A-Z]\.?|(?<![A-Z])[A-Z]{2,}(?![A-Z])")
+CANDIDATE_RE = re.compile(
+    LEGACY_CANDIDATE_RE.pattern + r"|(?<![A-Z])[A-Z](?=\d)|(?<=\d)[A-Z](?![A-Z])"
+)
 # An alphabet validates the model's proposed sounds; it never decides which
 # names to change. The model selects each occurrence and its spoken spelling.
 LETTER_NAMES = {
@@ -48,7 +52,17 @@ def policy_contract() -> dict:
         "version": POLICY_VERSION,
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "validation_alphabet_sha256": _digest(LETTER_NAMES),
+        "candidate_pattern_sha256": hashlib.sha256(CANDIDATE_RE.pattern.encode()).hexdigest(),
     }
+
+
+def compatible_policy(policy: dict, current: dict | None = None) -> bool:
+    """Recognize the immutable v3 candidate contract without rebinding its jobs."""
+    current = current or policy_contract()
+    legacy = {key: current[key] for key in ('prompt_sha256', 'validation_alphabet_sha256')}
+    legacy['version'] = 3
+    implemented = {**current, 'version': CANDIDATE_POLICY_VERSION}
+    return policy == implemented or policy == legacy
 
 
 def normalize_text(text: str) -> str:
@@ -56,10 +70,14 @@ def normalize_text(text: str) -> str:
     return "\n".join(" ".join(line.split()) for line in text.splitlines())
 
 
-def candidates(text: str) -> list[dict]:
+def candidates(text: str, *, policy_version: int | None = None) -> list[dict]:
+    version = CANDIDATE_POLICY_VERSION if policy_version is None else policy_version
+    if version not in {3, CANDIDATE_POLICY_VERSION}:
+        raise ValueError('Unsupported pronunciation candidate policy')
+    pattern = LEGACY_CANDIDATE_RE if version == 3 else CANDIDATE_RE
     protected = [(match.start(), match.end()) for match in PROTECTED_TEXT_RE.finditer(text)]
     result = []
-    for match in CANDIDATE_RE.finditer(text):
+    for match in pattern.finditer(text):
         if any(start < match.end() and end > match.start() for start, end in protected):
             continue
         result.append({"id": len(result), "start": match.start(), "end": match.end(), "source": match[0]})
@@ -89,8 +107,8 @@ def _spoken_letters(spoken: str) -> str:
     return "".join(result)
 
 
-def validate_decisions(text: str, decisions: object) -> tuple[list[dict], list[dict]]:
-    expected = candidates(text)
+def validate_decisions(text: str, decisions: object, *, policy_version: int | None = None) -> tuple[list[dict], list[dict]]:
+    expected = candidates(text, policy_version=policy_version)
     if not isinstance(decisions, list) or len(decisions) != len(expected):
         raise ValueError("Return exactly one decision for every candidate occurrence")
     indexed = {}
@@ -156,7 +174,8 @@ def render_span(text: str, start: int, end: int, edits: list[dict]) -> str:
 
 
 def _plan(text: str, decisions: object, identity: dict) -> dict:
-    validated, edits = validate_decisions(text, decisions)
+    version = (identity.get('policy') or {}).get('version')
+    validated, edits = validate_decisions(text, decisions, policy_version=version)
     core = {"identity": identity, "decisions": validated, "edits": edits}
     synthesis = render_span(text, 0, len(text), edits)
     return {**core, "plan_sha256": _digest(core), "synthesis_text": synthesis,
@@ -166,6 +185,12 @@ def _plan(text: str, decisions: object, identity: dict) -> dict:
 async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emit) -> dict:
     """Freeze one validated model plan before submitting any synthesis jobs."""
     from backend.pipeline.digester import _chat, _resolve_provider
+
+    current = policy_contract()
+    if policy.get('prompt_sha256') != current['prompt_sha256']:
+        raise RuntimeError('Chatterbox pronunciation prompt changed during preparation')
+    if not compatible_policy(policy, current):
+        raise RuntimeError('Pronunciation policy is unsupported or changed; preserving existing plans and jobs')
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -191,7 +216,7 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
     prompt = (config.PROMPTS_DIR / "tts_pronunciation.txt").read_text(encoding="utf-8")
     if hashlib.sha256(prompt.encode()).hexdigest() != policy["prompt_sha256"]:
         raise RuntimeError("Chatterbox pronunciation prompt changed during preparation")
-    found = candidates(text)
+    found = candidates(text, policy_version=policy['version'])
     route, requested_route = {}, {}
     if not found:
         result = _plan(text, [], identity)

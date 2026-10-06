@@ -53,7 +53,7 @@ def sha(path: Path) -> str:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def corpus(fixture: dict, observed: dict | None = None) -> list[dict]:
+def corpus(fixture: dict, observed: dict | None = None, *, policy_version: int | None = None) -> list[dict]:
     rows, seen = [], set()
 
     def add(term, kind, category, *, text=None, identifier=None, actions=None):
@@ -63,10 +63,10 @@ def corpus(fixture: dict, observed: dict | None = None) -> list[dict]:
             seen.add(term)
         text = text or fixture['overrides'].get(term) or f'The report mentions {term} today.'
         if actions is None:
-            actions = ({c['source']: kind for c in pronunciation.candidates(text)}
+            actions = ({c['source']: kind for c in pronunciation.candidates(text, policy_version=policy_version)}
                        if kind in {'spell', 'keep'} else {})
             if term in fixture.get('mode_overrides', {}):
-                actions = {c['source']: fixture['mode_overrides'][term] for c in pronunciation.candidates(text)}
+                actions = {c['source']: fixture['mode_overrides'][term] for c in pronunciation.candidates(text, policy_version=policy_version)}
         rows.append({'id': identifier or 'base-' + digest(term)[:12], 'term': term,
                      'text': text, 'category': category, 'expected_actions': actions})
 
@@ -104,17 +104,24 @@ def corpus(fixture: dict, observed: dict | None = None) -> list[dict]:
 
 
 def prepare(directory: Path, fixture: dict, observed: dict | None) -> dict:
-    cases = corpus(fixture, observed)
+    marker = directory / 'corpus.json'
+    contract = chatterbox.cache_contract()
+    if marker.exists():
+        previous = read(marker)['identity']['cache_contract']
+        policy = previous.get('pronunciation_policy')
+        if (isinstance(policy, dict) and pronunciation.compatible_policy(policy, contract['pronunciation_policy'])
+                and previous == {**contract, 'pronunciation_policy': policy}):
+            contract = previous
+    cases = corpus(fixture, observed, policy_version=contract['pronunciation_policy']['version'])
     identity = {'version': 1, 'cases': cases, 'fixture_sha256': digest(fixture),
                 'observed_sha256': digest(observed) if observed else None,
                 'voice': 'space-en-f1', 'language': 'en',
-                'secondary_model': SECONDARY_MODEL, 'cache_contract': chatterbox.cache_contract(),
+                'secondary_model': SECONDARY_MODEL, 'cache_contract': contract,
                 'batch_size': 12}
     coverage = {'corpus_sha256': digest(identity), 'case_count': len(cases),
                 'term_count': len({r['term'] for r in cases}),
                 'uppercase_letters': ''.join(sorted({c for r in cases for c in r['term'] if 'A' <= c <= 'Z'})),
                 'batch_count': (len(cases) + 11) // 12}
-    marker = directory / 'corpus.json'
     if marker.exists():
         saved = read(marker)
         if saved['identity'] != identity:
@@ -134,7 +141,8 @@ def mode_report(text: str, cases: list[dict], plan: dict) -> dict:
     for case in cases:
         start = text.index(case['text'], offset)
         offset = start + len(case['text'])
-        for decision, candidate in zip(plan['decisions'], pronunciation.candidates(text), strict=True):
+        version = ((plan.get('identity') or {}).get('policy') or {}).get('version')
+        for decision, candidate in zip(plan['decisions'], pronunciation.candidates(text, policy_version=version), strict=True):
             if not start <= candidate['start'] < offset:
                 continue
             expected = case['expected_actions'].get(decision['source'])
@@ -424,7 +432,8 @@ async def run(directory: Path, marker: dict, *, allow_composing: bool = False) -
             try:
                 result = await chatterbox._generate_chatterbox(str(script), str(group / 'audio'),
                     'space-en-f1', 'en', log=print, emit=print, verify_text=True,
-                    part_auditor=audit_part, audit_all_parts=True, before_submit=before_submit)
+                    part_auditor=audit_part, audit_all_parts=True, before_submit=before_submit,
+                    frozen_pronunciation_policy=marker['identity']['cache_contract']['pronunciation_policy'])
             except tts.TtsIntegrityError as error:
                 # Only positive integrity rejection advances; transport or
                 # observation uncertainty preserves this batch and stops here.

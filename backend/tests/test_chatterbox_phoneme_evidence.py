@@ -56,7 +56,7 @@ def test_vowel_repetitions_survive_consonant_continuation_normalization():
 
 @pytest.mark.parametrize(('source', 'phones'), [
     ('UnsupportedQbitThing today.', 't ə d eɪ'),
-    ('The value is 2.', 'ð ə v æ l j uː ɪ z t uː'),
+    ('The value is 21.', 'ð ə v æ l j uː ɪ z t uː'),
     ('Today.', 'ϕ'),
 ])
 def test_unsupported_reference_or_phone_never_claims_acceptance(source, phones):
@@ -87,3 +87,21 @@ def test_positive_phone_evidence_does_not_claim_overall_audio_acceptance(tmp_pat
                    'conditioned_on_reference_text': False, 'phones': 't ə d eɪ'}
     report = evidence.audit_observation(wav, 'Today.', [], observation)
     assert report['passed'] and not report['overall_audio_acceptance']
+
+
+def test_numeric_model_keeps_each_letter_and_single_digit_in_original_order():
+    source='The report mentions A2A today.'
+    rows=[{'id':row['id'],'source':row['source'],'spoken':'eigh','action':'spell','reason':'Same A letter.'}
+          for row in tts_pronunciation.candidates(source)]
+    _,prepared=tts_pronunciation.validate_decisions(source,rows)
+    assert evidence.compare_source(source,prepared,PREFIX+'eɪ t uː eɪ'+ENDING)['passed']
+    assert not evidence.compare_source(source,prepared,PREFIX+'ɐ t uː eɪ'+ENDING)['passed']
+    assert not evidence.compare_source(source,prepared,PREFIX+'eɪ θ ɹ iː eɪ'+ENDING)['passed']
+    assert not evidence.compare_source(source,prepared,PREFIX+'eɪ t uː eɪ'+ENDING+' ɐ')['passed']
+
+
+def test_legacy_numeric_source_cannot_treat_a_model_letter_as_an_indefinite_article():
+    source='The report mentions A2A today.'
+    assert evidence.compare_source(source,[],PREFIX+'eɪ t uː eɪ'+ENDING)['passed']
+    assert not evidence.compare_source(source,[],PREFIX+'ɐ t uː eɪ'+ENDING)['passed']
+    assert not evidence.compare_source(source,[],PREFIX+'eɪ t uː ɐ'+ENDING)['passed']

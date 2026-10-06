@@ -94,7 +94,7 @@ must match. It compares all source words and every validated spelling atom with
 CMU word references and English letter-name phones. Compound rhotic token
 continuations do not count twice; vowel repetitions are never collapsed.
 Missing letters, extra named syllables, wrong vowels and an incomplete closing
-remain differences. Unsupported phones, words, numbers or symbols remain
+remain differences. Unsupported phones, words, multi-digit numbers or symbols remain
 unverified. Passing this additional comparison does not override production
 gates or claim overall audio acceptance.
 
@@ -117,6 +117,19 @@ on two CPU threads, and does not edit the original waveform. A missing runtime
 retains the strict ASR behavior. An attempted but unavailable local observation
 stops with the completed job preserved. TTS service/model/reference parameters
 remain unchanged.
+
+Pronunciation policy 4 includes isolated uppercase fragments adjacent to digits:
+`A2A`, `B2B`, `C3I`, `2D` and `4G` are reviewed in their complete script context.
+Only the alphabetic source spans can receive letter-name hints; digits, ordinary
+source text and protected URLs/domains/email addresses remain untouched. The
+candidate-pattern hash joins the frozen policy identity. Existing submitted v3
+jobs retain their original candidate set, plan, provider input and request keys.
+Frozen vocabulary runs also retain their full original case order and counts.
+A new repair input uses a separate directory and the current policy; it cannot
+overwrite an already submitted v3 request or replenish that request's attempts.
+Single digits have English number references in the acoustic comparison, and an
+isolated uppercase model letter adjacent to a digit uses its letter-name phones.
+The A in `A2A` cannot be accepted as the weak indefinite article.
 
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.

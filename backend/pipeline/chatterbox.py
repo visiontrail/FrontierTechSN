@@ -620,6 +620,7 @@ async def _generate_chatterbox(
     part_auditor: Callable[[Path, str, list[dict]], Awaitable[dict]] | None = None,
     audit_all_parts: bool = False,
     before_submit: Callable[[dict], Awaitable[dict]] | None = None,
+    frozen_pronunciation_policy: dict | None = None,
 ) -> str:
     # The service can speak 23 languages. The project's existing source-word,
     # ASR and subtitle contract is currently certified for English only.
@@ -630,7 +631,20 @@ async def _generate_chatterbox(
     if not config.CHATTERBOX_TTS_API_KEY:
         raise RuntimeError("Set CHATTERBOX_TTS_API_KEY in Admin -> System -> Voice & TTS")
     contract = cache_contract()
+    if contract['pronunciation_policy']['version'] not in {3, pronunciation.CANDIDATE_POLICY_VERSION}:
+        raise RuntimeError('Pronunciation policy is unsupported; preserving submitted jobs')
     _, directory, _, cleaned = tts._prepare_tts_input(script_path, output_dir, strip_speaker_labels=True)
+    if frozen_pronunciation_policy is not None:
+        if not pronunciation.compatible_policy(frozen_pronunciation_policy, contract['pronunciation_policy']):
+            raise RuntimeError('Frozen pronunciation contract changed; preserving submitted jobs')
+        contract['pronunciation_policy'] = dict(frozen_pronunciation_policy)
+    elif any(directory.glob('tts_input_part_*.request-*.json')):
+        saved = _read_json(directory / 'tts_pronunciation.json').get('identity') or {}
+        policy = saved.get('policy')
+        if (saved.get('source_sha256') == hashlib.sha256(pronunciation.normalize_text(cleaned).encode()).hexdigest()
+                and saved.get('language') == language and isinstance(policy, dict)
+                and pronunciation.compatible_policy(policy, contract['pronunciation_policy'])):
+            contract['pronunciation_policy'] = dict(policy)
     base_url = contract["url"]
     timeout = httpx.Timeout(max(5, config.CHATTERBOX_TTS_REQUEST_TIMEOUT), connect=15)
     async with httpx.AsyncClient(timeout=timeout, headers={"X-API-Key": config.CHATTERBOX_TTS_API_KEY}, follow_redirects=False) as client:
