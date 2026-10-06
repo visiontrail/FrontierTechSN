@@ -568,11 +568,15 @@ async def _generate_chatterbox(
     script_path: str, output_dir: str, voice: str, language: str, *,
     log, emit, verify_text: bool = False,
     part_auditor: Callable[[Path, str, list[dict]], Awaitable[dict]] | None = None,
+    audit_all_parts: bool = False,
+    before_submit: Callable[[dict], Awaitable[dict]] | None = None,
 ) -> str:
     # The service can speak 23 languages. The project's existing source-word,
     # ASR and subtitle contract is currently certified for English only.
     if language != "en":
         raise ValueError("The Chatterbox video adapter currently validates English narration only")
+    if audit_all_parts and (not verify_text or part_auditor is None):
+        raise ValueError("Complete part auditing requires text verification and an independent part auditor")
     if not config.CHATTERBOX_TTS_API_KEY:
         raise RuntimeError("Set CHATTERBOX_TTS_API_KEY in Admin -> System -> Voice & TTS")
     contract = cache_contract()
@@ -605,6 +609,19 @@ async def _generate_chatterbox(
         synthesis_directory = directory / "synthesis"
         synthesis_directory.mkdir(exist_ok=True)
         parts, metadata_rows = [], []
+        rejected_parts = []
+        coverage = []
+        def save_coverage():
+            if audit_all_parts:
+                _write_json(directory / 'tts_audit_coverage.json', {
+                    'source_sha256': hashlib.sha256(normalized.encode()).hexdigest(),
+                    'plan_sha256': pronunciation_plan['plan_sha256'],
+                    'expected_parts': len(chunks), 'observed_parts': len(coverage),
+                    'all_parts_observed': len(coverage) == len(chunks),
+                    'passed': len(coverage) == len(chunks) and not rejected_parts,
+                    'parts': coverage,
+                })
+        save_coverage()
         source_offset = 0
         for index, text in enumerate(chunks, 1):
             start = normalized.index(text, source_offset)
@@ -666,6 +683,9 @@ async def _generate_chatterbox(
                 _write_json(tts._part_metadata_path(path), cached)
                 parts.append(path)
                 metadata_rows.append(cached)
+                coverage.append({'part': index, 'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                                 'status': 'accepted', 'audio_sha256': cached['audio_sha256']})
+                save_coverage()
                 continue
             for attempt in range(MAX_INTEGRITY_ATTEMPTS):
                 request_path = directory / f"{stem}.request-{attempt}.json"
@@ -686,6 +706,12 @@ async def _generate_chatterbox(
                 )
                 if checkpoint.get("rejected") and not rechecking:
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
+                        if audit_all_parts:
+                            rejected_parts.append({'part': index, 'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                                                   'status': 'rejected', 'error': checkpoint['rejected']})
+                            coverage.append(rejected_parts[-1])
+                            save_coverage()
+                            break
                         raise tts.TtsIntegrityError(f"Chatterbox part {index} exhausted audio integrity attempts")
                     continue
                 if checkpoint.get("terminal_failure"):
@@ -693,6 +719,11 @@ async def _generate_chatterbox(
                         raise _service_attempts_exhausted(index, checkpoint["terminal_failure"])
                     continue
                 if not checkpoint.get("job_id"):
+                    if before_submit is not None:
+                        window = await before_submit({'part': index, 'attempt': attempt,
+                                                      'request_identity': request_identity})
+                        if not isinstance(window, dict) or window.get('available') is not True:
+                            raise RuntimeError('Chatterbox synthesis window is unverified; retaining the request checkpoint')
                     response = await _request(client, "POST", f"{base_url}/v1/jobs", emit=emit,
                                               json=payload, headers={"Idempotency-Key": checkpoint["idempotency_key"]})
                     checkpoint["job_id"] = response.json()["id"]
@@ -778,6 +809,12 @@ async def _generate_chatterbox(
                     checkpoint['rejection_observation_version'] = OBSERVATION_SPELLING_VERSION
                     _write_json(request_path, checkpoint)
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
+                        if audit_all_parts:
+                            rejected_parts.append({'part': index, 'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                                                   'status': 'rejected', 'error': str(exc)})
+                            coverage.append(rejected_parts[-1])
+                            save_coverage()
+                            break
                         raise
                     emit(f"Chatterbox audio integrity retry for part {index}: {exc}")
                     continue
@@ -801,7 +838,12 @@ async def _generate_chatterbox(
                 _write_json(tts._part_metadata_path(path), metadata)
                 parts.append(path)
                 metadata_rows.append(metadata)
+                coverage.append({'part': index, 'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                                 'status': 'accepted', 'audio_sha256': metadata['audio_sha256']})
+                save_coverage()
                 break
+        if rejected_parts:
+            raise tts.TtsIntegrityError('Chatterbox complete part audit retained integrity rejections: ' + json.dumps(rejected_parts))
     output = await tts._concat_wav_parts(parts, directory, log=log)
     integrity = tts._narration_integrity_summary(metadata_rows, tts._spoken_word_count(cleaned),
                                                 required=verify_text,

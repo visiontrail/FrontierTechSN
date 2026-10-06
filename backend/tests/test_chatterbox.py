@@ -1407,3 +1407,122 @@ async def test_missing_independent_acceptance_cannot_publish_or_spend_retry(setu
     assert len(server.jobs) == 1
     assert not (directory / 'tts_input_part_001_generated.wav').exists()
     assert not json.loads((directory / 'tts_input_part_001.request-0.json').read_text()).get('rejected')
+
+
+@pytest.mark.asyncio
+async def test_complete_audit_checks_later_parts_after_rejection_without_partial_concat(setup_client, monkeypatch):
+    server, script, directory, _verifier, _generate = setup_client
+    script.write_text('The API report is ready.\nThe GPU report is ready.\nThe BBC report is ready.')
+    concat = AsyncMock(side_effect=AssertionError('Rejected coverage cannot concatenate'))
+    monkeypatch.setattr(tts, '_concat_wav_parts', concat)
+    async def audit(_wav, text, _edits):
+        if 'API' in text:
+            raise tts.TtsIntegrityError('Missing first API letter')
+        return {'passed': True}
+    async def run():
+        return await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=True, part_auditor=audit, audit_all_parts=True)
+    with pytest.raises(tts.TtsIntegrityError, match='complete part audit'):
+        await run()
+    assert len(server.jobs) == 5
+    report = json.loads((directory / 'tts_audit_coverage.json').read_text())
+    assert report['all_parts_observed'] and not report['passed']
+    assert report['expected_parts'] == report['observed_parts'] == 3
+    assert [row['status'] for row in report['parts']] == ['rejected', 'accepted', 'accepted']
+    good_waves = {p.name: p.read_bytes() for p in directory.glob('*_generated.wav')}
+    assert len(good_waves) == 2
+    assert not (directory / 'tts_manifest.json').exists()
+    with pytest.raises(tts.TtsIntegrityError, match='complete part audit'):
+        await run()
+    assert len(server.jobs) == 5
+    assert {p.name:p.read_bytes() for p in directory.glob('*_generated.wav')} == good_waves
+    concat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_complete_audit_stops_on_uncertainty_and_resumes_identical_job(setup_client):
+    server, script, directory, _verifier, _generate = setup_client
+    script.write_text('The API report is ready.\nThe GPU report is ready.\nThe BBC report is ready.')
+    unavailable = True
+    async def audit(_wav, text, _edits):
+        if 'GPU' in text and unavailable:
+            raise TimeoutError('Observation unavailable')
+        return {'passed': True}
+    async def run():
+        return await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=True, part_auditor=audit, audit_all_parts=True)
+    with pytest.raises(TimeoutError):
+        await run()
+    checkpoint = directory / 'tts_input_part_002.request-0.json'
+    retained = checkpoint.read_bytes()
+    assert len(server.jobs) == 2
+    report = json.loads((directory / 'tts_audit_coverage.json').read_text())
+    assert report['observed_parts'] == 1 and not report['all_parts_observed'] and not report['passed']
+    assert not (directory / 'tts_input_part_003.request-0.json').exists()
+    unavailable = False
+    await run()
+    assert len(server.jobs) == 3
+    assert checkpoint.read_bytes() == retained
+    report = json.loads((directory / 'tts_audit_coverage.json').read_text())
+    assert report['passed'] and report['all_parts_observed']
+    assert report['source_sha256'] == hashlib.sha256(script.read_text().encode()).hexdigest()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('verify','auditor'), [(False, None), (True, None), (False, AsyncMock())])
+async def test_complete_audit_cannot_disable_required_guards(setup_client, verify, auditor):
+    server, script, directory, _verifier, _generate = setup_client
+    with pytest.raises(ValueError, match='requires text verification'):
+        await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=verify,
+            part_auditor=auditor, audit_all_parts=True)
+    assert not server.requests
+
+
+@pytest.mark.asyncio
+async def test_submission_window_stops_new_requests_but_keeps_durable_identity(setup_client):
+    server, script, directory, _verifier, _generate = setup_client
+    async def blocked(context):
+        assert context['part'] == 1 and context['attempt'] == 0 and context['request_identity']
+        raise RuntimeError('Production speech stage is active')
+    with pytest.raises(RuntimeError, match='Production speech'):
+        await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=True, before_submit=blocked)
+    checkpoint = directory / 'tts_input_part_001.request-0.json'
+    before = checkpoint.read_bytes()
+    assert not server.jobs
+    async def available(_context):
+        return {'available': True}
+    await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+        log=None, emit=lambda _message: None, verify_text=True, before_submit=available)
+    accepted = json.loads(checkpoint.read_text())
+    retained = json.loads(before)
+    assert accepted['identity'] == retained['identity']
+    assert accepted['idempotency_key'] == retained['idempotency_key']
+    assert len(server.jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_existing_completed_job_can_resume_without_new_submission_window(setup_client):
+    server, _script, directory, _verifier, generate = setup_client
+    await generate()
+    (directory / 'tts_input_part_001_generated.json').unlink()
+    blocked = AsyncMock(side_effect=AssertionError('Existing job must not be resubmitted'))
+    script = directory.parent / 'script.txt'
+    await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+        log=None, emit=lambda _message: None, verify_text=True, before_submit=blocked)
+    assert len(server.jobs) == 1
+    blocked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('result', [None, {}, {'available': False}])
+async def test_unconfirmed_submission_window_cannot_create_remote_job(setup_client, result):
+    server, script, directory, _verifier, _generate = setup_client
+    async def unknown(_context):
+        return result
+    with pytest.raises(RuntimeError, match='window is unverified'):
+        await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=True, before_submit=unknown)
+    assert not server.jobs
+    assert not json.loads((directory / 'tts_input_part_001.request-0.json').read_text()).get('job_id')

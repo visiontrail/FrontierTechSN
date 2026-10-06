@@ -51,6 +51,26 @@ run. Both raw and source-normalized extra-tail checks are required. The final
 audit compares metadata with the frozen source and provider input, rather than
 accepting metadata as its own expected identity.
 
+Complete corpus auditing records every source part, including rejected parts,
+in `audio/tts_audit_coverage.json`. A positive integrity rejection after the
+original bounded attempts does not skip the batch's later vocabulary cases.
+Observation or transport uncertainty still stops immediately and preserves the
+current job. The coverage report is updated per part, cannot claim completion
+after a partial run, and binds the complete source and plan hashes. Any rejected
+part prevents narration concatenation and passing batch acceptance. Normal
+production generation retains its immediate failure behavior.
+
+By default validation requires an idle application queue. `--allow-composing`
+also permits a private audio run while identified production tasks are composing
+video, after their narration is complete. Every active task must be composing;
+its final WAV hash, required source coverage and manifest part count must match.
+Unidentified queue owners, queued work and any speech/preparation stage block
+new submissions. This check repeats immediately before each new durable job;
+following an existing job does not resubmit it. `execution-window.json` and
+`synthesis-windows.json` retain the production audio anchors and application
+runtime separately from the isolated validation process's code identity. This
+option does not permit an application restart during composition.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and

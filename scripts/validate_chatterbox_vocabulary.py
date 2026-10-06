@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from backend.pipeline import chatterbox, tts, tts_pronunciation as pronunciation  # noqa: E402
 from backend.runtime import RUNTIME_IDENTITY  # noqa: E402
-from scripts.validate_chatterbox import require_idle  # noqa: E402
+from scripts.validate_chatterbox import TERMINAL, require_idle  # noqa: E402
 
 FIXTURE = ROOT / 'backend/tests/fixtures/chatterbox_common_vocabulary.json'
 DEFAULT_OUTPUT = ROOT / 'outputs/chatterbox-uppercase-20261006/full-corpus'
@@ -254,6 +254,53 @@ async def independent_part_audit(wav: Path, text: str, edits: list[dict], *, dir
     return report
 
 
+def composition_audio_window(tasks: list[dict], queue: dict) -> dict:
+    """Allow private speech QA only after every active production voice is final."""
+    active = [task for task in tasks if task['status'] not in TERMINAL]
+    if queue.get('items'):
+        raise RuntimeError('Queued production work must finish before private speech validation')
+    owner = queue.get('active')
+    ids = {task['id'] for task in active}
+    if owner and owner.get('id') not in ids:
+        raise RuntimeError('Shared queue owner is not an identified composing task')
+    anchors = []
+    for task in active:
+        if task['status'] != 'composing':
+            raise RuntimeError('Active production work has not finished its speech stage')
+        wav = Path(task.get('audio_path') or '')
+        manifest_path = wav.parent / 'tts_manifest.json'
+        if not wav.is_file() or not manifest_path.is_file():
+            raise RuntimeError('Composing task has no completed narration and manifest')
+        manifest = read(manifest_path)
+        integrity = manifest.get('integrity') or {}
+        if (integrity.get('passed') is not True or integrity.get('required') is not True
+                or integrity.get('accepted_source_coverage') != 1.0
+                or integrity.get('accepted_source_words') != manifest.get('source_word_count')
+                or manifest.get('chunk_count') != len(manifest.get('parts') or [])
+                or manifest.get('output_audio_sha256') != sha(wav)):
+            raise RuntimeError('Composing narration is incomplete or differs from its final waveform hash')
+        tts._read_pcm_wav(wav)
+        anchors.append({'task_id': task['id'], 'status': task['status'],
+                        'audio_sha256': manifest['output_audio_sha256'],
+                        'manifest_sha256': sha(manifest_path)})
+    return {'available': True, 'production_audio_anchors': anchors,
+            'queue_active': owner, 'queued_items': 0}
+
+
+async def require_audio_window(app_url: str, *, allow_composing: bool = False) -> dict:
+    if not allow_composing:
+        return {'available': True, **await require_idle(app_url)}
+    import httpx
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+        responses = await asyncio.gather(*(client.get(app_url.rstrip('/') + '/api/' + endpoint)
+                                          for endpoint in ['tasks', 'explainers/queue', 'runtime']))
+    for response in responses:
+        response.raise_for_status()
+    report = composition_audio_window(responses[0].json()['tasks'], responses[1].json())
+    report.update(checked_at=datetime.now(timezone.utc).isoformat(), application_runtime=responses[2].json())
+    return report
+
+
 async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
     audio = directory / 'audio'
     reports, offset = [], 0
@@ -310,14 +357,15 @@ async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
     return {'passed': bool(reports) and all(r['passed'] for r in reports), 'parts': reports}
 
 
-async def run(directory: Path, marker: dict) -> None:
+async def run(directory: Path, marker: dict, *, allow_composing: bool = False) -> None:
     rows = marker['identity']['cases']
     outcomes = []
     for index in range(marker['batch_count']):
-        await require_idle('http://localhost:8101')
+        window = await require_audio_window('http://localhost:8101', allow_composing=allow_composing)
         cases = rows[index * 12:(index + 1) * 12]
         group = directory / f'batch-{index + 1:03d}'
         group.mkdir(exist_ok=True)
+        write(group / 'execution-window.json', window)
         script = group / 'script.txt'
         source = '\n'.join(row['text'] for row in cases)
         if script.exists() and script.read_text() != source:
@@ -335,9 +383,19 @@ async def run(directory: Path, marker: dict) -> None:
         else:
             async def audit_part(wav, text, edits):
                 return await independent_part_audit(wav, text, edits, directory=group, plan=plan)
+            async def before_submit(context):
+                checked = await require_audio_window('http://localhost:8101', allow_composing=allow_composing)
+                checked['request_context'] = context
+                path = group / 'synthesis-windows.json'
+                previous = json.loads(path.read_text()) if path.exists() else []
+                if not isinstance(previous, list):
+                    raise ValueError('Synthesis-window archive is invalid; preserving it')
+                write(path, [*previous, checked])
+                return checked
             try:
                 result = await chatterbox._generate_chatterbox(str(script), str(group / 'audio'),
-                    'space-en-f1', 'en', log=print, emit=print, verify_text=True, part_auditor=audit_part)
+                    'space-en-f1', 'en', log=print, emit=print, verify_text=True,
+                    part_auditor=audit_part, audit_all_parts=True, before_submit=before_submit)
             except tts.TtsIntegrityError as error:
                 # Only positive integrity rejection advances; transport or
                 # observation uncertainty preserves this batch and stops here.
@@ -365,6 +423,8 @@ def main() -> int:
     parser.add_argument('action', choices=['prepare', 'run'])
     parser.add_argument('--output', type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument('--observed', type=Path)
+    parser.add_argument('--allow-composing', action='store_true',
+                        help='Use an identified composition window with hash-verified finished production narration')
     args = parser.parse_args()
     directory = args.output.expanduser().resolve()
     base = (ROOT / 'outputs').resolve()
@@ -373,7 +433,7 @@ def main() -> int:
     marker = prepare(directory, read(FIXTURE), read(args.observed) if args.observed else None)
     print(json.dumps({k:marker[k] for k in ['corpus_sha256','case_count','term_count','batch_count','uppercase_letters']}), flush=True)
     if args.action == 'run':
-        asyncio.run(run(directory, marker))
+        asyncio.run(run(directory, marker, allow_composing=args.allow_composing))
     return 0
 
 

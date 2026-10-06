@@ -232,3 +232,58 @@ async def test_final_vocabulary_audit_compares_identity_with_source_not_itself(t
     validation.write(validation.tts._part_metadata_path(wav), {'identity':identity})
     with pytest.raises(ValueError, match='frozen source'):
         await validation.audit_audio(tmp_path, source, plan)
+
+
+def completed_composition_task(tmp_path):
+    import hashlib,struct,wave
+    audio = tmp_path / 'audio'
+    audio.mkdir()
+    wav = audio / 'tts_input_generated.wav'
+    with wave.open(str(wav), 'wb') as stream:
+        stream.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+        stream.writeframes(struct.pack('<h',1000) * 24000)
+    manifest = {'output_audio_sha256':hashlib.sha256(wav.read_bytes()).hexdigest(),
+                'source_word_count':5, 'chunk_count':1, 'parts':[{}],
+                'integrity':{'required':True,'passed':True,'accepted_source_coverage':1.0,'accepted_source_words':5}}
+    validation.write(audio / 'tts_manifest.json',manifest)
+    return {'id':'production','status':'composing','audio_path':str(wav)},manifest
+
+
+def test_composition_window_requires_hash_bound_finished_voice(tmp_path):
+    task,_manifest = completed_composition_task(tmp_path)
+    result = validation.composition_audio_window([task], {'active':{'id':'production'},'items':[]})
+    assert result['available']
+    assert result['production_audio_anchors'][0]['audio_sha256'] == validation.sha(validation.Path(task['audio_path']))
+
+
+@pytest.mark.parametrize('status',['tts','writing','review','queued','music','publishing'])
+def test_composition_window_never_overlaps_unfinished_production_speech(tmp_path,status):
+    task,_manifest = completed_composition_task(tmp_path)
+    task['status'] = status
+    with pytest.raises(RuntimeError):
+        validation.composition_audio_window([task], {'active':{'id':'production'},'items':[]})
+
+
+@pytest.mark.parametrize('defect',['failed','preview','missing_coverage','changed_wave','changed_word_count','missing_part'])
+def test_composition_window_rejects_incomplete_or_changed_narration(tmp_path,defect):
+    task,manifest = completed_composition_task(tmp_path)
+    wav = validation.Path(task['audio_path'])
+    if defect == 'failed':manifest['integrity']['passed'] = False
+    elif defect == 'preview':manifest['integrity']['required'] = False
+    elif defect == 'missing_coverage':manifest['integrity'].pop('accepted_source_coverage')
+    elif defect == 'changed_wave':wav.write_bytes(b'changed')
+    elif defect == 'changed_word_count':manifest['integrity']['accepted_source_words'] = 4
+    elif defect == 'missing_part':manifest['parts'] = []
+    validation.write(wav.parent / 'tts_manifest.json',manifest)
+    with pytest.raises(RuntimeError):
+        validation.composition_audio_window([task], {'active':{'id':'production'},'items':[]})
+
+
+@pytest.mark.parametrize('queue',[
+    {'active':{'id':'unidentified-explainer'},'items':[]},
+    {'active':None,'items':[{'id':'next-production'}]},
+])
+def test_composition_window_rejects_other_queue_work(tmp_path,queue):
+    task,_manifest = completed_composition_task(tmp_path)
+    with pytest.raises(RuntimeError):
+        validation.composition_audio_window([task],queue)
