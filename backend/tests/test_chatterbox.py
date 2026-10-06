@@ -1317,3 +1317,93 @@ async def test_normalized_letter_names_still_reject_extra_trailing_speech(tmp_pa
     with pytest.raises(tts.TtsIntegrityError, match='trailing speech'):
         await chatterbox._verify_pronunciation(tmp_path / 'audio.wav', source, tmp_path,
             emit=lambda _message: None, edits=tts_pronunciation.candidates(source))
+
+
+@pytest.mark.asyncio
+async def test_independent_audit_rejects_cached_audio_and_retains_remaining_attempts(setup_client):
+    server, script, directory, _verifier, generate = setup_client
+    await generate()
+    original = (directory / 'tts_input_part_001_generated.wav').read_bytes()
+    original_metadata = (directory / 'tts_input_part_001_generated.json').read_bytes()
+    keys = dict(server.keys)
+    calls = 0
+    async def audit(_wav, _text, _edits):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise tts.TtsIntegrityError('Observed extra trailing speech')
+        return {'passed': True}
+    await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+        log=None, emit=lambda _message: None, verify_text=True, part_auditor=audit)
+    assert len(server.jobs) == 2
+    assert [job['request']['seed'] for job in server.jobs.values()] == [42, 43]
+    assert all(server.keys[key] == job for key, job in keys.items())
+    archive = directory / 'verification/tts_input_part_001/independent-rejected-job-1'
+    assert (archive / 'tts_input_part_001_generated.wav').read_bytes() == original
+    assert (archive / 'tts_input_part_001_generated.json').read_bytes() == original_metadata
+    assert json.loads((directory / 'tts_input_part_001.request-0.json').read_text())['rejected'].startswith('Chatterbox independent')
+
+
+@pytest.mark.asyncio
+async def test_independent_audit_rejection_never_replenishes_retry_budget(setup_client):
+    server, script, directory, _verifier, generate = setup_client
+    await generate()
+    async def reject(*_args):
+        raise tts.TtsIntegrityError('Extra speech remains present')
+    for _ in range(2):
+        with pytest.raises(tts.TtsIntegrityError):
+            await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+                log=None, emit=lambda _message: None, verify_text=True, part_auditor=reject)
+    assert len(server.jobs) == chatterbox.MAX_INTEGRITY_ATTEMPTS
+    assert [job['request']['seed'] for job in server.jobs.values()] == [42, 43, 44]
+
+
+@pytest.mark.asyncio
+async def test_independent_audit_uncertainty_preserves_cached_audio_and_request(setup_client):
+    server, script, directory, _verifier, generate = setup_client
+    await generate()
+    checkpoint = directory / 'tts_input_part_001.request-0.json'
+    before = checkpoint.read_bytes()
+    wav = directory / 'tts_input_part_001_generated.wav'
+    audio = wav.read_bytes()
+    async def unavailable(*_args):
+        raise TimeoutError('Recognizer unavailable')
+    with pytest.raises(TimeoutError):
+        await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=True, part_auditor=unavailable)
+    assert len(server.jobs) == 1
+    assert checkpoint.read_bytes() == before
+    assert wav.read_bytes() == audio
+
+
+@pytest.mark.asyncio
+async def test_independent_audit_checks_new_audio_before_acceptance(setup_client):
+    server, script, directory, _verifier, _generate = setup_client
+    calls = 0
+    async def audit(wav, _text, _edits):
+        nonlocal calls
+        calls += 1
+        assert wav.name.endswith('.tmp.wav')
+        assert not (directory / 'tts_input_part_001_generated.wav').exists()
+        if calls == 1:
+            raise tts.TtsIntegrityError('Extra speech')
+        return {'passed': True}
+    await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+        log=None, emit=lambda _message: None, verify_text=True, part_auditor=audit)
+    assert len(server.jobs) == 2
+    metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+    assert metadata['integrity']['independent_audit']['passed']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('result', [None, {}, {'passed': False}])
+async def test_missing_independent_acceptance_cannot_publish_or_spend_retry(setup_client, result):
+    server, script, directory, _verifier, _generate = setup_client
+    async def unknown(*_args):
+        return result
+    with pytest.raises(RuntimeError, match='confirmed acceptance'):
+        await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=True, part_auditor=unknown)
+    assert len(server.jobs) == 1
+    assert not (directory / 'tts_input_part_001_generated.wav').exists()
+    assert not json.loads((directory / 'tts_input_part_001.request-0.json').read_text()).get('rejected')

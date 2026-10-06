@@ -172,3 +172,63 @@ async def test_observation_timeout_keeps_current_job_and_stops_before_next_batch
     checkpoint = json.loads((tmp_path / 'batch-001/audio/tts_input_part_001.request-0.json').read_text())
     assert checkpoint == {'job_id': 'owned-live-job', 'idempotency_key': 'preserved-key'}
     assert not (tmp_path / 'batch-002').exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('observed', [
+    'The report mentions OCR today. Art.',
+    'The report mentions A are today, are today.',
+])
+async def test_independent_part_audit_rejects_raw_and_normalized_extra_speech(tmp_path, monkeypatch, observed):
+    from types import SimpleNamespace
+    from backend.pipeline import tts
+    source = 'The report mentions AR today.' if 'A are' in observed else 'The report mentions OCR today.'
+    wav = tmp_path / 'part.wav'
+    wav.write_bytes(b'unchanged-waveform')
+    def transcribe(command, **_kwargs):
+        validation.write(validation.Path(command[5]), words(observed))
+        return SimpleNamespace(returncode=0, stderr=b'')
+    monkeypatch.setattr(validation.subprocess, 'run', transcribe)
+    with pytest.raises(tts.TtsIntegrityError, match='Independent vocabulary audit'):
+        await validation.independent_part_audit(wav, source, pronunciation.candidates(source),
+            directory=tmp_path, plan={'plan_sha256': 'frozen-plan'})
+    report = json.loads(next((tmp_path / 'independent-parts').glob('*/*/audit.json')).read_text())
+    assert not report['passed']
+    assert report['transcript_sha256']
+    assert wav.read_bytes() == b'unchanged-waveform'
+
+
+@pytest.mark.asyncio
+async def test_independent_part_audit_retains_unavailable_observation(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    wav = tmp_path / 'part.wav'
+    wav.write_bytes(b'preserved-waveform')
+    monkeypatch.setattr(validation.subprocess, 'run', lambda *_args, **_kwargs:
+        SimpleNamespace(returncode=1, stderr=b'offline model unavailable'))
+    with pytest.raises(RuntimeError, match='recognizer unavailable'):
+        await validation.independent_part_audit(wav, 'The AI report is ready.', [],
+            directory=tmp_path, plan={'plan_sha256': 'plan'})
+    assert wav.read_bytes() == b'preserved-waveform'
+    assert not list((tmp_path / 'independent-parts').glob('*/*/identity.json'))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('key','wrong'), [
+    ('text', 'A different AI sentence.'), ('synthesis_text', 'eye eye'),
+    ('voice', 'different-voice'), ('pronunciation_plan_sha256', 'different-plan'),
+])
+async def test_final_vocabulary_audit_compares_identity_with_source_not_itself(tmp_path, key, wrong):
+    audio = tmp_path / 'audio'
+    audio.mkdir()
+    source = 'The AI report is ready.'
+    part = audio / 'tts_input_part_001.txt'
+    part.write_text(source)
+    wav = audio / 'tts_input_part_001_generated.wav'
+    wav.write_bytes(b'preserved')
+    plan = {'edits': [], 'plan_sha256': 'frozen-plan'}
+    identity = {'text': source, 'synthesis_text': source, 'voice': 'space-en-f1',
+                'language': 'en', 'pronunciation_plan_sha256': 'frozen-plan', 'synthesis_speed_ratio': 1.0}
+    identity[key] = wrong
+    validation.write(validation.tts._part_metadata_path(wav), {'identity':identity})
+    with pytest.raises(ValueError, match='frozen source'):
+        await validation.audit_audio(tmp_path, source, plan)

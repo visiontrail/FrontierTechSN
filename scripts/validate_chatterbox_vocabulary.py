@@ -222,6 +222,38 @@ def all_target_report(text: str, words: list[dict]) -> dict:
     return report
 
 
+async def independent_part_audit(wav: Path, text: str, edits: list[dict], *, directory: Path, plan: dict) -> dict:
+    """Disprove a part before acceptance, using the same remaining job attempts."""
+    identity = {'audio_sha256': sha(wav), 'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                'plan_sha256': plan['plan_sha256'], 'model': SECONDARY_MODEL}
+    target = directory / 'independent-parts' / identity['source_sha256'] / identity['audio_sha256']
+    target.mkdir(parents=True, exist_ok=True)
+    transcript = target / 'transcript.json'
+    marker = target / 'identity.json'
+    if not marker.exists() or read(marker) != identity or not transcript.exists():
+        env = os.environ.copy()
+        env['HF_HUB_OFFLINE'] = '1'
+        done = await asyncio.to_thread(subprocess.run, [sys.executable, '-m', 'backend.pipeline.av_sync',
+            'transcribe-mlx', str(wav), str(transcript), '--model', SECONDARY_MODEL, '--language', 'en'],
+            cwd=ROOT, env=env, capture_output=True, timeout=180)
+        if done.returncode:
+            raise RuntimeError('Independent recognizer unavailable: ' + done.stderr.decode()[-1000:])
+        write(marker, identity)
+    words = json.loads(transcript.read_text())
+    spelling = chatterbox._pronunciation_report(text, words, edits)
+    report = {'identity': identity, 'transcript_sha256': sha(transcript),
+              'targets': all_target_report(text, words), 'spelling': spelling,
+              'tail': chatterbox._trailing_speech_report(text, words),
+              'normalized_tail': chatterbox._trailing_speech_report(text, [{'text': spelling['normalized_transcript']}])}
+    if sha(wav) != identity['audio_sha256']:
+        raise RuntimeError('Waveform changed during its independent audit')
+    report['passed'] = all(report[key]['passed'] for key in ['targets', 'spelling', 'tail', 'normalized_tail'])
+    write(target / 'audit.json', report)
+    if not report['passed']:
+        raise tts.TtsIntegrityError('Independent vocabulary audit rejected speech: ' + json.dumps(report, ensure_ascii=False))
+    return report
+
+
 async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
     audio = directory / 'audio'
     reports, offset = [], 0
@@ -233,6 +265,15 @@ async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
                  for e in plan['edits'] if start <= e['start'] and e['end'] <= offset]
         wav = part.with_name(part.stem + '_generated.wav')
         metadata = read(tts._part_metadata_path(wav))
+        synthesis = chatterbox._render_provider_span(source, start, offset, plan['edits'])
+        expected_identity = {
+            'text': text, 'synthesis_text': synthesis, 'voice': 'space-en-f1', 'language': 'en',
+            'pronunciation_plan_sha256': plan['plan_sha256'], 'synthesis_speed_ratio': 1.0,
+        }
+        if any(metadata['identity'].get(key) != value for key, value in expected_identity.items()):
+            raise ValueError('Accepted part identity differs from the frozen source, plan or installed voice')
+        if metadata['synthesis_request']['text'] != synthesis:
+            raise ValueError('Accepted speech request differs from the source-bound provider input')
         if not chatterbox._cached_part(wav, metadata['identity'], verify_text=True):
             raise ValueError('Accepted production part no longer matches its waveform or identity')
         primary_words = json.loads((audio / 'verification' / part.stem / 'transcript.json').read_text())
@@ -256,7 +297,12 @@ async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
                'secondary': all_target_report(text, secondary_words),
                'secondary_spell_gate': chatterbox._pronunciation_report(text, secondary_words, edits),
                'secondary_tail_gate': chatterbox._trailing_speech_report(text, secondary_words)}
-        row['passed'] = all(row[k]['passed'] for k in ['primary', 'secondary', 'secondary_spell_gate', 'secondary_tail_gate'])
+        row['secondary_normalized_tail_gate'] = chatterbox._trailing_speech_report(
+            text, [{'text': row['secondary_spell_gate']['normalized_transcript']}])
+        if sha(wav) != identity['audio_sha256']:
+            raise ValueError('Accepted waveform changed during its final audit')
+        row['passed'] = all(row[k]['passed'] for k in ['primary', 'secondary', 'secondary_spell_gate',
+                                                     'secondary_tail_gate', 'secondary_normalized_tail_gate'])
         write(target / 'audit.json', row)
         reports.append(row)
         print(json.dumps({'part': part.name, 'dual_audit_passed': row['passed'],
@@ -287,9 +333,11 @@ async def run(directory: Path, marker: dict) -> None:
         if not modes['passed']:
             outcome.update(passed=False, status='mode_mismatch_before_synthesis')
         else:
+            async def audit_part(wav, text, edits):
+                return await independent_part_audit(wav, text, edits, directory=group, plan=plan)
             try:
                 result = await chatterbox._generate_chatterbox(str(script), str(group / 'audio'),
-                    'space-en-f1', 'en', log=print, emit=print, verify_text=True)
+                    'space-en-f1', 'en', log=print, emit=print, verify_text=True, part_auditor=audit_part)
             except tts.TtsIntegrityError as error:
                 # Only positive integrity rejection advances; transport or
                 # observation uncertainty preserves this batch and stops here.

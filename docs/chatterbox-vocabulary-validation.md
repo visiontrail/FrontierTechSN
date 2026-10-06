@@ -41,6 +41,16 @@ Roman `III` in the Phase III case can be represented as three. These
 representations do not authorize omitted letters, extra repetitions or changed
 product values.
 
+The corpus attaches its independent per-part auditor to the production adapter.
+It runs before each new WAV is accepted and when a cached WAV is reused. A
+positive rejection of cached speech archives its original WAV and metadata and
+marks the matching durable job rejected. Only the remaining original bounded
+attempts may synthesize again; resuming cannot replenish that budget. An
+unavailable recognizer leaves the waveform and checkpoint intact and stops the
+run. Both raw and source-normalized extra-tail checks are required. The final
+audit compares metadata with the frozen source and provider input, rather than
+accepting metadata as its own expected identity.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and

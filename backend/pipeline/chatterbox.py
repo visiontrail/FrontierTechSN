@@ -14,6 +14,7 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -566,6 +567,7 @@ def _continuity_report(text: str, chunks: list[str], parts: list[Path], rows: li
 async def _generate_chatterbox(
     script_path: str, output_dir: str, voice: str, language: str, *,
     log, emit, verify_text: bool = False,
+    part_auditor: Callable[[Path, str, list[dict]], Awaitable[dict]] | None = None,
 ) -> str:
     # The service can speak 23 languages. The project's existing source-word,
     # ASR and subtitle contract is currently certified for English only.
@@ -631,6 +633,34 @@ async def _generate_chatterbox(
                 "synthesis_parameters": contract["synthesis_parameters"],
             }
             cached = _cached_part(path, identity, verify_text=verify_text)
+            if cached and part_auditor is not None:
+                try:
+                    audit = await part_auditor(path, text, chunk_edits)
+                    if not isinstance(audit, dict) or audit.get('passed') is not True:
+                        raise RuntimeError('Independent part auditor did not return confirmed acceptance')
+                except tts.TtsIntegrityError as exc:
+                    # A new independent audit may disprove a formerly accepted
+                    # part. Preserve its original WAV and metadata, then spend
+                    # only the remaining attempts of this same durable request.
+                    request_path = next((p for p in directory.glob(f"{stem}.request-*.json")
+                                         if _read_request_checkpoint(p).get("job_id") == cached["job_id"]), None)
+                    if request_path is None:
+                        raise RuntimeError("Audited cached audio has no matching durable job checkpoint") from exc
+                    checkpoint = _read_request_checkpoint(request_path)
+                    if checkpoint.get("identity") != _digest({"identity": identity, "payload": cached["synthesis_request"]}):
+                        raise RuntimeError("Audited cached audio does not match its durable request identity") from exc
+                    archive = directory / "verification" / stem / f"independent-rejected-{cached['job_id']}"
+                    archive.mkdir(parents=True, exist_ok=True)
+                    for original in (path, tts._part_metadata_path(path)):
+                        retained = archive / original.name
+                        if retained.exists() and retained.read_bytes() != original.read_bytes():
+                            raise RuntimeError("Independent rejection archive changed; preserving current inputs") from exc
+                        if not retained.exists():
+                            retained.write_bytes(original.read_bytes())
+                    checkpoint["rejected"] = "Chatterbox independent part audit: " + str(exc)
+                    _write_json(request_path, checkpoint)
+                    emit(f"Chatterbox part {index}: independent audit rejected cached audio; remaining bounded attempts retained")
+                    cached = None
             if cached:
                 emit(f"Chatterbox part {index}/{len(chunks)}: reusing hash-validated audio")
                 _write_json(tts._part_metadata_path(path), cached)
@@ -729,6 +759,11 @@ async def _generate_chatterbox(
                     else:
                         integrity = {"method": "duration_only_preview", "verified": True,
                                      "internal_silence": tts._validate_pocket_internal_silence(staged)}
+                    if part_auditor is not None:
+                        audit = await part_auditor(staged, text, chunk_edits)
+                        if not isinstance(audit, dict) or audit.get('passed') is not True:
+                            raise RuntimeError('Independent part auditor did not return confirmed acceptance')
+                        integrity["independent_audit"] = audit
                 except tts.TtsIntegrityError as exc:
                     rejected = directory / "verification" / stem
                     rejected.mkdir(parents=True, exist_ok=True)
