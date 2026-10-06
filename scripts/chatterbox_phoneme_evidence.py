@@ -17,7 +17,7 @@ from backend.pipeline import tts_pronunciation as pronunciation
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 3
+EVIDENCE_VERSION = 4
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -114,6 +114,13 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
                 for index in range(len(variant) - 1):
                     if variant[index:index + 2] == ('N', 'SH'):
                         references.add((*variant[:index], 'N', 'CH', *variant[index + 2:]))
+                # A voiced stop can occur in a word-final /nz/ coda, e.g.
+                # mentions -> mention[d]s. Restrict this reference alternative
+                # to the dictionary word's final cluster: neither a syllable
+                # boundary inside a word nor a sequence of named letters
+                # authorizes an extra D. All vowels and closing words remain.
+                if variant[-2:] == ('N', 'Z'):
+                    references.add((*variant[:-2], 'N', 'D', 'Z'))
             parts.append(sorted(references))
 
     aliases = {name: letter for letter, names in pronunciation.LETTER_NAMES.items()

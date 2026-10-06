@@ -155,6 +155,15 @@ Missing A, changed N/M, added named syllables and word omissions remain failures
 Older phone-sequence rejections can be rechecked against the same completed
 waveform without new synthesis submissions.
 
+Phone evidence version 4 also permits the voiced homorganic stop in a dictionary
+word's final `/nz/` coda (`mentions` can contain `n-d-z`). This is a restricted
+application of the nasal/fricative stop-epenthesis rule described in
+[MIT's pronunciation material](https://ocw.mit.edu/courses/21g-223-listening-speaking-and-pronunciation-fall-2004/d54f3bba263684cab866eb7b25fe1533_MIT21G_223F04_epenthesis.pdf).
+It does not apply across named letters or at an internal syllable boundary.
+Missing vowels, changed nasals, extra spoken letter names and trailing speech
+remain failures. This reference alternative does not change the waveform or
+authorize a word-reading hint in a production pronunciation plan.
+
 Policy 6 uses `tts_pronunciation_v6.txt` and retains the policy 5 file unchanged.
 After actual source-bound trials, M and R inside longer spelled candidates can
 use standalone glyphs to avoid weak/clitic readings of `em` and `are`. Distinct

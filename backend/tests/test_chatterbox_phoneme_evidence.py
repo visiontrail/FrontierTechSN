@@ -123,6 +123,28 @@ def test_dictionary_transition_variant_never_waives_an_extra_named_letter_or_wro
     assert not evidence.compare_source(source,prepared,PREFIX+'ɛ n eɪ dʒ'+ENDING)['passed']
 
 
+def test_voiced_stop_in_an_ordinary_word_final_nz_coda_preserves_the_full_source():
+    source = 'The report mentions AI today.'
+    prepared = edits(source, 'AI', 'eigh eye')
+    phones = PREFIX.replace('ə n z', 'ə n d z') + 'eɪ aɪ' + ENDING
+    assert evidence.compare_source(source, prepared, phones)['passed']
+    assert not evidence.compare_source(source, prepared, phones + ' t')['passed']
+    assert not evidence.compare_source(source, prepared, phones.replace('eɪ aɪ', 'aɪ aɪ'))['passed']
+    assert not evidence.compare_source(source, prepared, phones.replace('ə n d z', 'ə m d z'))['passed']
+
+
+def test_word_final_stop_variant_cannot_add_d_between_named_n_and_z():
+    source = 'The report mentions NZ today.'
+    prepared = edits(source, 'NZ', 'N zee')
+    assert evidence.compare_source(source, prepared, PREFIX + 'ɛ n z iː' + ENDING)['passed']
+    assert not evidence.compare_source(source, prepared, PREFIX + 'ɛ n d z iː' + ENDING)['passed']
+
+
+def test_word_final_stop_variant_does_not_apply_to_an_internal_syllable_boundary():
+    assert evidence.compare_source('Enzymes.', [], 'ɛ n z aɪ m z')['passed']
+    assert not evidence.compare_source('Enzymes.', [], 'ɛ n d z aɪ m z')['passed']
+
+
 def test_double_you_retains_w_with_syllabic_l_without_losing_any_target_letter():
     source='The report mentions WLAN today.'
     prepared=edits(source,'WLAN','double you el eigh N')
