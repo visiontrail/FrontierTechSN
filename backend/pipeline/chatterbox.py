@@ -85,6 +85,27 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+def _bind_verification(directory: Path, binding: dict) -> None:
+    """Keep reports from another waveform out of the current attempt's evidence."""
+    directory.mkdir(parents=True, exist_ok=True)
+    marker = directory / 'observation_binding.json'
+    previous = _read_json(marker)
+    same_wave = previous.get('audio_sha256') == binding['audio_sha256']
+    files = [p for p in directory.glob('*.json') if p != marker and
+             (not same_wave or p.name in {'integrity_report.json', 'pronunciation_report.json', 'rejection.json'})]
+    if files:
+        identity = {'binding': previous, 'reports': {p.name: tts._file_sha256(p) for p in files}}
+        archive = directory / 'observation_history' / _digest(identity)
+        archive.mkdir(parents=True, exist_ok=True)
+        for path in files:
+            retained = archive / path.name
+            if retained.exists() and retained.read_bytes() != path.read_bytes():
+                raise RuntimeError('Verification history changed; preserving the current reports')
+            os.replace(path, retained)
+        _write_json(archive / 'provenance.json', identity)
+    _write_json(marker, binding)
+
+
 def _read_request_checkpoint(path: Path) -> dict:
     """An unreadable submitted-job identity must never become a new request."""
     try:
@@ -285,7 +306,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 2
+OBSERVATION_SPELLING_VERSION = 3
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -316,6 +337,20 @@ def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) 
             options.append((1, aliases[token]))
         if tokens[cursor:cursor + 2] in [['double', 'you'], ['double', 'u']]:
             options.append((2, 'w'))
+        if token in {'double', 'triple'} and cursor + 1 < end:
+            repeats = 2 if token == 'double' else 3
+            following = tokens[cursor + 1]
+            if tokens[cursor + 1:cursor + 3] in [['double', 'you'], ['double', 'u']]:
+                options.append((3, 'w' * repeats))
+            elif not (token == 'double' and following in {'you', 'u'}):
+                letter = aliases.get(following, following if len(following) == 1 else '')
+                if len(letter) == 1:
+                    options.append((2, letter * repeats))
+                elif re.fullmatch(r'[a-z]{2,4}', following) and following not in aliases:
+                    # ASR can fuse the named repeat and the following glyphs:
+                    # "double S H" -> "double SH". Repeat only its first
+                    # glyph and retain every remaining observed glyph.
+                    options.append((2, following[0] * repeats + following[1:]))
         for consumed, letters in options:
             if cursor + consumed <= end and target.startswith(joined + letters):
                 pending.append((cursor + consumed, joined + letters))
@@ -776,15 +811,21 @@ async def _generate_chatterbox(
                 try:
                     if tts._file_sha256(staged) != job.get("audio_sha256"):
                         raise RuntimeError("Chatterbox download does not match the completed job audio hash")
+                    verification = directory / "verification" / stem
+                    _bind_verification(verification, {
+                        'audio_sha256': job['audio_sha256'], 'job_id': job_id,
+                        'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                        'request_identity': request_identity,
+                    })
                     _validate_audio(staged, synthesis_text)
                     if verify_text:
                         integrity = await tts._verify_orpheus_part(
-                            staged, text, directory / "verification" / stem, emit=emit,
+                            staged, text, verification, emit=emit,
                             asr_advisory=True, provider_label="Chatterbox",
                             validate_pocket_continuity=True,
                         )
                         integrity["pronunciation"] = await _verify_pronunciation(
-                            staged, text, directory / "verification" / stem, emit=emit,
+                            staged, text, verification, emit=emit,
                             edits=chunk_edits,
                         )
                     else:
@@ -802,6 +843,10 @@ async def _generate_chatterbox(
                               if rechecking else f'rejected-{attempt}')
                     evidence = rejected / marker
                     evidence.mkdir(exist_ok=True)
+                    _write_json(rejected / 'rejection.json', {
+                        **_read_json(rejected / 'observation_binding.json'),
+                        'error': str(exc), 'observation_spelling_version': OBSERVATION_SPELLING_VERSION,
+                    })
                     for report_path in rejected.glob("*.json"):
                         (evidence / report_path.name).write_bytes(report_path.read_bytes())
                     os.replace(staged, rejected / f"{marker}.wav")

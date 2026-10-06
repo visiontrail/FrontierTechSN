@@ -1526,3 +1526,105 @@ async def test_unconfirmed_submission_window_cannot_create_remote_job(setup_clie
             log=None, emit=lambda _message: None, verify_text=True, before_submit=unknown)
     assert not server.jobs
     assert not json.loads((directory / 'tts_input_part_001.request-0.json').read_text()).get('job_id')
+
+
+def test_verification_binding_removes_legacy_reports_without_deleting_evidence(tmp_path):
+    original={'integrity_report.json':b'{"passed":true}', 'pronunciation_report.json':b'{"transcript":"old wave"}',
+              'transcript.json':b'[{"text":"old wave"}]'}
+    for name,data in original.items():(tmp_path/name).write_bytes(data)
+    binding={'audio_sha256':'new-wave','job_id':'new-job','source_sha256':'source','request_identity':'request'}
+    chatterbox._bind_verification(tmp_path,binding)
+    assert json.loads((tmp_path/'observation_binding.json').read_text()) == binding
+    assert not any((tmp_path/name).exists() for name in original)
+    archive=next((tmp_path/'observation_history').iterdir())
+    assert {name:(archive/name).read_bytes() for name in original} == original
+    assert json.loads((archive/'provenance.json').read_text())['binding'] == {}
+
+
+def test_same_wave_binding_reuses_transcript_but_refreshes_decision_reports(tmp_path):
+    binding={'audio_sha256':'same-wave','job_id':'same-job','source_sha256':'source','request_identity':'request'}
+    chatterbox._bind_verification(tmp_path,binding)
+    transcript=b'[{"text":"source"}]'
+    (tmp_path/'transcript.json').write_bytes(transcript)
+    (tmp_path/'transcript.meta.json').write_text('{"model":"recognizer"}')
+    (tmp_path/'integrity_report.json').write_text('{"passed":true}')
+    (tmp_path/'pronunciation_report.json').write_text('{"passed":true}')
+    chatterbox._bind_verification(tmp_path,binding)
+    assert (tmp_path/'transcript.json').read_bytes() == transcript
+    assert (tmp_path/'transcript.meta.json').exists()
+    assert not (tmp_path/'integrity_report.json').exists()
+    assert not (tmp_path/'pronunciation_report.json').exists()
+    archive=next((tmp_path/'observation_history').iterdir())
+    assert (archive/'integrity_report.json').exists()
+
+
+def test_changed_wave_cannot_reuse_previous_transcription(tmp_path):
+    first={'audio_sha256':'first','job_id':'first-job','source_sha256':'source','request_identity':'request'}
+    chatterbox._bind_verification(tmp_path,first)
+    (tmp_path/'transcript.json').write_text('[{"text":"old"}]')
+    (tmp_path/'transcript.meta.json').write_text('{"audio_size":100}')
+    second={**first,'audio_sha256':'second','job_id':'second-job'}
+    chatterbox._bind_verification(tmp_path,second)
+    assert not (tmp_path/'transcript.json').exists()
+    assert not (tmp_path/'transcript.meta.json').exists()
+    archive=next((tmp_path/'observation_history').iterdir())
+    assert json.loads((archive/'provenance.json').read_text())['binding']==first
+
+
+@pytest.mark.asyncio
+async def test_physical_rejection_cannot_archive_a_prior_passing_verdict(setup_client,monkeypatch):
+    server,script,directory,_verifier,generate=setup_client
+    await generate()
+    original=json.loads((directory/'tts_input_part_001_generated.json').read_text())
+    root=directory/'verification/tts_input_part_001'
+    root.mkdir(parents=True,exist_ok=True)
+    (root/'integrity_report.json').write_text('{"passed":true,"audio":"previous"}')
+    (root/'pronunciation_report.json').write_text('{"passed":true,"audio":"previous"}')
+    (directory/'tts_input_part_001_generated.json').unlink()
+    validate=chatterbox._validate_audio
+    def reject_staged(path,text):
+        if path.name.endswith('.tmp.wav'):raise tts.TtsIntegrityError('New physical rejection')
+        return validate(path,text)
+    monkeypatch.setattr(chatterbox,'_validate_audio',reject_staged)
+    with pytest.raises(tts.TtsIntegrityError,match='physical rejection'):
+        await generate()
+    assert len(server.jobs)==3
+    for attempt in range(3):
+        folder=root/f'rejected-{attempt}'
+        assert not (folder/'integrity_report.json').exists()
+        assert not (folder/'pronunciation_report.json').exists()
+        reason=json.loads((folder/'rejection.json').read_text())
+        waveform=root/f'rejected-{attempt}.wav'
+        assert reason['audio_sha256']==hashlib.sha256(waveform.read_bytes()).hexdigest()
+        assert reason['job_id']==f'job-{attempt+1}'
+    assert original['job_id']=='job-1'
+
+
+@pytest.mark.parametrize(('source','observed'),[
+    ('SSH','double S H'),('SSH','double SH'),('SSH','double ess haitch'),
+    ('IEEE','I triple E'),('IEEE','I triple ee'),('WW','double double you'),
+    ('WWW','triple double U'),('WWW','triple W'),('W','double U'),('W','double you'),
+    ('AAI','double A I'),('AAI','double AI'),
+])
+def test_source_bound_spelling_counts_conventional_repeated_letter_names(source,observed):
+    text=f'The report mentions {source} today.'
+    report=chatterbox._pronunciation_report(text,[{'text':f'The report mentions {observed} today.'}])
+    assert report['passed'],report
+    assert report['observation_spelling_version']==chatterbox.OBSERVATION_SPELLING_VERSION
+
+
+@pytest.mark.parametrize(('source','observed'),[
+    ('SH','double S H'),('SSH','triple S H'),('SSH','double S H H'),
+    ('SSH','double SSSH'),('SSH','double sausage H'),('SSH','double exited H'),
+    ('AI','double A I'),('UU','double you'),('UU','double U'),
+    ('WWW','triple U'),('IEEE','I double E'),('IEEE','I triple exited'),
+])
+def test_repeated_letter_observation_never_drops_glyphs_or_confuses_w_with_two_u(source,observed):
+    text=f'The report mentions {source} today.'
+    assert not chatterbox._pronunciation_report(text,[{'text':f'The report mentions {observed} today.'}])['passed']
+
+
+def test_repeated_letter_observation_still_rejects_a_distant_extra_initialism():
+    source='The report mentions SSH today.'
+    report=chatterbox._pronunciation_report(source,[{'text':'The report mentions SSH and double S H today.'}])
+    assert not report['passed']

@@ -71,6 +71,22 @@ following an existing job does not resubmit it. `execution-window.json` and
 runtime separately from the isolated validation process's code identity. This
 option does not permit an application restart during composition.
 
+Each verification attempt writes `observation_binding.json` with the downloaded
+waveform hash, durable job ID, source hash and request identity. Reports from a
+different waveform move into immutable `observation_history` before verification.
+Decision reports are refreshed even when rechecking the same waveform; its raw
+transcription remains reusable. A physical failure that precedes pronunciation
+verification therefore cannot archive a previous job's passing verdict. Every
+rejected WAV retains a hash-bound `rejection.json` alongside the reports actually
+available for that attempt.
+
+Spelling observation version 3 accepts source-bound conventional `double` and
+`triple` letter names, including ASR fusions such as `double SH` for `double S H`.
+It counts the named repeat and retains every remaining glyph. Extra repetitions
+and missing glyphs still reject. `double you` and `double U` remain the letter W
+and cannot silently satisfy two U glyphs. This observation change does not alter
+source text, provider hints, synthesis parameters or durable request identities.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and
