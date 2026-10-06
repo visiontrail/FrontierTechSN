@@ -41,7 +41,7 @@ class ExplainerStoreTests(unittest.TestCase):
         chatterbox = next(model for model in defaults["tts_models"] if model["id"] == "chatterbox-multilingual")
         self.assertEqual(chatterbox["default_voice"], "space-en-f1")
         self.assertEqual(chatterbox["voices"][0], "space-en-f1")
-        self.assertIn("Pocket reference clone", chatterbox["voice_labels"]["jane"])
+        self.assertIn("Pocket clone", chatterbox["voice_labels"]["jane"])
         original = studio.create_project(studio.ProjectInput(title="How practice works", scenes=[scene()]))
         studio.save_defaults(studio.Defaults(tts_model="orpheus-en", voice="tara", style=studio.Style(accent_color="#112233")))
         snapshot = studio.read_project(original["id"])
