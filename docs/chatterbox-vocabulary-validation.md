@@ -155,6 +155,13 @@ Missing A, changed N/M, added named syllables and word omissions remain failures
 Older phone-sequence rejections can be rechecked against the same completed
 waveform without new synthesis submissions.
 
+Policy 6 uses `tts_pronunciation_v6.txt` and retains the policy 5 file unchanged.
+After actual source-bound trials, M and R inside longer spelled candidates can
+use standalone glyphs to avoid weak/clitic readings of `em` and `are`. Distinct
+single-letter hints can use `M.` or `R.` without changing following digits.
+All candidate decisions remain contextual and letter/order/count validated;
+there is no production list of entity names to replace.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and

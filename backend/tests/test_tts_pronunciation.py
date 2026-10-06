@@ -425,7 +425,7 @@ def test_policy5_keeps_old_prompt_resources_and_uses_explicit_names_beside_n():
     legacy3=pronunciation.policy_contract(policy_version=3)
     legacy4=pronunciation.policy_contract(policy_version=4)
     latest=pronunciation.policy_contract()
-    assert latest['version']==5
+    assert latest['version']==pronunciation.IMPLEMENTED_POLICY_VERSION
     assert legacy3['prompt_sha256']==legacy4['prompt_sha256']!=latest['prompt_sha256']
     assert pronunciation.compatible_policy(legacy3,latest) and pronunciation.compatible_policy(legacy4,latest)
     prompt=pronunciation.prompt_path().read_text()
@@ -450,3 +450,31 @@ async def test_old_policy_can_plan_without_using_the_new_prompt(tmp_path,mock_mo
     if version==4:
         assert chat.await_args.args[0]==pronunciation.prompt_path(policy_version=4).read_text()
         assert 'ENTIRE candidate' in chat.await_args.args[0]
+
+
+def test_policy6_keeps_v5_bytes_and_disambiguates_m_without_changing_source_letters():
+    old=pronunciation.policy_contract(policy_version=5);latest=pronunciation.policy_contract()
+    assert latest['version']==6 and old['prompt_sha256']!=latest['prompt_sha256']
+    assert pronunciation.compatible_policy(old,latest)
+    assert pronunciation.prompt_path(policy_version=5).name=='tts_pronunciation_v5.txt'
+    assert pronunciation.prompt_path().name=='tts_pronunciation_v6.txt'
+    text='The report mentions CMAME today.'
+    _,edits=pronunciation.validate_decisions(text,decisions_for(text,{'CMAME':'see M eigh M ee'}))
+    assert pronunciation.render_span(text,0,len(text),edits)=='The report mentions see M eigh M ee today.'
+    assert 'standalone M' in pronunciation.prompt_path().read_text()
+    assert 'N/M/R rules' in pronunciation.prompt_path().read_text()
+
+
+def test_single_m_hint_can_be_distinct_while_retaining_its_model_digit():
+    text='The report mentions M2 today.'
+    _,edits=pronunciation.validate_decisions(text,decisions_for(text,{'M':'M.'}))
+    assert pronunciation.render_span(text,0,len(text),edits)=='The report mentions M. 2 today.'
+    assert text=='The report mentions M2 today.'
+
+
+def test_policy6_keeps_r_as_the_same_letter_in_ocr_and_numeric_fragments():
+    text='OCR and R2 remain source identifiers.'
+    _,edits=pronunciation.validate_decisions(text,decisions_for(text,{'OCR':'oh see R','R':'R.'}))
+    assert pronunciation.render_span(text,0,len(text),edits)=='oh see R and R. 2 remain source identifiers.'
+    assert text=='OCR and R2 remain source identifiers.'
+    assert 'Prefer standalone R' in pronunciation.prompt_path().read_text()

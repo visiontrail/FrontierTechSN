@@ -13,9 +13,9 @@ from pathlib import Path
 from backend import config
 
 CANDIDATE_POLICY_VERSION = 4
-IMPLEMENTED_POLICY_VERSION = 5
+IMPLEMENTED_POLICY_VERSION = 6
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -52,7 +52,7 @@ def prompt_path(*, policy_version: int | None = None) -> Path:
     version = IMPLEMENTED_POLICY_VERSION if policy_version is None else policy_version
     if version not in SUPPORTED_POLICY_VERSIONS:
         raise ValueError('Unsupported pronunciation prompt policy')
-    return config.PROMPTS_DIR / ('tts_pronunciation.txt' if version in {3, 4} else 'tts_pronunciation_v5.txt')
+    return config.PROMPTS_DIR / ('tts_pronunciation.txt' if version in {3, 4} else f'tts_pronunciation_v{version}.txt')
 
 
 def policy_contract(*, policy_version: int | None = None) -> dict:
@@ -74,7 +74,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {3, 4}:
+    if policy.get('version') in {3, 4, 5}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
         except OSError:
