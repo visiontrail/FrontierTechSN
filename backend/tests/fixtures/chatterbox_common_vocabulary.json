@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "language": "en",
+  "initialisms": {
+    "ai_and_computing": "AI AGI GPT ML LLM NLP API CPU GPU TPU NPU DPU FPGA SDK CLI IDE UI UX URL URI HTTP HTTPS HTML CSS XML RPC DNS DHCP TCP UDP IP TLS SSL SSH FTP SMTP IMAP VPN WLAN NFC USB HDMI SATA SSD HDD HBM GDDR DDR VR AR XR VFX CGI LCD LED TV GPS GIS IT MCP RL SFT DPO PPO CV OCR TTS ASR RTX SCP",
+    "companies_and_media": "AMD ASML TSMC IBM HP AWS BBC CBS ABC NBC CNBC CNN NPR PBS WSJ FT AP AFP HBO ESPN MSNBC NHK CBC JVC JLL DJI BYD SK PTC XTX",
+    "institutions": "EU UK US UN USA UAE WHO WTO OECD IMF ECB FBI CIA NSA FDA CDC FCC FTC SEC CFTC IRS DHS DOJ DOD IETF IEEE ACM ITU ICML EMNLP NYU MIT UCLA USC CMU EPFL",
+    "business": "CEO CFO COO CTO CIO CMO CPO CHRO VP SVP EVP IPO GDP GNP CPI PPI PMI ETF ROI ROE ROA EPS PE VC ARR MRR KPI KYC AML ESG B2B B2C B2G P2P",
+    "daily_life": "PC PDF DVD CD SMS MMS LTE GSM CDMA OTP QR ATM MFA ID ISBN ISSN IQ EQ UTC GMT AM PM AZ NY TX OR XY XYZ FYI ETA TBD TBA DIY DM IMO IMHO BRB AFK IRL IDK PTO EOD EOW NSFW SFW",
+    "science_and_health": "DNA RNA RBC ECG EEG MRI CT PET ICU ER EMS NHS PCR ADHD PTSD BMI HIV"
+  },
+  "word_readings": {
+    "acronyms": "NASA NATO UNESCO UNICEF OPEC ASEAN APEC RAM ROM DRAM SRAM RAID BIOS ASCII ASIC CAD CAM OLED CUDA RADAR SONAR LASER LIDAR SCUBA COVID EBITDA REST SOAP PIN SIM NIST ANSI CERN AIDS SARS FOMO YOLO GOAT",
+    "names_and_emphasis": "NVIDIA SIGGRAPH CRISPR WIRED TIME README HELP STOP WAIT YES THANKS NOTE INFO WARNING NeurIPS"
+  },
+  "contextual_readings": "SQL GUI JSON YAML GIF JPEG TIFF AVIF ZIP RAR TAR NAS SAN ARM OK ASAP ISO RFID FAQ ICLR WASM RAG LOL AFAIK TLDR",
+  "mixed_case_and_symbols": "OpenAI ChatGPT xAI QbitAI AIBase mRNA PhD WiFi Wi-Fi eSIM eGPU iOS macOS NVMe PCIe SoC SaaS PaaS IaaS NoSQL MySQL PostgreSQL MLOps AIOps R&D M&A P&L C++ C#",
+  "overrides": {
+    "IT": "The IT department checks the system.",
+    "US": "The US delegation attends the meeting.",
+    "AM": "The clock reads nine AM today.",
+    "PM": "The clock reads nine PM today.",
+    "OR": "OR is Oregon's postal abbreviation.",
+    "AZ": "AZ is Arizona's postal abbreviation.",
+    "NY": "NY is New York's postal abbreviation.",
+    "TX": "TX is Texas's postal abbreviation.",
+    "NASA": "NASA studies a mission to space.",
+    "NATO": "The NATO delegation attends the meeting.",
+    "NVIDIA": "The chipmaker NVIDIA presents its hardware.",
+    "JSON": "The JSON parser reads the document.",
+    "YAML": "The YAML configuration file is ready.",
+    "SQL": "The SQL database answers the query.",
+    "GUI": "The GUI displays the application window.",
+    "SaaS": "The SaaS company delivers hosted software.",
+    "PaaS": "The PaaS platform hosts the application.",
+    "IaaS": "The IaaS service supplies computing infrastructure.",
+    "PhD": "The PhD student presents the research.",
+    "mRNA": "The mRNA molecule carries genetic information.",
+    "NVMe": "The NVMe drive stores the file.",
+    "PCIe": "The PCIe interface connects the device.",
+    "SoC": "The SoC combines components on a chip.",
+    "R&D": "The R&D team studies the design.",
+    "M&A": "The M&A team discusses the proposal.",
+    "P&L": "The P&L statement records the results.",
+    "C++": "The programmer reads a C++ example.",
+    "C#": "The programmer reads a C# example."
+  },
+  "context_cases": [
+    {"id": "emphasized-it", "term": "IT", "text": "The sign reads DO IT NOW.", "expected_actions": {"DO": "keep", "IT": "keep", "NOW": "keep"}},
+    {"id": "emphasized-us", "term": "US", "text": "The sign reads HELP US TODAY.", "expected_actions": {"HELP": "keep", "US": "keep", "TODAY": "keep"}},
+    {"id": "emphasized-no", "term": "NO", "text": "The sign reads NO ENTRY.", "expected_actions": {"NO": "keep", "ENTRY": "keep"}},
+    {"id": "emphasized-in", "term": "IN", "text": "The sign reads COME IN.", "expected_actions": {"COME": "keep", "IN": "keep"}},
+    {"id": "emphasized-or", "term": "OR", "text": "The sign reads YES OR NO.", "expected_actions": {"YES": "keep", "OR": "keep", "NO": "keep"}},
+    {"id": "emphasized-am", "term": "AM", "text": "The note reads I AM READY.", "expected_actions": {"AM": "keep", "READY": "keep"}},
+    {"id": "chemical-no", "term": "NO", "text": "NO means nitric oxide in this sentence.", "expected_actions": {"NO": "spell"}},
+    {"id": "postal-in", "term": "IN", "text": "IN is Indiana's postal abbreviation.", "expected_actions": {"IN": "spell"}},
+    {"id": "adjacent-ai-api", "term": "AI API", "text": "The AI API returns the result.", "expected_actions": {"AI": "spell", "API": "spell"}},
+    {"id": "adjacent-ai-r-and-d", "term": "AI R&D", "text": "The AI R&D team studies the result.", "expected_actions": {"AI": "spell"}},
+    {"id": "repeated-ai-source", "term": "AI", "text": "AI supports research, and AI supports testing.", "expected_actions": {"AI": "spell"}},
+    {"id": "word-vs-letter-nasa", "term": "NASA API", "text": "The NASA API returns the result.", "expected_actions": {"NASA": "keep", "API": "spell"}}
+  ],
+  "plural_bases": "API CPU GPU TPU NPU LLM ETF VC VPN PC PDF URL SDK CEO CFO CTO",
+  "possessive_bases": "OpenAI ChatGPT AI GPU API BBC CNN CNBC NASA NATO CEO GPT",
+  "dotted_forms": "A.I. A.P.I. C.P.U. G.P.U. G.P.T. B.B.C. C.N.N. U.S. U.S.A. U.K. E.U. U.N. I.B.M.",
+  "product_forms": "GPT4 GPT-4 GPT4o GPT-4o GPT-5 GPT-5.2 ChatGPT4 ChatGPT-4 RTX5090 RTX-5090 HBM3E FP8 FP16 DDR5 PCIe5 NVMe2 IPv4 IPv6 HTTP2 TLS1.3 GLM-5 GLM-6",
+  "reference_readings": [
+    {"term": "SQL", "valid_readings": ["letter names", "sequel"], "source": "https://learn.microsoft.com/en-us/sql/odbc/reference/structured-query-language-sql"},
+    {"term": "SaaS", "valid_readings": ["sass"], "source": "https://info.microsoft.com/rs/157-GQE-382/images/Enterprise_Cloud_Strategy_2nd_Edition_ebook_mobile.pdf"}
+  ]
+}
