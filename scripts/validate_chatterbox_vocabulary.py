@@ -248,6 +248,20 @@ async def independent_part_audit(wav: Path, text: str, edits: list[dict], *, dir
     if sha(wav) != identity['audio_sha256']:
         raise RuntimeError('Waveform changed during its independent audit')
     report['passed'] = all(report[key]['passed'] for key in ['targets', 'spelling', 'tail', 'normalized_tail'])
+    if not report['passed'] and report['tail']['passed'] and report['normalized_tail']['passed']:
+        from backend.pipeline import chatterbox_phonemes
+        acoustic = await chatterbox_phonemes.confirm(wav, text, edits, target)
+        if acoustic is not None:
+            report['acoustic_source_confirmation'] = acoustic
+            if acoustic.get('passed') is True:
+                if (acoustic.get('audio_sha256') != identity['audio_sha256']
+                        or acoustic.get('source_sha256') != identity['source_sha256']
+                        or acoustic.get('method') != 'complete_source_phone_sequence'
+                        or acoustic.get('supported') is not True
+                        or acoustic.get('conditioned_on_reference_text') is not False):
+                    raise RuntimeError('Acoustic corpus confirmation differs from its exact source waveform')
+                report.update(asr_audit_passed=False, passed=True,
+                              verification_mode='complete_source_phone_sequence')
     write(target / 'audit.json', report)
     if not report['passed']:
         raise tts.TtsIntegrityError('Independent vocabulary audit rejected speech: ' + json.dumps(report, ensure_ascii=False))
@@ -350,6 +364,21 @@ async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
             raise ValueError('Accepted waveform changed during its final audit')
         row['passed'] = all(row[k]['passed'] for k in ['primary', 'secondary', 'secondary_spell_gate',
                                                      'secondary_tail_gate', 'secondary_normalized_tail_gate'])
+        if (not row['passed'] and row['secondary_tail_gate']['passed']
+                and row['secondary_normalized_tail_gate']['passed']):
+            from backend.pipeline import chatterbox_phonemes
+            acoustic = await chatterbox_phonemes.confirm(wav, text, edits, target)
+            if acoustic is not None:
+                row['acoustic_source_confirmation'] = acoustic
+                if acoustic.get('passed') is True:
+                    if (acoustic.get('audio_sha256') != identity['audio_sha256']
+                            or acoustic.get('source_sha256') != identity['source_sha256']
+                            or acoustic.get('supported') is not True
+                            or acoustic.get('method') != 'complete_source_phone_sequence'
+                            or acoustic.get('conditioned_on_reference_text') is not False):
+                        raise RuntimeError('Final acoustic confirmation differs from its source waveform')
+                    row.update(asr_audit_passed=False, passed=True,
+                               verification_mode='complete_source_phone_sequence')
         write(target / 'audit.json', row)
         reports.append(row)
         print(json.dumps({'part': part.name, 'dual_audit_passed': row['passed'],

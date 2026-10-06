@@ -154,6 +154,7 @@ class FakeService:
 
 @pytest.fixture
 def setup_client(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'CHATTERBOX_PHONEME_RUNTIME_LIB', str(tmp_path / 'not-installed'))
     monkeypatch.setattr(config, "CHATTERBOX_TTS_API_KEY", "test-secret")
     monkeypatch.setattr(config, "CHATTERBOX_TTS_URL", "http://chatterbox.test")
     monkeypatch.setattr(config, "CHATTERBOX_TTS_DEPLOYMENT_FINGERPRINT", "deployment-a", raising=False)
@@ -1628,3 +1629,30 @@ def test_repeated_letter_observation_still_rejects_a_distant_extra_initialism():
     source='The report mentions SSH today.'
     report=chatterbox._pronunciation_report(source,[{'text':'The report mentions SSH and double S H today.'}])
     assert not report['passed']
+
+
+@pytest.mark.asyncio
+async def test_acoustic_observation_upgrade_rechecks_original_completed_jobs_without_resynthesis(setup_client,monkeypatch):
+    from backend.pipeline import chatterbox_phonemes
+    server,script,directory,_verifier,generate=setup_client
+    script.write_text('The report mentions RPC today.')
+    monkeypatch.setattr(av_sync,'ensure_word_transcript',AsyncMock(return_value=([{'text':'The report mentions our PC today.'}],{})))
+    monkeypatch.setattr(chatterbox_phonemes,'confirm',AsyncMock(return_value=None))
+    with pytest.raises(tts.TtsIntegrityError):await generate()
+    original={}
+    for p in directory.glob('tts_input_part_001.request-*.json'):
+        d=json.loads(p.read_text());d['rejection_observation_version']=chatterbox.OBSERVATION_SPELLING_VERSION-1
+        p.write_text(json.dumps(d));original[p.name]=(d['job_id'],d['idempotency_key'])
+    async def confirm(wav,source,_edits,_directory):
+        return {'supported':True,'passed':True,'method':'complete_source_phone_sequence',
+                'conditioned_on_reference_text':False,'audio_sha256':hashlib.sha256(wav.read_bytes()).hexdigest(),
+                'source_sha256':hashlib.sha256(source.encode()).hexdigest()}
+    monkeypatch.setattr(chatterbox_phonemes,'confirm',confirm)
+    await generate()
+    assert len(server.jobs)==chatterbox.MAX_INTEGRITY_ATTEMPTS
+    for p in directory.glob('tts_input_part_001.request-*.json'):
+        d=json.loads(p.read_text());assert (d['job_id'],d['idempotency_key'])==original[p.name]
+    m=json.loads((directory/'tts_input_part_001_generated.json').read_text())
+    assert m['job_id']=='job-1' and m['synthesis_request']['seed']==42
+    assert m['integrity']['pronunciation']['passed']
+    assert m['integrity']['pronunciation']['asr_spelling_passed'] is False

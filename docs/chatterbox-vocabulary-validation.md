@@ -98,6 +98,26 @@ remain differences. Unsupported phones, words, numbers or symbols remain
 unverified. Passing this additional comparison does not override production
 gates or claim overall audio acceptance.
 
+Observation version 4 can corroborate an ASR spelling mismatch with a complete
+source phone sequence after the physical checks have passed. The raw failed
+ASR report remains visible, and the accepted report explicitly names the
+acoustic confirmation method. Positive ASR extra-tail detection remains a
+rejection. Source/word/letter omissions, extra phones and wrong vowels cannot
+be cleared by the source comparison. Previously rejected spelling checkpoints
+are followed under their original completed job IDs, without new POSTs or a
+replenished seed budget.
+
+The optional local runtime defaults to `.run/tts-phoneme-runtime/lib`, or
+`CHATTERBOX_PHONEME_RUNTIME_LIB` can select another isolated library directory.
+The tested isolated packages are transformers 4.57.6, huggingface-hub 0.36.2,
+tokenizers 0.22.2 and safetensors 0.6.2; the invoking Python also needs Torch and
+NumPy. The pinned model snapshot must already exist in the local Hugging Face
+cache. The observer receives only a WAV path, never source text, loads offline
+on two CPU threads, and does not edit the original waveform. A missing runtime
+retains the strict ASR behavior. An attempted but unavailable local observation
+stops with the completed job preserved. TTS service/model/reference parameters
+remain unchanged.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and

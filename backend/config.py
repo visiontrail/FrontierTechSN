@@ -374,6 +374,10 @@ CHATTERBOX_TTS_CHUNK_WORDS = int(os.getenv("CHATTERBOX_TTS_CHUNK_WORDS", "30"))
 CHATTERBOX_TTS_MAX_CHARS = int(os.getenv("CHATTERBOX_TTS_MAX_CHARS", "250"))
 CHATTERBOX_TTS_REQUEST_TIMEOUT = int(os.getenv("CHATTERBOX_TTS_REQUEST_TIMEOUT", "60"))
 CHATTERBOX_TTS_POLL_SECONDS = int(os.getenv("CHATTERBOX_TTS_POLL_SECONDS", "2"))
+# Optional isolated verifier dependencies; no TTS model or voice is changed.
+CHATTERBOX_PHONEME_RUNTIME_LIB = os.getenv(
+    "CHATTERBOX_PHONEME_RUNTIME_LIB", str(PROJECT_ROOT / ".run" / "tts-phoneme-runtime" / "lib"),
+)
 
 # Audio/visual alignment. MLX Whisper reads the finished WAV from whichever TTS
 # provider the task selected to obtain word timestamps; it never generates or

@@ -306,7 +306,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 3
+OBSERVATION_SPELLING_VERSION = 4
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -543,6 +543,21 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
     normalized_tail = _trailing_speech_report(text, [{"text": report['normalized_transcript']}])
     if not normalized_tail['passed']:
         report['trailing_speech'] = normalized_tail
+    if words and not report['passed'] and report['trailing_speech']['passed']:
+        from backend.pipeline import chatterbox_phonemes
+        acoustic = await chatterbox_phonemes.confirm(path, text, edits, directory)
+        if acoustic is not None:
+            report['acoustic_source_confirmation'] = acoustic
+            if acoustic.get('passed') is True:
+                if (acoustic.get('audio_sha256') != tts._file_sha256(path)
+                        or acoustic.get('source_sha256') != hashlib.sha256(text.encode()).hexdigest()
+                        or acoustic.get('conditioned_on_reference_text') is not False
+                        or acoustic.get('method') != 'complete_source_phone_sequence'
+                        or acoustic.get('supported') is not True):
+                    raise RuntimeError('Acoustic confirmation differs from the complete source waveform')
+                report.update(asr_spelling_passed=False, passed=True,
+                              verification_mode='complete_source_phone_sequence')
+                emit('Chatterbox spelling drift: complete source and letter phones independently confirmed')
     report["transcription"] = transcription
     _write_json(directory / "pronunciation_report.json", report)
     if not words and edits:
