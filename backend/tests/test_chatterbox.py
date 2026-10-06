@@ -1240,3 +1240,77 @@ async def test_manifest_drives_composer_line_timing_and_detects_source_or_audio_
     script.write_text("\n".join(lines), encoding="utf-8")
     output.write_bytes(output.read_bytes() + b"changed")
     assert any("WAV changed" in issue for issue in composer._narration_manifest_failures(script, output, chatterbox.MODEL_ID))
+@pytest.mark.parametrize(('source', 'observed'), [
+    ('The report mentions UI today.', 'The report mentions you I today.'),
+    ('The report mentions UX today.', 'The report mentions you ex today.'),
+    ('The report mentions AR today.', 'The report mentions A are today.'),
+    ('The report mentions API today.', 'The report mentions eigh pee eye today.'),
+    ('The report mentions WHO today.', 'The report mentions double U H O today.'),
+    ('OpenAI published a report.', 'Open eigh eye published a report.'),
+])
+def test_source_bound_letter_names_preserve_every_observed_letter(source, observed):
+    report = chatterbox._pronunciation_report(source, [{'text': observed}])
+    assert report['passed']
+    assert report['transcript'] == observed
+    assert chatterbox._trailing_speech_report(source, [{'text': report['normalized_transcript']}])['passed']
+
+
+@pytest.mark.parametrize(('source', 'observed'), [
+    ('The report mentions UX today.', 'The report mentions you exited today.'),
+    ('The report mentions UI today.', 'The report mentions you eye eye today.'),
+    ('The report mentions AI today.', 'The report mentions eye eye today.'),
+    ('The report mentions API today.', 'The report mentions eigh eye today.'),
+    ('The report mentions API today.', 'The report mentions eigh pee eye eye today.'),
+    ('The report mentions WHO today.', 'The report mentions double U O today.'),
+    ('The report mentions UX today.', 'The report mentions UX today and you ex.'),
+])
+def test_letter_name_normalization_cannot_hide_loss_repetition_or_extra_syllables(source, observed):
+    assert not chatterbox._pronunciation_report(source, [{'text': observed}])['passed']
+
+
+@pytest.mark.asyncio
+async def test_repaired_spelling_observation_rechecks_original_jobs_without_new_synthesis(setup_client, monkeypatch):
+    server, script, directory, _verifier, generate = setup_client
+    source = 'The report mentions UX today.'
+    observed = 'The report mentions you ex today.'
+    script.write_text(source)
+    real_report = chatterbox._pronunciation_report
+    def legacy_report(text, words, edits):
+        report = real_report(text, words, edits)
+        report.update(passed=False, differences=[{'kind': 'replace', 'source': ['ux'], 'asr': ['you', 'ex']}])
+        return report
+    monkeypatch.setattr(chatterbox, '_pronunciation_report', legacy_report)
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=([{'text': observed}], {})))
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    assert len(server.jobs) == chatterbox.MAX_INTEGRITY_ATTEMPTS
+    checkpoints = {}
+    for path in directory.glob('tts_input_part_001.request-*.json'):
+        record = json.loads(path.read_text())
+        record.pop('rejection_observation_version')
+        path.write_text(json.dumps(record))
+        checkpoints[path.name] = (record['job_id'], record['idempotency_key'])
+    archived = directory / 'verification/tts_input_part_001/rejected-0/pronunciation_report.json'
+    original_report = archived.read_bytes()
+    original_audio = (directory / 'verification/tts_input_part_001/rejected-0.wav').read_bytes()
+    monkeypatch.setattr(chatterbox, '_pronunciation_report', real_report)
+    await generate()
+    assert len(server.jobs) == chatterbox.MAX_INTEGRITY_ATTEMPTS
+    assert archived.read_bytes() == original_report
+    assert (directory / 'tts_input_part_001_generated.wav').read_bytes() == original_audio
+    for path in directory.glob('tts_input_part_001.request-*.json'):
+        record = json.loads(path.read_text())
+        assert (record['job_id'], record['idempotency_key']) == checkpoints[path.name]
+    accepted = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+    assert accepted['rejected']
+    assert accepted['revalidated_after_rejection']['observation_spelling_version'] == 1
+
+
+@pytest.mark.asyncio
+async def test_normalized_letter_names_still_reject_extra_trailing_speech(tmp_path, monkeypatch):
+    source = 'The report mentions AR today.'
+    observed = 'The report mentions A are today, are today.'
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=([{'text': observed}], {})))
+    with pytest.raises(tts.TtsIntegrityError, match='trailing speech'):
+        await chatterbox._verify_pronunciation(tmp_path / 'audio.wav', source, tmp_path,
+            emit=lambda _message: None, edits=tts_pronunciation.candidates(source))

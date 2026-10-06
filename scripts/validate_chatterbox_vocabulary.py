@@ -65,6 +65,8 @@ def corpus(fixture: dict, observed: dict | None = None) -> list[dict]:
         if actions is None:
             actions = ({c['source']: kind for c in pronunciation.candidates(text)}
                        if kind in {'spell', 'keep'} else {})
+            if term in fixture.get('mode_overrides', {}):
+                actions = {c['source']: fixture['mode_overrides'][term] for c in pronunciation.candidates(text)}
         rows.append({'id': identifier or 'base-' + digest(term)[:12], 'term': term,
                      'text': text, 'category': category, 'expected_actions': actions})
 
@@ -134,7 +136,8 @@ def mode_report(text: str, cases: list[dict], plan: dict) -> dict:
             if not start <= candidate['start'] < offset:
                 continue
             expected = case['expected_actions'].get(decision['source'])
-            if expected and decision['action'] != expected:
+            allowed = [expected] if isinstance(expected, str) else expected
+            if allowed and decision['action'] not in allowed:
                 failures.append({'case_id': case['id'], 'source': decision['source'],
                                  'expected_action': expected, 'actual_decision': decision})
     return {'passed': not failures, 'failures': failures}

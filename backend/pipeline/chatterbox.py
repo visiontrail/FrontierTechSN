@@ -284,6 +284,39 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
 )
 
+OBSERVATION_SPELLING_VERSION = 1
+
+
+def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
+    """Consume an exact source-bound spelling, retaining every observed atom.
+
+    ASR can write a letter's English name (you/ex/are) rather than its glyph.
+    An ordinary word is never shortened to a name: exited cannot become X.
+    """
+    aliases = {name: letter.casefold() for letter, names in pronunciation.LETTER_NAMES.items()
+               for name in names if ' ' not in name}
+    pending = [(start, '')]
+    visited = set()
+    while pending:
+        cursor, joined = pending.pop()
+        if (cursor, joined) in visited:
+            continue
+        visited.add((cursor, joined))
+        if joined == target:
+            return cursor
+        if cursor >= end:
+            continue
+        token = tokens[cursor]
+        options = [(1, token)]
+        if token in aliases:
+            options.append((1, aliases[token]))
+        if tokens[cursor:cursor + 2] in [['double', 'you'], ['double', 'u']]:
+            options.append((2, 'w'))
+        for consumed, letters in options:
+            if cursor + consumed <= end and target.startswith(joined + letters):
+                pending.append((cursor + consumed, joined + letters))
+    return None
+
 
 def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None = None) -> dict:
     """Require source initialisms, including brand suffixes, exactly once in place.
@@ -304,12 +337,14 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         return value.replace(".", "").replace("’", "'").casefold()
 
     expected, targets, embedded, compound_suffixes, symbol_conjunctions = [], set(), {}, {}, set()
+    embedded_ranges = []
     for token in source:
         if token.start() - 1 in ampersands:
             symbol_conjunctions.add(len(expected))
             expected.append("and")
         local = [candidate for candidate in found if
                  candidate["start"] < token.end() and candidate["end"] > token.start()]
+        token_start = len(expected)
         cursor, expanded = token.start(), []
         for candidate in local:
             if candidate["start"] > cursor:
@@ -332,6 +367,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             expanded.append(suffix)
         if local and len(expanded) > 1:
             embedded[normalize(token[0])] = expanded
+            embedded_ranges.append((token_start, len(expected), normalize(token[0])))
             if len(local) == 1 and local[0]["start"] > token.start():
                 suffix = normalize(text[local[0]["start"]:token.end()])
                 compound_suffixes.setdefault(suffix, []).append(
@@ -339,7 +375,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
                 )
     observed = []
     for word in words:
-        for token in PRONUNCIATION_TOKEN_RE.finditer(str(word.get("text") or "")):
+        for token in PRONUNCIATION_TOKEN_RE.finditer(str(word.get("text") or "").replace('&', ' and ')):
             value = normalize(token[0])
             expanded = embedded.get(value)
             # ASR may change the ordinary brand prefix while retaining the
@@ -383,10 +419,8 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         # aligned block of initialisms and the source ampersand conjunction;
         # all observed letters must match, with none omitted or repeated.
         indices = range(start, end)
-        if (any(index in symbol_conjunctions for index in indices)
-                and all(index in targets or index in symbol_conjunctions for index in indices)
-                and "".join(observed[left:right]) == "".join(
-                    expected[index] for index in indices if index not in symbol_conjunctions)):
+        if (all(index in targets or index in symbol_conjunctions for index in indices)
+                and "".join(observed[left:right]) == "".join(expected[start:end])):
             replacements[left] = (right, expected[start:end])
             continue
         cursor, aligned = left, []
@@ -397,15 +431,11 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
                 aligned.append(observed[cursor])
                 cursor += 1
                 continue
-            joined = ""
-            while cursor < right and expected[index].startswith(joined + observed[cursor]):
-                joined += observed[cursor]
-                cursor += 1
-                if joined == expected[index]:
-                    break
-            if joined != expected[index]:
+            matched = _match_spoken_letters(observed, cursor, right, expected[index])
+            if matched is None:
                 break
-            aligned.append(joined)
+            cursor = matched
+            aligned.append(expected[index])
         else:
             if cursor == right:
                 replacements[left] = (right, aligned)
@@ -429,17 +459,36 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         # even when the intended occurrence itself matched exactly.
         if tag in {"insert", "replace"}:
             inserted = collapsed[left:right]
-            repeated = any("".join(inserted[i:j]) in target_forms
-                           for i in range(len(inserted)) for j in range(i + 1, len(inserted) + 1))
+            repeated = any(_match_spoken_letters(inserted, i, len(inserted), form) is not None
+                           for i in range(len(inserted)) for form in target_forms)
             affected = affected or repeated or (
                 tag == "insert" and (start in targets or start - 1 in targets)
             )
         if affected:
             differences.append({"kind": tag, "source": expected[start:end],
                                 "asr": collapsed[left:right], "source_start": start})
+    aligned = {}
+    for tag, start, end, left, right in SequenceMatcher(a=expected, b=collapsed, autojunk=False).get_opcodes():
+        if tag == 'equal':
+            aligned.update({start + offset: left + offset for offset in range(end - start)})
+    joins = {}
+    for start, end, spelling in embedded_ranges:
+        positions = [aligned.get(index) for index in range(start, end)]
+        if all(index is not None for index in positions) and positions == list(range(positions[0], positions[0] + end - start)):
+            joins[positions[0]] = (positions[-1] + 1, spelling)
+    normalized, cursor = [], 0
+    while cursor < len(collapsed):
+        if cursor in joins:
+            cursor, spelling = joins[cursor]
+            normalized.append(spelling)
+        else:
+            normalized.append(collapsed[cursor])
+            cursor += 1
     return {"required": bool(targets), "passed": not targets or bool(words) and not differences,
             "targets": [expected[index] for index in sorted(targets)],
-            "transcript": tts._raw_transcript(words), "differences": differences,
+            "transcript": tts._raw_transcript(words), "normalized_transcript": ' '.join(normalized),
+            "observation_spelling_version": OBSERVATION_SPELLING_VERSION,
+            "differences": differences,
             "policy": "exact_initialism_occurrences"}
 
 
@@ -452,6 +501,9 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
     words, transcription = await av_sync.ensure_word_transcript(path, directory, minimum_words=1)
     report = _pronunciation_report(text, words, edits)
     report["trailing_speech"] = _trailing_speech_report(text, words)
+    normalized_tail = _trailing_speech_report(text, [{"text": report['normalized_transcript']}])
+    if not normalized_tail['passed']:
+        report['trailing_speech'] = normalized_tail
     report["transcription"] = transcription
     _write_json(directory / "pronunciation_report.json", report)
     if not words and edits:
@@ -594,7 +646,12 @@ async def _generate_chatterbox(
                 if checkpoint.get("identity") != request_identity:
                     checkpoint = {"identity": request_identity, "idempotency_key": uuid.uuid4().hex}
                     _write_json(request_path, checkpoint)
-                if checkpoint.get("rejected"):
+                rechecking = bool(
+                    str(checkpoint.get('rejected') or '').startswith('Chatterbox initialism pronunciation mismatch:')
+                    and checkpoint.get('job_id')
+                    and checkpoint.get('rejection_observation_version', 0) < OBSERVATION_SPELLING_VERSION
+                )
+                if checkpoint.get("rejected") and not rechecking:
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
                         raise tts.TtsIntegrityError(f"Chatterbox part {index} exhausted audio integrity attempts")
                     continue
@@ -608,6 +665,8 @@ async def _generate_chatterbox(
                     checkpoint["job_id"] = response.json()["id"]
                     _write_json(request_path, checkpoint)
                 job_id = checkpoint["job_id"]
+                if rechecking:
+                    emit(f'Chatterbox part {index}: rechecking the same completed job after spelling-observation repair')
                 emit(f"Chatterbox part {index}/{len(chunks)}: following job {job_id}")
                 deadline = time.monotonic() + config.TTS_TIMEOUT
                 previous_status = None
@@ -670,18 +729,27 @@ async def _generate_chatterbox(
                 except tts.TtsIntegrityError as exc:
                     rejected = directory / "verification" / stem
                     rejected.mkdir(parents=True, exist_ok=True)
-                    evidence = rejected / f"rejected-{attempt}"
+                    marker = (f'rechecked-{attempt}-spelling-{OBSERVATION_SPELLING_VERSION}'
+                              if rechecking else f'rejected-{attempt}')
+                    evidence = rejected / marker
                     evidence.mkdir(exist_ok=True)
                     for report_path in rejected.glob("*.json"):
                         (evidence / report_path.name).write_bytes(report_path.read_bytes())
-                    os.replace(staged, rejected / f"rejected-{attempt}.wav")
+                    os.replace(staged, rejected / f"{marker}.wav")
                     checkpoint["rejected"] = str(exc)
+                    checkpoint['rejection_observation_version'] = OBSERVATION_SPELLING_VERSION
                     _write_json(request_path, checkpoint)
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
                         raise
                     emit(f"Chatterbox audio integrity retry for part {index}: {exc}")
                     continue
                 os.replace(staged, path)
+                if rechecking:
+                    checkpoint['revalidated_after_rejection'] = {
+                        'observation_spelling_version': OBSERVATION_SPELLING_VERSION,
+                        'audio_sha256': tts._file_sha256(path),
+                    }
+                    _write_json(request_path, checkpoint)
                 metadata = {
                     "identity": identity, "job_id": job_id, "integrity": integrity,
                     "synthesis_request": payload,

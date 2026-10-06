@@ -35,6 +35,11 @@ def test_context_contrasts_preserve_distinct_reading_requirements():
     assert rows['emphasized-in']['expected_actions']['IN'] == 'keep'
 
 
+def test_sata_corpus_does_not_force_a_common_word_reading_to_be_spelled():
+    case = next(row for row in validation.corpus(fixture()) if row['term'] == 'SATA')
+    assert case['expected_actions']['SATA'] == ['keep', 'spell']
+
+
 def test_duplicate_inventory_entries_are_rejected():
     value = copy.deepcopy(fixture())
     value['contextual_readings'] += ' AI'

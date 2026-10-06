@@ -61,6 +61,11 @@ The transformation applies only to Chatterbox's English synthesis request:
   `C N B C`); wrong letters, omissions and repetitions are rejected. Adjacent
   source initialisms are checked separately. Distant repeated initialisms are
   rejected both when inserted and when they replace ordinary source words.
+  Source-aligned English letter names in recognition output also retain their
+  exact meaning (`you ex` -> UX, `A are` -> AR). Names are consumed only when
+  every observed atom reproduces the complete source spelling; `exited` cannot
+  become X. Normalized observations preserve the raw transcript and still
+  reject missing letters, repetitions and extra speech after the utterance.
   Brand prefixes and model-selected
   word acronyms keep their advisory spelling policy. URLs and email addresses
   remain excluded. This recognition gate is evidence of the decoded pronunciation,
@@ -80,6 +85,11 @@ The transformation applies only to Chatterbox's English synthesis request:
   while preserving the completed service job for resume, without resynthesis.
   Accepted cache entries must contain a passing pronunciation report. Pocket
   and Orpheus keep their existing advisory behavior.
+  Earlier pronunciation-only rejections can be rechecked once after the
+  observation repair, following their original completed job and idempotency
+  key. Synthesis inputs, seeds and attempt budgets do not change; original
+  rejection files remain archived. Physical failures are not cleared by this
+  observation repair.
 
 ## Real AI validation, 2026-10-02
 

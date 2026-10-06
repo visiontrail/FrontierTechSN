@@ -15,6 +15,7 @@
   },
   "contextual_readings": "SQL GUI JSON YAML GIF JPEG TIFF AVIF ZIP RAR TAR NAS SAN ARM OK ASAP ISO RFID FAQ ICLR WASM RAG LOL AFAIK TLDR",
   "mixed_case_and_symbols": "OpenAI ChatGPT xAI QbitAI AIBase mRNA PhD WiFi Wi-Fi eSIM eGPU iOS macOS NVMe PCIe SoC SaaS PaaS IaaS NoSQL MySQL PostgreSQL MLOps AIOps R&D M&A P&L C++ C#",
+  "mode_overrides": {"SATA": ["keep", "spell"]},
   "overrides": {
     "IT": "The IT department checks the system.",
     "US": "The US delegation attends the meeting.",
