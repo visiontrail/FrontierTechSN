@@ -490,8 +490,8 @@ async def test_pronunciation_policy_invalidates_preview_cache_and_preserves_subm
     else:
         prompts = tmp_path / "changed-prompts"
         prompts.mkdir()
-        prompt = (config.PROMPTS_DIR / "tts_pronunciation.txt").read_text()
-        (prompts / "tts_pronunciation.txt").write_text(prompt + "\nTest policy change.\n")
+        prompt = tts_pronunciation.prompt_path().read_text()
+        (prompts / tts_pronunciation.prompt_path().name).write_text(prompt + "\nTest policy change.\n")
         monkeypatch.setattr(config, "PROMPTS_DIR", prompts)
     assert config.voice_preview_cache_dir(chatterbox.MODEL_ID) != original_preview
     assert chatterbox.cache_contract() != original_contract
@@ -1664,7 +1664,7 @@ async def test_existing_numeric_jobs_retain_legacy_policy_input_seed_and_identit
     server,script,directory,_verifier,_generate=setup_client
     script.write_text('The report mentions A2A today.')
     current=tts_pronunciation.policy_contract()
-    legacy={k:current[k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    legacy=tts_pronunciation.policy_contract(policy_version=3)
     await chatterbox._generate_chatterbox(str(script),str(directory),'jane','en',log=None,
         emit=lambda _m:None,verify_text=True,frozen_pronunciation_policy=legacy)
     checkpoint=directory/'tts_input_part_001.request-0.json';before=checkpoint.read_bytes()
@@ -1685,5 +1685,5 @@ async def test_new_numeric_generation_spells_single_letters_but_retains_digit_an
     assert server.jobs['job-1']['request']['text']=='The report mentions eigh 2 eigh today.'
     assert script.read_text()=='The report mentions A2A today.'
     metadata=json.loads((directory/'tts_input_part_001_generated.json').read_text())
-    assert metadata['identity']['pronunciation_policy']['version']==4
+    assert metadata['identity']['pronunciation_policy']['version']==tts_pronunciation.IMPLEMENTED_POLICY_VERSION
     assert metadata['identity']['text']==script.read_text()

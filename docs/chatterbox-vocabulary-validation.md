@@ -131,6 +131,23 @@ Single digits have English number references in the acoustic comparison, and an
 isolated uppercase model letter adjacent to a digit uses its letter-name phones.
 The A in `A2A` cannot be accepted as the weak indefinite article.
 
+Policy 5 uses `backend/prompts/tts_pronunciation_v5.txt`. The original
+`tts_pronunciation.txt` remains the immutable policy 3/4 resource, so submitted
+jobs and ongoing frozen corpus runs can retain their exact prompt hashes. In
+new spelling plans, only N stays a standalone glyph; all other letters retain
+explicit names, including A as `eigh`. Consecutive repeated letters prefer the
+accurate conventional double/triple reading when natural.
+
+`--require-phones` additionally requires a supported complete-source phone
+sequence on every accepted part. If that observation is unavailable, the
+completed job is preserved; confirmed differences use only its remaining
+bounded attempts. Acoustic evidence version 2 recognizes a word-internal
+nasal/fricative stop transition (N SH to N CH) within dictionary words, as in
+the observed pronunciation of `mentions`. Nasal/fricative stop epenthesis is
+documented in [MIT's pronunciation teaching material](https://ocw.mit.edu/courses/21g-223-listening-speaking-and-pronunciation-fall-2004/d54f3bba263684cab866eb7b25fe1533_MIT21G_223F04_epenthesis.pdf).
+This word transition rule never applies to independently named letters and
+does not discard vowels, additional letter names, wrong H affricates or tails.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and

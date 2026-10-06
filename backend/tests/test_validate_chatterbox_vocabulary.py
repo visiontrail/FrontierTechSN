@@ -291,7 +291,7 @@ def test_composition_window_rejects_other_queue_work(tmp_path,queue):
 
 def test_legacy_corpus_preserves_case_order_and_original_candidate_contract(tmp_path,monkeypatch):
     value=fixture();current=validation.chatterbox.cache_contract()
-    legacy={k:current['pronunciation_policy'][k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    legacy=pronunciation.policy_contract(policy_version=3)
     frozen={**current,'pronunciation_policy':legacy}
     monkeypatch.setattr(validation.chatterbox,'cache_contract',lambda:frozen)
     directory=tmp_path/'run';original=validation.prepare(directory,value,None)
@@ -303,7 +303,7 @@ def test_legacy_corpus_preserves_case_order_and_original_candidate_contract(tmp_
 
 def test_legacy_corpus_cannot_hide_a_changed_synthesis_contract(tmp_path,monkeypatch):
     value=fixture();current=validation.chatterbox.cache_contract()
-    legacy={k:current['pronunciation_policy'][k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    legacy=pronunciation.policy_contract(policy_version=3)
     frozen={**current,'pronunciation_policy':legacy}
     monkeypatch.setattr(validation.chatterbox,'cache_contract',lambda:frozen)
     directory=tmp_path/'run';validation.prepare(directory,value,None)

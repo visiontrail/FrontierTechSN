@@ -394,7 +394,8 @@ async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
     return {'passed': bool(reports) and all(r['passed'] for r in reports), 'parts': reports}
 
 
-async def run(directory: Path, marker: dict, *, allow_composing: bool = False) -> None:
+async def run(directory: Path, marker: dict, *, allow_composing: bool = False,
+              require_phone_sequence: bool = False) -> None:
     rows = marker['identity']['cases']
     outcomes = []
     for index in range(marker['batch_count']):
@@ -419,7 +420,16 @@ async def run(directory: Path, marker: dict, *, allow_composing: bool = False) -
             outcome.update(passed=False, status='mode_mismatch_before_synthesis')
         else:
             async def audit_part(wav, text, edits):
-                return await independent_part_audit(wav, text, edits, directory=group, plan=plan)
+                report = await independent_part_audit(wav, text, edits, directory=group, plan=plan)
+                if require_phone_sequence:
+                    from backend.pipeline import chatterbox_phonemes
+                    acoustic = await chatterbox_phonemes.confirm(wav, text, edits, group / 'required-phones')
+                    if acoustic is None or acoustic.get('supported') is not True:
+                        raise RuntimeError('Required complete-source phone verification unavailable; preserving the job')
+                    report['required_acoustic_confirmation'] = acoustic
+                    if acoustic.get('passed') is not True:
+                        raise tts.TtsIntegrityError('Required complete-source phone sequence differs from the source')
+                return report
             async def before_submit(context):
                 checked = await require_audio_window('http://localhost:8101', allow_composing=allow_composing)
                 checked['request_context'] = context
@@ -463,6 +473,8 @@ def main() -> int:
     parser.add_argument('--observed', type=Path)
     parser.add_argument('--allow-composing', action='store_true',
                         help='Use an identified composition window with hash-verified finished production narration')
+    parser.add_argument('--require-phones', action='store_true',
+                        help='Also require a supported complete-source acoustic phone sequence for each part')
     args = parser.parse_args()
     directory = args.output.expanduser().resolve()
     base = (ROOT / 'outputs').resolve()
@@ -471,7 +483,8 @@ def main() -> int:
     marker = prepare(directory, read(FIXTURE), read(args.observed) if args.observed else None)
     print(json.dumps({k:marker[k] for k in ['corpus_sha256','case_count','term_count','batch_count','uppercase_letters']}), flush=True)
     if args.action == 'run':
-        asyncio.run(run(directory, marker, allow_composing=args.allow_composing))
+        asyncio.run(run(directory, marker, allow_composing=args.allow_composing,
+                        require_phone_sequence=args.require_phones))
     return 0
 
 

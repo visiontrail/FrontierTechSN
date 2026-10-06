@@ -344,9 +344,9 @@ async def test_source_change_before_any_jobs_can_create_a_new_plan(tmp_path, moc
 
 
 def test_policy_contract_changes_when_prompt_changes(tmp_path, monkeypatch):
-    original_prompt = (config.PROMPTS_DIR / "tts_pronunciation.txt").read_text()
+    original_prompt = pronunciation.prompt_path().read_text()
     monkeypatch.setattr(config, "PROMPTS_DIR", tmp_path)
-    prompt_path = tmp_path / "tts_pronunciation.txt"
+    prompt_path = tmp_path / pronunciation.prompt_path().name
     prompt_path.write_text(original_prompt)
     original = pronunciation.policy_contract()
     prompt_path.write_text(original_prompt + "\nAdditional pronunciation instruction.\n")
@@ -358,11 +358,11 @@ async def test_prompt_changed_after_policy_snapshot_blocks_model_call(tmp_path, 
     resolve, chat = mock_model
     prompt_dir = tmp_path / "prompts"
     prompt_dir.mkdir()
-    original_prompt = (config.PROMPTS_DIR / "tts_pronunciation.txt").read_text()
-    (prompt_dir / "tts_pronunciation.txt").write_text(original_prompt)
+    original_prompt = pronunciation.prompt_path().read_text()
+    (prompt_dir / pronunciation.prompt_path().name).write_text(original_prompt)
     monkeypatch.setattr(config, "PROMPTS_DIR", prompt_dir)
     policy = pronunciation.policy_contract()
-    (prompt_dir / "tts_pronunciation.txt").write_text(original_prompt + "\nChanged instruction.\n")
+    (prompt_dir / pronunciation.prompt_path().name).write_text(original_prompt + "\nChanged instruction.\n")
     with pytest.raises(RuntimeError, match="prompt changed"):
         await pronunciation.prepare_pronunciation("QZV reported results.", tmp_path / "audio", policy=policy, emit=lambda _: None)
     resolve.assert_not_awaited()
@@ -388,7 +388,7 @@ def test_numeric_candidates_remain_excluded_from_urls_domains_and_email_addresse
 
 def test_legacy_policy_retains_original_candidate_set_and_hash():
     current=pronunciation.policy_contract()
-    legacy={k:current[k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    legacy=pronunciation.policy_contract(policy_version=3)
     assert pronunciation.compatible_policy(legacy,current)
     assert pronunciation.candidates('A2A uses API.',policy_version=3)[0]['source']=='API'
     assert [r['source'] for r in pronunciation.candidates('A2A uses API.')]==['A','A','API']
@@ -402,7 +402,7 @@ def test_legacy_policy_retains_original_candidate_set_and_hash():
 @pytest.mark.asyncio
 async def test_legacy_saved_plan_keeps_submitted_numeric_request_identity(tmp_path,mock_model):
     _resolve,chat=mock_model
-    current=pronunciation.policy_contract();legacy={k:current[k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    current=pronunciation.policy_contract();legacy=pronunciation.policy_contract(policy_version=3)
     text='A2A is available.'
     identity={'source_sha256':hashlib.sha256(text.encode()).hexdigest(),'language':'en','policy':legacy}
     plan=pronunciation._plan(text,[],identity)
@@ -416,6 +416,37 @@ async def test_legacy_saved_plan_keeps_submitted_numeric_request_identity(tmp_pa
 
 @pytest.mark.parametrize('field',['prompt_sha256','validation_alphabet_sha256','version'])
 def test_legacy_compatibility_does_not_accept_changed_prompt_or_alphabet(field):
-    current=pronunciation.policy_contract();legacy={k:current[k] for k in ['prompt_sha256','validation_alphabet_sha256']};legacy['version']=3
+    current=pronunciation.policy_contract();legacy=pronunciation.policy_contract(policy_version=3)
     legacy[field]='changed'
     assert not pronunciation.compatible_policy(legacy,current)
+
+
+def test_policy5_keeps_old_prompt_resources_and_uses_explicit_names_beside_n():
+    legacy3=pronunciation.policy_contract(policy_version=3)
+    legacy4=pronunciation.policy_contract(policy_version=4)
+    latest=pronunciation.policy_contract()
+    assert latest['version']==5
+    assert legacy3['prompt_sha256']==legacy4['prompt_sha256']!=latest['prompt_sha256']
+    assert pronunciation.compatible_policy(legacy3,latest) and pronunciation.compatible_policy(legacy4,latest)
+    prompt=pronunciation.prompt_path().read_text()
+    assert 'cue N ex' in prompt and 'A must remain "eigh"' in prompt
+    assert 'double ess H' in prompt
+    source='WLAN and SSH are present.'
+    _,prepared=pronunciation.validate_decisions(source,decisions_for(source,{'WLAN':'double you ell eigh N','SSH':'double ess H'}))
+    assert pronunciation.render_span(source,0,len(source),prepared)=='double you ell eigh N and double ess H are present.'
+    assert source=='WLAN and SSH are present.'
+
+
+@pytest.mark.parametrize('version',[3,4])
+@pytest.mark.asyncio
+async def test_old_policy_can_plan_without_using_the_new_prompt(tmp_path,mock_model,version):
+    _resolve,chat=mock_model
+    source='A2A is available.'
+    policy=pronunciation.policy_contract(policy_version=version)
+    if version==3:chat.side_effect=AssertionError('No candidates under original v3')
+    else:chat.return_value=json.dumps({'decisions':decisions_for(source,{'A':'eigh'})})
+    plan=await pronunciation.prepare_pronunciation(source,tmp_path,policy=policy,emit=lambda _m:None)
+    assert plan['identity']['policy']==policy
+    if version==4:
+        assert chat.await_args.args[0]==pronunciation.prompt_path(policy_version=4).read_text()
+        assert 'ENTIRE candidate' in chat.await_args.args[0]

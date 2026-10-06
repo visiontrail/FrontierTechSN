@@ -105,3 +105,19 @@ def test_legacy_numeric_source_cannot_treat_a_model_letter_as_an_indefinite_arti
     assert evidence.compare_source(source,[],PREFIX+'eɪ t uː eɪ'+ENDING)['passed']
     assert not evidence.compare_source(source,[],PREFIX+'ɐ t uː eɪ'+ENDING)['passed']
     assert not evidence.compare_source(source,[],PREFIX+'eɪ t uː ɐ'+ENDING)['passed']
+
+
+def test_ordinary_dictionary_word_nasal_fricative_transition_preserves_the_complete_source():
+    source='The report mentions AI today.'
+    prepared=edits(source,'AI','eigh eye')
+    phones=PREFIX.replace('n ʃ','n tʃ')+'eɪ aɪ'+ENDING
+    assert evidence.compare_source(source,prepared,phones)['passed']
+    assert not evidence.compare_source(source,prepared,phones+' t')['passed']
+    assert not evidence.compare_source(source,prepared,phones.replace('eɪ aɪ','aɪ aɪ'))['passed']
+
+
+def test_dictionary_transition_variant_never_waives_an_extra_named_letter_or_wrong_h():
+    source='The report mentions NH today.'
+    prepared=edits(source,'NH','N aitch')
+    assert not evidence.compare_source(source,prepared,PREFIX+'ɛ n t iː eɪ tʃ'+ENDING)['passed']
+    assert not evidence.compare_source(source,prepared,PREFIX+'ɛ n eɪ dʒ'+ENDING)['passed']

@@ -13,7 +13,9 @@ from pathlib import Path
 from backend import config
 
 CANDIDATE_POLICY_VERSION = 4
-POLICY_VERSION = CANDIDATE_POLICY_VERSION
+IMPLEMENTED_POLICY_VERSION = 5
+POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -46,23 +48,39 @@ def _write_json(path: Path, value: dict) -> None:
     os.replace(staged, path)
 
 
-def policy_contract() -> dict:
-    prompt = (config.PROMPTS_DIR / "tts_pronunciation.txt").read_text(encoding="utf-8")
-    return {
-        "version": POLICY_VERSION,
+def prompt_path(*, policy_version: int | None = None) -> Path:
+    version = IMPLEMENTED_POLICY_VERSION if policy_version is None else policy_version
+    if version not in SUPPORTED_POLICY_VERSIONS:
+        raise ValueError('Unsupported pronunciation prompt policy')
+    return config.PROMPTS_DIR / ('tts_pronunciation.txt' if version in {3, 4} else 'tts_pronunciation_v5.txt')
+
+
+def policy_contract(*, policy_version: int | None = None) -> dict:
+    version = POLICY_VERSION if policy_version is None else policy_version
+    prompt = prompt_path(policy_version=policy_version).read_text(encoding="utf-8")
+    result = {
+        "version": version,
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "validation_alphabet_sha256": _digest(LETTER_NAMES),
-        "candidate_pattern_sha256": hashlib.sha256(CANDIDATE_RE.pattern.encode()).hexdigest(),
     }
+    if version != 3:
+        result['candidate_pattern_sha256'] = hashlib.sha256(CANDIDATE_RE.pattern.encode()).hexdigest()
+    return result
 
 
 def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     """Recognize the immutable v3 candidate contract without rebinding its jobs."""
     current = current or policy_contract()
-    legacy = {key: current[key] for key in ('prompt_sha256', 'validation_alphabet_sha256')}
-    legacy['version'] = 3
-    implemented = {**current, 'version': CANDIDATE_POLICY_VERSION}
-    return policy == implemented or policy == legacy
+    implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
+    if policy == implemented:
+        return True
+    if policy.get('version') in {3, 4}:
+        try:
+            legacy = policy_contract(policy_version=policy['version'])
+        except OSError:
+            return False
+        return policy == legacy and policy['validation_alphabet_sha256'] == current['validation_alphabet_sha256']
+    return False
 
 
 def normalize_text(text: str) -> str:
@@ -72,7 +90,7 @@ def normalize_text(text: str) -> str:
 
 def candidates(text: str, *, policy_version: int | None = None) -> list[dict]:
     version = CANDIDATE_POLICY_VERSION if policy_version is None else policy_version
-    if version not in {3, CANDIDATE_POLICY_VERSION}:
+    if version not in SUPPORTED_POLICY_VERSIONS:
         raise ValueError('Unsupported pronunciation candidate policy')
     pattern = LEGACY_CANDIDATE_RE if version == 3 else CANDIDATE_RE
     protected = [(match.start(), match.end()) for match in PROTECTED_TEXT_RE.finditer(text)]
@@ -186,10 +204,13 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
     """Freeze one validated model plan before submitting any synthesis jobs."""
     from backend.pipeline.digester import _chat, _resolve_provider
 
-    current = policy_contract()
-    if policy.get('prompt_sha256') != current['prompt_sha256']:
+    try:
+        selected = policy_contract(policy_version=policy['version'])
+    except (OSError, KeyError, ValueError) as error:
+        raise RuntimeError('Pronunciation policy is unsupported; preserving submitted jobs') from error
+    if policy.get('prompt_sha256') != selected['prompt_sha256']:
         raise RuntimeError('Chatterbox pronunciation prompt changed during preparation')
-    if not compatible_policy(policy, current):
+    if policy != selected:
         raise RuntimeError('Pronunciation policy is unsupported or changed; preserving existing plans and jobs')
 
     directory = Path(directory)
@@ -213,7 +234,7 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
     if checkpoints:
         raise RuntimeError("Chatterbox pronunciation plan is missing or changed beside submitted jobs; preserving their request identities")
 
-    prompt = (config.PROMPTS_DIR / "tts_pronunciation.txt").read_text(encoding="utf-8")
+    prompt = prompt_path(policy_version=policy['version']).read_text(encoding="utf-8")
     if hashlib.sha256(prompt.encode()).hexdigest() != policy["prompt_sha256"]:
         raise RuntimeError("Chatterbox pronunciation prompt changed during preparation")
     found = candidates(text, policy_version=policy['version'])

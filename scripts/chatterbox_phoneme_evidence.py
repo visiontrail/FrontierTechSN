@@ -17,6 +17,7 @@ from backend.pipeline import tts_pronunciation as pronunciation
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
+EVIDENCE_VERSION = 2
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -99,7 +100,15 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
             variants = dictionary.get(word.casefold())
             if not variants:
                 raise ValueError(f'No source pronunciation reference for {word}')
-            parts.append([tuple(re.sub(r'\d', '', p) for p in variant) for variant in variants])
+            references = {tuple(re.sub(r'\d', '', p) for p in variant) for variant in variants}
+            # A word-internal nasal/fricative transition may include the
+            # homorganic stop (n-sh -> n-t-sh, decoded as n-ch). Apply only
+            # inside dictionary words, never to independently named letters.
+            for variant in list(references):
+                for index in range(len(variant) - 1):
+                    if variant[index:index + 2] == ('N', 'SH'):
+                        references.add((*variant[:index], 'N', 'CH', *variant[index + 2:]))
+            parts.append(sorted(references))
 
     aliases = {name: letter for letter, names in pronunciation.LETTER_NAMES.items()
                for name in (letter.casefold(), *names) if ' ' not in name}
@@ -131,7 +140,7 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
 def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     report = {'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
               'raw_phones': phones, 'supported': False, 'passed': False,
-              'method': 'complete_source_phone_sequence'}
+              'method': 'complete_source_phone_sequence', 'evidence_version': EVIDENCE_VERSION}
     try:
         observed = observed_phones(phones)
         parts = reference_parts(text, edits)

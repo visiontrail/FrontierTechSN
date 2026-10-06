@@ -306,7 +306,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 4
+OBSERVATION_SPELLING_VERSION = 5
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -631,7 +631,7 @@ async def _generate_chatterbox(
     if not config.CHATTERBOX_TTS_API_KEY:
         raise RuntimeError("Set CHATTERBOX_TTS_API_KEY in Admin -> System -> Voice & TTS")
     contract = cache_contract()
-    if contract['pronunciation_policy']['version'] not in {3, pronunciation.CANDIDATE_POLICY_VERSION}:
+    if contract['pronunciation_policy']['version'] not in pronunciation.SUPPORTED_POLICY_VERSIONS:
         raise RuntimeError('Pronunciation policy is unsupported; preserving submitted jobs')
     _, directory, _, cleaned = tts._prepare_tts_input(script_path, output_dir, strip_speaker_labels=True)
     if frozen_pronunciation_policy is not None:
