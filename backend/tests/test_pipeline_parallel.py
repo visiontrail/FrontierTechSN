@@ -135,7 +135,7 @@ def test_worker_reports_parallel_failure_without_waiting_for_sibling(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('entry', ['run_pipeline', 'run_regenerate'])
+@pytest.mark.parametrize('entry', ['run_pipeline', 'run_regenerate', 'run_tts_resume'])
 def test_parallel_success_waits_for_both_branches(pipeline, tmp_path, entry):
     async def run():
         task, _, after = pipeline
@@ -172,7 +172,7 @@ def test_parallel_success_waits_for_both_branches(pipeline, tmp_path, entry):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('entry', ['run_pipeline', 'run_regenerate'])
+@pytest.mark.parametrize('entry', ['run_pipeline', 'run_regenerate', 'run_tts_resume'])
 def test_pipeline_cancellation_cleans_up_both_branches(pipeline, entry):
     async def run():
         task, _, after = pipeline
@@ -207,7 +207,8 @@ def test_pipeline_cancellation_cleans_up_both_branches(pipeline, entry):
 
 
 @pytest.mark.parametrize('failed_branch', ['audio', 'footage'])
-def test_regenerate_failure_cancels_sibling_without_discarding_artifacts(pipeline, tmp_path, failed_branch):
+@pytest.mark.parametrize('entry', ['run_regenerate', 'run_tts_resume'])
+def test_recovery_failure_cancels_sibling_without_discarding_artifacts(pipeline, tmp_path, failed_branch, entry):
     async def run():
         task, _, after = pipeline
         entered = asyncio.Event()
@@ -231,7 +232,7 @@ def test_regenerate_failure_cancels_sibling_without_discarding_artifacts(pipelin
             patch.object(orchestrator, '_acquire_task_footage', failing if failed_branch == 'footage' else waiting),
         ):
             with pytest.raises(RuntimeError, match=failed_branch + ' rejected'):
-                await asyncio.wait_for(orchestrator.run_regenerate(task), timeout=1)
+                await asyncio.wait_for(getattr(orchestrator, entry)(task), timeout=1)
         assert cleaned.is_set()
         assert artifact.read_bytes() == b'preserved'
         after.assert_not_awaited()
@@ -302,6 +303,60 @@ def test_regenerate_preserves_manual_review_and_local_model_order(pipeline, mode
         ):
             await orchestrator.run_regenerate(task)
         media.assert_not_awaited()
+        after.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('model,auto_render', [
+    ('chatterbox-multilingual', False), ('pocket-tts', True),
+])
+def test_tts_resume_preserves_manual_review_and_local_model_order(pipeline, model, auto_render):
+    async def run():
+        task, _, after = pipeline
+        task.config.tts_model = model
+        task.config.auto_render = auto_render
+        with (
+            patch.object(orchestrator, 'generate_tts', AsyncMock(return_value='audio.wav')),
+            patch.object(orchestrator, '_ensure_task_footage', AsyncMock()) as media,
+        ):
+            await orchestrator.run_tts_resume(task)
+        media.assert_not_awaited()
+        after.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_tts_resume_preserves_editorial_artifacts_and_reuses_verified_footage(pipeline, tmp_path):
+    async def run():
+        task, _, after = pipeline
+        task.config.thumbnail_enabled = True
+        task.generated_title = 'Saved title'
+        task.thumbnail_path = str(tmp_path / 'saved-cover.png')
+        script = (tmp_path / 'script.txt').read_text()
+        Path(task.thumbnail_path).write_bytes(b'saved cover')
+        manifest = {
+            'clips': [{'id': 'verified-clip'}],
+            'task_request_sha256': orchestrator._footage_request_sha256(task, script),
+        }
+        with (
+            patch.object(orchestrator, '_generate_task_title', AsyncMock()) as title,
+            patch.object(orchestrator, '_generate_task_thumbnail', AsyncMock()) as thumbnail,
+            patch.object(orchestrator.footage, 'read_manifest', return_value=manifest),
+            patch.object(orchestrator.footage, 'acquisition_is_complete', return_value=True) as complete,
+            patch.object(orchestrator, '_acquire_task_footage', AsyncMock()) as acquire,
+            patch.object(orchestrator, 'generate_tts', AsyncMock(return_value='audio.wav')) as audio,
+        ):
+            await orchestrator.run_tts_resume(task)
+        title.assert_not_awaited()
+        thumbnail.assert_not_awaited()
+        acquire.assert_not_awaited()
+        complete.assert_called_once_with(tmp_path, manifest, script)
+        audio.assert_awaited_once()
+        assert audio.await_args.args[:2] == (str(tmp_path / 'script.txt'), str(tmp_path / 'audio'))
+        assert (tmp_path / 'script.txt').read_text() == script
+        assert task.generated_title == 'Saved title'
+        assert Path(task.thumbnail_path).read_bytes() == b'saved cover'
         after.assert_awaited_once()
 
     asyncio.run(run())

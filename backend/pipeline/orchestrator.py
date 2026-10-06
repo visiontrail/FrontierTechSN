@@ -587,15 +587,37 @@ async def run_tts_resume(task: TaskResponse, log: LogCallback | None = None):
     if task.config.script_format == ScriptFormat.DIALOGUE:
         voices.append(task.config.voice_2)
 
-    audio_dir = str(task_dir / "audio")
-    audio_path = await generate_tts(
-        script_path,
-        audio_dir,
-        voices,
-        task.config.tts_model,
-        log=task_log,
-    )
-    await update_task(task.id, audio_path=audio_path)
+    async def prepare_audio():
+        audio_path = await generate_tts(
+            script_path,
+            str(task_dir / "audio"),
+            voices,
+            task.config.tts_model,
+            log=task_log,
+        )
+        await update_task(task.id, audio_path=audio_path)
+        task.audio_path = audio_path
+        return audio_path
+
+    if task.config.tts_model == "chatterbox-multilingual" and task.config.auto_render:
+        # Remote synthesis and browser footage are independent. Reuse the
+        # normal prerequisite and join both before composition, preserving all
+        # saved editorial artifacts and completed audio parts on recovery.
+        branches = [
+            asyncio.create_task(_ensure_task_footage(task, task_dir, task_log)),
+            asyncio.create_task(prepare_audio()),
+        ]
+        try:
+            results = await asyncio.gather(*branches)
+        except BaseException:
+            for branch in branches:
+                branch.cancel()
+            await asyncio.gather(*branches, return_exceptions=True)
+            raise
+        audio_path = results[1]
+    else:
+        # Keep local resource ordering and the manual audio-review boundary.
+        audio_path = await prepare_audio()
 
     await _after_audio(
         task,
