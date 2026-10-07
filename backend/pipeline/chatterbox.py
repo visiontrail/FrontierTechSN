@@ -49,6 +49,8 @@ def cache_contract() -> dict:
     Read settings and verifier constants at call time: Admin changes and code
     upgrades must also invalidate callers that can skip this adapter entirely.
     """
+    from backend.pipeline.tts_tail_cleanup import VERSION as tail_cleanup_version
+
     return {
         "url": config.CHATTERBOX_TTS_URL.rstrip("/"),
         "source_revision": config.CHATTERBOX_TTS_SOURCE_REVISION,
@@ -61,6 +63,7 @@ def cache_contract() -> dict:
         "verifier_version": VERIFIER_VERSION,
         "trailing_speech_verifier_version": TRAILING_SPEECH_VERIFIER_VERSION,
         "symbol_initialism_policy_version": SYMBOL_INITIALISM_POLICY_VERSION,
+        "tail_cleanup_version": tail_cleanup_version,
         "shared_verifier_version": tts.POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
         "synthesis_parameters": dict(SYNTHESIS_PARAMETERS),
         "pronunciation_policy": pronunciation.policy_contract(),
@@ -921,6 +924,8 @@ async def _generate_chatterbox(
                 break
         if rejected_parts:
             raise tts.TtsIntegrityError('Chatterbox complete part audit retained integrity rejections: ' + json.dumps(rejected_parts))
+    from backend.pipeline.chatterbox_tail import prepare_delivery_parts
+    parts, metadata_rows = prepare_delivery_parts(parts, metadata_rows)
     output = await tts._concat_wav_parts(parts, directory, log=log)
     integrity = tts._narration_integrity_summary(metadata_rows, tts._spoken_word_count(cleaned),
                                                 required=verify_text,
