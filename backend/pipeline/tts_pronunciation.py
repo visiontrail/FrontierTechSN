@@ -158,7 +158,11 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             if decoded_letters != letters:
                 raise ValueError("Spoken spelling must retain every source letter in its original order")
             if spoken == candidate["source"]:
-                raise ValueError("A spell decision must provide an explicit pronunciation hint")
+                raise ValueError(
+                    f"Candidate {candidate['id']} ({candidate['source']}), spoken {spoken!r}: "
+                    "A spell decision must provide an explicit pronunciation hint; "
+                    "spoken must differ from source while retaining the same letters"
+                )
             # The installed voice can read "ay" as "eye", losing the A in
             # AI/OpenAI. Use the letter-identical form accepted in live audio.
             spoken = re.sub(r"\bay\b", "eigh", spoken, flags=re.IGNORECASE)
@@ -246,6 +250,34 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
         requested_route = {"endpoint": endpoint, "model": model}
         payload = {"language": "en", "source_text": text, "candidates": found,
                    "letter_name_forms": LETTER_NAMES}
+        # A failed run may have corrected most decisions before exhausting its
+        # bounded attempts. Treat that response only as repair context, never
+        # as an accepted plan, and recheck its error under the current policy.
+        for previous_path in sorted(
+            directory.glob("tts_pronunciation_attempt_*.json"),
+            key=lambda item: item.stat().st_mtime_ns, reverse=True,
+        ):
+            try:
+                previous = json.loads(previous_path.read_text(encoding="utf-8"))
+                request = previous.get("request", {})
+                raw = previous.get("response")
+                if (request.get("source_text") != text or request.get("candidates") != found
+                        or not previous.get("validation_error") or not isinstance(raw, str)
+                        or len(raw) > 131072):
+                    continue
+                body = raw.strip()
+                fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", body, re.DOTALL)
+                decoded = json.loads(fenced[1] if fenced else body)
+                if not isinstance(decoded, dict):
+                    continue
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            try:
+                _plan(text, decoded.get("decisions"), identity)
+            except (ValueError, TypeError) as exc:
+                payload.update(validation_error=str(exc), previous_response=raw)
+                emit("Chatterbox pronunciation: using source-matched failed response as repair context")
+                break
         emit(f"Chatterbox pronunciation: AI reviewing {len(found)} occurrences in full script context")
 
         def selected(selected_endpoint, selected_model, _selected_key):
@@ -274,6 +306,7 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
                 if attempt + 1 == MAX_PLAN_ATTEMPTS:
                     raise RuntimeError(f"Chatterbox pronunciation AI plan failed validation: {exc}") from exc
                 payload["validation_error"] = str(exc)
+                payload["previous_response"] = raw
                 emit("Chatterbox pronunciation: retrying invalid AI output once before synthesis")
                 continue
             _write_json(directory / f"tts_pronunciation_attempt_{uuid.uuid4().hex}.json", evidence)
