@@ -181,6 +181,40 @@ def test_editor_cannot_ship_gaps_invented_assets_or_repetition(mutation, error):
         ms.validate(raw, *context())
 
 
+@pytest.mark.parametrize("ids", [None, [], "copy-1", ["invented"], ["copy-1"] * 6,
+                                [{"id": "copy-1"}], [1]])
+def test_invalid_copy_feedback_identifies_shot_value_and_allowed_ids(ids):
+    raw = raw_plan()
+    raw["shots"][1]["copy_ids"] = ids
+    with pytest.raises(ValueError) as error:
+        ms.validate(raw, *context())
+    message = str(error.value)
+    assert "scene-02 shot 2" in message
+    assert "1-5 supplied copy ids" in message
+    assert f"received {ids!r}" in message
+    assert "allowed ids: copy-1, copy-2" in message
+
+
+def test_copy_id_repair_receives_actionable_feedback_and_keeps_valid_cache(tmp_path):
+    scene, assets, _ = context()
+    plan = {"id": scene["id"], "headline": "Five priorities", "body": "Artificial intelligence"}
+    bad = raw_plan()
+    bad["shots"][1]["copy_ids"] = ["asset-1"]
+    chat = AsyncMock(side_effect=[json.dumps([bad]), json.dumps([raw_plan()])])
+    with patch.object(ms, "inventory", return_value=assets), patch(
+        "backend.pipeline.digester._resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))
+    ), patch("backend.pipeline.digester._chat", chat):
+        report = asyncio.run(ms.plan_media_shots([plan], {"scenes": [scene]}, tmp_path))
+        feedback = json.loads(chat.call_args_list[1].args[1])["validation_feedback"][scene["id"]]
+        assert len(feedback) == 1
+        assert "scene-02 shot 2" in feedback[0] and "received ['asset-1']" in feedback[0]
+        assert "allowed ids: copy-1, copy-2" in feedback[0]
+        assert report["passed"] and report["scenes"][0]["planner"] == "ai"
+        assert plan["media_shots"][1]["copy"] == ["Five priorities", "Artificial intelligence"]
+        asyncio.run(ms.plan_media_shots([plan], {"scenes": [scene]}, tmp_path))
+        assert chat.await_count == 2
+
+
 def test_recovery_keeps_assets_and_fills_long_tail_with_real_information():
     scene, assets, copy = context()
     scene["duration"] = 70.26

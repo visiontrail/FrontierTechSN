@@ -188,7 +188,7 @@ def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict]) -> li
     seen = set()
     shots = []
     cursor = 0
-    for item in raw.get("shots") or []:
+    for shot_index, item in enumerate(raw.get("shots") or [], start=1):
         aid = item.get("asset_id")
         if aid != "editorial" and aid not in allowed:
             raise ValueError(f"unknown asset {aid}")
@@ -213,9 +213,16 @@ def validate(raw: dict, scene: dict, assets: list[dict], copy: list[dict]) -> li
         excerpt = str(item.get("script_excerpt") or "").strip()
         if not excerpt or excerpt not in scene["text"]:
             raise ValueError("shot excerpt is not from its narration")
-        ids = item.get("copy_ids") or []
-        if not isinstance(ids, list) or not ids or len(ids) > 5 or any(key not in words for key in ids):
-            raise ValueError("each shot needs 1-5 supplied copy ids")
+        ids = item.get("copy_ids")
+        if (
+            not isinstance(ids, list) or not 1 <= len(ids) <= 5
+            or any(not isinstance(key, str) or key not in words for key in ids)
+        ):
+            raise ValueError(
+                f"{scene['id']} shot {shot_index}: each shot needs 1-5 supplied copy ids "
+                f"as a JSON array of strings; received {ids!r}; "
+                f"allowed ids: {', '.join(words)}"
+            )
         layout = item.get("layout", "cards")
         transition = item.get("transition", "wipe")
         if layout not in {"cards", "focus", "split"} or transition not in {"wipe", "iris"}:

@@ -20,8 +20,11 @@ Each shot has:
   durations must add to the scene duration (0.01 second precision).
 - script_excerpt: an EXACT nonempty substring of this scene's narration that
   explains the shot's relevance.
-- copy_ids: ids from editorial_copy to display; never invent copy. Usually 1-3
-  for a visual shot, 2-5 for editorial graphics. Preserve reporting attribution.
+- copy_ids: a JSON array of 1-5 exact string ids from this scene's editorial_copy.
+  Required on EVERY shot, including footage, article captures and holds; never
+  leave it empty or substitute asset ids, copy text, or another scene's ids.
+  Usually 1-3 for a visual shot, 2-5 for editorial graphics. Never invent copy.
+  Preserve reporting attribution.
   Prefer the existing concise headline/items over long verbatim narration. Do
   not display the same claim twice in different wording on the same shot. Use a
   narration sentence only when the concise copy does not convey that detail.
