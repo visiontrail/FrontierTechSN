@@ -101,6 +101,22 @@ def test_yaml_published_rhyme_preserves_its_word_reading_and_every_source_word()
     assert not evidence.compare_source(source, [], phones + ' ɛ l')['passed']
 
 
+def test_cited_hyphenated_word_keeps_both_vowels_and_source_boundaries():
+    source = 'The report mentions Wi-Fi today.'
+    phones = PREFIX + 'w aɪ f aɪ' + ENDING
+    report = evidence.compare_source(source, [], phones)
+    assert report['supported'] and report['passed']
+    assert 'wi-fi' in report['cited_body_word_references']
+    for changed in ['w aɪ f', 'w ɪ f aɪ', 'w aɪ f aɪ aɪ']:
+        assert not evidence.compare_source(source, [], PREFIX + changed + ENDING)['passed']
+    assert evidence.ordinary_source_words('Wi-Fi high-speed Wi-Fi-extra') == [
+        'Wi-Fi', 'high', 'speed', 'Wi', 'Fi', 'extra']
+    with pytest.raises(ValueError, match='No source pronunciation reference'):
+        evidence.reference_parts('The report mentions Wi-Fi-extra today.', [])
+    assert evidence.reference_parts('A high-speed report.', []) == evidence.reference_parts(
+        'A high speed report.', [])
+
+
 def test_configuration_dictionary_variant_preserves_yaml_and_rhotic_vowel_identity():
     source = 'The YAML configuration file is ready.'
     phones = 'ð ə j æ m əl k ə n f ɪ ɡ ɚ ɹ eɪ ʃ ə n f aɪ l ɪ z ɹ ɛ d i'

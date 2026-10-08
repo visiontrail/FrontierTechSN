@@ -24,7 +24,7 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 18
+EVIDENCE_VERSION = 19
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PRERHOTIC_VOWEL_SOURCE = 'https://opentext.ku.edu/amenglishpronunciation/chapter/chapter-1/'
 ORDINARY_FLAP_SOURCE = 'https://journals.sagepub.com/doi/10.1177/0023830908098542'
@@ -99,6 +99,15 @@ def observed_phones(phones: str) -> tuple[str, ...]:
     return collapse_consonant_continuations(values)
 
 
+def ordinary_source_words(fragment: str) -> list[str]:
+    """Keep a cited hyphenated word whole; retain prior splitting otherwise."""
+    words = []
+    for match in re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)*(?:-[A-Za-z]+)*|\d+", fragment):
+        word = match[0].replace('’', "'")
+        words.extend([word] if word.casefold() in body_word_references() else word.split('-'))
+    return words
+
+
 def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]:
     dictionary = lexicon()
     parts = []
@@ -108,10 +117,13 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
         if (re.search(r"[^A-Za-z0-9\s.,:;!?'’\-\u2014\u2013]", fragment)
                 or re.search(r"(?<![A-Za-z])['’]|['’](?![A-Za-z])", fragment)):
             raise ValueError('Source interval contains unsupported symbols')
-        for match in re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)*|\d+", fragment):
+        for match in re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)*(?:-[A-Za-z]+)*|\d+", fragment):
             # Use the dictionary's complete possessive/contraction entry.
             # Never discard a suffix or infer phones for an unknown word.
             word = match[0].replace('’', "'")
+            if '-' in word and word.casefold() not in body_word_references():
+                ordinary(word.replace('-', ' '))
+                continue
             if (len(word) == 1 and word in LETTER_PHONES
                     and ((match.start() and fragment[match.start() - 1].isdigit())
                          or (match.end() < len(fragment) and fragment[match.end()].isdigit()))):
@@ -256,7 +268,7 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
         report['cited_word_references'] = cited
         report['word_reference_sha256'] = reference_contract()['reference_sha256']
     body_cited = {word.casefold(): body_word_references()[word.casefold()]
-                  for word in re.findall(r'[A-Za-z]+', unedited)
+                  for word in ordinary_source_words(unedited)
                   if word.casefold() in body_word_references()}
     if body_cited:
         report['cited_body_word_references'] = body_cited

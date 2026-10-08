@@ -19,7 +19,7 @@ def _loaded():
             or not isinstance(payload.get('entries'), dict)):
         raise ValueError('Unsupported ordinary-word reference data')
     for word, row in payload['entries'].items():
-        if (not re.fullmatch(r'[a-z]{3,32}', word) or not isinstance(row, dict)
+        if (not re.fullmatch(r'(?:[a-z]{3,32}|[a-z]{2,32}-[a-z]{2,32})', word) or not isinstance(row, dict)
                 or not isinstance(row.get('source_url'), str) or not row['source_url'].startswith('https://')
                 or not isinstance(row.get('source_location'), str) or not row['source_location']
                 or not isinstance(row.get('variants'), list) or not row['variants']

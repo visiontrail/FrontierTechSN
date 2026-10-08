@@ -1,6 +1,13 @@
 {
   "version": 1,
   "entries": {
+    "wi-fi": {
+      "variants": [["W", "AY", "F", "AY"]],
+      "ipa": ["ˈwaɪ.faɪ"],
+      "source_url": "https://dictionary.cambridge.org/us/pronunciation/english/wi-fi",
+      "source_location": "British and American pronunciation of the complete hyphenated word Wi-Fi",
+      "verified_on": "2026-10-08"
+    },
     "lidar": {
       "variants": [["L", "AY", "D", "AA", "R"]],
       "source_url": "https://www.merriam-webster.com/dictionary/lidar",
