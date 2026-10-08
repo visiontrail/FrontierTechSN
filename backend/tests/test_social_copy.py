@@ -267,6 +267,7 @@ class CopyGenerationTests(unittest.IsolatedAsyncioTestCase):
             with (
                 self.subTest(failure=failure),
                 patch.object(worker, "get_next_queued_task", AsyncMock(side_effect=[queued, asyncio.CancelledError()])),
+                patch.object(worker.explainers, "production_owner", return_value=None),
                 patch.object(worker, "get_task", AsyncMock(side_effect=[publishing, self.task])),
                 patch.object(worker, "compare_and_set_task_status", AsyncMock(return_value=True)) as transition,
                 patch.object(worker, "run_pipeline", AsyncMock()),

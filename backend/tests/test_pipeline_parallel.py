@@ -108,6 +108,7 @@ def test_worker_reports_parallel_failure_without_waiting_for_sibling(
                 patch.object(orchestrator, 'generate_tts', failing if failed_branch == 'audio' else waiting),
                 patch.object(orchestrator, '_acquire_task_footage', failing if failed_branch == 'footage' else waiting),
                 patch.object(worker, 'get_next_queued_task', AsyncMock(side_effect=[task, asyncio.CancelledError()])),
+                patch.object(worker.explainers, 'production_owner', return_value=None),
                 patch.object(worker, 'compare_and_set_task_status', AsyncMock(return_value=True)),
                 patch.object(worker, 'update_task', update),
                 patch.object(worker, 'run_auto_publish_pipeline', AsyncMock()) as publish,

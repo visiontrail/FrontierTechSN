@@ -875,6 +875,13 @@ class ResumeTtsOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ResumeTtsWorkerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Queue ownership is covered by the studio queue tests. These worker
+        # unit tests must not consult an actual interrupted production project.
+        owner = patch.object(worker.explainers, "production_owner", return_value=None)
+        owner.start()
+        self.addCleanup(owner.stop)
+
     async def test_worker_rerenders_complete_task_without_republishing(self):
         with tempfile.TemporaryDirectory() as directory:
             configured_output_root = Path(directory) / "configured-output"
