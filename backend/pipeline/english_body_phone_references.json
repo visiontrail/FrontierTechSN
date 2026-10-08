@@ -1,6 +1,16 @@
 {
   "version": 1,
   "entries": {
+    "configuration": {
+      "variants": [
+        ["K", "AH", "N", "F", "IH", "G", "AH", "R", "EY", "SH", "AH", "N"],
+        ["K", "AH", "N", "F", "IH", "G", "ER", "R", "EY", "SH", "AH", "N"]
+      ],
+      "ipa": ["kənˌfɪɡəˈreɪʃn"],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/configuration",
+      "source_location": "British pronunciation without /j/; schwa followed by /r/. The r-colored-schwa-before-R alternative is a coarticulation inference, not a separately published dictionary transcription.",
+      "verified_on": "2026-10-08"
+    },
     "yaml": {
       "variants": [["Y", "AE", "M", "AH", "L"]],
       "ipa": ["jæməl"],

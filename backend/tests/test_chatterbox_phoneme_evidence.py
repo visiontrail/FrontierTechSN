@@ -99,6 +99,22 @@ def test_yaml_published_rhyme_preserves_its_word_reading_and_every_source_word()
     assert not evidence.compare_source(source, [], phones + ' ɛ l')['passed']
 
 
+def test_configuration_dictionary_variant_preserves_yaml_and_rhotic_vowel_identity():
+    source = 'The YAML configuration file is ready.'
+    phones = 'ð ə j æ m əl k ə n f ɪ ɡ ɚ ɹ eɪ ʃ ə n f aɪ l ɪ z ɹ ɛ d i'
+    report = evidence.compare_source(source, [], phones)
+    assert report['supported'] and report['passed']
+    assert report['cited_body_word_references']['configuration']['source_url'] == (
+        'https://www.oxfordlearnersdictionaries.com/definition/english/configuration')
+    assert not evidence.compare_source(source, [], phones.replace('j æ m əl', 'j eɪ m əl'))['passed']
+    assert not evidence.compare_source(source, [], phones + ' ɑːɹ')['passed']
+    assert evidence.observed_phones('ɚ ɹ ɑːɹ') == ('ER', 'R', 'AA', 'R')
+    assert not evidence.compare_source(source, [], phones.replace('ɚ ɹ eɪ', 'ɚ eɪ'))['passed']
+    source_r = 'The report mentions RR today.'
+    prepared = edits(source_r, 'RR', 'R R')
+    assert not evidence.compare_source(source_r, prepared, PREFIX + 'ɚ ɹ' + ENDING)['passed']
+
+
 def test_body_reference_does_not_change_frozen_word_hint_policy13_bytes():
     from backend.pipeline import tts_pronunciation
     contract = tts_pronunciation.policy_contract(policy_version=13)
