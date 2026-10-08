@@ -201,7 +201,12 @@ def all_target_report(text: str, words: list[dict]) -> dict:
                           for m in re.finditer(r'[A-Za-z]+', match[0]))
         else:
             probes.append({'source': match[0], 'start': match.start(), 'end': match.end()})
-    report = chatterbox._pronunciation_report(text, [{'text': ' '.join(normalized)}], probes)
+    # Quantity normalization uses an internal decimal marker. Give the
+    # pronunciation guard its readable value while retaining the exact
+    # integer/fraction digits in the separate numeric audit below.
+    readable = [re.sub(r'^decimalnumber(\d+)point(\d+)$', r'\1.\2', token)
+                for token in normalized]
+    report = chatterbox._pronunciation_report(text, [{'text': ' '.join(readable)}], probes)
     # Model suffixes must retain their values, order and multiplicity too.
     def numbers(tokens):
         result = []

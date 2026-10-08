@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from backend import config
-from backend.pipeline import av_sync, chatterbox, composer, digester, tts, tts_pronunciation
+from backend.pipeline import av_sync, chatterbox, chatterbox_independent, composer, digester, tts, tts_pronunciation
 
 
 @pytest.mark.asyncio
@@ -68,6 +68,40 @@ def spelling_decisions(source):
         }
         for candidate in tts_pronunciation.candidates(source)
     ]
+
+
+@pytest.mark.parametrize(('source', 'observation'), [
+    ('GPT-6 is available.', 'GPT6 is available.'),
+    ('GPT 6 is available.', 'GPT6 is available.'),
+    ('ChatGPT-6 is available.', 'ChatGPT6 is available.'),
+    ('RTX-4090 is available.', 'RTX4090 is available.'),
+    ('GPT-6 is available.', 'GPT six is available.'),
+    ('H100 is available.', 'H one hundred is available.'),
+    ('GPT-4o is available.', 'GPT4o is available.'),
+    ('GPT-4o is available.', 'GPT four oh is available.'),
+    ('TLS1.3 is available.', 'TLS one point three is available.'),
+])
+def test_model_separator_observation_keeps_every_source_letter_and_digit(source, observation):
+    report = chatterbox._pronunciation_report(source, [{'text': observation}])
+    assert report['passed']
+
+
+@pytest.mark.parametrize(('source', 'observation'), [
+    ('GPT-6 is available.', 'GPT7 is available.'),
+    ('ChatGPT-6 is available.', 'ChatGPT7 is available.'),
+    ('RTX-4090 is available.', 'RTX409 is available.'),
+    ('GPT-6 is available.', 'GPT6 GPT6 is available.'),
+    ('GPT. 6 is available.', 'GPT6 is available.'),
+    ('GPT6 7 is available.', 'GPT67 is available.'),
+    ('GPT-6 is available.', 'GPT 7 is available.'),
+    ('H100 is available.', 'H one hundred six is available.'),
+    ('H001 is available.', 'H1 is available.'),
+    ('GPT-4o is available.', 'GPT four zero is available.'),
+    ('TLS1.3 is available.', 'TLS1.4 is available.'),
+    ('TLS1.30 is available.', 'TLS1.3 is available.'),
+])
+def test_model_separator_observation_never_changes_digits_repeats_or_sentence_boundaries(source, observation):
+    assert not chatterbox._pronunciation_report(source, [{'text': observation}])['passed']
 
 
 class FakeService:
@@ -162,6 +196,8 @@ def setup_client(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CHATTERBOX_TTS_CHUNK_WORDS", 30)
     monkeypatch.setattr(config, "CHATTERBOX_TTS_MAX_CHARS", 250)
     server = FakeService()
+    server.independent_audit = AsyncMock(return_value={'required': True, 'passed': True})
+    monkeypatch.setattr(chatterbox_independent, 'audit_part', server.independent_audit)
     server.pronunciation_route = AsyncMock(return_value=("test-endpoint", "test-model", "test-key"))
     server.pronunciation_ai = AsyncMock(side_effect=lambda _prompt, payload, **_kwargs: json.dumps({
         "decisions": spelling_decisions(json.loads(payload)["source_text"]),
@@ -190,6 +226,38 @@ def setup_client(tmp_path, monkeypatch):
         ))
 
     return server, script, directory, verifier, generate
+
+
+@pytest.mark.asyncio
+async def test_default_production_independent_check_uses_the_original_remaining_attempts(setup_client):
+    server, script, directory, _verifier, generate = setup_client
+    script.write_text('The report mentions DIY today.')
+    passed = {'required': True, 'passed': True, 'scope': 'independent_tail_and_extra_initialism_check'}
+    server.independent_audit.side_effect = [tts.TtsIntegrityError('independent trailing why'), passed, passed]
+    await generate()
+    assert len(server.jobs) == 2
+    rejected = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+    assert 'independent trailing why' in rejected['rejected']
+    accepted = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+    assert accepted['synthesis_request']['seed'] == chatterbox.cache_contract()['seed'] + 1
+    assert accepted['integrity']['independent_audit'] == passed
+    await generate()
+    assert len(server.jobs) == 2 and server.independent_audit.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_default_production_independent_unavailability_reuses_the_completed_job(setup_client):
+    server, script, directory, _verifier, generate = setup_client
+    script.write_text('The report mentions DIY today.')
+    server.independent_audit.side_effect = RuntimeError('independent decoder unavailable')
+    with pytest.raises(RuntimeError, match='decoder unavailable'):
+        await generate()
+    first = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+    assert first['job_id'] and 'rejected' not in first
+    server.independent_audit.side_effect = None
+    await generate()
+    assert len(server.jobs) == 1
+    assert json.loads((directory / 'tts_input_part_001.request-0.json').read_text()) == first
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,7 @@ def test_duplicate_inventory_entries_are_rejected():
     ('The FP16 report is ready.', 'The FP sixteen report is ready.'),
     ('The GPT4o report is ready.', 'The GPT four o report is ready.'),
     ('The TLS1.3 report is ready.', 'The TLS 1.3 report is ready.'),
+    ('The TLS1.3 report is ready.', 'The TLS one point three report is ready.'),
     ('The AI R&D team is ready.', 'The AIR &D team is ready.'),
     ('The SQL database is ready.', 'The sequel database is ready.'),
     ('The SaaS service is ready.', 'The sass service is ready.'),

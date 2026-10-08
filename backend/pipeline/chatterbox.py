@@ -315,10 +315,10 @@ def _trailing_speech_report(text: str, words: list[dict]) -> dict:
 
 
 PRONUNCIATION_TOKEN_RE = re.compile(
-    r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
+    r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:\.\d+)*(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 9
+OBSERVATION_SPELLING_VERSION = 10
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -345,6 +345,16 @@ def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) 
             continue
         token = tokens[cursor]
         options = [(1, token)]
+        if re.search(r'\d', target):
+            for number_end in range(cursor + 1, end + 1):
+                numbers = tts._canonicalize_number_tokens([
+                    tts.NUMBER_WORDS.get(value, value) for value in tokens[cursor:number_end]
+                ])
+                if not numbers or not all(value.isdigit() for value in numbers):
+                    break
+                options.append((number_end - cursor, ''.join(numbers)))
+            if '.' in target and token == 'point':
+                options.append((1, '.'))
         if token in aliases:
             options.append((1, aliases[token]))
         if tokens[cursor:cursor + 2] in [['double', 'you'], ['double', 'u']]:
@@ -385,9 +395,10 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     source = list(PRONUNCIATION_TOKEN_RE.finditer(text))
 
     def normalize(value: str) -> str:
-        return value.replace(".", "").replace("’", "'").casefold()
+        return re.sub(r'(?<!\d)\.|\.(?!\d)', '', value).replace("’", "'").casefold()
 
     expected, targets, embedded, compound_suffixes, symbol_conjunctions = [], set(), {}, {}, set()
+    token_indexes, model_identifiers = {}, set()
     embedded_ranges = []
     for token in source:
         if token.start() - 1 in ampersands:
@@ -396,6 +407,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         local = [candidate for candidate in found if
                  candidate["start"] < token.end() and candidate["end"] > token.start()]
         token_start = len(expected)
+        token_indexes[token.start()] = token_start
         cursor, expanded = token.start(), []
         for candidate in local:
             if candidate["start"] > cursor:
@@ -417,6 +429,8 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             expected.append(suffix)
             expanded.append(suffix)
         if local and len(expanded) > 1:
+            model_identifiers.update(index for index in range(token_start, len(expected))
+                                     if re.search(r'\d', expected[index]))
             embedded[normalize(token[0])] = expanded
             embedded_ranges.append((token_start, len(expected), normalize(token[0])))
             if len(local) == 1 and local[0]["start"] > token.start():
@@ -424,11 +438,26 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
                 compound_suffixes.setdefault(suffix, []).append(
                     (expanded[0], expanded[1:], normalize(local[0]["source"]))
                 )
+    # Recognizers can omit the separator in a source model identifier.
+    # Expand only an exact source-bound letter/digit pair: GPT7 cannot
+    # stand in for GPT-6, nor may separate numeric groups be combined.
+    observed_compounds = dict(embedded)
+    for left, right in zip(source, source[1:]):
+        if (re.fullmatch(r'\d+[A-Za-z]*', right[0]) and not re.search(r'\d', left[0])
+                and re.fullmatch(r'[ \t]*-?[ \t]*', text[left.end():right.start()])
+                and any(row['end'] == left.end() for row in found)):
+            left_value = normalize(left[0])
+            observed_compounds[left_value + normalize(right[0])] = [
+                *embedded.get(left_value, [left_value]),
+                *embedded.get(normalize(right[0]), [normalize(right[0])]),
+            ]
+            model_identifiers.add(token_indexes[right.start()])
+    verification_targets = targets | model_identifiers
     observed = []
     for word in words:
         for token in PRONUNCIATION_TOKEN_RE.finditer(str(word.get("text") or "").replace('&', ' and ')):
             value = normalize(token[0])
-            expanded = embedded.get(value)
+            expanded = observed_compounds.get(value)
             # ASR may change the ordinary brand prefix while retaining the
             # exact capitalized initialism suffix (QbitAI -> QubitAI).
             compound = re.fullmatch(r"([A-Za-z][a-z]+)([A-Z]{2,}[0-9]*(?:s|['’]s)?)", token[0])
@@ -476,7 +505,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             continue
         cursor, aligned = left, []
         for index in range(start, end):
-            if index not in targets:
+            if index not in verification_targets:
                 if cursor >= right:
                     break
                 aligned.append(observed[cursor])
@@ -505,7 +534,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     ).get_opcodes():
         if tag == "equal":
             continue
-        affected = any(index in targets for index in range(start, end))
+        affected = any(index in verification_targets for index in range(start, end))
         # Extra initialisms can be inserted or replace distant ordinary words,
         # even when the intended occurrence itself matched exactly.
         if tag in {"insert", "replace"}:
@@ -513,7 +542,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             repeated = any(_match_spoken_letters(inserted, i, len(inserted), form) is not None
                            for i in range(len(inserted)) for form in target_forms)
             affected = affected or repeated or (
-                tag == "insert" and (start in targets or start - 1 in targets)
+                tag == "insert" and (start in verification_targets or start - 1 in verification_targets)
             )
         if affected:
             differences.append({"kind": tag, "source": expected[start:end],
@@ -535,8 +564,9 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         else:
             normalized.append(collapsed[cursor])
             cursor += 1
-    return {"required": bool(targets), "passed": not targets or bool(words) and not differences,
+    return {"required": bool(verification_targets), "passed": not verification_targets or bool(words) and not differences,
             "targets": [expected[index] for index in sorted(targets)],
+            "protected_model_identifiers": [expected[index] for index in sorted(model_identifiers)],
             "transcript": tts._raw_transcript(words), "normalized_transcript": ' '.join(normalized),
             "observation_spelling_version": OBSERVATION_SPELLING_VERSION,
             "differences": differences,
@@ -681,6 +711,13 @@ async def _generate_chatterbox(
     if contract['pronunciation_policy']['version'] not in pronunciation.SUPPORTED_POLICY_VERSIONS:
         raise RuntimeError('Pronunciation policy is unsupported; preserving submitted jobs')
     _, directory, _, cleaned = tts._prepare_tts_input(script_path, output_dir, strip_speaker_labels=True)
+    if verify_text and language == 'en' and part_auditor is None:
+        from backend.pipeline import chatterbox_independent
+
+        async def part_auditor(wav, text, edits):
+            return await chatterbox_independent.audit_part(
+                wav, text, edits, directory / 'independent-production')
+
     if frozen_pronunciation_policy is not None:
         if not pronunciation.compatible_policy(frozen_pronunciation_policy, contract['pronunciation_policy']):
             raise RuntimeError('Frozen pronunciation contract changed; preserving submitted jobs')
@@ -770,6 +807,7 @@ async def _generate_chatterbox(
                     audit = await part_auditor(path, text, chunk_edits)
                     if not isinstance(audit, dict) or audit.get('passed') is not True:
                         raise RuntimeError('Independent part auditor did not return confirmed acceptance')
+                    cached['integrity'] = {**cached['integrity'], 'independent_audit': audit}
                 except tts.TtsIntegrityError as exc:
                     # A new independent audit may disprove a formerly accepted
                     # part. Preserve its original WAV and metadata, then spend
