@@ -482,7 +482,7 @@ def test_policy6_keeps_r_as_the_same_letter_in_ocr_and_numeric_fragments():
 
 def test_policy8_preserves_word_policy7_and_uses_f_without_changing_other_letters():
     old = pronunciation.policy_contract(policy_version=7)
-    latest = pronunciation.policy_contract()
+    latest = pronunciation.policy_contract(policy_version=8)
     assert old['prompt_sha256'] != latest['prompt_sha256']
     assert pronunciation.compatible_policy(old, latest)
     assert pronunciation.prompt_path(policy_version=7).name == 'tts_pronunciation_v7.txt'
@@ -493,3 +493,27 @@ def test_policy8_preserves_word_policy7_and_uses_f_without_changing_other_letter
     source = 'F2 is unchanged.'
     _, edits = pronunciation.validate_decisions(source, decisions_for(source, {'F': 'F.'}))
     assert pronunciation.render_span(source, 0, len(source), edits) == 'F. 2 is unchanged.'
+
+
+def test_policy9_preserves_all_submitted_policies_and_disambiguates_only_the_y_hint():
+    latest = pronunciation.policy_contract()
+    assert latest['version'] == 9
+    for version in range(3, 9):
+        legacy = pronunciation.policy_contract(policy_version=version)
+        assert pronunciation.compatible_policy(legacy, latest)
+        assert not pronunciation.compatible_policy({**legacy, 'prompt_sha256': 'changed'}, latest)
+    prompt = pronunciation.prompt_path().read_text()
+    assert 'standalone Y' in prompt and 'A as "eigh" and I as "eye"' in prompt
+    assert pronunciation.prompt_path(policy_version=8).name == 'tts_pronunciation_v8.txt'
+    assert 'standalone Y' not in pronunciation.prompt_path(policy_version=8).read_text()
+    source = 'DIY and OpenAI appear today.'
+    _, edits = pronunciation.validate_decisions(
+        source, decisions_for(source, {'DIY': 'dee eye Y', 'AI': 'eigh eye'}))
+    assert pronunciation.render_span(source, 0, len(source), edits) == 'dee eye Y and Open eigh eye appear today.'
+    assert source == 'DIY and OpenAI appear today.'
+
+
+def test_single_y_hint_retains_its_letter_and_model_digit():
+    source = 'Y2 is available.'
+    _, edits = pronunciation.validate_decisions(source, decisions_for(source, {'Y': 'Y.'}))
+    assert pronunciation.render_span(source, 0, len(source), edits) == 'Y. 2 is available.'

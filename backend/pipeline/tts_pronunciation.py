@@ -13,9 +13,9 @@ from pathlib import Path
 from backend import config
 
 CANDIDATE_POLICY_VERSION = 4
-IMPLEMENTED_POLICY_VERSION = 8
+IMPLEMENTED_POLICY_VERSION = 9
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -77,7 +77,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {3, 4, 5, 6, 7}:
+    if policy.get('version') in {3, 4, 5, 6, 7, 8}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
         except OSError:
