@@ -1,6 +1,12 @@
 {
   "version": 1,
   "entries": {
+    "wasm": {
+      "variants": [["W", "AA", "Z", "AH", "M"], ["W", "AE", "Z", "AH", "M"]],
+      "source_url": "https://wasmgroundup.com/WebAssembly_from_the_Ground_Up_sample.pdf",
+      "source_location": "Introduction, PDF page 3: wah-zum; accent-dependent rhyme with awesome or has 'em. Stress-free phone variants infer the published rhyme, retaining the final weak vowel and M.",
+      "verified_on": "2026-10-08"
+    },
     "wi-fi": {
       "variants": [["W", "AY", "F", "AY"]],
       "ipa": ["ˈwaɪ.faɪ"],

@@ -81,6 +81,7 @@ def test_cited_presents_verb_variant_preserves_every_degree_letter_and_source_wo
     ('JPEG', 'dʒ eɪ p ɛ ɡ', 'dʒ eɪ p ɛ k'),
     ('LIDAR', 'l aɪ d ɑːɹ', 'l aɪ ɾ ɑːɹ'),
     ('EBITDA', 'ɛ b ɪ t d ə', 'ɛ b ɪ ɾ ə'),
+    ('WASM', 'w ɑː z ə m', 'w ɑː z m'),
 ])
 def test_cited_native_word_reference_does_not_accept_caption_autocorrection(term, phones, incorrect):
     source = f'The report mentions {term} today.'
@@ -115,6 +116,15 @@ def test_cited_hyphenated_word_keeps_both_vowels_and_source_boundaries():
         evidence.reference_parts('The report mentions Wi-Fi-extra today.', [])
     assert evidence.reference_parts('A high-speed report.', []) == evidence.reference_parts(
         'A high speed report.', [])
+
+
+def test_wasm_published_rhymes_preserve_the_complete_word_and_closing_source():
+    source = 'The report mentions WASM today.'
+    for vowel in ['ɑː', 'æ']:
+        assert evidence.compare_source(source, [], PREFIX + f'w {vowel} z ə m' + ENDING)['passed']
+    for phones in ['w ɑː z ɪ m', 'w ɑː z ə', 'w ɑː z ə m ə']:
+        assert not evidence.compare_source(source, [], PREFIX + phones + ENDING)['passed']
+    assert not evidence.compare_source(source, [], PREFIX + 'w ɑː z ə m')['passed']
 
 
 def test_configuration_dictionary_variant_preserves_yaml_and_rhotic_vowel_identity():

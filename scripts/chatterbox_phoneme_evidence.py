@@ -24,7 +24,7 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 19
+EVIDENCE_VERSION = 20
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PRERHOTIC_VOWEL_SOURCE = 'https://opentext.ku.edu/amenglishpronunciation/chapter/chapter-1/'
 ORDINARY_FLAP_SOURCE = 'https://journals.sagepub.com/doi/10.1177/0023830908098542'
