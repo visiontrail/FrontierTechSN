@@ -84,6 +84,7 @@ def test_cited_presents_verb_variant_preserves_every_degree_letter_and_source_wo
     ('WASM', 'w ɑː z ə m', 'w ɑː z m'),
     ('README', 'ɹ iː d m iː', 'ɹ ɛ d m iː'),
     ('NAS', 'n æ s', 'n ɑː z'),
+    ('ISO', 'aɪ s oʊ', 'aɪ z oʊ'),
 ])
 def test_cited_native_word_reference_does_not_accept_caption_autocorrection(term, phones, incorrect):
     source = f'The report mentions {term} today.'
@@ -150,6 +151,16 @@ def test_nas_storage_word_reference_does_not_change_a_source_bound_spelled_readi
     assert not evidence.compare_source(source, spelled, PREFIX + 'n æ s' + ENDING)['passed']
     assert not evidence.compare_source(source, spelled, PREFIX + 'ɛ n eɪ ɛ s ɛ s' + ENDING)['passed']
     assert not evidence.compare_source(source, [], PREFIX + 'n æ s' + ENDING + 'n æ s')['passed']
+
+
+def test_iso_word_reference_never_accepts_a_spelled_edit_or_an_extra_eye():
+    source = 'The report mentions ISO today.'
+    word = PREFIX + 'aɪ s oʊ' + ENDING
+    assert evidence.compare_source(source, [], word)['passed']
+    spelled = edits(source, 'ISO', 'eye ess oh')
+    assert not evidence.compare_source(source, spelled, word)['passed']
+    assert evidence.compare_source(source, spelled, PREFIX + 'aɪ ɛ s oʊ' + ENDING)['passed']
+    assert not evidence.compare_source(source, [], word + ' aɪ')['passed']
 
 
 def test_configuration_dictionary_variant_preserves_yaml_and_rhotic_vowel_identity():

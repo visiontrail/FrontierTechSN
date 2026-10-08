@@ -1,6 +1,13 @@
 {
   "version": 1,
   "entries": {
+    "iso": {
+      "variants": [["AY", "S", "OW"]],
+      "uppercase_only": true,
+      "source_url": "https://assets.bishopfox.com/prod-1437/Documents/Guides/Bishop-Fox-Cybersecurity-Style-Guide-V2.pdf",
+      "source_location": "ISO/IEC 27001 entry, PDF page 74 (one-based): ISO pronounced eye-so. The declared word reading retains its AY and OW vowels with S between them.",
+      "verified_on": "2026-10-09"
+    },
     "nas": {
       "variants": [["N", "AE", "S"]],
       "uppercase_only": true,
