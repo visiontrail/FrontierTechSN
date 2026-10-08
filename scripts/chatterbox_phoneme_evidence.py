@@ -7,6 +7,7 @@ Unsupported vocabulary and acoustic differences remain unverified.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -17,7 +18,8 @@ from backend.pipeline import tts_pronunciation as pronunciation
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 7
+EVIDENCE_VERSION = 8
+ACRONYM_REFERENCES = Path(__file__).resolve().parents[1] / 'backend/pipeline/english_acronym_phone_references.json'
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -48,6 +50,27 @@ VOWELS = {'AA', 'AE', 'AH', 'AO', 'AW', 'AY', 'EH', 'ER', 'EY', 'IH', 'IY', 'OW'
 @lru_cache(maxsize=1)
 def lexicon():
     return cmudict.dict()
+
+
+@lru_cache(maxsize=1)
+def acronym_references():
+    """Fill dictionary gaps with cited word phones, never synthesis rewrites."""
+    payload = json.loads(ACRONYM_REFERENCES.read_text(encoding='utf-8'))
+    if payload.get('version') != 1 or not isinstance(payload.get('entries'), dict):
+        raise ValueError('Unsupported acronym reference data')
+    from backend.pipeline.tts_word_pronunciation import PHONES
+    for word, row in payload['entries'].items():
+        if (not re.fullmatch(r'[a-z]{3,32}', word)
+                or not isinstance(row, dict)
+                or not isinstance(row.get('source_url'), str)
+                or not row['source_url'].startswith('https://')
+                or not row.get('source_location')
+                or not isinstance(row.get('variants'), list) or not row['variants']
+                or any(not isinstance(variant, list) or not variant
+                       or any(phone not in PHONES for phone in variant)
+                       for variant in row['variants'])):
+            raise ValueError('Invalid cited acronym phone reference')
+    return payload['entries']
 
 
 def collapse_consonant_continuations(phones: list[str] | tuple[str, ...]) -> tuple[str, ...]:
@@ -103,6 +126,9 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
                     raise ValueError('Multi-digit source number requires a supported numeric reference')
                 word = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine')[int(word)]
             variants = dictionary.get(word.casefold())
+            if not variants:
+                reference = acronym_references().get(word.casefold())
+                variants = reference['variants'] if reference else None
             if not variants:
                 raise ValueError(f'No source pronunciation reference for {word}')
             references = {tuple(re.sub(r'\d', '', p) for p in variant) for variant in variants}
@@ -200,6 +226,15 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
                  for edit in edits if edit.get('kind') == 'word']
     if word_refs:
         report['word_hint_references'] = word_refs
+    unedited = text
+    for edit in sorted(edits, key=lambda row: row['start'], reverse=True):
+        unedited = unedited[:edit['start']] + ' ' + unedited[edit['end']:]
+    cited = {word.casefold(): acronym_references()[word.casefold()]
+             for word in re.findall(r'[A-Za-z]+', unedited)
+             if not lexicon().get(word.casefold()) and word.casefold() in acronym_references()}
+    if cited:
+        report['cited_acronym_references'] = cited
+        report['acronym_reference_sha256'] = hashlib.sha256(ACRONYM_REFERENCES.read_bytes()).hexdigest()
     try:
         observed = observed_phones(phones)
         parts = reference_parts(text, edits)

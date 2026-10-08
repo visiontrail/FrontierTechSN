@@ -9,6 +9,38 @@ PREFIX = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z '
 ENDING = ' t ə d eɪ'
 
 
+@pytest.mark.parametrize(('term', 'phones'), [
+    ('JSON', 'dʒ eɪ s ə n'), ('GIF', 'ɡ ɪ f'), ('GIF', 'dʒ ɪ f'),
+    ('GUI', 'ɡ uː iː'),
+])
+def test_cited_missing_dictionary_acronym_requires_exact_word_phones(term, phones):
+    source = f'The report mentions {term} today.'
+    report = evidence.compare_source(source, [], PREFIX + phones + ENDING)
+    assert report['supported'] and report['passed']
+    assert report['cited_acronym_references'][term.casefold()]['source_url'].startswith('https://')
+    assert report['acronym_reference_sha256'] == hashlib.sha256(evidence.ACRONYM_REFERENCES.read_bytes()).hexdigest()
+    assert not evidence.compare_source(source, [], PREFIX + phones + ENDING + ' t')['passed']
+
+
+@pytest.mark.parametrize(('term', 'phones'), [
+    ('JSON', 'dʒ eɪ s ə n t ə'), ('GIF', 'ɡ ɪ v'), ('GIF', 'ɡ ɪ f t ə'),
+    ('GUI', 'ɡ iː'), ('GUI', 'ɡ aɪ'),
+])
+def test_cited_word_reference_never_accepts_missing_vowels_or_extra_consonants(term, phones):
+    source = f'The report mentions {term} today.'
+    report = evidence.compare_source(source, [], PREFIX + phones + ENDING)
+    assert report['supported'] and not report['passed']
+
+
+def test_spelled_candidate_does_not_gain_a_word_pronunciation_from_reference_data():
+    source = 'The report mentions JSON today.'
+    prepared = edits(source, 'JSON', 'jay ess oh N')
+    report = evidence.compare_source(source, prepared, PREFIX + 'dʒ eɪ s ə n' + ENDING)
+    assert report['supported'] and not report['passed']
+    assert 'cited_acronym_references' not in report
+    assert evidence.compare_source(source, prepared, PREFIX + 'dʒ eɪ ɛ s oʊ ɛ n' + ENDING)['passed']
+
+
 def edits(source, term, spoken):
     return tts_pronunciation.validate_decisions(source, [
         {'id': 0, 'source': term, 'action': 'spell', 'spoken': spoken,

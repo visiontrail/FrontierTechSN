@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "entries": {
+    "json": {
+      "variants": [["JH", "EY", "S", "AH", "N"]],
+      "ipa": ["ˈdʒeɪ.sən"],
+      "source_url": "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf",
+      "source_location": "Introduction, page iii, pronunciation footnote",
+      "verified_on": "2026-10-08"
+    },
+    "gif": {
+      "variants": [["G", "IH", "F"], ["JH", "IH", "F"]],
+      "ipa": ["ɡɪf", "dʒɪf"],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/gif",
+      "source_location": "British and American pronunciation entries",
+      "verified_on": "2026-10-08"
+    },
+    "gui": {
+      "variants": [["G", "UW", "IY"]],
+      "ipa": ["ˈɡuːi"],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/gui",
+      "source_location": "British and American word pronunciation entries",
+      "verified_on": "2026-10-08"
+    }
+  }
+}
