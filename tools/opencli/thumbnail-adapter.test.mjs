@@ -110,6 +110,71 @@ test('idle saved conversation is never periodically reloaded before a late image
   assert.equal(state.progress.at(-1).stage, 'images_detected')
 })
 
+const imageFailure = "I wasn't able to generate the image due to an error on my side."
+const ownedFailure = [
+  { Role: 'User', Text: 'exact image prompt' },
+  { Role: 'Assistant', Text: imageFailure },
+]
+
+test('completed image error ends the owned wait after two stable idle readings', async () => {
+  const { run, state } = waiter(fixedWait, { messages: () => ownedFailure })
+  await assert.rejects(run(420, savedUrl, { prompt: 'exact image prompt' }),
+    error => /CHATGPT_IMAGE_GENERATION_FAILED/.test(error.message) && error.message.includes(savedUrl))
+  assert.equal(state.clock, 6000)
+  assert.equal(state.navigations.length, 0)
+  assert.equal(state.progress.at(-1).stage, 'image_generation_failed')
+})
+
+test('reproduces full-deadline wait on the installed adapter for a completed provider error', async t => {
+  const legacy = waitSource(originals.get('clis/chatgpt/utils.js').toString())
+  if (legacy.includes('CHATGPT_IMAGE_GENERATION_FAILED')) return t.skip('Installed runtime already detects terminal errors')
+  const { run, state } = waiter(legacy, { messages: () => ownedFailure })
+  assert.deepEqual(Array.from(await run(420, savedUrl, { prompt: 'exact image prompt' })), [])
+  assert.ok(state.clock >= 420000)
+})
+
+for (const [label, messages] of [
+  ['different request', [{ Role: 'User', Text: 'other prompt' }, ownedFailure[1]]],
+  ['older reply', [ownedFailure[1], ownedFailure[0]]],
+  ['unhydrated user', [ownedFailure[1]]],
+  ['quoted error', [ownedFailure[0], { Role: 'Assistant', Text: `The earlier error was: ${imageFailure}` }]],
+]) {
+  test(`does not treat ${label} as a terminal image failure`, async () => {
+    const { run, state } = waiter(fixedWait, { messages: () => messages })
+    assert.deepEqual(Array.from(await run(12, savedUrl, { prompt: 'exact image prompt' })), [])
+    assert.equal(state.progress.at(-1).stage, 'image_wait_timeout')
+  })
+}
+
+test('single error sighting does not reject an image that subsequently finishes', async () => {
+  const { run, state } = waiter(fixedWait, {
+    messages: () => ownedFailure, images: state => state.clock >= 6000 ? [imageUrl] : [],
+  })
+  assert.deepEqual(Array.from(await run(30, savedUrl, { prompt: 'exact image prompt' })), [imageUrl])
+  assert.equal(state.clock, 9000)
+})
+
+test('generation restarting between error sightings resets the failure confirmation', async () => {
+  const { run } = waiter(fixedWait, {
+    messages: () => ownedFailure, generating: state => state.clock === 6000,
+    images: state => state.clock >= 12000 ? [imageUrl] : [],
+  })
+  assert.deepEqual(Array.from(await run(30, savedUrl, { prompt: 'exact image prompt' })), [imageUrl])
+})
+
+for (const rendering of ['active generation', 'canvas preview']) {
+  test(`${rendering} prevents stale failure text from terminating an image request`, async () => {
+    const { run, state } = waiter(fixedWait, {
+      messages: () => ownedFailure,
+      generating: state => rendering === 'active generation' && state.clock < 12000,
+      images: state => state.clock >= 12000 ? [imageUrl]
+        : rendering === 'canvas preview' ? ['data:image/png;base64,unfinished'] : [],
+    })
+    assert.deepEqual(Array.from(await run(30, savedUrl, { prompt: 'exact image prompt' })), [imageUrl])
+    assert.equal(state.progress.at(-1).stage, 'images_detected')
+  })
+}
+
 test('known live local route remains in place while its canonical image finishes', async () => {
   const { run, state } = waiter(fixedWait, { url: localUrl,
     generating: state => state.clock < 15000, images: () => [imageUrl] })

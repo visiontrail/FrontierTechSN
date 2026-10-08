@@ -1024,7 +1024,7 @@ async def _retry_opencli_in_session(
             if any(code in str(exc) for code in (
                 "GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT",
                 "GEMINI_VIDEO_SUBMISSION_UNCERTAIN", "GEMINI_VIDEO_GENERATION_FAILED",
-                "CHATGPT_IMAGE_TURN_PENDING",
+                "CHATGPT_IMAGE_TURN_PENDING", "CHATGPT_IMAGE_GENERATION_FAILED",
             )):
                 raise
             if non_retryable and non_retryable(exc):

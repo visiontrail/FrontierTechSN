@@ -832,6 +832,21 @@ def test_video_terminal_generation_does_not_start_ten_more_generations(monkeypat
     assert run.await_count == 1
 
 
+def test_image_terminal_failure_does_not_repeat_original_turn_wait(monkeypatch):
+    run = AsyncMock(side_effect=collage_broll.OpenCLIError(
+        "CHATGPT_IMAGE_GENERATION_FAILED: I wasn't able to generate the image due to an error on my side."
+    ))
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    sleep = AsyncMock()
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", sleep)
+    with pytest.raises(collage_broll.OpenCLIError, match="CHATGPT_IMAGE_GENERATION_FAILED"):
+        asyncio.run(collage_broll._retry_opencli_in_session(
+            ["chatgpt", "image", "prompt"], timeout=420, label="still",
+        ))
+    assert run.await_count == 1
+    sleep.assert_not_awaited()
+
+
 def test_cached_failure_recovery_closes_interrupted_session_before_skipping_generation(tmp_path):
     with _CollageCacheHarness(tmp_path) as harness:
         with patch.object(collage_broll, "_generate_video", AsyncMock(side_effect=RuntimeError("provider unavailable"))):

@@ -8,6 +8,8 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
     let lastUrls = [];
     let stableCount = 0;
     let stillRendering = false;
+    let failureText = '';
+    let failureCount = 0;
     const isLocal = value => /^https:\/\/chatgpt\.com\/c\/local-chatgpt(?::|%3a)[0-9a-f-]{36}(?:[?#]|$)/i.test(value || '');
     const isPending = value => /^https:\/\/chatgpt\.com\/(?:new\/?)?(?:[?#]|$)/i.test(value || '');
     const report = stage => options.onProgress?.(stage, conversationUrl);
@@ -61,6 +63,8 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
         if (stillRendering) {
             lastUrls = [];
             stableCount = 0;
+            failureText = '';
+            failureCount = 0;
             continue;
         }
 
@@ -73,8 +77,37 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
         if (!urls.length) {
             lastUrls = [];
             stableCount = 0;
+            // A completed provider error is not a slow image. Bind it to the
+            // exact submitted turn, and require two idle, identical readings.
+            // Canvas previews and unrelated/older assistant text cannot fail it.
+            let terminalText = '';
+            if (!stillRendering && options.prompt) {
+                const messages = await getVisibleMessages(page, { textOnly: true });
+                if (Date.now() >= deadline) break;
+                const userIndex = messages.findLastIndex(message => message.Role === 'User');
+                const latest = messages.at(-1);
+                if (userIndex >= 0 && userIndex < messages.length - 1
+                    && chatGPTPromptMatches(messages[userIndex].Text, options.prompt)
+                    && latest?.Role === 'Assistant') {
+                    const text = String(latest.Text || '').trim();
+                    if (/^I wasn['’]t able to generate the image due to an error on my side\.$/.test(text)) {
+                        terminalText = text;
+                    }
+                }
+            }
+            failureCount = terminalText && terminalText === failureText ? failureCount + 1 : (terminalText ? 1 : 0);
+            failureText = terminalText;
+            if (failureCount >= 2) {
+                report('image_generation_failed');
+                throw new CommandExecutionError(
+                    `CHATGPT_IMAGE_GENERATION_FAILED: ${terminalText}`,
+                    `Inspect the original request at ${conversationUrl}; the image prompt was not replayed.`,
+                );
+            }
             continue;
         }
+        failureText = '';
+        failureCount = 0;
         if (urls.join('\n') === lastUrls.join('\n')) stableCount += 1;
         else { lastUrls = urls; stableCount = 1; }
         if (stableCount >= 2) {
