@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from backend.pipeline import chatterbox, tts, tts_pronunciation as pronunciation  # noqa: E402
-from backend.runtime import RUNTIME_IDENTITY  # noqa: E402
+from backend.runtime import RUNTIME_IDENTITY, _identity as _runtime_identity  # noqa: E402
 from scripts.validate_chatterbox import TERMINAL, require_idle  # noqa: E402
 
 FIXTURE = ROOT / 'backend/tests/fixtures/chatterbox_common_vocabulary.json'
@@ -51,6 +51,33 @@ def digest(value: object) -> str:
 def sha(path: Path) -> str:
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+VALIDATION_SOURCE_HASHES = {
+    relative: sha(ROOT / relative) for relative in [
+        'scripts/validate_chatterbox_vocabulary.py',
+        'scripts/chatterbox_phoneme_evidence.py',
+        'scripts/chatterbox_body_phone_references.py',
+        'backend/pipeline/english_body_phone_references.json',
+        'backend/pipeline/english_word_phone_references.json',
+    ]
+}
+
+
+def require_validation_source() -> dict:
+    """Bind private verification to its own loaded code, independently of the web service."""
+    current = _runtime_identity()
+    if (not RUNTIME_IDENTITY.get('commit')
+            or any(current.get(key) != RUNTIME_IDENTITY.get(key) for key in ['commit', 'backend_sha256'])):
+        raise RuntimeError('Local validation source changed; preserve requests and reload the validator')
+    records = subprocess.check_output([
+        'git', 'status', '--porcelain', '-z', '--', 'backend', *VALIDATION_SOURCE_HASHES,
+    ], cwd=ROOT).decode().split(chr(0))
+    if any(record and not record[3:].startswith('backend/tests/') for record in records):
+        raise RuntimeError('Local validation source is uncommitted; preserve requests before synthesis')
+    if any(sha(ROOT / relative) != digest for relative, digest in VALIDATION_SOURCE_HASHES.items()):
+        raise RuntimeError('Local validation references changed; preserve requests and reload the validator')
+    return {**RUNTIME_IDENTITY, 'verification_source_hashes': VALIDATION_SOURCE_HASHES.copy()}
 
 
 def corpus(fixture: dict, observed: dict | None = None, *, policy_version: int | None = None) -> list[dict]:
@@ -319,8 +346,9 @@ def composition_audio_window(tasks: list[dict], queue: dict) -> dict:
 
 
 async def require_audio_window(app_url: str, *, allow_composing: bool = False) -> dict:
+    validator = require_validation_source()
     if not allow_composing:
-        return {'available': True, **await require_idle(app_url)}
+        return {'available': True, **await require_idle(app_url), 'validation_runtime': validator}
     import httpx
     async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
         responses = await asyncio.gather(*(client.get(app_url.rstrip('/') + '/api/' + endpoint)
@@ -328,7 +356,8 @@ async def require_audio_window(app_url: str, *, allow_composing: bool = False) -
     for response in responses:
         response.raise_for_status()
     report = composition_audio_window(responses[0].json()['tasks'], responses[1].json())
-    report.update(checked_at=datetime.now(timezone.utc).isoformat(), application_runtime=responses[2].json())
+    report.update(checked_at=datetime.now(timezone.utc).isoformat(), application_runtime=responses[2].json(),
+                  validation_runtime=validator)
     return report
 
 

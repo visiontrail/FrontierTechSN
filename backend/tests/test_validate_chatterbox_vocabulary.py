@@ -217,6 +217,7 @@ async def test_mode_rejection_does_not_submit_audio_or_claim_acoustic_completion
     async def unexpected_audio(*_args, **_kwargs):
         pytest.fail('A wrong mode must stop before submitting audio')
     monkeypatch.setattr(validation, 'require_idle', idle)
+    monkeypatch.setattr(validation, 'require_validation_source', lambda: {'commit': 'isolated-test-source'})
     monkeypatch.setattr(pronunciation, 'prepare_pronunciation', plan)
     monkeypatch.setattr(validation.chatterbox, '_generate_chatterbox', unexpected_audio)
     marker = {'identity': {'cases': [case], 'cache_contract': {'pronunciation_policy': {}}},
@@ -241,6 +242,7 @@ async def test_observation_timeout_keeps_current_job_and_stops_before_next_batch
         validation.write(validation.Path(directory) / 'tts_input_part_001.request-0.json', checkpoint)
         raise TimeoutError('Observation expired; service job may still be running')
     monkeypatch.setattr(validation, 'require_idle', idle)
+    monkeypatch.setattr(validation, 'require_validation_source', lambda: {'commit': 'isolated-test-source'})
     monkeypatch.setattr(pronunciation, 'prepare_pronunciation', plan)
     monkeypatch.setattr(validation.chatterbox, '_generate_chatterbox', uncertain_audio)
     marker = {'identity': {'cases': [case], 'cache_contract': {'pronunciation_policy': {}}},
@@ -388,3 +390,42 @@ def test_legacy_corpus_cannot_hide_a_changed_synthesis_contract(tmp_path,monkeyp
     monkeypatch.setattr(validation.chatterbox,'cache_contract',lambda:{**current,'seed':current['seed']+1})
     with pytest.raises(ValueError,match='Frozen corpus'):
         validation.prepare(directory,value,None)
+
+
+@pytest.mark.parametrize('drift', ['commit', 'backend_sha256', 'reference', 'uncommitted'])
+def test_validator_source_drift_stops_before_an_audio_window_or_new_request(tmp_path, monkeypatch, drift):
+    loaded = {'commit': 'loaded-commit', 'backend_sha256': 'loaded-backend', 'loaded_at': 'loaded-time'}
+    current = loaded.copy()
+    path = tmp_path / 'reference.json'
+    path.write_text('original')
+    monkeypatch.setattr(validation, 'ROOT', tmp_path)
+    monkeypatch.setattr(validation, 'RUNTIME_IDENTITY', loaded)
+    monkeypatch.setattr(validation, 'VALIDATION_SOURCE_HASHES', {'reference.json': validation.sha(path)})
+    monkeypatch.setattr(validation, '_runtime_identity', lambda: current)
+    monkeypatch.setattr(validation.subprocess, 'check_output', lambda *_args, **_kwargs: (
+        b' M backend/pipeline/tts_pronunciation.py\0' if drift == 'uncommitted' else b''))
+    if drift in current:
+        current[drift] = 'changed'
+    elif drift == 'reference':
+        path.write_text('changed')
+    with pytest.raises(RuntimeError, match='Local validation'):
+        validation.require_validation_source()
+
+
+@pytest.mark.asyncio
+async def test_finished_narration_window_keeps_web_and_private_validator_versions_distinct(tmp_path, monkeypatch):
+    import httpx
+    task, _manifest = completed_composition_task(tmp_path)
+    application = {'commit': 'older-web-service', 'backend_sha256': 'web-bytes'}
+    validator = {'commit': 'committed-validator', 'backend_sha256': 'validator-bytes'}
+    monkeypatch.setattr(validation, 'require_validation_source', lambda: validator)
+    payloads = {'/api/tasks': {'tasks': [task]}, '/api/explainers/queue': {
+        'active': {'id': task['id']}, 'items': []}, '/api/runtime': application}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payloads[request.url.path]))
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: client(transport=transport, **kwargs))
+    report = await validation.require_audio_window('http://example.invalid', allow_composing=True)
+    assert report['available']
+    assert report['application_runtime'] == application
+    assert report['validation_runtime'] == validator
+    assert report['production_audio_anchors'][0]['audio_sha256'] == validation.sha(validation.Path(task['audio_path']))
