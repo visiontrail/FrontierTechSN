@@ -13,9 +13,9 @@ from pathlib import Path
 from backend import config
 
 CANDIDATE_POLICY_VERSION = 4
-IMPLEMENTED_POLICY_VERSION = 6
+IMPLEMENTED_POLICY_VERSION = 7
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -65,6 +65,9 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
     }
     if version != 3:
         result['candidate_pattern_sha256'] = hashlib.sha256(CANDIDATE_RE.pattern.encode()).hexdigest()
+    if version >= 7:
+        from backend.pipeline.tts_word_pronunciation import policy_contract as word_contract
+        result['word_hint_contract'] = word_contract().copy()
     return result
 
 
@@ -74,7 +77,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {3, 4, 5}:
+    if policy.get('version') in {3, 4, 5, 6}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
         except OSError:
@@ -167,10 +170,17 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             # AI/OpenAI. Use the letter-identical form accepted in live audio.
             spoken = re.sub(r"\bay\b", "eigh", spoken, flags=re.IGNORECASE)
             edits.append({**candidate, "spoken": spoken})
+        elif action == 'word' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 7:
+            from backend.pipeline.tts_word_pronunciation import validate_word_hint
+            phones = validate_word_hint(candidate['source'], spoken, row.get('phones'))
+            edits.append({**candidate, 'spoken': spoken, 'kind': 'word', 'phones': phones})
         else:
-            raise ValueError("Pronunciation action must be keep or spell")
-        validated.append({"id": candidate["id"], "source": candidate["source"],
-                          "action": action, "spoken": spoken, "reason": reason.strip()})
+            raise ValueError("Pronunciation action must be keep, spell or a supported word hint")
+        accepted = {"id": candidate["id"], "source": candidate["source"],
+                    "action": action, "spoken": spoken, "reason": reason.strip()}
+        if action == 'word':
+            accepted['phones'] = phones
+        validated.append(accepted)
     return validated, edits
 
 

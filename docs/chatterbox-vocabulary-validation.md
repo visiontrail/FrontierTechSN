@@ -171,6 +171,38 @@ single-letter hints can use `M.` or `R.` without changing following digits.
 All candidate decisions remain contextual and letter/order/count validated;
 there is no production list of entity names to replace.
 
+Policy 7 adds a contextual `word` action while retaining policies 3 through 6
+and their prompt files. A word hint separates fragments of the same uppercase
+word; it cannot add, omit or reorder source letters, rewrite a sentence, expand
+a name, change a number or touch a protected URL. Every fragment must have a
+CMU dictionary reading. The model declares the complete word's stress-free
+ARPABET phones; they must match the fragments and the canonical dictionary word
+when it has an entry. The actual dictionary bytes join the policy identity.
+For an unknown dictionary word, the reference is explicitly composed from the
+validated, spelling-preserving hint rather than claimed to be a dictionary entry.
+
+The word action retains the word-reading role in corpus mode checks. Its WAV
+must pass complete-source unconditioned phone verification even when ASR already
+returns the exact source. A missing observer preserves the completed job;
+a phone mismatch retains the original bounded retry budget and failure reports.
+Cached word-hint acceptance requires the waveform hash, source hash and exact
+planned word-phone references to match. Failed raw ASR reports remain visible
+when acoustic evidence corroborates the actual word reading.
+
+Phone evidence version 5 also permits a dictionary word's final `/z/` to appear
+as `/s/` before the next ordinary word's `/s/` onset. This limited surface-reference
+alternative is an inference from
+[Smith's study of English fricative devoicing](https://doi.org/10.1006/jpho.1997.0053).
+The repeated consonant continuation may merge; named-letter units never receive
+this alternative, and vowels, missing words and extra tails remain unchanged.
+
+A corpus created before optional delivery-tail cleanup retains that policy when
+resumed: the missing cleanup version means disabled cleanup. Only this known
+additive verifier transition is compatible; generation parameter, source, voice
+or corpus changes still stop the run. Existing completed jobs and provider WAVs
+remain bound to their original identities. New production runs keep the current
+delivery cleanup behavior.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and

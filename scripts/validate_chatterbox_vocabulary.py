@@ -109,8 +109,11 @@ def prepare(directory: Path, fixture: dict, observed: dict | None) -> dict:
     if marker.exists():
         previous = read(marker)['identity']['cache_contract']
         policy = previous.get('pronunciation_policy')
+        compatible = {**contract, 'pronunciation_policy': policy}
+        if 'tail_cleanup_version' not in previous and compatible.get('tail_cleanup_version') == 1:
+            compatible.pop('tail_cleanup_version')
         if (isinstance(policy, dict) and pronunciation.compatible_policy(policy, contract['pronunciation_policy'])
-                and previous == {**contract, 'pronunciation_policy': policy}):
+                and previous == compatible):
             contract = previous
     cases = corpus(fixture, observed, policy_version=contract['pronunciation_policy']['version'])
     identity = {'version': 1, 'cases': cases, 'fixture_sha256': digest(fixture),
@@ -147,7 +150,8 @@ def mode_report(text: str, cases: list[dict], plan: dict) -> dict:
                 continue
             expected = case['expected_actions'].get(decision['source'])
             allowed = [expected] if isinstance(expected, str) else expected
-            if allowed and decision['action'] not in allowed:
+            selected_mode = 'keep' if decision['action'] == 'word' else decision['action']
+            if allowed and selected_mode not in allowed:
                 failures.append({'case_id': case['id'], 'source': decision['source'],
                                  'expected_action': expected, 'actual_decision': decision})
     return {'passed': not failures, 'failures': failures}
@@ -443,7 +447,8 @@ async def run(directory: Path, marker: dict, *, allow_composing: bool = False,
                 result = await chatterbox._generate_chatterbox(str(script), str(group / 'audio'),
                     'space-en-f1', 'en', log=print, emit=print, verify_text=True,
                     part_auditor=audit_part, audit_all_parts=True, before_submit=before_submit,
-                    frozen_pronunciation_policy=marker['identity']['cache_contract']['pronunciation_policy'])
+                    frozen_pronunciation_policy=marker['identity']['cache_contract']['pronunciation_policy'],
+                    frozen_tail_cleanup_version=marker['identity']['cache_contract'].get('tail_cleanup_version', 0))
             except tts.TtsIntegrityError as error:
                 # Only positive integrity rejection advances; transport or
                 # observation uncertainty preserves this batch and stops here.

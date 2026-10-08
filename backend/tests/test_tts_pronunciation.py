@@ -453,11 +453,11 @@ async def test_old_policy_can_plan_without_using_the_new_prompt(tmp_path,mock_mo
 
 
 def test_policy6_keeps_v5_bytes_and_disambiguates_m_without_changing_source_letters():
-    old=pronunciation.policy_contract(policy_version=5);latest=pronunciation.policy_contract()
+    old=pronunciation.policy_contract(policy_version=5);latest=pronunciation.policy_contract(policy_version=6)
     assert latest['version']==6 and old['prompt_sha256']!=latest['prompt_sha256']
     assert pronunciation.compatible_policy(old,latest)
     assert pronunciation.prompt_path(policy_version=5).name=='tts_pronunciation_v5.txt'
-    assert pronunciation.prompt_path().name=='tts_pronunciation_v6.txt'
+    assert pronunciation.prompt_path(policy_version=6).name=='tts_pronunciation_v6.txt'
     text='The report mentions CMAME today.'
     _,edits=pronunciation.validate_decisions(text,decisions_for(text,{'CMAME':'see M eigh M ee'}))
     assert pronunciation.render_span(text,0,len(text),edits)=='The report mentions see M eigh M ee today.'

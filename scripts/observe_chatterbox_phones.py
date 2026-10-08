@@ -22,13 +22,16 @@ def main():
 
     model_id = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
     revision = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
+    # Model initialization also uses Torch's CPU pool. Bound it before
+    # loading weights, rather than only after the expensive initialization.
+    torch.set_num_threads(2)
+    torch.set_num_interop_threads(1)
     digest = hashlib.sha256(args.audio.read_bytes()).hexdigest()
     options = {'revision': revision, 'local_files_only': True}
     feature = Wav2Vec2FeatureExtractor.from_pretrained(model_id, **options)
     tokenizer = Wav2Vec2PhonemeCTCTokenizer.from_pretrained(model_id, do_phonemize=False, **options)
     model = Wav2Vec2ForCTC.from_pretrained(model_id, use_safetensors=False, **options)
     model.eval()
-    torch.set_num_threads(2)
     decoded = subprocess.check_output(['ffmpeg', '-v', 'error', '-i', str(args.audio),
                                        '-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1'])
     samples = np.frombuffer(decoded, dtype='<f4').copy()

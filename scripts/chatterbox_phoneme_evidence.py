@@ -17,7 +17,7 @@ from backend.pipeline import tts_pronunciation as pronunciation
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 4
+EVIDENCE_VERSION = 5
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -81,6 +81,7 @@ def observed_phones(phones: str) -> tuple[str, ...]:
 def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]:
     dictionary = lexicon()
     parts = []
+    ordinary_units = []
 
     def ordinary(fragment):
         if re.search(r'[^A-Za-z0-9\s.,:;!?\-\u2014\u2013]', fragment):
@@ -92,6 +93,7 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
                          or (match.end() < len(fragment) and fragment[match.end()].isdigit()))):
                 # A in A2A names the letter; it is not the indefinite article.
                 parts.append(LETTER_PHONES[word])
+                ordinary_units.append(False)
                 continue
             if word.isdigit():
                 if len(word) != 1:
@@ -122,6 +124,7 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
                 if variant[-2:] == ('N', 'Z'):
                     references.add((*variant[:-2], 'N', 'D', 'Z'))
             parts.append(sorted(references))
+            ordinary_units.append(True)
 
     aliases = {name: letter for letter, names in pronunciation.LETTER_NAMES.items()
                for name in (letter.casefold(), *names) if ' ' not in name}
@@ -130,6 +133,14 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
         start, end = edit['start'], edit['end']
         if not cursor <= start < end <= len(text) or text[start:end] != edit['source']:
             raise ValueError('Spelling edit differs from its source span')
+        if edit.get('kind') == 'word':
+            from backend.pipeline.tts_word_pronunciation import validate_word_hint
+            phones = validate_word_hint(edit['source'], edit['spoken'], edit.get('phones'))
+            ordinary(text[cursor:start])
+            parts.append([tuple(phones)])
+            ordinary_units.append(True)
+            cursor = end
+            continue
         if pronunciation._spoken_letters(edit['spoken']) != edit['source'].replace('.', '').upper():
             raise ValueError('Spelling edit does not retain every source letter')
         ordinary(text[cursor:start])
@@ -138,15 +149,26 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
         while index < len(words):
             if words[index:index + 2] == ['double', 'you']:
                 parts.append(LETTER_PHONES['W'])
+                ordinary_units.append(False)
                 index += 2
             elif words[index] in {'double', 'triple'}:
                 ordinary(words[index])
                 index += 1
             else:
                 parts.append(LETTER_PHONES[aliases[words[index]]])
+                ordinary_units.append(False)
                 index += 1
         cursor = end
     ordinary(text[cursor:])
+    # A dictionary word's coda /z/ can devoice before the next word's /s/.
+    # Keep the source word and following onset; consonant-continuation
+    # normalization merges the resulting s-s, never a named-letter vowel.
+    for index in range(len(parts) - 1):
+        if (ordinary_units[index] and ordinary_units[index + 1]
+                and all(variant[0] == 'S' for variant in parts[index + 1])):
+            variants = set(parts[index])
+            variants.update((*variant[:-1], 'S') for variant in parts[index] if variant[-1] == 'Z')
+            parts[index] = sorted(variants)
     return parts
 
 
@@ -154,6 +176,10 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     report = {'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
               'raw_phones': phones, 'supported': False, 'passed': False,
               'method': 'complete_source_phone_sequence', 'evidence_version': EVIDENCE_VERSION}
+    word_refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
+                 for edit in edits if edit.get('kind') == 'word']
+    if word_refs:
+        report['word_hint_references'] = word_refs
     try:
         observed = observed_phones(phones)
         parts = reference_parts(text, edits)

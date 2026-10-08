@@ -1,0 +1,73 @@
+import hashlib
+
+import pytest
+
+from backend.pipeline import tts_pronunciation as pronunciation
+from backend.pipeline import tts_word_pronunciation as word
+from scripts import chatterbox_phoneme_evidence as evidence
+
+
+def word_row(**changes):
+    return {'id': 0, 'source': 'SATA', 'action': 'word', 'spoken': 'sat, a',
+            'phones': ['S', 'AE', 'T', 'AH'], 'reason': 'Keep the conventional word reading.', **changes}
+
+
+def test_word_hint_preserves_source_and_numeric_suffix_and_binds_phones():
+    source = 'The SATA3 interface is ready.'
+    rows, edits = pronunciation.validate_decisions(source, [word_row()])
+    assert source == 'The SATA3 interface is ready.'
+    assert pronunciation.render_span(source, 0, len(source), edits) == 'The sat, a 3 interface is ready.'
+    assert rows[0]['phones'] == ['S', 'AE', 'T', 'AH']
+    assert edits[0]['kind'] == 'word'
+    assert pronunciation.validate_decisions(source, rows) == (rows, edits)
+
+
+@pytest.mark.parametrize('changes', [
+    {'spoken': 'sat uh'}, {'spoken': 'sat'}, {'spoken': 'sat a a'},
+    {'spoken': 's a t a'}, {'spoken': 'sat/a'}, {'spoken': 'sat <break> a'},
+    {'phones': ['S', 'AA', 'T', 'AH']}, {'phones': ['S', 'AE', 'T']},
+    {'phones': ['S', 'AE', 'T', 'AH', 'AH']}, {'phones': ['s', 'ae', 't', 'ah']},
+    {'phones': ['S', 'AE1', 'T', 'AH0']}, {'phones': None},
+])
+def test_word_hint_rejects_changed_spelling_unbound_phones_and_instructions(changes):
+    with pytest.raises(ValueError):
+        pronunciation.validate_decisions('SATA today.', [word_row(**changes)])
+
+
+def test_known_word_cannot_turn_into_a_sequence_of_letter_names():
+    with pytest.raises(ValueError, match='source word'):
+        word.validate_word_hint('STOP', 's top', ['EH', 'S', 'T', 'AA', 'P'])
+
+
+@pytest.mark.parametrize('version', [3, 4, 5, 6])
+def test_old_policies_reject_new_word_action_and_keep_original_contract(version):
+    with pytest.raises(ValueError, match='supported word'):
+        pronunciation.validate_decisions('SATA today.', [word_row()], policy_version=version)
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=version))
+
+
+def test_word_policy_freezes_the_actual_dictionary_bytes():
+    with word.cmudict.dict_stream() as stream:
+        expected = hashlib.sha256(stream.read()).hexdigest()
+    assert pronunciation.policy_contract()['word_hint_contract']['dictionary_sha256'] == expected
+
+
+def test_word_hint_phone_evidence_checks_entire_source_and_conventional_word_reading():
+    source = 'The report mentions SATA today.'
+    _, edits = pronunciation.validate_decisions(source, [word_row()])
+    phones = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n d s æ t ɐ t ə d eɪ'
+    report = evidence.compare_source(source, edits, phones)
+    assert report['supported'] and report['passed']
+    assert report['word_hint_references'][0]['phones'] == ['S', 'AE', 'T', 'AH']
+    assert not evidence.compare_source(source, edits, phones + ' ɐ t')['passed']
+    assert not evidence.compare_source(source, edits, phones.replace('s æ t ɐ', 'ð æ t ɐ'))['passed']
+    assert not evidence.compare_source(source, edits, phones.replace('s æ t ɐ', 'ɛ s eɪ t iː eɪ'))['passed']
+
+
+def test_word_coda_devoicing_is_limited_to_a_following_ordinary_s_onset():
+    assert evidence.compare_source('His socks.', [], 'h ɪ s ɑː k s')['passed']
+    assert not evidence.compare_source('His toes.', [], 'h ɪ s t oʊ z')['passed']
+    _, edits = pronunciation.validate_decisions('ZS.', [
+        {'id': 0, 'source': 'ZS', 'action': 'spell', 'spoken': 'zee ess', 'reason': 'Two letter names.'},
+    ])
+    assert not evidence.compare_source('ZS.', edits, 's iː ɛ s')['passed']

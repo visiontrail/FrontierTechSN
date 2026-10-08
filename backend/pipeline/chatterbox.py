@@ -259,6 +259,15 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
             return None
     except tts.TtsIntegrityError:
         return None
+    if verify_text and identity.get('word_hint_references'):
+        acoustic = guard.get('required_word_phone_confirmation') or {}
+        if (acoustic.get('passed') is not True or acoustic.get('supported') is not True
+                or acoustic.get('conditioned_on_reference_text') is not False
+                or acoustic.get('method') != 'complete_source_phone_sequence'
+                or acoustic.get('audio_sha256') != metadata['audio_sha256']
+                or acoustic.get('source_sha256') != hashlib.sha256(identity['text'].encode()).hexdigest()
+                or acoustic.get('word_hint_references') != identity['word_hint_references']):
+            return None
     if verify_text:
         # The existing ASR observation is bound to this verified waveform hash.
         # Recheck it when upgrading the tail gate, retaining the original job
@@ -309,7 +318,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 6
+OBSERVATION_SPELLING_VERSION = 7
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -542,11 +551,15 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
     # transcript rather than running a second recognition pass per chunk.
     words, transcription = await av_sync.ensure_word_transcript(path, directory, minimum_words=1)
     report = _pronunciation_report(text, words, edits)
+    report['transcription'] = transcription
     report["trailing_speech"] = _trailing_speech_report(text, words)
     normalized_tail = _trailing_speech_report(text, [{"text": report['normalized_transcript']}])
     if not normalized_tail['passed']:
         report['trailing_speech'] = normalized_tail
-    if words and not report['passed'] and report['trailing_speech']['passed']:
+    word_hint = any(edit.get('kind') == 'word' for edit in edits)
+    if word_hint:
+        report['word_hint_required'] = True
+    if words and (not report['passed'] or word_hint) and report['trailing_speech']['passed']:
         from backend.pipeline import chatterbox_phonemes
         acoustic = await chatterbox_phonemes.confirm(path, text, edits, directory)
         if acoustic is not None:
@@ -558,9 +571,31 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
                         or acoustic.get('method') != 'complete_source_phone_sequence'
                         or acoustic.get('supported') is not True):
                     raise RuntimeError('Acoustic confirmation differs from the complete source waveform')
-                report.update(asr_spelling_passed=False, passed=True,
-                              verification_mode='complete_source_phone_sequence')
-                emit('Chatterbox spelling drift: complete source and letter phones independently confirmed')
+                if not report['passed']:
+                    report.update(asr_spelling_passed=False, passed=True,
+                                  verification_mode='complete_source_phone_sequence')
+                    emit('Chatterbox word transcription drift: complete source phones independently confirmed'
+                         if word_hint else 'Chatterbox spelling drift: complete source and letter phones independently confirmed')
+                elif word_hint:
+                    report.update(asr_spelling_passed=True,
+                                  verification_mode='required_word_hint_phone_sequence')
+                    emit('Chatterbox word pronunciation: complete source phones independently confirmed')
+        if word_hint:
+            report['required_word_phone_confirmation'] = acoustic
+            if acoustic is None or acoustic.get('supported') is not True:
+                report.update(asr_spelling_passed=report['passed'], passed=False,
+                              verification_status='word_phone_observation_unavailable')
+                _write_json(directory / 'pronunciation_report.json', report)
+                raise RuntimeError('Required word-hint acoustic verification unavailable; preserving the completed job')
+            if acoustic.get('passed') is not True:
+                report.update(asr_spelling_passed=report['passed'], passed=False,
+                              verification_status='word_phone_mismatch')
+                _write_json(directory / 'pronunciation_report.json', report)
+                raise tts.TtsIntegrityError('Word-hint audio differs from its complete source phone sequence')
+            refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
+                    for edit in edits if edit.get('kind') == 'word']
+            if acoustic.get('word_hint_references') != refs:
+                raise RuntimeError('Word-hint confirmation differs from its frozen phone references')
     report["transcription"] = transcription
     _write_json(directory / "pronunciation_report.json", report)
     if not words and edits:
@@ -624,6 +659,7 @@ async def _generate_chatterbox(
     audit_all_parts: bool = False,
     before_submit: Callable[[dict], Awaitable[dict]] | None = None,
     frozen_pronunciation_policy: dict | None = None,
+    frozen_tail_cleanup_version: int | None = None,
 ) -> str:
     # The service can speak 23 languages. The project's existing source-word,
     # ASR and subtitle contract is currently certified for English only.
@@ -634,6 +670,14 @@ async def _generate_chatterbox(
     if not config.CHATTERBOX_TTS_API_KEY:
         raise RuntimeError("Set CHATTERBOX_TTS_API_KEY in Admin -> System -> Voice & TTS")
     contract = cache_contract()
+    if frozen_tail_cleanup_version is not None:
+        if (type(frozen_tail_cleanup_version) is not int
+                or frozen_tail_cleanup_version not in {0, contract.get('tail_cleanup_version', 0)}):
+            raise RuntimeError('Frozen tail-cleanup policy is unsupported; preserving submitted jobs')
+        if frozen_tail_cleanup_version == 0:
+            # A corpus frozen before optional delivery cleanup retains its
+            # original provider samples and original manifest contract.
+            contract.pop('tail_cleanup_version', None)
     if contract['pronunciation_policy']['version'] not in pronunciation.SUPPORTED_POLICY_VERSIONS:
         raise RuntimeError('Pronunciation policy is unsupported; preserving submitted jobs')
     _, directory, _, cleaned = tts._prepare_tts_input(script_path, output_dir, strip_speaker_labels=True)
@@ -716,6 +760,10 @@ async def _generate_chatterbox(
                 "synthesis_speed_ratio": 1.0,
                 "synthesis_parameters": contract["synthesis_parameters"],
             }
+            word_refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
+                         for edit in chunk_edits if edit.get('kind') == 'word']
+            if word_refs:
+                identity['word_hint_references'] = word_refs
             cached = _cached_part(path, identity, verify_text=verify_text)
             if cached and part_auditor is not None:
                 try:
@@ -770,6 +818,7 @@ async def _generate_chatterbox(
                     str(checkpoint.get('rejected') or '').startswith((
                         'Chatterbox initialism pronunciation mismatch:',
                         'Required complete-source phone sequence differs from the source',
+                        'Word-hint audio differs from its complete source phone sequence',
                     ))
                     and checkpoint.get('job_id')
                     and checkpoint.get('rejection_observation_version', 0) < OBSERVATION_SPELLING_VERSION
@@ -924,8 +973,9 @@ async def _generate_chatterbox(
                 break
         if rejected_parts:
             raise tts.TtsIntegrityError('Chatterbox complete part audit retained integrity rejections: ' + json.dumps(rejected_parts))
-    from backend.pipeline.chatterbox_tail import prepare_delivery_parts
-    parts, metadata_rows = prepare_delivery_parts(parts, metadata_rows)
+    if contract.get('tail_cleanup_version'):
+        from backend.pipeline.chatterbox_tail import prepare_delivery_parts
+        parts, metadata_rows = prepare_delivery_parts(parts, metadata_rows)
     output = await tts._concat_wav_parts(parts, directory, log=log)
     integrity = tts._narration_integrity_summary(metadata_rows, tts._spoken_word_count(cleaned),
                                                 required=verify_text,

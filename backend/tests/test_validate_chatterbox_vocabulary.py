@@ -118,6 +118,19 @@ def test_frozen_corpus_cannot_rebind_submitted_provider_jobs(tmp_path):
         validation.prepare(tmp_path / 'run', value, None)
 
 
+def test_old_corpus_resumes_with_delivery_cleanup_disabled_and_still_rejects_generation_drift(tmp_path, monkeypatch):
+    current = validation.chatterbox.cache_contract()
+    old = {key: value for key, value in current.items() if key != 'tail_cleanup_version'}
+    monkeypatch.setattr(validation.chatterbox, 'cache_contract', lambda: old)
+    saved = validation.prepare(tmp_path / 'run', fixture(), None)
+    monkeypatch.setattr(validation.chatterbox, 'cache_contract', lambda: current)
+    assert validation.prepare(tmp_path / 'run', fixture(), None) == saved
+    changed = {**current, 'seed': current['seed'] + 1}
+    monkeypatch.setattr(validation.chatterbox, 'cache_contract', lambda: changed)
+    with pytest.raises(ValueError, match='Frozen corpus'):
+        validation.prepare(tmp_path / 'run', fixture(), None)
+
+
 @pytest.mark.parametrize('field', ['batch_count','case_count','term_count','corpus_sha256','uppercase_letters'])
 def test_resumed_manifest_cannot_claim_full_coverage_with_corrupt_counts(tmp_path, field):
     directory = tmp_path / 'run'

@@ -217,6 +217,18 @@ async def test_generation_freezes_contract_before_first_network_await(setup_clie
     assert metadata["identity"]["deployment_fingerprint"] == initial["deployment_fingerprint"]
 
 
+@pytest.mark.asyncio
+async def test_frozen_legacy_corpus_retains_provider_waveforms_without_new_delivery_cleanup(setup_client, monkeypatch):
+    from backend.pipeline import chatterbox_tail
+    _server, script, directory, _verifier, _generate = setup_client
+    monkeypatch.setattr(chatterbox_tail, 'prepare_delivery_parts',
+                        lambda *_args: pytest.fail('A frozen legacy corpus must retain its original delivery policy'))
+    output = await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+        log=None, emit=lambda _message: None, verify_text=True, frozen_tail_cleanup_version=0)
+    assert Path(output).is_file()
+    assert 'tail_cleanup_version' not in json.loads((directory / 'tts_manifest.json').read_text())['cache_contract']
+
+
 @pytest.mark.parametrize("max_words,max_chars", [(8, 60), (30, 250), (4, 22)])
 def test_bounded_chunks_preserve_every_word_and_punctuation(max_words, max_chars):
     text = "  ".join(["The complete source includes 2.5 billion items, with no missing ending."] * 12)
@@ -717,6 +729,9 @@ async def test_adapter_recovers_actual_service_decoder_rejection_without_model_l
     monkeypatch.setattr(tts, "_verify_orpheus_part", AsyncMock(return_value=advisory_report()))
     script = tmp_path / "script.txt"
     script.write_text("The complete source reaches the video.", encoding="utf-8")
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(
+        [{'text': word} for word in script.read_text().split()], {'passed': True},
+    )))
     directory = tmp_path / "audio"
     client_class = httpx.AsyncClient
     async with app.router.lifespan_context(app):
@@ -1657,6 +1672,54 @@ async def test_acoustic_observation_upgrade_rechecks_original_completed_jobs_wit
     assert m['job_id']=='job-1' and m['synthesis_request']['seed']==42
     assert m['integrity']['pronunciation']['passed']
     assert m['integrity']['pronunciation']['asr_spelling_passed'] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['passed', 'wrong_phones', 'unavailable'])
+async def test_word_hint_requires_acoustic_proof_even_when_asr_returns_exact_source(setup_client, monkeypatch, outcome):
+    from backend.pipeline import chatterbox_phonemes
+    server, script, directory, _verifier, generate = setup_client
+    source = 'The report mentions SATA today.'
+    script.write_text(source)
+    row = {'id': 0, 'source': 'SATA', 'action': 'word', 'spoken': 'sat, a',
+           'phones': ['S', 'AE', 'T', 'AH'], 'reason': 'A conventional word reading.'}
+    monkeypatch.setattr(digester, '_chat', AsyncMock(return_value=json.dumps({'decisions': [row]})))
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=([{'text': source}], {})))
+
+    async def confirm(wav, text, edits, _directory):
+        if outcome == 'unavailable':
+            return None
+        return {'supported': True, 'passed': outcome == 'passed', 'method': 'complete_source_phone_sequence',
+                'conditioned_on_reference_text': False, 'audio_sha256': hashlib.sha256(wav.read_bytes()).hexdigest(),
+                'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                'word_hint_references': [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
+                                         for edit in edits if edit.get('kind') == 'word']}
+
+    monkeypatch.setattr(chatterbox_phonemes, 'confirm', confirm)
+    if outcome == 'wrong_phones':
+        with pytest.raises(tts.TtsIntegrityError, match='Word-hint audio differs'):
+            await generate()
+        assert len(server.jobs) == chatterbox.MAX_INTEGRITY_ATTEMPTS
+        report = json.loads((directory / 'verification/tts_input_part_001/rejected-0/pronunciation_report.json').read_text())
+        assert report['asr_spelling_passed'] is True and report['passed'] is False
+    elif outcome == 'unavailable':
+        with pytest.raises(RuntimeError, match='word-hint acoustic verification unavailable'):
+            await generate()
+        assert len(server.jobs) == 1
+        checkpoint = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+        assert checkpoint['job_id'] == 'job-1' and not checkpoint.get('rejected')
+    else:
+        await generate()
+        meta_path = directory / 'tts_input_part_001_generated.json'
+        metadata = json.loads(meta_path.read_text())
+        assert metadata['identity']['word_hint_references'][0]['phones'] == ['S', 'AE', 'T', 'AH']
+        assert metadata['integrity']['pronunciation']['asr_spelling_passed'] is True
+        metadata['integrity']['pronunciation']['required_word_phone_confirmation']['word_hint_references'][0]['phones'][-1] = 'AA'
+        meta_path.write_text(json.dumps(metadata))
+        await generate()
+        assert len(server.jobs) == 1
+        repaired = json.loads(meta_path.read_text())
+        assert repaired['integrity']['pronunciation']['required_word_phone_confirmation']['word_hint_references'][0]['phones'][-1] == 'AH'
 
 
 @pytest.mark.asyncio
