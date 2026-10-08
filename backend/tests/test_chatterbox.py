@@ -1974,3 +1974,31 @@ async def test_opt_in_numeric_policy_sends_exact_decimal_words_and_reuses_the_sa
     assert len(server.jobs) == 1
     assert (directory / 'tts_input_part_001.request-0.json').read_bytes() == checkpoint
     assert script.read_text() == source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name', ['C++', 'C#'])
+async def test_opt_in_programming_policy_sends_all_named_symbols_and_reuses_same_job(setup_client, monkeypatch, name):
+    server, script, directory, _verifier, _generate = setup_client
+    source = f'The programmer reads a {name} example.'
+    script.write_text(source)
+    decisions = [{**row, 'action': 'programming',
+                  'spoken': tts_pronunciation.PROGRAMMING_CUES[row['source']],
+                  'reason': 'Programming language name in the source sentence.'}
+                 for row in tts_pronunciation.candidates(source, policy_version=15)]
+    monkeypatch.setattr(digester, '_chat', AsyncMock(return_value=json.dumps({'decisions': decisions})))
+    policy = tts_pronunciation.policy_contract(policy_version=15)
+    async def run():
+        return await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=True, frozen_pronunciation_policy=policy)
+    await run()
+    assert len(server.jobs) == 1
+    assert server.jobs['job-1']['request']['text'] == source.replace(name, tts_pronunciation.PROGRAMMING_CUES[name])
+    metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+    assert metadata['identity']['text'] == source
+    assert metadata['identity']['pronunciation_policy']['version'] == 15
+    checkpoint = (directory / 'tts_input_part_001.request-0.json').read_bytes()
+    await run()
+    assert len(server.jobs) == 1
+    assert (directory / 'tts_input_part_001.request-0.json').read_bytes() == checkpoint
+    assert script.read_text() == source

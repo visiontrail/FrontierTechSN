@@ -637,6 +637,73 @@ def v14_decisions(text, spellings=None):
             for row in pronunciation.candidates(text, policy_version=14)]
 
 
+def programming_decisions(text):
+    return [{**row, 'action': 'programming' if row.get('kind') == 'programming' else 'keep',
+             'spoken': pronunciation.PROGRAMMING_CUES[row['source']] if row.get('kind') == 'programming' else row['source'],
+             'reason': 'Programming language name in the sentence.'}
+            for row in pronunciation.candidates(text, policy_version=15)]
+
+
+def test_policy15_programming_cues_retain_both_operators_and_source():
+    text = 'The programmer reads a C++ example and a C# example.'
+    _, edits = pronunciation.validate_decisions(text, programming_decisions(text), policy_version=15)
+    assert pronunciation.render_span(text, 0, len(text), edits) == (
+        'The programmer reads a see plus plus example and a see sharp example.')
+    assert text == 'The programmer reads a C++ example and a C# example.'
+    assert [(row['source'], row['kind']) for row in edits] == [('C++', 'programming'), ('C#', 'programming')]
+    for version in range(3, 15):
+        assert not pronunciation.candidates(text, policy_version=version)
+    assert pronunciation.POLICY_VERSION == 13
+
+
+@pytest.mark.parametrize('wrong', ['see plus', 'see plus plus plus', 'cee plus plus', 'C++'])
+def test_policy15_programming_cue_rejects_symbol_changes(wrong):
+    text = 'The programmer reads a C++ example.'
+    decisions = programming_decisions(text)
+    decisions[0]['spoken'] = wrong
+    with pytest.raises(ValueError, match='every named symbol'):
+        pronunciation.validate_decisions(text, decisions, policy_version=15)
+
+
+@pytest.mark.parametrize('wrong', ['see hashtag', 'see pound', 'see', 'see sharp sharp'])
+def test_policy15_sharp_cue_rejects_symbol_changes(wrong):
+    text = 'The programmer reads a C# example.'
+    decisions = programming_decisions(text)
+    decisions[0]['spoken'] = wrong
+    with pytest.raises(ValueError, match='every named symbol'):
+        pronunciation.validate_decisions(text, decisions, policy_version=15)
+
+
+def test_policy15_programming_names_avoid_protected_and_embedded_source():
+    text = 'https://example.com/C++ https://example.com/C# coder@example.com XC++ C+++ C## C++x c++ remain.'
+    assert not any(row.get('kind') == 'programming'
+                   for row in pronunciation.candidates(text, policy_version=15))
+
+
+@pytest.mark.asyncio
+async def test_policy15_programming_plan_is_frozen_and_cannot_rebind_submitted_plan(tmp_path, mock_model):
+    _resolve, chat = mock_model
+    text = 'The programmer reads a C++ example.'
+    old_policy = pronunciation.policy_contract(policy_version=14)
+    old = await pronunciation.prepare_pronunciation(text, tmp_path, policy=old_policy, emit=lambda _: None)
+    checkpoint = tmp_path / 'tts_input_part_001.request-0.json'
+    checkpoint.write_text('{"identity":"old","idempotency_key":"same","job_id":"original"}')
+    original_checkpoint = checkpoint.read_bytes()
+    original_plan = (tmp_path / 'tts_pronunciation.json').read_bytes()
+    policy = pronunciation.policy_contract(policy_version=15)
+    with pytest.raises(RuntimeError, match='preserving their request identities'):
+        await pronunciation.prepare_pronunciation(text, tmp_path, policy=policy, emit=lambda _: None)
+    assert checkpoint.read_bytes() == original_checkpoint
+    assert (tmp_path / 'tts_pronunciation.json').read_bytes() == original_plan
+    assert old['synthesis_text'] == text
+    fresh = tmp_path / 'new-input'
+    chat.return_value = json.dumps({'decisions': programming_decisions(text)})
+    plan = await pronunciation.prepare_pronunciation(text, fresh, policy=policy, emit=lambda _: None)
+    assert plan['synthesis_text'] == 'The programmer reads a see plus plus example.'
+    assert await pronunciation.prepare_pronunciation(text, fresh, policy=policy, emit=lambda _: None) == plan
+    assert pronunciation.compatible_policy(policy)
+
+
 def test_policy14_numeric_cues_preserve_source_and_all_legacy_policy_contracts(tmp_path):
     text = 'The GPT-5.2 and TLS1.3 models use GD01 and GPT4o.'
     old = {version: pronunciation.policy_contract(policy_version=version) for version in range(3, 14)}

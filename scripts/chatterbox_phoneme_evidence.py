@@ -26,7 +26,11 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 26
+EVIDENCE_VERSION = 27
+PROGRAMMING_REFERENCES = {
+    'C++': 'https://stroustrup.com/bs_faq.html',
+    'C#': 'https://dotnet.microsoft.com/en-us/languages',
+}
 NUMERIC_REFERENCE_SOURCE = 'https://dictionaryblog.cambridge.org/tag/numbers/'
 SOURCE_WORD_REFERENCE_POLICY_VERSION = 1
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
@@ -260,6 +264,16 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
         start, end = edit['start'], edit['end']
         if not cursor <= start < end <= len(text) or text[start:end] != edit['source']:
             raise ValueError('Spelling edit differs from its source span')
+        if edit.get('kind') == 'programming':
+            if (edit['source'] not in PROGRAMMING_REFERENCES
+                    or edit['spoken'] != pronunciation.PROGRAMMING_CUES[edit['source']]):
+                raise ValueError('Programming edit differs from the independently cited source reading')
+            ordinary(text[cursor:start])
+            parts.append(LETTER_PHONES['C'])
+            ordinary_units.append(False)
+            ordinary('plus plus' if edit['source'] == 'C++' else 'sharp')
+            cursor = end
+            continue
         if edit.get('kind') == 'number':
             if edit['spoken'] != pronunciation.numeric_cue(edit['source']):
                 raise ValueError('Numeric edit differs from its exact source value')
@@ -342,6 +356,11 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
         report['ordinary_flap_reference'] = ORDINARY_FLAP_SOURCE
     word_refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
                  for edit in edits if edit.get('kind') == 'word']
+    programming_refs = {edit['source']: PROGRAMMING_REFERENCES[edit['source']]
+                        for edit in edits if edit.get('kind') == 'programming'
+                        and edit['source'] in PROGRAMMING_REFERENCES}
+    if programming_refs:
+        report['programming_reading_references'] = programming_refs
     if word_refs:
         report['word_hint_references'] = word_refs
         report['source_word_reference_policy_version'] = SOURCE_WORD_REFERENCE_POLICY_VERSION

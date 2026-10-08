@@ -9,6 +9,24 @@ PREFIX = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z '
 ENDING = ' t ə d eɪ'
 
 
+@pytest.mark.parametrize(('source_name', 'cue', 'phones', 'wrong'), [
+    ('C++', 'see plus plus', 's iː p l ʌ s p l ʌ s', 's iː p l ʌ s'),
+    ('C#', 'see sharp', 's iː ʃ ɑːɹ p', 's iː ʃ ɑːɹ'),
+])
+def test_programming_source_phones_require_every_operator(source_name, cue, phones, wrong):
+    source = f'The report mentions {source_name} today.'
+    start = source.index(source_name)
+    prepared = [{'source': source_name, 'start': start, 'end': start + len(source_name),
+                 'spoken': cue, 'kind': 'programming'}]
+    report = evidence.compare_source(source, prepared, PREFIX + phones + ENDING)
+    assert report['supported'] and report['passed']
+    assert report['programming_reading_references'][source_name] == evidence.PROGRAMMING_REFERENCES[source_name]
+    assert not evidence.compare_source(source, prepared, PREFIX + wrong + ENDING)['passed']
+    assert not evidence.compare_source(source, prepared, PREFIX + phones + ENDING + ' t ə d eɪ')['passed']
+    tampered = [{**prepared[0], 'spoken': 'see plus'}]
+    assert not evidence.compare_source(source, tampered, PREFIX + phones + ENDING)['supported']
+
+
 @pytest.mark.parametrize(('term', 'phones'), [
     ('JSON', 'dʒ eɪ s ə n'), ('GIF', 'ɡ ɪ f'), ('GIF', 'dʒ ɪ f'),
     ('GUI', 'ɡ uː iː'),

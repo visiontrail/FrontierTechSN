@@ -15,7 +15,7 @@ from backend import config
 CANDIDATE_POLICY_VERSION = 13
 IMPLEMENTED_POLICY_VERSION = 13
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -32,6 +32,9 @@ CANDIDATE_RE = re.compile(
 NUMERIC_MODEL_RE = re.compile(r'[A-Za-z][A-Za-z0-9-]*(?:\.[0-9]+)*')
 NUMERIC_LITERAL_RE = re.compile(r'[0-9]{1,6}(?:\.[0-9]{1,6})?')
 NUMERIC_CUE_VERSION = 1
+PROGRAMMING_NAME_RE = re.compile(r'(?<![A-Za-z0-9_+#])C(?:\+\+|#)(?![A-Za-z+#])')
+PROGRAMMING_CUES = {'C++': 'see plus plus', 'C#': 'see sharp'}
+PROGRAMMING_CUE_VERSION = 1
 
 # An alphabet validates the model's proposed sounds; it never decides which
 # names to change. The model selects each occurrence and its spoken spelling.
@@ -93,6 +96,9 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
     if version >= 14:
         result['numeric_cue_version'] = NUMERIC_CUE_VERSION
         result['numeric_candidate_pattern_sha256'] = _digest((NUMERIC_MODEL_RE.pattern, NUMERIC_LITERAL_RE.pattern))
+    if version >= 15:
+        result['programming_cue_version'] = PROGRAMMING_CUE_VERSION
+        result['programming_cue_sha256'] = _digest((PROGRAMMING_NAME_RE.pattern, PROGRAMMING_CUES))
     return result
 
 
@@ -102,8 +108,8 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') == 14:
-        return policy == policy_contract(policy_version=14)
+    if policy.get('version') in {14, 15}:
+        return policy == policy_contract(policy_version=policy['version'])
     if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
@@ -159,6 +165,13 @@ def candidates(text: str, *, policy_version: int | None = None) -> list[dict]:
                 if ((start and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit())):
                     continue
                 result.append({'id': 0, 'start': start, 'end': end, 'source': text[start:end], 'kind': 'number'})
+    if version >= 15:
+        for match in PROGRAMMING_NAME_RE.finditer(text):
+            if any(start < match.end() and end > match.start() for start, end in protected):
+                continue
+            result.append({'id': 0, 'start': match.start(), 'end': match.end(),
+                           'source': match[0], 'kind': 'programming'})
+    if version >= 14:
         result.sort(key=lambda row: row['start'])
         for identifier, row in enumerate(result):
             row['id'] = identifier
@@ -211,12 +224,19 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             raise ValueError("Spoken spelling must be a trimmed string")
         if candidate.get('kind') == 'number' and action not in {'keep', 'number'}:
             raise ValueError('Numeric candidates require keep or the exact number action')
+        if candidate.get('kind') == 'programming' and action not in {'keep', 'programming'}:
+            raise ValueError('Programming candidates require keep or the exact programming action')
         if action == "keep":
             if spoken != candidate["source"]:
                 raise ValueError("A keep decision must preserve its exact source spelling")
         elif action == 'number' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 14:
             if candidate.get('kind') != 'number' or spoken != numeric_cue(candidate['source']):
                 raise ValueError('Numeric cue must retain the exact source value, point and every precision digit')
+            edits.append({**candidate, 'spoken': spoken})
+        elif action == 'programming' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 15:
+            if (candidate.get('kind') != 'programming'
+                    or spoken != PROGRAMMING_CUES[candidate['source']]):
+                raise ValueError('Programming cue must retain the source letter and every named symbol')
             edits.append({**candidate, 'spoken': spoken})
         elif action == "spell":
             letters = candidate["source"].replace(".", "").upper()
@@ -353,6 +373,10 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
             payload['exact_numeric_cue_forms'] = [
                 {'id': row['id'], 'source': row['source'], 'spoken': numeric_cue(row['source'])}
                 for row in found if row.get('kind') == 'number']
+        if policy['version'] >= 15:
+            payload['exact_programming_cue_forms'] = [
+                {'id': row['id'], 'source': row['source'], 'spoken': PROGRAMMING_CUES[row['source']]}
+                for row in found if row.get('kind') == 'programming']
         if policy['version'] >= 13:
             from backend.pipeline.tts_phone_references import entries
             references = entries()

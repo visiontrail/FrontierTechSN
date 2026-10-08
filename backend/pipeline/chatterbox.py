@@ -412,7 +412,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     Other words retain the shared advisory policy.
     """
     found = [row for row in (pronunciation.candidates(text) if edits is None else edits)
-             if row.get('kind') != 'number']
+             if row.get('kind') not in {'number', 'programming'}]
     symbols = _symbol_initialisms(text)
     for match in symbols:
         for group in (1, 2):
