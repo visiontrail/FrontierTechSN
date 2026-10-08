@@ -12,10 +12,10 @@ from pathlib import Path
 
 from backend import config
 
-CANDIDATE_POLICY_VERSION = 12
-IMPLEMENTED_POLICY_VERSION = 12
+CANDIDATE_POLICY_VERSION = 13
+IMPLEMENTED_POLICY_VERSION = 13
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -74,7 +74,7 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
             result['candidate_boundary_version'] = 1
     if version >= 7:
         from backend.pipeline.tts_word_pronunciation import policy_contract as word_contract
-        result['word_hint_contract'] = word_contract(version=3 if version >= 12 else 2 if version >= 10 else 1).copy()
+        result['word_hint_contract'] = word_contract(version=4 if version >= 13 else 3 if version >= 12 else 2 if version >= 10 else 1).copy()
     return result
 
 
@@ -84,7 +84,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
         except OSError:
@@ -202,7 +202,8 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
         elif action == 'word' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 7:
             from backend.pipeline.tts_word_pronunciation import validate_word_hint
             phones = validate_word_hint(candidate['source'], spoken, row.get('phones'),
-                                        version=3 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 12 else
+                                        version=4 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 13 else
+                                        3 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 12 else
                                         2 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 10 else 1)
             edits.append({**candidate, 'spoken': spoken, 'kind': 'word', 'phones': phones})
         else:
@@ -298,6 +299,15 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
         requested_route = {"endpoint": endpoint, "model": model}
         payload = {"language": "en", "source_text": text, "candidates": found,
                    "letter_name_forms": LETTER_NAMES}
+        if policy['version'] >= 13:
+            from backend.pipeline.tts_phone_references import entries
+            references = entries()
+            cited = [
+                {'id': row['id'], 'source': row['source'], **references[row['source'].casefold()]}
+                for row in found if row['source'].casefold() in references
+            ]
+            if cited:
+                payload['cited_word_phone_references'] = cited
         if audio_feedback is not None:
             # Audio observations are advisory planning context, never an
             # accepted decision or permission to change the canonical script.

@@ -62,7 +62,42 @@ def test_mixed_case_word_hint_retains_its_prefix_letter_and_word_reading():
     assert evidence.compare_source(source, edits, phones)['passed']
     assert not evidence.compare_source(source, edits, phones.replace('iː s ɪ m', 's ɪ m'))['passed']
     assert not evidence.compare_source(source, edits, phones.replace('iː s ɪ m', 'iː ɛ s aɪ ɛ m'))['passed']
-    assert pronunciation.policy_contract()['word_hint_contract']['version'] == 3
+    assert pronunciation.policy_contract()['word_hint_contract']['version'] == 4
+
+
+def test_cited_complete_word_hint_retains_source_phones_and_pins_reference_bytes():
+    from backend.pipeline import tts_phone_references as references
+    source = 'The GUI displays the application window.'
+    row = word_row(source='GUI', spoken='gui,', phones=['G', 'UW', 'IY'])
+    _, edits = pronunciation.validate_decisions(source, [row])
+    assert pronunciation.render_span(source, 0, len(source), edits) == 'The gui, displays the application window.'
+    contract = pronunciation.policy_contract()['word_hint_contract']
+    assert contract['supplemental_word_references'] == references.policy_contract()
+    assert contract['supplemental_word_references']['reference_sha256'] == hashlib.sha256(references.WORD_REFERENCES.read_bytes()).hexdigest()
+    correct = 'ð ə ɡ uː iː d ɪ s p l eɪ z ð ə æ p l ə k eɪ ʃ ə n w ɪ n d oʊ'
+    assert evidence.compare_source(source, edits, correct)['passed']
+    assert not evidence.compare_source(source, edits, correct.replace('uː iː', 'iː'))['passed']
+    assert not evidence.compare_source(source, edits, correct + ' iː')['passed']
+
+
+@pytest.mark.parametrize('version', [10, 11, 12])
+def test_cited_single_word_hint_does_not_rebind_previous_word_policies(version):
+    contract = pronunciation.policy_contract(policy_version=version)['word_hint_contract']
+    assert contract['version'] == (3 if version == 12 else 2)
+    assert 'supplemental_word_references' not in contract
+    with pytest.raises(ValueError):
+        pronunciation.validate_decisions('GUI today.', [word_row(
+            source='GUI', spoken='gui,', phones=['G', 'UW', 'IY'])], policy_version=version)
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=version))
+
+
+@pytest.mark.parametrize(('spoken', 'phones'), [
+    ('gui,', ['G', 'IY']), ('gui,', ['G', 'AY']), ('gui,', ['G', 'UW', 'IY', 'IY']),
+    ('gooey,', ['G', 'UW', 'IY']), ('g u i', ['G', 'UW', 'IY']), ('gui', ['G', 'UW', 'IY']),
+])
+def test_cited_word_hint_rejects_missing_phones_rewritten_letters_and_fake_spelling(spoken, phones):
+    with pytest.raises(ValueError):
+        pronunciation.validate_decisions('GUI today.', [word_row(source='GUI', spoken=spoken, phones=phones)])
 
 
 @pytest.mark.parametrize('version', [10, 11])

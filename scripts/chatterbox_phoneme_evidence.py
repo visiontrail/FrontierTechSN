@@ -7,7 +7,6 @@ Unsupported vocabulary and acoustic differences remain unverified.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -15,11 +14,14 @@ from pathlib import Path
 import cmudict
 
 from backend.pipeline import tts_pronunciation as pronunciation
+from backend.pipeline.tts_phone_references import (
+    WORD_REFERENCES, entries as supplemental_word_references,
+    policy_contract as reference_contract,
+)
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 9
-WORD_REFERENCES = Path(__file__).resolve().parents[1] / 'backend/pipeline/english_word_phone_references.json'
+EVIDENCE_VERSION = 10
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -50,27 +52,6 @@ VOWELS = {'AA', 'AE', 'AH', 'AO', 'AW', 'AY', 'EH', 'ER', 'EY', 'IH', 'IY', 'OW'
 @lru_cache(maxsize=1)
 def lexicon():
     return cmudict.dict()
-
-
-@lru_cache(maxsize=1)
-def supplemental_word_references():
-    """Supplement dictionary word phones with citations, never synthesis rewrites."""
-    payload = json.loads(WORD_REFERENCES.read_text(encoding='utf-8'))
-    if payload.get('version') != 1 or not isinstance(payload.get('entries'), dict):
-        raise ValueError('Unsupported supplemental word reference data')
-    from backend.pipeline.tts_word_pronunciation import PHONES
-    for word, row in payload['entries'].items():
-        if (not re.fullmatch(r'[a-z]{3,32}', word)
-                or not isinstance(row, dict)
-                or not isinstance(row.get('source_url'), str)
-                or not row['source_url'].startswith('https://')
-                or not row.get('source_location')
-                or not isinstance(row.get('variants'), list) or not row['variants']
-                or any(not isinstance(variant, list) or not variant
-                       or any(phone not in PHONES for phone in variant)
-                       for variant in row['variants'])):
-            raise ValueError('Invalid cited word phone reference')
-    return payload['entries']
 
 
 def collapse_consonant_continuations(phones: list[str] | tuple[str, ...]) -> tuple[str, ...]:
@@ -234,7 +215,7 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
              if word.casefold() in supplemental_word_references()}
     if cited:
         report['cited_word_references'] = cited
-        report['word_reference_sha256'] = hashlib.sha256(WORD_REFERENCES.read_bytes()).hexdigest()
+        report['word_reference_sha256'] = reference_contract()['reference_sha256']
     try:
         observed = observed_phones(phones)
         parts = reference_parts(text, edits)

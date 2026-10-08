@@ -6,9 +6,10 @@ import re
 
 import cmudict
 
+from backend.pipeline.tts_phone_references import PHONES
 
-WORD_HINT_VERSION = 3
-PHONES = frozenset('AA AE AH AO AW AY B CH D DH EH ER EY F G HH IH IY JH K L M N NG OW OY P R S SH T TH UH UW V W Y Z ZH'.split())
+
+WORD_HINT_VERSION = 4
 
 
 @lru_cache(maxsize=1)
@@ -16,14 +17,18 @@ def lexicon():
     return cmudict.dict()
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=4)
 def policy_contract(*, version=WORD_HINT_VERSION):
-    if version not in {1, 2, 3}:
+    if version not in {1, 2, 3, 4}:
         raise ValueError('Unsupported word-hint policy')
     with cmudict.dict_stream() as stream:
         dictionary_sha256 = hashlib.sha256(stream.read()).hexdigest()
-    return {'version': version, 'dictionary_version': cmudict.__version__,
-            'dictionary_sha256': dictionary_sha256}
+    result = {'version': version, 'dictionary_version': cmudict.__version__,
+              'dictionary_sha256': dictionary_sha256}
+    if version >= 4:
+        from backend.pipeline.tts_phone_references import policy_contract as reference_contract
+        result['supplemental_word_references'] = reference_contract()
+    return result
 
 
 def normalized(variant):
@@ -31,7 +36,7 @@ def normalized(variant):
 
 
 def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
-    if version not in {1, 2, 3}:
+    if version not in {1, 2, 3, 4}:
         raise ValueError('Unsupported word-hint policy')
     pattern = r'[A-Za-z]{3,32}' if version >= 3 else r'[A-Z]{3,32}'
     if not re.fullmatch(pattern, source):
@@ -44,8 +49,18 @@ def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
     if ''.join(words) != source.casefold():
         raise ValueError('A word hint must preserve every source letter in its original order')
     dictionary = lexicon()
+    def choices(word):
+        variants = dictionary.get(word.casefold()) or []
+        if version >= 4:
+            from backend.pipeline.tts_phone_references import entries
+            reference = entries().get(word.casefold())
+            if reference:
+                variants = [*variants, *reference['variants']]
+        return variants
+
+    canonical = choices(source)
     single_word_hint = (version >= 2 and len(words) == 1
-                        and bool(dictionary.get(source.casefold()))
+                        and bool(canonical)
                         and spoken.rstrip().endswith((',', '.')))
     if ((len(words) < 2 and not single_word_hint)
             or not any(len(word) > 1 for word in words)):
@@ -53,7 +68,7 @@ def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
     if (not isinstance(phones, list) or not 1 <= len(phones) <= 64
             or any(not isinstance(phone, str) or phone not in PHONES for phone in phones)):
         raise ValueError('A word hint requires an explicit valid ARPABET phone sequence')
-    variants = [dictionary.get(word) for word in words]
+    variants = [choices(word) for word in words]
     if not all(variants):
         raise ValueError('Every word-hint fragment needs an English dictionary pronunciation')
     wanted = tuple(phones)
@@ -67,7 +82,6 @@ def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
             break
     if wanted not in states:
         raise ValueError('Declared word phones do not match the spelling-preserving hint fragments')
-    canonical = dictionary.get(source.casefold())
     if canonical and wanted not in {normalized(choice) for choice in canonical}:
         raise ValueError('A known source word must retain its dictionary pronunciation')
     return list(wanted)

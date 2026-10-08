@@ -256,6 +256,33 @@ async def test_no_candidates_persists_identity_without_network(tmp_path, mock_mo
 
 
 @pytest.mark.asyncio
+async def test_cited_word_references_are_source_matched_and_older_plans_do_not_gain_them(tmp_path, mock_model):
+    _, chat = mock_model
+    source = 'The GUI displays the application window.'
+    chat.return_value = json.dumps({'decisions': [
+        {'id': 0, 'source': 'GUI', 'action': 'word', 'spoken': 'gui,',
+         'phones': ['G', 'UW', 'IY'], 'reason': 'Use the cited conventional word pronunciation.'},
+    ]})
+    plan = await pronunciation.prepare_pronunciation(
+        source, tmp_path / 'current', policy=pronunciation.policy_contract(), emit=lambda _: None)
+    payload = json.loads(chat.call_args.args[1])
+    references = payload['cited_word_phone_references']
+    assert len(references) == 1
+    assert references[0]['source'] == 'GUI' and references[0]['id'] == 0
+    assert references[0]['variants'] == [['G', 'UW', 'IY']]
+    assert references[0]['source_url'] == 'https://www.oxfordlearnersdictionaries.com/definition/english/gui'
+    assert plan['synthesis_text'] == 'The gui, displays the application window.'
+    chat.reset_mock()
+    chat.return_value = json.dumps({'decisions': [
+        {'id': 0, 'source': 'GUI', 'action': 'keep', 'spoken': 'GUI',
+         'reason': 'Preserve the frozen previous policy.'},
+    ]})
+    await pronunciation.prepare_pronunciation(
+        source, tmp_path / 'old', policy=pronunciation.policy_contract(policy_version=12), emit=lambda _: None)
+    assert 'cited_word_phone_references' not in json.loads(chat.call_args.args[1])
+
+
+@pytest.mark.asyncio
 async def test_invalid_ai_output_gets_one_bounded_repair_with_feedback(tmp_path, mock_model):
     _, chat = mock_model
     text = "QZV announced its result."
