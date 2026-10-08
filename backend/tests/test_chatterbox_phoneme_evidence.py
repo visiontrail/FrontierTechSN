@@ -187,6 +187,36 @@ def test_body_reference_does_not_change_frozen_word_hint_policy13_bytes():
     assert contract['prompt_sha256'] == '83ffb1466fdb9be77e69a2f89952ebf1fc7922deddc43e7caa938e83addf0e85'
 
 
+def test_published_the_weak_form_applies_only_before_an_actual_vowel_onset():
+    source = "The OpenAI's result is available."
+    prepared = edits(source, 'AI', 'eigh eye')
+    phones = 'ð ɪ oʊ p ə n eɪ aɪ z ɹ ᵻ z ʌ l t ɪ z ɐ v eɪ l ə b əl'
+    report = evidence.compare_source(source, prepared, phones)
+    assert report['supported'] and report['passed']
+    assert report['cited_body_word_references']['the']['source_url'] == (
+        'https://www.collinsdictionary.com/dictionary/english/the')
+    assert not evidence.compare_source(source, prepared, phones + ' ɪ z ɐ v eɪ l ə b əl')['passed']
+    assert not evidence.compare_source(source, prepared, phones.replace('eɪ aɪ z', 'aɪ aɪ z'))['passed']
+    consonant_source = 'The report is available.'
+    consonant_phones = 'ð ɪ ɹ ᵻ p ɔːɹ t ɪ z ɐ v eɪ l ə b əl'
+    assert not evidence.compare_source(consonant_source, [], consonant_phones)['passed']
+    assert evidence.compare_source(consonant_source, [], consonant_phones.replace('ð ɪ', 'ð ə'))['passed']
+
+
+def test_the_weak_form_uses_named_letter_sound_and_never_changes_the_letter():
+    n_source = 'The NN is available.'
+    n_edits = edits(n_source, 'NN', 'enn enn')
+    n_phones = 'ð ɪ ɛ n ɛ n ɪ z ɐ v eɪ l ə b əl'
+    assert evidence.compare_source(n_source, n_edits, n_phones)['passed']
+    assert not evidence.compare_source(n_source, n_edits, n_phones.replace('ɛ n', 'ɪ n'))['passed']
+    u_source = 'The UU is available.'
+    u_edits = edits(u_source, 'UU', 'you you')
+    u_phones = 'ð ɪ j uː j uː ɪ z ɐ v eɪ l ə b əl'
+    assert not evidence.compare_source(u_source, u_edits, u_phones)['passed']
+    assert evidence.compare_source(u_source, u_edits, u_phones.replace('ð ɪ', 'ð ə'))['passed']
+    assert not evidence.compare_source('The.', [], 'ð ɪ')['passed']
+
+
 def test_ordinary_connects_coda_elision_retains_every_pcie_letter_and_plural():
     source = 'The PCIe interface connects the device.'
     prepared = edits(source, 'PCIe', 'pee see eye ee')

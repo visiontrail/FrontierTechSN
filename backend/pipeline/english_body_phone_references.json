@@ -1,6 +1,13 @@
 {
   "version": 1,
   "entries": {
+    "the": {
+      "variants": [["DH", "AH"], ["DH", "IY"]],
+      "before_vowel_variants": [["DH", "IH"]],
+      "source_url": "https://www.collinsdictionary.com/dictionary/english/the",
+      "source_location": "British and American definite article entries and American usage note: unstressed before a vowel may be /ðɪ/. The DH-IH alternative applies only before a following source unit beginning with a vowel.",
+      "verified_on": "2026-10-09"
+    },
     "iso": {
       "variants": [["AY", "S", "OW"]],
       "uppercase_only": true,

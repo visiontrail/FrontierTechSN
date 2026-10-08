@@ -25,7 +25,7 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 23
+EVIDENCE_VERSION = 24
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PRERHOTIC_VOWEL_SOURCE = 'https://opentext.ku.edu/amenglishpronunciation/chapter/chapter-1/'
 ORDINARY_FLAP_SOURCE = 'https://journals.sagepub.com/doi/10.1177/0023830908098542'
@@ -113,6 +113,7 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
     dictionary = lexicon()
     parts = []
     ordinary_units = []
+    before_vowel_references = {}
 
     def ordinary(fragment):
         if (re.search(r"[^A-Za-z0-9\s.,:;!?'’\-\u2014\u2013]", fragment)
@@ -144,6 +145,8 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
             if body_reference:
                 variants = (body_reference['variants'] if body_reference.get('replace_dictionary') else
                             [*variants, *body_reference['variants']])
+                if body_reference.get('before_vowel_variants'):
+                    before_vowel_references[len(parts)] = body_reference['before_vowel_variants']
             if not variants:
                 raise ValueError(f'No source pronunciation reference for {word}')
             references = {tuple(re.sub(r'\d', '', p) for p in variant) for variant in variants}
@@ -236,6 +239,12 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
             ordinary_units.append(False)
             cursor += suffix.end()
     ordinary(text[cursor:])
+    # A cited weak article form depends on the following spoken onset, not
+    # its written first letter. Named N /en/ starts with a vowel; U /you/
+    # starts with a consonant. Never alter any named-letter reference.
+    for index, variants in before_vowel_references.items():
+        if index + 1 < len(parts) and all(variant[0] in VOWELS for variant in parts[index + 1]):
+            parts[index] = sorted({*parts[index], *(tuple(variant) for variant in variants)})
     # A dictionary word's coda /z/ can devoice before the next word's /s/.
     # Keep the source word and following onset; consonant-continuation
     # normalization merges the resulting s-s, never a named-letter vowel.

@@ -23,11 +23,13 @@ def _loaded():
                 or not isinstance(row.get('source_url'), str) or not row['source_url'].startswith('https://')
                 or not isinstance(row.get('source_location'), str) or not row['source_location']
                 or not isinstance(row.get('variants'), list) or not row['variants']
+                or ('before_vowel_variants' in row and
+                    (not isinstance(row['before_vowel_variants'], list) or not row['before_vowel_variants']))
                 or any(key in row and type(row[key]) is not bool
                        for key in ('uppercase_only', 'replace_dictionary'))
                 or any(not isinstance(variant, list) or not variant
                        or any(not isinstance(phone, str) or phone not in PHONES for phone in variant)
-                       for variant in row['variants'])):
+                       for variant in [*row['variants'], *row.get('before_vowel_variants', [])])):
             raise ValueError('Invalid cited ordinary-word reference')
     return payload['entries'], hashlib.sha256(raw).hexdigest()
 
