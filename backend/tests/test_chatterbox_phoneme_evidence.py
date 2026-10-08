@@ -74,6 +74,21 @@ def test_cited_presents_verb_variant_preserves_every_degree_letter_and_source_wo
         assert not evidence.compare_source(source, prepared, changed)['passed']
 
 
+@pytest.mark.parametrize(('term', 'phones', 'incorrect'), [
+    ('COVID', 'k oʊ v ɪ d', 'k oʊ b ɪ d'),
+    ('FOMO', 'f oʊ m oʊ', 'f ɪ l m oʊ'),
+    ('CRISPR', 'k ɹ ɪ s p ɚ', 'k ɹ ɪ s p'),
+    ('JPEG', 'dʒ eɪ p ɛ ɡ', 'dʒ eɪ p ɛ k'),
+])
+def test_cited_native_word_reference_does_not_accept_caption_autocorrection(term, phones, incorrect):
+    source = f'The report mentions {term} today.'
+    report = evidence.compare_source(source, [], PREFIX + phones + ENDING)
+    assert report['supported'] and report['passed']
+    assert term.casefold() in report['cited_body_word_references']
+    assert not evidence.compare_source(source, [], PREFIX + incorrect + ENDING)['passed']
+    assert not evidence.compare_source(source, [], PREFIX + phones + ENDING + ' t')['passed']
+
+
 def test_body_reference_does_not_change_frozen_word_hint_policy13_bytes():
     from backend.pipeline import tts_pronunciation
     contract = tts_pronunciation.policy_contract(policy_version=13)

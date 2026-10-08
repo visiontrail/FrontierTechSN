@@ -1,6 +1,34 @@
 {
   "version": 1,
   "entries": {
+    "covid": {
+      "variants": [["K", "OW", "V", "IH", "D"]],
+      "ipa": ["ˈkəʊvɪd"],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/covid",
+      "source_location": "Covid noun, also COVID; pronunciation entry",
+      "verified_on": "2026-10-08"
+    },
+    "fomo": {
+      "variants": [["F", "OW", "M", "OW"]],
+      "ipa": ["ˈfəʊməʊ"],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/fomo",
+      "source_location": "FOMO abbreviation; pronunciation entry",
+      "verified_on": "2026-10-08"
+    },
+    "crispr": {
+      "variants": [["K", "R", "IH", "S", "P", "ER"]],
+      "ipa": ["ˈkrɪsp.ɚ"],
+      "source_url": "https://dictionary.cambridge.org/us/pronunciation/english/crispr",
+      "source_location": "American pronunciation, CRISPR",
+      "verified_on": "2026-10-08"
+    },
+    "jpeg": {
+      "variants": [["JH", "EY", "P", "EH", "G"]],
+      "ipa": ["ˈdʒeɪpeɡ"],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/jpeg",
+      "source_location": "JPEG noun; pronunciation entry",
+      "verified_on": "2026-10-08"
+    },
     "presents": {
       "variants": [["P", "R", "IH", "Z", "EH", "N", "T", "S"]],
       "ipa": ["prɪˈzents"],
