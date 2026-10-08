@@ -82,6 +82,8 @@ def test_cited_presents_verb_variant_preserves_every_degree_letter_and_source_wo
     ('LIDAR', 'l aɪ d ɑːɹ', 'l aɪ ɾ ɑːɹ'),
     ('EBITDA', 'ɛ b ɪ t d ə', 'ɛ b ɪ ɾ ə'),
     ('WASM', 'w ɑː z ə m', 'w ɑː z m'),
+    ('README', 'ɹ iː d m iː', 'ɹ ɛ d m iː'),
+    ('NAS', 'n æ s', 'n ɑː z'),
 ])
 def test_cited_native_word_reference_does_not_accept_caption_autocorrection(term, phones, incorrect):
     source = f'The report mentions {term} today.'
@@ -139,6 +141,15 @@ def test_asic_technical_reference_replaces_unrelated_dictionary_reading_only_in_
     assert evidence.compare_source(lower, [], unrelated)['passed']
     assert 'asic' not in evidence.compare_source(lower, [], unrelated).get('cited_body_word_references', {})
     assert not evidence.compare_source(source, [], correct + ' ɛ s')['passed']
+
+
+def test_nas_storage_word_reference_does_not_change_a_source_bound_spelled_reading():
+    source = 'The report mentions NAS today.'
+    spelled = edits(source, 'NAS', 'N eigh ess')
+    assert evidence.compare_source(source, spelled, PREFIX + 'ɛ n eɪ ɛ s' + ENDING)['passed']
+    assert not evidence.compare_source(source, spelled, PREFIX + 'n æ s' + ENDING)['passed']
+    assert not evidence.compare_source(source, spelled, PREFIX + 'ɛ n eɪ ɛ s ɛ s' + ENDING)['passed']
+    assert not evidence.compare_source(source, [], PREFIX + 'n æ s' + ENDING + 'n æ s')['passed']
 
 
 def test_configuration_dictionary_variant_preserves_yaml_and_rhotic_vowel_identity():

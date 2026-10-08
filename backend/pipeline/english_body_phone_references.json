@@ -1,6 +1,19 @@
 {
   "version": 1,
   "entries": {
+    "nas": {
+      "variants": [["N", "AE", "S"]],
+      "uppercase_only": true,
+      "source_url": "https://www.netlingo.com/word/nas.php",
+      "source_location": "Network Attached Storage entry: pronounced nass; this reference covers its native storage-word reading. Explicit spelled edits retain the independent letter-name references.",
+      "verified_on": "2026-10-09"
+    },
+    "readme": {
+      "variants": [["R", "IY", "D", "M", "IY"]],
+      "source_url": "https://www.nnlm.gov/resources/data/data-glossary/readme",
+      "source_location": "README file in the data glossary. Its compositional reading is inferred as imperative read plus me using their CMU dictionary entries; the glossary does not publish an IPA transcription.",
+      "verified_on": "2026-10-09"
+    },
     "asic": {
       "variants": [["EY", "S", "IH", "K"]],
       "uppercase_only": true,
