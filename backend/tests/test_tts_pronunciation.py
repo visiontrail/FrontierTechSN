@@ -519,6 +519,53 @@ def test_single_y_hint_retains_its_letter_and_model_digit():
     assert pronunciation.render_span(source, 0, len(source), edits) == 'Y. 2 is available.'
 
 
+def test_policy11_mixed_case_and_camel_boundaries_preserve_exact_source_spans():
+    source = 'AIBase PhD eSIM PCIe SoC APIs GPUs OpenAI ChatGPT APIClient MSc BSc iOS macOS'
+    found = pronunciation.candidates(source)
+    assert [row['source'] for row in found] == [
+        'AI', 'PhD', 'eSIM', 'PCIe', 'SoC', 'API', 'GPU', 'AI', 'GPT', 'API',
+        'MSc', 'BSc', 'iOS', 'OS',
+    ]
+    assert all(source[row['start']:row['end']] == row['source'] for row in found)
+    assert [row['id'] for row in found] == list(range(len(found)))
+    _, edits = pronunciation.validate_decisions(source, decisions_for(source, {
+        'AI': 'eigh eye', 'PhD': 'pee aitch dee', 'eSIM': 'ee ess eye M',
+        'PCIe': 'pee see eye ee', 'SoC': 'ess oh see',
+    }))
+    rendered = pronunciation.render_span(source, 0, len(source), edits)
+    assert rendered.startswith('eigh eye Base pee aitch dee ee ess eye M pee see eye ee ess oh see')
+    assert 'APIs GPUs' in rendered and 'AIBase' in source
+
+
+def test_policy11_preserves_every_previous_candidate_contract_and_protected_url():
+    source = 'AIBase PhD eSIM PCIe SoC'
+    for version in range(3, 11):
+        old = pronunciation.policy_contract(policy_version=version)
+        assert pronunciation.compatible_policy(old)
+        assert [row['source'] for row in pronunciation.candidates(source, policy_version=version)] == [
+            'AIB', 'SIM', 'PCI',
+        ]
+        legacy_text = 'AIBase uses APIs and GPUs.'
+        legacy_decisions = [
+            {**row, 'action': 'spell' if row['source'] == 'AIB' else 'keep',
+             'spoken': 'eigh eye bee' if row['source'] == 'AIB' else row['source'],
+             'reason': 'Retain the frozen legacy decision.'}
+            for row in pronunciation.candidates(legacy_text, policy_version=version)
+        ]
+        _, edits = pronunciation.validate_decisions(
+            legacy_text, legacy_decisions, policy_version=version,
+        )
+        assert pronunciation.render_span(legacy_text, 0, len(legacy_text), edits) == (
+            'eigh eye beease uses APIs and GPUs.'
+        )
+    text = 'See https://example.com/AIBase/PhD and AIBase@example.com. PhD remains.'
+    assert [row['source'] for row in pronunciation.candidates(text)] == ['PhD']
+    assert pronunciation.policy_contract()['candidate_boundary_version'] == 1
+    assert [row['source'] for row in pronunciation.candidates('APIservice CSVfile JSONParser AIService')] == [
+        'API', 'CSV', 'JSON', 'AI',
+    ]
+
+
 @pytest.mark.asyncio
 async def test_source_bound_audio_feedback_is_advisory_and_never_rebinds_a_submitted_plan(tmp_path, mock_model):
     _resolve, chat = mock_model

@@ -12,18 +12,22 @@ from pathlib import Path
 
 from backend import config
 
-CANDIDATE_POLICY_VERSION = 4
-IMPLEMENTED_POLICY_VERSION = 10
+CANDIDATE_POLICY_VERSION = 11
+IMPLEMENTED_POLICY_VERSION = 11
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
     re.IGNORECASE,
 )
 LEGACY_CANDIDATE_RE = re.compile(r"(?:[A-Z]\.)+[A-Z]\.?|(?<![A-Z])[A-Z]{2,}(?![A-Z])")
-CANDIDATE_RE = re.compile(
+V4_CANDIDATE_RE = re.compile(
     LEGACY_CANDIDATE_RE.pattern + r"|(?<![A-Z])[A-Z](?=\d)|(?<=\d)[A-Z](?![A-Z])"
+)
+CANDIDATE_RE = re.compile(
+    r"(?<![A-Za-z])[A-Z][a-z][A-Z](?![A-Za-z])"
+    r"|(?<![A-Za-z])[a-z][A-Z]{2,4}(?![A-Za-z])|" + V4_CANDIDATE_RE.pattern
 )
 # An alphabet validates the model's proposed sounds; it never decides which
 # names to change. The model selects each occurrence and its spoken spelling.
@@ -64,7 +68,10 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
         "validation_alphabet_sha256": _digest(LETTER_NAMES),
     }
     if version != 3:
-        result['candidate_pattern_sha256'] = hashlib.sha256(CANDIDATE_RE.pattern.encode()).hexdigest()
+        pattern = CANDIDATE_RE if version >= 11 else V4_CANDIDATE_RE
+        result['candidate_pattern_sha256'] = hashlib.sha256(pattern.pattern.encode()).hexdigest()
+        if version >= 11:
+            result['candidate_boundary_version'] = 1
     if version >= 7:
         from backend.pipeline.tts_word_pronunciation import policy_contract as word_contract
         result['word_hint_contract'] = word_contract(version=2 if version >= 10 else 1).copy()
@@ -77,7 +84,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {3, 4, 5, 6, 7, 8, 9}:
+    if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
         except OSError:
@@ -95,13 +102,30 @@ def candidates(text: str, *, policy_version: int | None = None) -> list[dict]:
     version = CANDIDATE_POLICY_VERSION if policy_version is None else policy_version
     if version not in SUPPORTED_POLICY_VERSIONS:
         raise ValueError('Unsupported pronunciation candidate policy')
-    pattern = LEGACY_CANDIDATE_RE if version == 3 else CANDIDATE_RE
+    pattern = (LEGACY_CANDIDATE_RE if version == 3 else
+               V4_CANDIDATE_RE if version < 11 else CANDIDATE_RE)
     protected = [(match.start(), match.end()) for match in PROTECTED_TEXT_RE.finditer(text)]
     result = []
     for match in pattern.finditer(text):
         if any(start < match.end() and end > match.start() for start, end in protected):
             continue
-        result.append({"id": len(result), "start": match.start(), "end": match.end(), "source": match[0]})
+        start, end = match.span()
+        if version >= 11 and match[0].isupper() and '.' not in match[0]:
+            suffix = re.match(r'[a-z]+', text[end:])
+            if suffix:
+                if (len(suffix[0]) == 1 and suffix[0] != 's'
+                        and len(match[0]) + 1 <= 5
+                        and (start == 0 or not text[start - 1].isalpha())):
+                    # PCIe/MSc: the final lower-case letter is part of the
+                    # short abbreviation; plural s remains an inflection.
+                    end += 1
+                elif len(suffix[0]) > 1 and len(match[0]) >= 3:
+                    from backend.pipeline.tts_word_pronunciation import lexicon
+                    # AIBase/APIClient: the last capital starts the following
+                    # ordinary CamelCase word, rather than naming a letter.
+                    if lexicon().get((match[0][-1] + suffix[0]).casefold()):
+                        end -= 1
+        result.append({"id": len(result), "start": start, "end": end, "source": text[start:end]})
     return result
 
 
@@ -153,7 +177,7 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             if spoken != candidate["source"]:
                 raise ValueError("A keep decision must preserve its exact source spelling")
         elif action == "spell":
-            letters = candidate["source"].replace(".", "")
+            letters = candidate["source"].replace(".", "").upper()
             try:
                 decoded_letters = _spoken_letters(spoken)
             except ValueError as exc:
@@ -169,7 +193,12 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             # The installed voice can read "ay" as "eye", losing the A in
             # AI/OpenAI. Use the letter-identical form accepted in live audio.
             spoken = re.sub(r"\bay\b", "eigh", spoken, flags=re.IGNORECASE)
-            edits.append({**candidate, "spoken": spoken})
+            edit = {**candidate, "spoken": spoken}
+            if ((policy_version or IMPLEMENTED_POLICY_VERSION) >= 11
+                    and candidate['end'] < len(text)
+                    and text[candidate['end']].isupper()):
+                edit['following_word_boundary'] = True
+            edits.append(edit)
         elif action == 'word' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 7:
             from backend.pipeline.tts_word_pronunciation import validate_word_hint
             phones = validate_word_hint(candidate['source'], spoken, row.get('phones'),
@@ -198,7 +227,8 @@ def render_span(text: str, start: int, end: int, edits: list[dict]) -> str:
         # OpenAI -> Openay eye and GPT4 -> gee pee tee4.
         if edit["start"] > 0 and text[edit["start"] - 1].isalnum():
             spoken = " " + spoken
-        if edit["end"] < len(text) and text[edit["end"]].isdigit():
+        if (edit.get('following_word_boundary')
+                or (edit["end"] < len(text) and text[edit["end"]].isdigit())):
             spoken += " "
         pieces.extend((text[cursor:edit["start"]], spoken))
         cursor = edit["end"]
