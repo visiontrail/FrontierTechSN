@@ -17,7 +17,7 @@ from backend.pipeline import tts_pronunciation as pronunciation
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 5
+EVIDENCE_VERSION = 6
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -84,10 +84,13 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
     ordinary_units = []
 
     def ordinary(fragment):
-        if re.search(r'[^A-Za-z0-9\s.,:;!?\-\u2014\u2013]', fragment):
+        if (re.search(r"[^A-Za-z0-9\s.,:;!?'’\-\u2014\u2013]", fragment)
+                or re.search(r"(?<![A-Za-z])['’]|['’](?![A-Za-z])", fragment)):
             raise ValueError('Source interval contains unsupported symbols')
-        for match in re.finditer(r'[A-Za-z]+|\d+', fragment):
-            word = match[0]
+        for match in re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)*|\d+", fragment):
+            # Use the dictionary's complete possessive/contraction entry.
+            # Never discard a suffix or infer phones for an unknown word.
+            word = match[0].replace('’', "'")
             if (len(word) == 1 and word in LETTER_PHONES
                     and ((match.start() and fragment[match.start() - 1].isdigit())
                          or (match.end() < len(fragment) and fragment[match.end()].isdigit()))):

@@ -64,6 +64,41 @@ def test_unsupported_reference_or_phone_never_claims_acceptance(source, phones):
     assert not report['supported'] and not report['passed']
 
 
+@pytest.mark.parametrize('source', ["Arizona's.", 'Arizona’s.'])
+def test_dictionary_possessive_retains_its_complete_pronunciation(source):
+    phones = 'ɛ ɹ ɪ z oʊ n ə z'
+    assert evidence.compare_source(source, [], phones)['passed']
+    assert not evidence.compare_source(source, [], phones.removesuffix(' z'))['passed']
+    assert not evidence.compare_source(source, [], phones + ' eɪ')['passed']
+
+
+def test_postal_abbreviation_with_dictionary_possessive_requires_each_letter():
+    source = "AZ is Arizona's postal abbreviation."
+    prepared = edits(source, 'AZ', 'eigh zee')
+    ending = ' ɪ z ɛ ɹ ɪ z oʊ n ə z p oʊ s t ə l ə b ɹ iː v iː eɪ ʃ ə n'
+    assert evidence.compare_source(source, prepared, 'eɪ z iː' + ending)['passed']
+    assert not evidence.compare_source(source, prepared, 'aɪ z iː' + ending)['passed']
+    assert not evidence.compare_source(source, prepared, 'eɪ z iː' + ending + ' z iː')['passed']
+
+
+@pytest.mark.parametrize(('source', 'phones'), [
+    ("It's.", 'ɪ t s'),
+    ('Can’t.', 'k æ n t'),
+    ("York's.", 'j ɔː ɹ k s'),
+    ("Texas's.", 't ɛ k s ə s ɪ z'),
+])
+def test_known_dictionary_apostrophe_words_use_their_actual_word_phones(source, phones):
+    assert evidence.compare_source(source, [], phones)['passed']
+
+
+@pytest.mark.parametrize('source', [
+    "UnsupportedQbitThing's.", "Arizona''s.", "Arizona'.", "'Arizona.",
+])
+def test_unknown_or_malformed_apostrophe_words_remain_unsupported(source):
+    report = evidence.compare_source(source, [], 'ɛ ɹ ɪ z oʊ n ə z')
+    assert not report['supported'] and not report['passed']
+
+
 @pytest.mark.parametrize('defect', ['hash', 'model', 'revision', 'conditioned'])
 def test_phone_provenance_requires_the_exact_unconditioned_waveform(tmp_path, defect):
     wav = tmp_path / 'original.wav'
