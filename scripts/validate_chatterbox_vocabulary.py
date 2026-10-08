@@ -404,7 +404,8 @@ async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
 
 
 async def run(directory: Path, marker: dict, *, allow_composing: bool = False,
-              require_phone_sequence: bool = False) -> None:
+              require_phone_sequence: bool = False,
+              pronunciation_audio_feedback: dict | None = None) -> None:
     rows = marker['identity']['cases']
     outcomes = []
     for index in range(marker['batch_count']):
@@ -420,7 +421,8 @@ async def run(directory: Path, marker: dict, *, allow_composing: bool = False,
         script.write_text(source)
         normalized = pronunciation.normalize_text(source)
         plan = await pronunciation.prepare_pronunciation(normalized, group / 'audio',
-            policy=marker['identity']['cache_contract']['pronunciation_policy'], emit=print)
+            policy=marker['identity']['cache_contract']['pronunciation_policy'], emit=print,
+            **({'audio_feedback': pronunciation_audio_feedback} if pronunciation_audio_feedback is not None else {}))
         modes = mode_report(normalized, cases, plan)
         write(group / 'mode-audit.json', modes)
         outcome = {'batch': index + 1, 'case_ids': [r['id'] for r in cases],
@@ -453,6 +455,8 @@ async def run(directory: Path, marker: dict, *, allow_composing: bool = False,
                     'space-en-f1', 'en', log=print, emit=print, verify_text=True,
                     part_auditor=audit_part, audit_all_parts=True, before_submit=before_submit,
                     frozen_pronunciation_policy=marker['identity']['cache_contract']['pronunciation_policy'],
+                    **({'pronunciation_audio_feedback': pronunciation_audio_feedback}
+                       if pronunciation_audio_feedback is not None else {}),
                     frozen_tail_cleanup_version=marker['identity']['cache_contract'].get('tail_cleanup_version', 0))
             except tts.TtsIntegrityError as error:
                 # Only positive integrity rejection advances; transport or

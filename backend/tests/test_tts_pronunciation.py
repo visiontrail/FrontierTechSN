@@ -496,7 +496,7 @@ def test_policy8_preserves_word_policy7_and_uses_f_without_changing_other_letter
 
 
 def test_policy9_preserves_all_submitted_policies_and_disambiguates_only_the_y_hint():
-    latest = pronunciation.policy_contract()
+    latest = pronunciation.policy_contract(policy_version=9)
     assert latest['version'] == 9
     for version in range(3, 9):
         legacy = pronunciation.policy_contract(policy_version=version)
@@ -517,3 +517,38 @@ def test_single_y_hint_retains_its_letter_and_model_digit():
     source = 'Y2 is available.'
     _, edits = pronunciation.validate_decisions(source, decisions_for(source, {'Y': 'Y.'}))
     assert pronunciation.render_span(source, 0, len(source), edits) == 'Y. 2 is available.'
+
+
+@pytest.mark.asyncio
+async def test_source_bound_audio_feedback_is_advisory_and_never_rebinds_a_submitted_plan(tmp_path, mock_model):
+    _resolve, chat = mock_model
+    source = 'The report mentions DIY today.'
+    chat.return_value = json.dumps({'decisions': decisions_for(source, {'DIY': 'dee eye Y'})})
+    feedback = {'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
+                'observations': [{'source': 'DIY', 'failure': 'extra why after closing words'}]}
+    plan = await pronunciation.prepare_pronunciation(
+        source, tmp_path, policy=pronunciation.policy_contract(), emit=lambda _m: None,
+        audio_feedback=feedback)
+    assert json.loads(chat.await_args.args[1])['audio_feedback'] == feedback
+    assert plan['synthesis_text'] == 'The report mentions dee eye Y today.'
+    checkpoint = tmp_path / 'tts_input_part_001.request-0.json'
+    checkpoint.write_text('{"job_id":"original","idempotency_key":"original-key"}')
+    original = checkpoint.read_bytes()
+    updated = {**feedback, 'observations': [{'source': 'DIY', 'failure': 'different observation'}]}
+    chat.reset_mock()
+    reused = await pronunciation.prepare_pronunciation(
+        source, tmp_path, policy=pronunciation.policy_contract(), emit=lambda _m: None,
+        audio_feedback=updated)
+    assert reused == plan and checkpoint.read_bytes() == original
+    chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_audio_feedback_for_another_source_is_rejected_before_model_or_job_changes(tmp_path, mock_model):
+    _resolve, chat = mock_model
+    with pytest.raises(ValueError, match='complete canonical source'):
+        await pronunciation.prepare_pronunciation(
+            'DIY today.', tmp_path, policy=pronunciation.policy_contract(), emit=lambda _m: None,
+            audio_feedback={'source_sha256': 'another-source'})
+    chat.assert_not_awaited()
+    assert not list(tmp_path.glob('tts_input_part_*.request-*.json'))

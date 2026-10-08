@@ -52,6 +52,25 @@ def test_word_policy_freezes_the_actual_dictionary_bytes():
     assert pronunciation.policy_contract()['word_hint_contract']['dictionary_sha256'] == expected
 
 
+def test_known_word_punctuation_hint_keeps_its_dictionary_phones_and_all_source_letters():
+    assert word.validate_word_hint('RAM', 'ram,', ['R', 'AE', 'M']) == ['R', 'AE', 'M']
+    for spoken, phones in [('rum,', ['R', 'AH', 'M']), ('ram,', ['R', 'AH', 'M']),
+                           ('r a m,', ['R', 'AE', 'M']), ('ram', ['R', 'AE', 'M'])]:
+        with pytest.raises(ValueError):
+            word.validate_word_hint('RAM', spoken, phones)
+    with pytest.raises(ValueError):
+        word.validate_word_hint('SIGGRAPH', 'siggraph,', ['S', 'IH', 'G', 'R', 'AE', 'F'])
+
+
+@pytest.mark.parametrize('version', [7, 8, 9])
+def test_single_word_punctuation_hint_does_not_change_submitted_word_policies(version):
+    assert pronunciation.policy_contract(policy_version=version)['word_hint_contract']['version'] == 1
+    with pytest.raises(ValueError):
+        pronunciation.validate_decisions('RAM today.', [word_row(
+            source='RAM', spoken='ram,', phones=['R', 'AE', 'M'])], policy_version=version)
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=version))
+
+
 def test_word_hint_phone_evidence_checks_entire_source_and_conventional_word_reading():
     source = 'The report mentions SATA today.'
     _, edits = pronunciation.validate_decisions(source, [word_row()])

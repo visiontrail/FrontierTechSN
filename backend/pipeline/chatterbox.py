@@ -689,6 +689,7 @@ async def _generate_chatterbox(
     audit_all_parts: bool = False,
     before_submit: Callable[[dict], Awaitable[dict]] | None = None,
     frozen_pronunciation_policy: dict | None = None,
+    pronunciation_audio_feedback: dict | None = None,
     frozen_tail_cleanup_version: int | None = None,
 ) -> str:
     # The service can speak 23 languages. The project's existing source-word,
@@ -749,6 +750,7 @@ async def _generate_chatterbox(
         normalized = pronunciation.normalize_text(cleaned)
         pronunciation_plan = await pronunciation.prepare_pronunciation(
             normalized, directory, policy=contract["pronunciation_policy"], emit=emit,
+            **({'audio_feedback': pronunciation_audio_feedback} if pronunciation_audio_feedback is not None else {}),
         )
         chunks = _split_text(cleaned, max_words=contract["chunk_words"],
                              max_chars=min(contract["max_chars"], int(capabilities["max_chars"])),

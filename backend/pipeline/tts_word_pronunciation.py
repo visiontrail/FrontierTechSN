@@ -7,7 +7,7 @@ import re
 import cmudict
 
 
-WORD_HINT_VERSION = 1
+WORD_HINT_VERSION = 2
 PHONES = frozenset('AA AE AH AO AW AY B CH D DH EH ER EY F G HH IH IY JH K L M N NG OW OY P R S SH T TH UH UW V W Y Z ZH'.split())
 
 
@@ -16,11 +16,13 @@ def lexicon():
     return cmudict.dict()
 
 
-@lru_cache(maxsize=1)
-def policy_contract():
+@lru_cache(maxsize=2)
+def policy_contract(*, version=WORD_HINT_VERSION):
+    if version not in {1, 2}:
+        raise ValueError('Unsupported word-hint policy')
     with cmudict.dict_stream() as stream:
         dictionary_sha256 = hashlib.sha256(stream.read()).hexdigest()
-    return {'version': WORD_HINT_VERSION, 'dictionary_version': cmudict.__version__,
+    return {'version': version, 'dictionary_version': cmudict.__version__,
             'dictionary_sha256': dictionary_sha256}
 
 
@@ -28,21 +30,28 @@ def normalized(variant):
     return tuple(re.sub(r'\d', '', phone) for phone in variant)
 
 
-def validate_word_hint(source, spoken, phones):
+def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
+    if version not in {1, 2}:
+        raise ValueError('Unsupported word-hint policy')
     if not re.fullmatch(r'[A-Z]{3,32}', source):
         raise ValueError('A word hint requires an undotted uppercase word of at least three letters')
     if (not isinstance(spoken, str) or len(spoken) > 256
-            or not re.fullmatch(r'[A-Za-z][A-Za-z ,.-]*[A-Za-z]', spoken)):
+            or not re.fullmatch(r'[A-Za-z][A-Za-z ,.-]*', spoken)
+            or (version == 1 and not spoken[-1].isalpha())):
         raise ValueError('A word hint can contain only words and plain separators')
     words = re.findall(r'[A-Za-z]+', spoken.casefold())
     if ''.join(words) != source.casefold():
         raise ValueError('A word hint must preserve every source letter in its original order')
-    if len(words) < 2 or not any(len(word) > 1 for word in words):
+    dictionary = lexicon()
+    single_word_hint = (version >= 2 and len(words) == 1
+                        and bool(dictionary.get(source.casefold()))
+                        and spoken.rstrip().endswith((',', '.')))
+    if ((len(words) < 2 and not single_word_hint)
+            or not any(len(word) > 1 for word in words)):
         raise ValueError('A word hint must separate word fragments, not spell every individual letter')
     if (not isinstance(phones, list) or not 1 <= len(phones) <= 64
             or any(not isinstance(phone, str) or phone not in PHONES for phone in phones)):
         raise ValueError('A word hint requires an explicit valid ARPABET phone sequence')
-    dictionary = lexicon()
     variants = [dictionary.get(word) for word in words]
     if not all(variants):
         raise ValueError('Every word-hint fragment needs an English dictionary pronunciation')

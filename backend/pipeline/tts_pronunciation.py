@@ -13,9 +13,9 @@ from pathlib import Path
 from backend import config
 
 CANDIDATE_POLICY_VERSION = 4
-IMPLEMENTED_POLICY_VERSION = 9
+IMPLEMENTED_POLICY_VERSION = 10
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -67,7 +67,7 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
         result['candidate_pattern_sha256'] = hashlib.sha256(CANDIDATE_RE.pattern.encode()).hexdigest()
     if version >= 7:
         from backend.pipeline.tts_word_pronunciation import policy_contract as word_contract
-        result['word_hint_contract'] = word_contract().copy()
+        result['word_hint_contract'] = word_contract(version=2 if version >= 10 else 1).copy()
     return result
 
 
@@ -77,7 +77,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {3, 4, 5, 6, 7, 8}:
+    if policy.get('version') in {3, 4, 5, 6, 7, 8, 9}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
         except OSError:
@@ -172,7 +172,8 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             edits.append({**candidate, "spoken": spoken})
         elif action == 'word' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 7:
             from backend.pipeline.tts_word_pronunciation import validate_word_hint
-            phones = validate_word_hint(candidate['source'], spoken, row.get('phones'))
+            phones = validate_word_hint(candidate['source'], spoken, row.get('phones'),
+                                        version=2 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 10 else 1)
             edits.append({**candidate, 'spoken': spoken, 'kind': 'word', 'phones': phones})
         else:
             raise ValueError("Pronunciation action must be keep, spell or a supported word hint")
@@ -214,7 +215,8 @@ def _plan(text: str, decisions: object, identity: dict) -> dict:
             "synthesis_text_sha256": hashlib.sha256(synthesis.encode()).hexdigest()}
 
 
-async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emit) -> dict:
+async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emit,
+                                audio_feedback: dict | None = None) -> dict:
     """Freeze one validated model plan before submitting any synthesis jobs."""
     from backend.pipeline.digester import _chat, _resolve_provider
 
@@ -231,6 +233,11 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "tts_pronunciation.json"
     identity = {"source_sha256": hashlib.sha256(text.encode()).hexdigest(), "language": "en", "policy": policy}
+    if audio_feedback is not None:
+        if (not isinstance(audio_feedback, dict)
+                or audio_feedback.get('source_sha256') != identity['source_sha256']
+                or len(json.dumps(audio_feedback, ensure_ascii=False)) > 32768):
+            raise ValueError('Pronunciation audio feedback must match the complete canonical source')
     checkpoints = list(directory.glob("tts_input_part_*.request-*.json"))
     if path.exists():
         try:
@@ -260,6 +267,11 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
         requested_route = {"endpoint": endpoint, "model": model}
         payload = {"language": "en", "source_text": text, "candidates": found,
                    "letter_name_forms": LETTER_NAMES}
+        if audio_feedback is not None:
+            # Audio observations are advisory planning context, never an
+            # accepted decision or permission to change the canonical script.
+            # Cached/submitted plans above stay frozen even with new feedback.
+            payload['audio_feedback'] = audio_feedback
         # A failed run may have corrected most decisions before exhausting its
         # bounded attempts. Treat that response only as repair context, never
         # as an accepted plan, and recheck its error under the current policy.
