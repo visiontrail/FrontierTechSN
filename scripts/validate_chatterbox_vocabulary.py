@@ -405,10 +405,18 @@ async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
 
 async def run(directory: Path, marker: dict, *, allow_composing: bool = False,
               require_phone_sequence: bool = False,
-              pronunciation_audio_feedback: dict | None = None) -> None:
+              pronunciation_audio_feedback: dict | None = None,
+              batch_indices: list[int] | None = None) -> None:
+    selected = list(range(1, marker['batch_count'] + 1)) if batch_indices is None else batch_indices
+    if (not isinstance(selected, list) or not selected
+            or any(type(index) is not int or not 1 <= index <= marker['batch_count'] for index in selected)
+            or len(selected) != len(set(selected))):
+        raise ValueError('Select unique existing one-based corpus batch indices')
     rows = marker['identity']['cases']
     outcomes = []
     for index in range(marker['batch_count']):
+        if index + 1 not in selected:
+            continue
         window = await require_audio_window('http://localhost:8101', allow_composing=allow_composing)
         cases = rows[index * 12:(index + 1) * 12]
         group = directory / f'batch-{index + 1:03d}'
@@ -473,6 +481,7 @@ async def run(directory: Path, marker: dict, *, allow_composing: bool = False,
         summary = {'corpus_sha256': marker['corpus_sha256'], 'case_count': marker['case_count'],
                    'term_count': marker['term_count'], 'completed_batches': len(outcomes),
                    'total_batches': marker['batch_count'], 'all_batches_attempted': complete,
+                   'selected_batches': selected,
                    'all_batches_audited': audited,
                    'passed': complete and all(r['passed'] for r in outcomes),
                    'runtime_identity': RUNTIME_IDENTITY, 'outcomes': outcomes}

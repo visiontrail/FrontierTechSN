@@ -119,6 +119,53 @@ def test_frozen_corpus_cannot_rebind_submitted_provider_jobs(tmp_path):
         validation.prepare(tmp_path / 'run', value, None)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('selected', [[], [0], [3], [1, 1], [True], ['1'], (1,)])
+async def test_batch_resume_selection_rejects_invalid_indices_before_any_remote_work(tmp_path, monkeypatch, selected):
+    async def unexpected(*_args, **_kwargs):
+        pytest.fail('Invalid batch selection must stop before remote work')
+    monkeypatch.setattr(validation, 'require_audio_window', unexpected)
+    marker = {'identity': {'cases': []}, 'batch_count': 2}
+    with pytest.raises(ValueError, match='unique existing one-based'):
+        await validation.run(tmp_path, marker, batch_indices=selected)
+
+
+@pytest.mark.asyncio
+async def test_resuming_one_batch_preserves_full_scope_and_never_claims_full_completion(tmp_path, monkeypatch):
+    cases = [{'id': f'case-{index}', 'term': 'AI', 'text': 'The AI report is ready.',
+              'expected_actions': {'AI': 'spell'}} for index in range(24)]
+    marker = {'identity': {'cases': cases, 'cache_contract': {'pronunciation_policy': {}}},
+              'batch_count': 2, 'case_count': 24, 'term_count': 1, 'corpus_sha256': 'full-frozen-scope'}
+    original = copy.deepcopy(marker)
+    planned = []
+
+    async def window(*_args, **_kwargs):
+        return {'available': True}
+
+    async def plan(text, directory, **_kwargs):
+        planned.append(directory)
+        rows = [{**candidate, 'action': 'keep', 'spoken': candidate['source'],
+                 'reason': 'A controlled mode mismatch must stop before synthesis.'}
+                for candidate in pronunciation.candidates(text)]
+        return pronunciation._plan(text, rows, {})
+
+    async def unexpected(*_args, **_kwargs):
+        pytest.fail('A wrong mode must not submit any audio')
+
+    monkeypatch.setattr(validation, 'require_audio_window', window)
+    monkeypatch.setattr(pronunciation, 'prepare_pronunciation', plan)
+    monkeypatch.setattr(validation.chatterbox, '_generate_chatterbox', unexpected)
+    await validation.run(tmp_path, marker, batch_indices=[2])
+    assert marker == original
+    assert planned == [tmp_path / 'batch-002/audio']
+    assert not (tmp_path / 'batch-001').exists()
+    summary = validation.read(tmp_path / 'summary.json')
+    assert summary['case_count'] == 24 and summary['corpus_sha256'] == 'full-frozen-scope'
+    assert summary['total_batches'] == 2 and summary['selected_batches'] == [2]
+    assert not summary['passed'] and not summary['all_batches_attempted'] and not summary['all_batches_audited']
+    assert summary['outcomes'][0]['case_ids'] == [case['id'] for case in cases[12:]]
+
+
 def test_old_corpus_resumes_with_delivery_cleanup_disabled_and_still_rejects_generation_drift(tmp_path, monkeypatch):
     current = validation.chatterbox.cache_contract()
     old = {key: value for key, value in current.items() if key != 'tail_cleanup_version'}
