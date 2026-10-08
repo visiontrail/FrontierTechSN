@@ -23,6 +23,8 @@ def _loaded():
                 or not isinstance(row.get('source_url'), str) or not row['source_url'].startswith('https://')
                 or not isinstance(row.get('source_location'), str) or not row['source_location']
                 or not isinstance(row.get('variants'), list) or not row['variants']
+                or any(key in row and type(row[key]) is not bool
+                       for key in ('uppercase_only', 'replace_dictionary'))
                 or any(not isinstance(variant, list) or not variant
                        or any(not isinstance(phone, str) or phone not in PHONES for phone in variant)
                        for variant in row['variants'])):
@@ -32,6 +34,13 @@ def _loaded():
 
 def entries():
     return _loaded()[0]
+
+
+def reference_for(word):
+    row = entries().get(word.casefold())
+    if row and row.get('uppercase_only') and not word.isupper():
+        return None
+    return row
 
 
 def policy_contract():

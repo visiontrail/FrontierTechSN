@@ -20,11 +20,12 @@ from backend.pipeline.tts_phone_references import (
 )
 from scripts.chatterbox_body_phone_references import (
     entries as body_word_references, policy_contract as body_reference_contract,
+    reference_for as body_reference_for,
 )
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 20
+EVIDENCE_VERSION = 21
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PRERHOTIC_VOWEL_SOURCE = 'https://opentext.ku.edu/amenglishpronunciation/chapter/chapter-1/'
 ORDINARY_FLAP_SOURCE = 'https://journals.sagepub.com/doi/10.1177/0023830908098542'
@@ -139,9 +140,10 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
             reference = supplemental_word_references().get(word.casefold())
             if reference:
                 variants = [*variants, *reference['variants']]
-            body_reference = body_word_references().get(word.casefold())
+            body_reference = body_reference_for(word)
             if body_reference:
-                variants = [*variants, *body_reference['variants']]
+                variants = (body_reference['variants'] if body_reference.get('replace_dictionary') else
+                            [*variants, *body_reference['variants']])
             if not variants:
                 raise ValueError(f'No source pronunciation reference for {word}')
             references = {tuple(re.sub(r'\d', '', p) for p in variant) for variant in variants}
@@ -267,9 +269,9 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     if cited:
         report['cited_word_references'] = cited
         report['word_reference_sha256'] = reference_contract()['reference_sha256']
-    body_cited = {word.casefold(): body_word_references()[word.casefold()]
+    body_cited = {word.casefold(): body_reference_for(word)
                   for word in ordinary_source_words(unedited)
-                  if word.casefold() in body_word_references()}
+                  if body_reference_for(word)}
     if body_cited:
         report['cited_body_word_references'] = body_cited
         report['body_reference_sha256'] = body_reference_contract()['reference_sha256']

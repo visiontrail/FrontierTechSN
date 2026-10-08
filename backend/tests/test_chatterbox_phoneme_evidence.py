@@ -127,6 +127,20 @@ def test_wasm_published_rhymes_preserve_the_complete_word_and_closing_source():
     assert not evidence.compare_source(source, [], PREFIX + 'w ɑː z ə m')['passed']
 
 
+def test_asic_technical_reference_replaces_unrelated_dictionary_reading_only_in_capitals():
+    source = 'The report mentions ASIC today.'
+    correct = PREFIX + 'eɪ s ɪ k' + ENDING
+    unrelated = PREFIX + 'æ z ɪ k' + ENDING
+    report = evidence.compare_source(source, [], correct)
+    assert report['supported'] and report['passed']
+    assert report['cited_body_word_references']['asic']['replace_dictionary'] is True
+    assert not evidence.compare_source(source, [], unrelated)['passed']
+    lower = source.replace('ASIC', 'asic')
+    assert evidence.compare_source(lower, [], unrelated)['passed']
+    assert 'asic' not in evidence.compare_source(lower, [], unrelated).get('cited_body_word_references', {})
+    assert not evidence.compare_source(source, [], correct + ' ɛ s')['passed']
+
+
 def test_configuration_dictionary_variant_preserves_yaml_and_rhotic_vowel_identity():
     source = 'The YAML configuration file is ready.'
     phones = 'ð ə j æ m əl k ə n f ɪ ɡ ɚ ɹ eɪ ʃ ə n f aɪ l ɪ z ɹ ɛ d i'

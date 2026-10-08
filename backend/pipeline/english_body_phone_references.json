@@ -1,6 +1,14 @@
 {
   "version": 1,
   "entries": {
+    "asic": {
+      "variants": [["EY", "S", "IH", "K"]],
+      "uppercase_only": true,
+      "replace_dictionary": true,
+      "source_url": "https://www.computerlanguage.com/results.php?definition=ASIC",
+      "source_location": "Application-specific integrated circuit definition: a-sick. The capitalized technical acronym replaces CMU's unrelated AE-Z-IH-K entry in complete-source checks.",
+      "verified_on": "2026-10-08"
+    },
     "wasm": {
       "variants": [["W", "AA", "Z", "AH", "M"], ["W", "AE", "Z", "AH", "M"]],
       "source_url": "https://wasmgroundup.com/WebAssembly_from_the_Ground_Up_sample.pdf",
