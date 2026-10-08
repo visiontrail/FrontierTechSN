@@ -1947,3 +1947,30 @@ async def test_new_numeric_generation_spells_single_letters_but_retains_digit_an
     metadata=json.loads((directory/'tts_input_part_001_generated.json').read_text())
     assert metadata['identity']['pronunciation_policy']['version']==tts_pronunciation.IMPLEMENTED_POLICY_VERSION
     assert metadata['identity']['text']==script.read_text()
+
+
+@pytest.mark.asyncio
+async def test_opt_in_numeric_policy_sends_exact_decimal_words_and_reuses_the_same_job(setup_client, monkeypatch):
+    server, script, directory, _verifier, _generate = setup_client
+    source = 'The report mentions TLS1.3 today.'
+    script.write_text(source)
+    decisions = [{**row, 'action': 'number' if row.get('kind') == 'number' else 'spell',
+                  'spoken': tts_pronunciation.numeric_cue(row['source']) if row.get('kind') == 'number' else 'tee ell ess',
+                  'reason': 'Exact source-bound numeric and letter reading.'}
+                 for row in tts_pronunciation.candidates(source, policy_version=14)]
+    monkeypatch.setattr(digester, '_chat', AsyncMock(return_value=json.dumps({'decisions': decisions})))
+    policy = tts_pronunciation.policy_contract(policy_version=14)
+    async def run():
+        return await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _message: None, verify_text=True, frozen_pronunciation_policy=policy)
+    await run()
+    assert len(server.jobs) == 1
+    assert server.jobs['job-1']['request']['text'] == 'The report mentions tee ell ess one point three today.'
+    metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+    assert metadata['identity']['text'] == source
+    assert metadata['identity']['pronunciation_policy']['version'] == 14
+    checkpoint = (directory / 'tts_input_part_001.request-0.json').read_bytes()
+    await run()
+    assert len(server.jobs) == 1
+    assert (directory / 'tts_input_part_001.request-0.json').read_bytes() == checkpoint
+    assert script.read_text() == source

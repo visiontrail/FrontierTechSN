@@ -521,6 +521,21 @@ def test_decimal_model_requires_point_and_does_not_merge_or_reorder_digits():
         assert not evidence.compare_source(source, prepared, changed)['passed']
 
 
+def test_versioned_numeric_cue_keeps_original_decimal_in_complete_source_evidence():
+    source = 'The report mentions TLS1.3 today.'
+    decisions = [{**row, 'action': 'number' if row.get('kind') == 'number' else 'spell',
+                  'spoken': tts_pronunciation.numeric_cue(row['source']) if row.get('kind') == 'number' else 'tee ell ess',
+                  'reason': 'Exact source representation.'}
+                 for row in tts_pronunciation.candidates(source, policy_version=14)]
+    _, prepared = tts_pronunciation.validate_decisions(source, decisions, policy_version=14)
+    correct = PREFIX + 't iː ɛ l ɛ s w ʌ n p ɔɪ n t θ ɹ iː' + ENDING
+    assert evidence.compare_source(source, prepared, correct)['passed']
+    assert not evidence.compare_source(source, prepared, correct.replace('p ɔɪ n t ', ''))['passed']
+    from backend.pipeline import chatterbox
+    words = [{'text': 'The report mentions T L S one point three today.'}]
+    assert chatterbox._pronunciation_report(source, words, prepared)['passed']
+
+
 def test_fractional_leading_zero_and_trailing_zero_are_audible_source_precision():
     source = 'The value is 1.03.'
     correct = 'ð ə v æ l j uː ɪ z w ʌ n p ɔɪ n t z ɪ ɹ oʊ θ ɹ iː'

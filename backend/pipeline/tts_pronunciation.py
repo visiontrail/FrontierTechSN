@@ -15,7 +15,7 @@ from backend import config
 CANDIDATE_POLICY_VERSION = 13
 IMPLEMENTED_POLICY_VERSION = 13
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -29,6 +29,10 @@ CANDIDATE_RE = re.compile(
     r"(?<![A-Za-z])[A-Z][a-z][A-Z](?![A-Za-z])"
     r"|(?<![A-Za-z])[a-z][A-Z]{2,4}(?![A-Za-z])|" + V4_CANDIDATE_RE.pattern
 )
+NUMERIC_MODEL_RE = re.compile(r'[A-Za-z][A-Za-z0-9-]*(?:\.[0-9]+)*')
+NUMERIC_LITERAL_RE = re.compile(r'[0-9]{1,6}(?:\.[0-9]{1,6})?')
+NUMERIC_CUE_VERSION = 1
+
 # An alphabet validates the model's proposed sounds; it never decides which
 # names to change. The model selects each occurrence and its spoken spelling.
 LETTER_NAMES = {
@@ -40,6 +44,17 @@ LETTER_NAMES = {
     "S": ("ess", "es"), "T": ("tee",), "U": ("you",), "V": ("vee",),
     "W": ("double you",), "X": ("ex",), "Y": ("why",), "Z": ("zee", "zed"),
 }
+
+def numeric_cue(source: str) -> str:
+    """Spell a finite model numeric literal without losing zeroes or point."""
+    from backend.spoken_numbers import integer_words
+    if not NUMERIC_LITERAL_RE.fullmatch(source):
+        raise ValueError('Unsupported exact numeric cue literal')
+    digits = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine')
+    whole, point, fraction = source.partition('.')
+    words = ([digits[int(digit)] for digit in whole] if len(whole) > 1 and whole.startswith('0')
+             else integer_words(int(whole)).replace('-', ' ').split())
+    return ' '.join(words + (['point', *(digits[int(digit)] for digit in fraction)] if point else []))
 
 
 def _digest(value: object) -> str:
@@ -75,6 +90,9 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
     if version >= 7:
         from backend.pipeline.tts_word_pronunciation import policy_contract as word_contract
         result['word_hint_contract'] = word_contract(version=4 if version >= 13 else 3 if version >= 12 else 2 if version >= 10 else 1).copy()
+    if version >= 14:
+        result['numeric_cue_version'] = NUMERIC_CUE_VERSION
+        result['numeric_candidate_pattern_sha256'] = _digest((NUMERIC_MODEL_RE.pattern, NUMERIC_LITERAL_RE.pattern))
     return result
 
 
@@ -84,6 +102,8 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
+    if policy.get('version') == 14:
+        return policy == policy_contract(policy_version=14)
     if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
@@ -126,6 +146,22 @@ def candidates(text: str, *, policy_version: int | None = None) -> list[dict]:
                     if lexicon().get((match[0][-1] + suffix[0]).casefold()):
                         end -= 1
         result.append({"id": len(result), "start": start, "end": end, "source": text[start:end]})
+    if version >= 14:
+        for model in NUMERIC_MODEL_RE.finditer(text):
+            if not any(char.isupper() for char in model[0]) or not any(char.isdigit() for char in model[0]):
+                continue
+            if any(start < model.end() and end > model.start() for start, end in protected):
+                continue
+            if re.search(r'\d\.\d+\.\d', model[0]):
+                continue
+            for number in NUMERIC_LITERAL_RE.finditer(model[0]):
+                start, end = model.start() + number.start(), model.start() + number.end()
+                if ((start and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit())):
+                    continue
+                result.append({'id': 0, 'start': start, 'end': end, 'source': text[start:end], 'kind': 'number'})
+        result.sort(key=lambda row: row['start'])
+        for identifier, row in enumerate(result):
+            row['id'] = identifier
     return result
 
 
@@ -173,9 +209,15 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             raise ValueError("Each pronunciation decision requires a short contextual reason")
         if not isinstance(spoken, str) or spoken != spoken.strip():
             raise ValueError("Spoken spelling must be a trimmed string")
+        if candidate.get('kind') == 'number' and action not in {'keep', 'number'}:
+            raise ValueError('Numeric candidates require keep or the exact number action')
         if action == "keep":
             if spoken != candidate["source"]:
                 raise ValueError("A keep decision must preserve its exact source spelling")
+        elif action == 'number' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 14:
+            if candidate.get('kind') != 'number' or spoken != numeric_cue(candidate['source']):
+                raise ValueError('Numeric cue must retain the exact source value, point and every precision digit')
+            edits.append({**candidate, 'spoken': spoken})
         elif action == "spell":
             letters = candidate["source"].replace(".", "").upper()
             try:
@@ -232,9 +274,12 @@ def render_span(text: str, start: int, end: int, edits: list[dict]) -> str:
         # Letter names inside a brand/model need a word boundary. Keep plural
         # and possessive suffixes attached (GPUs -> gee pee yous), but prevent
         # OpenAI -> Openay eye and GPT4 -> gee pee tee4.
-        if edit["start"] > 0 and text[edit["start"] - 1].isalnum():
+        if (edit["start"] > 0 and text[edit["start"] - 1].isalnum()
+                and not (edit.get('kind') == 'number' and cursor == edit['start']
+                         and pieces and pieces[-1].endswith(' '))):
             spoken = " " + spoken
         if (edit.get('following_word_boundary')
+                or (edit.get('kind') == 'number' and edit['end'] < len(text) and text[edit['end']].isalpha())
                 or (edit["end"] < len(text) and text[edit["end"]].isdigit())):
             spoken += " "
         pieces.extend((text[cursor:edit["start"]], spoken))
@@ -262,7 +307,7 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
     except (OSError, KeyError, ValueError) as error:
         raise RuntimeError('Pronunciation policy is unsupported; preserving submitted jobs') from error
     if policy.get('prompt_sha256') != selected['prompt_sha256']:
-        raise RuntimeError('Chatterbox pronunciation prompt changed during preparation')
+        raise RuntimeError('Chatterbox pronunciation prompt changed during preparation; preserving submitted jobs')
     if policy != selected:
         raise RuntimeError('Pronunciation policy is unsupported or changed; preserving existing plans and jobs')
 
@@ -304,6 +349,10 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
         requested_route = {"endpoint": endpoint, "model": model}
         payload = {"language": "en", "source_text": text, "candidates": found,
                    "letter_name_forms": LETTER_NAMES}
+        if policy['version'] >= 14:
+            payload['exact_numeric_cue_forms'] = [
+                {'id': row['id'], 'source': row['source'], 'spoken': numeric_cue(row['source'])}
+                for row in found if row.get('kind') == 'number']
         if policy['version'] >= 13:
             from backend.pipeline.tts_phone_references import entries
             references = entries()

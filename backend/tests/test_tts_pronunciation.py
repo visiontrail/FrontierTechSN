@@ -626,3 +626,82 @@ async def test_audio_feedback_for_another_source_is_rejected_before_model_or_job
             audio_feedback={'source_sha256': 'another-source'})
     chat.assert_not_awaited()
     assert not list(tmp_path.glob('tts_input_part_*.request-*.json'))
+
+
+def v14_decisions(text, spellings=None):
+    spellings = spellings or {}
+    return [{**row, 'action': 'number' if row.get('kind') == 'number' else
+             'spell' if row['source'] in spellings else 'keep',
+             'spoken': pronunciation.numeric_cue(row['source']) if row.get('kind') == 'number' else
+             spellings.get(row['source'], row['source']), 'reason': 'Exact source reading.'}
+            for row in pronunciation.candidates(text, policy_version=14)]
+
+
+def test_policy14_numeric_cues_preserve_source_and_all_legacy_policy_contracts(tmp_path):
+    text = 'The GPT-5.2 and TLS1.3 models use GD01 and GPT4o.'
+    old = {version: pronunciation.policy_contract(policy_version=version) for version in range(3, 14)}
+    _, edits = pronunciation.validate_decisions(text, v14_decisions(text, {'GPT': 'gee pee tee', 'TLS': 'tee ell ess', 'GD': 'gee dee'}), policy_version=14)
+    rendered = pronunciation.render_span(text, 0, len(text), edits)
+    assert 'gee pee tee-five point two' in rendered
+    assert 'tee ell ess one point three' in rendered
+    assert 'gee dee zero one' in rendered
+    assert 'gee pee tee four o' in rendered
+    assert text == 'The GPT-5.2 and TLS1.3 models use GD01 and GPT4o.'
+    for version in range(3, 14):
+        assert pronunciation.policy_contract(policy_version=version) == old[version]
+        assert pronunciation.compatible_policy(old[version])
+        assert not any(row.get('kind') == 'number' for row in pronunciation.candidates(text, policy_version=version))
+    assert pronunciation.POLICY_VERSION == 13
+    assert pronunciation.policy_contract(policy_version=14)['numeric_cue_version'] == 1
+
+
+@pytest.mark.parametrize(('source', 'wrong'), [
+    ('5.2', 'five twenty two'), ('1.3', 'one three'), ('01', 'one'),
+    ('1.03', 'one point three'), ('1.30', 'one point three'), ('4', 'four oh'),
+])
+def test_policy14_numeric_cue_rejects_value_precision_and_letter_changes(source, wrong):
+    text = f'The GPT{source} model is ready.'
+    decisions = v14_decisions(text)
+    row = next(row for row in decisions if row.get('kind') == 'number')
+    row['spoken'] = wrong
+    with pytest.raises(ValueError, match='exact source value'):
+        pronunciation.validate_decisions(text, decisions, policy_version=14)
+
+
+def test_policy14_numbers_inside_urls_and_unbounded_versions_are_not_transformed():
+    text = 'https://example.com/GPT5.2 and GPT1.2.3 and GPT1234567 remain.'
+    assert not any(row.get('kind') == 'number' for row in pronunciation.candidates(text, policy_version=14))
+    with pytest.raises(ValueError, match='Unsupported'):
+        pronunciation.numeric_cue('1234567')
+
+
+@pytest.mark.asyncio
+async def test_policy14_numeric_plan_cache_is_frozen_before_any_job(tmp_path, mock_model):
+    _resolve, chat = mock_model
+    text = 'The report mentions TLS1.3 today.'
+    decisions = v14_decisions(text, {'TLS': 'tee ell ess'})
+    chat.return_value = json.dumps({'decisions': decisions})
+    policy = pronunciation.policy_contract(policy_version=14)
+    plan = await pronunciation.prepare_pronunciation(text, tmp_path, policy=policy, emit=lambda _: None)
+    assert plan['synthesis_text'] == 'The report mentions tee ell ess one point three today.'
+    again = await pronunciation.prepare_pronunciation(text, tmp_path, policy=policy, emit=lambda _: None)
+    assert again == plan and chat.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_policy14_cannot_rebind_a_submitted_policy13_numeric_plan(tmp_path, mock_model):
+    _resolve, chat = mock_model
+    text = 'The TLS1.3 report is ready.'
+    chat.return_value = json.dumps({'decisions': decisions_for(text, {'TLS': 'tee ell ess'})})
+    old = await pronunciation.prepare_pronunciation(text, tmp_path, policy=pronunciation.policy_contract(policy_version=13), emit=lambda _: None)
+    checkpoint = tmp_path / 'tts_input_part_001.request-0.json'
+    checkpoint.write_text('{"identity":"old-request","idempotency_key":"old-key","job_id":"old-job"}')
+    before = checkpoint.read_bytes()
+    plan_before = (tmp_path / 'tts_pronunciation.json').read_bytes()
+    chat.reset_mock()
+    with pytest.raises(RuntimeError, match='preserving.*request identities'):
+        await pronunciation.prepare_pronunciation(text, tmp_path, policy=pronunciation.policy_contract(policy_version=14), emit=lambda _: None)
+    assert checkpoint.read_bytes() == before
+    assert (tmp_path / 'tts_pronunciation.json').read_bytes() == plan_before
+    assert old['synthesis_text'] == 'The tee ell ess 1.3 report is ready.'
+    chat.assert_not_awaited()

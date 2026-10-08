@@ -411,7 +411,8 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     Wrong letters and additional repetitions can never become a spelling alias.
     Other words retain the shared advisory policy.
     """
-    found = list(pronunciation.candidates(text) if edits is None else edits)
+    found = [row for row in (pronunciation.candidates(text) if edits is None else edits)
+             if row.get('kind') != 'number']
     symbols = _symbol_initialisms(text)
     for match in symbols:
         for group in (1, 2):

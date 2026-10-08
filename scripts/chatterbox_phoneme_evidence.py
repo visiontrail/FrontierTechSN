@@ -260,6 +260,13 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
         start, end = edit['start'], edit['end']
         if not cursor <= start < end <= len(text) or text[start:end] != edit['source']:
             raise ValueError('Spelling edit differs from its source span')
+        if edit.get('kind') == 'number':
+            if edit['spoken'] != pronunciation.numeric_cue(edit['source']):
+                raise ValueError('Numeric edit differs from its exact source value')
+            ordinary(text[cursor:start])
+            ordinary(edit['source'])
+            cursor = end
+            continue
         if edit.get('kind') == 'word':
             from backend.pipeline.tts_word_pronunciation import validate_word_hint
             phones = validate_word_hint(edit['source'], edit['spoken'], edit.get('phones'))
