@@ -7,7 +7,7 @@ import re
 import cmudict
 
 
-WORD_HINT_VERSION = 2
+WORD_HINT_VERSION = 3
 PHONES = frozenset('AA AE AH AO AW AY B CH D DH EH ER EY F G HH IH IY JH K L M N NG OW OY P R S SH T TH UH UW V W Y Z ZH'.split())
 
 
@@ -18,7 +18,7 @@ def lexicon():
 
 @lru_cache(maxsize=2)
 def policy_contract(*, version=WORD_HINT_VERSION):
-    if version not in {1, 2}:
+    if version not in {1, 2, 3}:
         raise ValueError('Unsupported word-hint policy')
     with cmudict.dict_stream() as stream:
         dictionary_sha256 = hashlib.sha256(stream.read()).hexdigest()
@@ -31,10 +31,11 @@ def normalized(variant):
 
 
 def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
-    if version not in {1, 2}:
+    if version not in {1, 2, 3}:
         raise ValueError('Unsupported word-hint policy')
-    if not re.fullmatch(r'[A-Z]{3,32}', source):
-        raise ValueError('A word hint requires an undotted uppercase word of at least three letters')
+    pattern = r'[A-Za-z]{3,32}' if version >= 3 else r'[A-Z]{3,32}'
+    if not re.fullmatch(pattern, source):
+        raise ValueError('A word hint requires an undotted alphabetic word of at least three letters')
     if (not isinstance(spoken, str) or len(spoken) > 256
             or not re.fullmatch(r'[A-Za-z][A-Za-z ,.-]*', spoken)
             or (version == 1 and not spoken[-1].isalpha())):

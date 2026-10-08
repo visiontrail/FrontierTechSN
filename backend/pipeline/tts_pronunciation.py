@@ -12,10 +12,10 @@ from pathlib import Path
 
 from backend import config
 
-CANDIDATE_POLICY_VERSION = 11
-IMPLEMENTED_POLICY_VERSION = 11
+CANDIDATE_POLICY_VERSION = 12
+IMPLEMENTED_POLICY_VERSION = 12
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -74,7 +74,7 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
             result['candidate_boundary_version'] = 1
     if version >= 7:
         from backend.pipeline.tts_word_pronunciation import policy_contract as word_contract
-        result['word_hint_contract'] = word_contract(version=2 if version >= 10 else 1).copy()
+        result['word_hint_contract'] = word_contract(version=3 if version >= 12 else 2 if version >= 10 else 1).copy()
     return result
 
 
@@ -84,7 +84,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10}:
+    if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
         try:
             legacy = policy_contract(policy_version=policy['version'])
         except OSError:
@@ -202,7 +202,8 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
         elif action == 'word' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 7:
             from backend.pipeline.tts_word_pronunciation import validate_word_hint
             phones = validate_word_hint(candidate['source'], spoken, row.get('phones'),
-                                        version=2 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 10 else 1)
+                                        version=3 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 12 else
+                                        2 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 10 else 1)
             edits.append({**candidate, 'spoken': spoken, 'kind': 'word', 'phones': phones})
         else:
             raise ValueError("Pronunciation action must be keep, spell or a supported word hint")

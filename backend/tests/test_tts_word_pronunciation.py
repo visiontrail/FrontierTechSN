@@ -52,6 +52,37 @@ def test_word_policy_freezes_the_actual_dictionary_bytes():
     assert pronunciation.policy_contract()['word_hint_contract']['dictionary_sha256'] == expected
 
 
+def test_mixed_case_word_hint_retains_its_prefix_letter_and_word_reading():
+    source = 'The report mentions eSIM today.'
+    row = word_row(source='eSIM', spoken='e, sim', phones=['IY', 'S', 'IH', 'M'])
+    _, edits = pronunciation.validate_decisions(source, [row])
+    assert pronunciation.render_span(source, 0, len(source), edits) == 'The report mentions e, sim today.'
+    assert source == 'The report mentions eSIM today.'
+    phones = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z iː s ɪ m t ə d eɪ'
+    assert evidence.compare_source(source, edits, phones)['passed']
+    assert not evidence.compare_source(source, edits, phones.replace('iː s ɪ m', 's ɪ m'))['passed']
+    assert not evidence.compare_source(source, edits, phones.replace('iː s ɪ m', 'iː ɛ s aɪ ɛ m'))['passed']
+    assert pronunciation.policy_contract()['word_hint_contract']['version'] == 3
+
+
+@pytest.mark.parametrize('version', [10, 11])
+def test_submitted_word_policy_does_not_gain_mixed_case_hints(version):
+    assert pronunciation.policy_contract(policy_version=version)['word_hint_contract']['version'] == 2
+    with pytest.raises(ValueError):
+        pronunciation.validate_decisions('eSIM today.', [word_row(
+            source='eSIM', spoken='e, sim', phones=['IY', 'S', 'IH', 'M'])], policy_version=version)
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=version))
+
+
+@pytest.mark.parametrize(('spoken', 'phones'), [
+    ('sim', ['S', 'IH', 'M']), ('e, sims', ['IY', 'S', 'IH', 'M', 'Z']),
+    ('e s i m', ['IY', 'EH', 'S', 'AY', 'EH', 'M']), ('e, sim', ['IY', 'S', 'AY', 'M']),
+])
+def test_mixed_case_word_hint_rejects_lost_letters_and_changed_fragment_phones(spoken, phones):
+    with pytest.raises(ValueError):
+        pronunciation.validate_decisions('eSIM today.', [word_row(source='eSIM', spoken=spoken, phones=phones)])
+
+
 def test_known_word_punctuation_hint_keeps_its_dictionary_phones_and_all_source_letters():
     assert word.validate_word_hint('RAM', 'ram,', ['R', 'AE', 'M']) == ['R', 'AE', 'M']
     for spoken, phones in [('rum,', ['R', 'AH', 'M']), ('ram,', ['R', 'AH', 'M']),
