@@ -264,6 +264,7 @@ test('image command records submission, wait failure and canonical link without 
     ArgumentError: AdapterError, CommandExecutionError: AdapterError, EmptyResultError: AdapterError,
     console: { error: value => diagnostics.push(JSON.parse(value.slice('[chatgpt/image] '.length))) },
     normalizeBooleanFlag: Boolean, unwrapEvaluateResult: value => value,
+    async ensureChatGPTComposer() { return { url: 'https://chatgpt.com/' } },
     async clearChatGPTDraft() {}, async getChatGPTVisibleImageUrls() { return [] },
     async sendChatGPTMessage(_page, value) { sent.push(value); return true },
     async resolveChatGPTConversationIdentity() { return { conversationUrl: savedUrl, localConversationUrl: localUrl } },
@@ -286,27 +287,50 @@ test('image command records submission, wait failure and canonical link without 
   assert.ok(!JSON.stringify(diagnostics).includes('Private thumbnail prompt'))
 })
 
-test('unsubmitted image navigation recovers only its owned window and has bounded fallback', async () => {
+test('unready or wrong-origin composer never records submission or sends a prompt', async () => {
+  const source = fs.readFileSync(path.join(copied, 'clis/chatgpt/image.js'), 'utf8')
+    .replace(/^import .*\n/gm, '').replaceAll('export ', '')
+  for (const wrongOrigin of [false, true]) {
+    const stateFile = path.join(temporary, `unready-image-${wrongOrigin}.json`)
+    let sends = 0
+    const command = vm.runInNewContext(source + '\nimageCommand', {
+      os, path, fs, cli: value => value, Strategy: { COOKIE: 'cookie' },
+      ArgumentError: AdapterError, CommandExecutionError: AdapterError, EmptyResultError: AdapterError,
+      console: { error() {} }, normalizeBooleanFlag: Boolean,
+      async ensureChatGPTComposer() {
+        if (!wrongOrigin) throw new AdapterError('ChatGPT composer is not available')
+        return { url: 'about:blank' }
+      },
+      async sendChatGPTMessage() { sends++; return true },
+    })
+    await assert.rejects(command.func({ async goto() {} },
+      { prompt: 'must remain unsent', timeout: 30, 'state-file': stateFile }), /composer/)
+    assert.equal(sends, 0)
+    assert.equal(fs.existsSync(stateFile), false)
+  }
+})
+
+test('image navigation retries the same owned target and remains bounded', async () => {
   const source = fs.readFileSync(path.join(runtime, 'patches/chatgpt-image-request.js'), 'utf8').replaceAll('export ', '')
   const prepare = vm.runInNewContext(source + '\nprepareChatGPTImageComposer', {})
   const calls = []
   await prepare({
-    async goto(url) { calls.push(['goto', url]); throw new Error('Navigation rejected.') },
-    async closeWindow() { calls.push(['close-owned-window']) },
-    async newTab(url) { calls.push(['new-owned-tab', url]); return 'owned-image-target' },
-    async setActivePage(id) { calls.push(['select', id]) },
+    async goto(url) { calls.push(['goto', url]); if (calls.length === 1) throw new Error('Navigation rejected.') },
+    async sleep(seconds) { calls.push(['wait', seconds]) },
   })
   assert.deepEqual(calls, [
-    ['goto', 'https://chatgpt.com/new'], ['close-owned-window'],
-    ['goto', 'https://chatgpt.com/new'], ['new-owned-tab', 'https://chatgpt.com/new'],
-    ['select', 'owned-image-target'],
+    ['goto', 'https://chatgpt.com/new'], ['wait', 1], ['goto', 'https://chatgpt.com/new'],
   ])
-  let closed = false
+  let navigations = 0; let waits = 0
+  await assert.rejects(prepare({
+    async goto() { navigations++; throw new Error('Navigation rejected.') },
+    async sleep() { waits++ },
+  }), /Navigation rejected/)
+  assert.equal(navigations, 3); assert.equal(waits, 2)
   await assert.rejects(prepare({
     async goto() { throw new Error('Browser permission denied') },
-    async closeWindow() { closed = true },
+    async sleep() { assert.fail('Permission failures must not retry') },
   }), /permission denied/)
-  assert.equal(closed, false)
 })
 
 test('image setup/export allowance matches Python and preserves other command budgets', () => {
@@ -330,6 +354,7 @@ test('image timeout checkpoint recovers the original prompt without a second sen
     os, path, fs, Date, cli: value => value, Strategy: { COOKIE: 'cookie' },
     ArgumentError: AdapterError, CommandExecutionError: AdapterError, EmptyResultError: AdapterError,
     console: { error() {} }, normalizeBooleanFlag: Boolean,
+    async ensureChatGPTComposer() { return { url: 'https://chatgpt.com/' } },
     async clearChatGPTDraft() {}, async getChatGPTVisibleImageUrls() { return [] },
     async sendChatGPTMessage(_page, value) { sends.push(value); return true },
     async resolveChatGPTConversationIdentity() { return { conversationUrl: savedUrl } },

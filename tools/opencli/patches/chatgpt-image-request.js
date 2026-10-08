@@ -22,23 +22,17 @@ export async function prepareChatGPTImageComposer(page) {
     // Only used before submission. Never recover an owned turn by opening a new chat.
     const url = 'https://chatgpt.com/new';
     const rejected = error => /Navigation rejected/i.test(String(error?.message || error));
-    try {
-        await page.goto(url, { settleMs: 2000 });
-        return;
-    } catch (error) {
-        if (!rejected(error)) throw error;
-    }
-    // The persistent automation window can retain an unusable navigation target.
-    // These APIs affect this command's owned session, not ordinary browser tabs.
-    if (typeof page.closeWindow === 'function') await page.closeWindow();
-    try {
-        await page.goto(url, { settleMs: 2000 });
-    } catch (error) {
-        if (!rejected(error) || typeof page.newTab !== 'function'
-            || typeof page.setActivePage !== 'function') throw error;
-        const target = await page.newTab(url);
-        if (!target) throw error;
-        await page.setActivePage(target);
+    // A new automation window can reject its first navigation while its tab
+    // is still registering. Keep the same owned target and let it hydrate;
+    // closing/recreating the window repeats that startup race indefinitely.
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            await page.goto(url, { settleMs: 2000 });
+            return;
+        } catch (error) {
+            if (!rejected(error) || attempt === 2) throw error;
+            await page.sleep(1);
+        }
     }
 }
 

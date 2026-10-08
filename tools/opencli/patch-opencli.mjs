@@ -2098,6 +2098,16 @@ chatgptImage = chatgptImage.replace(
   'else await page.goto(`https://${CHATGPT_DOMAIN}/new`, { settleMs: 2000 });',
   'else await prepareChatGPTImageComposer(page);',
 )
+chatgptImage = chatgptImage.replace('import { clearChatGPTDraft,',
+  'import { ensureChatGPTComposer, clearChatGPTDraft,')
+if (!chatgptImage.includes('const composerState = await ensureChatGPTComposer(page);')) {
+  chatgptImage = chatgptImage.replace('            await clearChatGPTDraft(page);',
+    `            const composerState = await ensureChatGPTComposer(page);
+            if (!/^https:\\/\\/chatgpt\\.com(?:\\/|$)/.test(composerState.url || '')) {
+                throw new CommandExecutionError('ChatGPT image composer is on an unexpected page');
+            }
+            await clearChatGPTDraft(page);`)
+}
 fs.writeFileSync(chatgptImagePath, chatgptImage)
 
 let ask = fs.readFileSync(askPath, 'utf8')
