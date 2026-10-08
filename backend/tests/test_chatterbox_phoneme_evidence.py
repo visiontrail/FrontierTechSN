@@ -17,8 +17,8 @@ def test_cited_missing_dictionary_acronym_requires_exact_word_phones(term, phone
     source = f'The report mentions {term} today.'
     report = evidence.compare_source(source, [], PREFIX + phones + ENDING)
     assert report['supported'] and report['passed']
-    assert report['cited_acronym_references'][term.casefold()]['source_url'].startswith('https://')
-    assert report['acronym_reference_sha256'] == hashlib.sha256(evidence.ACRONYM_REFERENCES.read_bytes()).hexdigest()
+    assert report['cited_word_references'][term.casefold()]['source_url'].startswith('https://')
+    assert report['word_reference_sha256'] == hashlib.sha256(evidence.WORD_REFERENCES.read_bytes()).hexdigest()
     assert not evidence.compare_source(source, [], PREFIX + phones + ENDING + ' t')['passed']
 
 
@@ -37,8 +37,27 @@ def test_spelled_candidate_does_not_gain_a_word_pronunciation_from_reference_dat
     prepared = edits(source, 'JSON', 'jay ess oh N')
     report = evidence.compare_source(source, prepared, PREFIX + 'dʒ eɪ s ə n' + ENDING)
     assert report['supported'] and not report['passed']
-    assert 'cited_acronym_references' not in report
+    assert 'cited_word_references' not in report
     assert evidence.compare_source(source, prepared, PREFIX + 'dʒ eɪ ɛ s oʊ ɛ n' + ENDING)['passed']
+
+
+def test_document_noun_reference_keeps_exact_schwa_and_does_not_reduce_other_words():
+    source = 'The JSON parser reads the document.'
+    phones = 'ð ə dʒ eɪ s ə n p ɑːɹ s ɚ ɹ iː d z ð ə d ɑː k j uː m ə n t'
+    report = evidence.compare_source(source, [], phones)
+    assert report['passed']
+    assert set(report['cited_word_references']) == {'json', 'document'}
+    assert not evidence.compare_source(source, [], phones + ' æ n f aɪ n d')['passed']
+    assert not evidence.compare_source(source, [], phones.replace('dʒ eɪ s ə n', 'dʒ eɪ s ə n t'))['passed']
+    assert not evidence.compare_source(source, [], phones.replace('p ɑːɹ s ɚ', 'p ə s ɚ'))['passed']
+
+
+def test_cited_esim_word_does_not_omit_its_prefix_vowel():
+    source = 'The report mentions eSIM today.'
+    report = evidence.compare_source(source, [], PREFIX + 'iː s ɪ m' + ENDING)
+    assert report['supported'] and report['passed']
+    assert not evidence.compare_source(source, [], PREFIX + 's ɪ m' + ENDING)['passed']
+    assert not evidence.compare_source(source, [], PREFIX + 'iː ɛ s aɪ ɛ m' + ENDING)['passed']
 
 
 def edits(source, term, spoken):
