@@ -25,7 +25,8 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 24
+EVIDENCE_VERSION = 25
+SOURCE_WORD_REFERENCE_POLICY_VERSION = 1
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PRERHOTIC_VOWEL_SOURCE = 'https://opentext.ku.edu/amenglishpronunciation/chapter/chapter-1/'
 ORDINARY_FLAP_SOURCE = 'https://journals.sagepub.com/doi/10.1177/0023830908098542'
@@ -107,6 +108,26 @@ def ordinary_source_words(fragment: str) -> list[str]:
         word = match[0].replace('’', "'")
         words.extend([word] if word.casefold() in body_word_references() else word.split('-'))
     return words
+
+
+def independent_word_reference(word: str) -> dict:
+    """The cue's own fragments cannot establish how its source word is read."""
+    variants = lexicon().get(word.casefold()) or []
+    reference = supplemental_word_references().get(word.casefold())
+    if reference:
+        variants = [*variants, *reference['variants']]
+    body = body_reference_for(word)
+    if body:
+        variants = (body['variants'] if body.get('replace_dictionary') else [*variants, *body['variants']])
+    if not variants:
+        raise ValueError(f'No independent source-word pronunciation reference for {word}')
+    result = {'source': word, 'variants': sorted({
+        collapse_consonant_continuations(tuple(re.sub(r'\d', '', phone) for phone in variant))
+        for variant in variants}), 'dictionary_version': cmudict.__version__}
+    if body or reference:
+        selected = body or reference
+        result.update(source_url=selected['source_url'], source_location=selected['source_location'])
+    return result
 
 
 def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]:
@@ -198,6 +219,9 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
         if edit.get('kind') == 'word':
             from backend.pipeline.tts_word_pronunciation import validate_word_hint
             phones = validate_word_hint(edit['source'], edit['spoken'], edit.get('phones'))
+            canonical = independent_word_reference(edit['source'])
+            if collapse_consonant_continuations(phones) not in canonical['variants']:
+                raise ValueError('Word hint differs from the independent source-word pronunciation reference')
             ordinary(text[cursor:start])
             parts.append([tuple(phones)])
             ordinary_units.append(True)
@@ -269,6 +293,7 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
                  for edit in edits if edit.get('kind') == 'word']
     if word_refs:
         report['word_hint_references'] = word_refs
+        report['source_word_reference_policy_version'] = SOURCE_WORD_REFERENCE_POLICY_VERSION
     unedited = text
     for edit in sorted(edits, key=lambda row: row['start'], reverse=True):
         unedited = unedited[:edit['start']] + ' ' + unedited[edit['end']:]
@@ -284,6 +309,13 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     if body_cited:
         report['cited_body_word_references'] = body_cited
         report['body_reference_sha256'] = body_reference_contract()['reference_sha256']
+    if word_refs:
+        try:
+            report['independent_word_references'] = {
+                edit['source']: independent_word_reference(edit['source']) for edit in word_refs}
+        except ValueError as error:
+            report['unsupported_reason'] = str(error)
+            return report
     if any(tuple(re.sub(r'\d', '', phone) for phone in variant)[-3:] == ('K', 'T', 'S')
            for word in re.findall(r'[A-Za-z]+', unedited)
            for variant in (lexicon().get(word.casefold()) or [])):

@@ -187,6 +187,45 @@ def test_body_reference_does_not_change_frozen_word_hint_policy13_bytes():
     assert contract['prompt_sha256'] == '83ffb1466fdb9be77e69a2f89952ebf1fc7922deddc43e7caa938e83addf0e85'
 
 
+def test_unknown_source_word_cannot_use_its_own_hint_as_pronunciation_evidence():
+    source = 'The report mentions RAMRAM today.'
+    prepared = [{'source': 'RAMRAM', 'start': source.index('RAMRAM'),
+                 'end': source.index('RAMRAM') + 6, 'spoken': 'ram ram',
+                 'kind': 'word', 'phones': ['R', 'AE', 'M', 'R', 'AE', 'M']}]
+    from backend.pipeline.tts_word_pronunciation import validate_word_hint
+    assert validate_word_hint('RAMRAM', 'ram ram', prepared[0]['phones'])
+    report = evidence.compare_source(source, prepared, PREFIX + 'ɹ æ m ɹ æ m' + ENDING)
+    assert not report['supported'] and not report['passed']
+    assert 'independent source-word' in report['unsupported_reason']
+
+
+def test_cited_oled_word_blocks_a_glyph_preserving_but_wrong_reading():
+    source = 'The report mentions OLED today.'
+    prepared = [{'source': 'OLED', 'start': source.index('OLED'),
+                 'end': source.index('OLED') + 4, 'spoken': 'ole D',
+                 'kind': 'word', 'phones': ['OW', 'L', 'EY', 'D', 'IY']}]
+    from backend.pipeline.tts_word_pronunciation import validate_word_hint
+    assert validate_word_hint('OLED', 'ole D', prepared[0]['phones'])
+    report = evidence.compare_source(source, prepared, PREFIX + 'oʊ l eɪ d iː' + ENDING)
+    assert not report['passed']
+    assert 'independent source-word' in report['unsupported_reason']
+
+
+@pytest.mark.parametrize(('term', 'spoken', 'phones', 'observed'), [
+    ('OLED', 'O, led', ['OW', 'L', 'EH', 'D'], 'oʊ l ɛ d'),
+    ('SATA', 'sat, a', ['S', 'AE', 'T', 'AH'], 's æ t ə'),
+    ('SIGGRAPH', 'sig graph', ['S', 'IH', 'G', 'G', 'R', 'AE', 'F'], 's ɪ ɡ ɹ æ f'),
+])
+def test_legacy_word_cues_are_confirmed_against_independent_source_references(term, spoken, phones, observed):
+    source = f'The report mentions {term} today.'
+    prepared = [{'source': term, 'start': source.index(term), 'end': source.index(term) + len(term),
+                 'spoken': spoken, 'kind': 'word', 'phones': phones}]
+    report = evidence.compare_source(source, prepared, PREFIX + observed + ENDING)
+    assert report['supported'] and report['passed']
+    assert report['source_word_reference_policy_version'] == evidence.SOURCE_WORD_REFERENCE_POLICY_VERSION
+    assert report['independent_word_references'][term]['source_url'].startswith('https://')
+
+
 def test_published_the_weak_form_applies_only_before_an_actual_vowel_onset():
     source = "The OpenAI's result is available."
     prepared = edits(source, 'AI', 'eigh eye')

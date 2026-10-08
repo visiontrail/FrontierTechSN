@@ -260,8 +260,20 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
     except tts.TtsIntegrityError:
         return None
     if verify_text and identity.get('word_hint_references'):
+        from scripts.chatterbox_phoneme_evidence import (
+            SOURCE_WORD_REFERENCE_POLICY_VERSION, independent_word_reference,
+        )
+        try:
+            source_references = {row['source']: independent_word_reference(row['source'])
+                                 for row in identity['word_hint_references']}
+        except ValueError:
+            return None
         acoustic = guard.get('required_word_phone_confirmation') or {}
         if (acoustic.get('passed') is not True or acoustic.get('supported') is not True
+                or acoustic.get('source_word_reference_policy_version') != SOURCE_WORD_REFERENCE_POLICY_VERSION
+                or set(acoustic.get('independent_word_references') or {}) != {
+                    row['source'] for row in identity['word_hint_references']}
+                or _digest(acoustic.get('independent_word_references')) != _digest(source_references)
                 or acoustic.get('conditioned_on_reference_text') is not False
                 or acoustic.get('method') != 'complete_source_phone_sequence'
                 or acoustic.get('audio_sha256') != metadata['audio_sha256']
@@ -635,6 +647,16 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
                               verification_status='word_phone_mismatch')
                 _write_json(directory / 'pronunciation_report.json', report)
                 raise tts.TtsIntegrityError('Word-hint audio differs from its complete source phone sequence')
+            from scripts.chatterbox_phoneme_evidence import (
+                SOURCE_WORD_REFERENCE_POLICY_VERSION, independent_word_reference,
+            )
+            source_references = {edit['source']: independent_word_reference(edit['source'])
+                                 for edit in edits if edit.get('kind') == 'word'}
+            if (acoustic.get('source_word_reference_policy_version') != SOURCE_WORD_REFERENCE_POLICY_VERSION
+                    or set(acoustic.get('independent_word_references') or {}) != {
+                        edit['source'] for edit in edits if edit.get('kind') == 'word'}
+                    or _digest(acoustic.get('independent_word_references')) != _digest(source_references)):
+                raise RuntimeError('Independent source-word pronunciation reference unavailable; preserving the completed job')
             refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
                     for edit in edits if edit.get('kind') == 'word']
             if acoustic.get('word_hint_references') != refs:

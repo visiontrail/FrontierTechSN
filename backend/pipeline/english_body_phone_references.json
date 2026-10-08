@@ -1,6 +1,26 @@
 {
   "version": 1,
   "entries": {
+    "oled": {
+      "variants": [["OW", "L", "EH", "D"]],
+      "source_url": "https://dictionary.cambridge.org/pronunciation/english/oled",
+      "source_location": "British /ˈəʊ.led/ and American /ˈoʊ.led/ word reading; Cambridge's e is the head vowel (ARPABET EH). The separately listed O-L-E-D initialism uses named-letter edits.",
+      "verified_on": "2026-10-09"
+    },
+    "sata": {
+      "variants": [["S", "AE", "T", "AH"]],
+      "uppercase_only": true,
+      "source_url": "https://www.cse.iitd.ac.in/~rijurekha/col216/cmu_book_chapter6.pdf",
+      "source_location": "Computer Systems: A Programmer's Perspective, chapter 6, description of disk host bus interfaces: SATA pronounced sat-uh. The cited word reading is independent of any proposed articulation cue.",
+      "verified_on": "2026-10-09"
+    },
+    "siggraph": {
+      "variants": [["S", "IH", "G", "G", "R", "AE", "F"]],
+      "uppercase_only": true,
+      "source_url": "https://www.siggraph.org/about/",
+      "source_location": "Official ACM SIGGRAPH name and computer graphics organization. The conventional compound reading is inferred from CMU sig plus graph entries; the official page does not publish IPA. Continued G consonants retain the existing word-boundary normalization.",
+      "verified_on": "2026-10-09"
+    },
     "the": {
       "variants": [["DH", "AH"], ["DH", "IY"]],
       "before_vowel_variants": [["DH", "IH"]],

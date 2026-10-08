@@ -1856,7 +1856,7 @@ async def test_acoustic_observation_upgrade_rechecks_original_completed_jobs_wit
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('outcome', ['passed', 'wrong_phones', 'unavailable'])
+@pytest.mark.parametrize('outcome', ['passed', 'wrong_phones', 'unavailable', 'uncited'])
 async def test_word_hint_requires_acoustic_proof_even_when_asr_returns_exact_source(setup_client, monkeypatch, outcome):
     from backend.pipeline import chatterbox_phonemes
     server, script, directory, _verifier, generate = setup_client
@@ -1868,9 +1868,12 @@ async def test_word_hint_requires_acoustic_proof_even_when_asr_returns_exact_sou
     monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=([{'text': source}], {})))
 
     async def confirm(wav, text, edits, _directory):
+        from scripts.chatterbox_phoneme_evidence import independent_word_reference
         if outcome == 'unavailable':
             return None
-        return {'supported': True, 'passed': outcome == 'passed', 'method': 'complete_source_phone_sequence',
+        return {'supported': True, 'passed': outcome in {'passed', 'uncited'}, 'method': 'complete_source_phone_sequence',
+                'source_word_reference_policy_version': 0 if outcome == 'uncited' else 1,
+                'independent_word_references': {} if outcome == 'uncited' else {'SATA': independent_word_reference('SATA')},
                 'conditioned_on_reference_text': False, 'audio_sha256': hashlib.sha256(wav.read_bytes()).hexdigest(),
                 'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
                 'word_hint_references': [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
@@ -1889,6 +1892,12 @@ async def test_word_hint_requires_acoustic_proof_even_when_asr_returns_exact_sou
         assert len(server.jobs) == 1
         checkpoint = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
         assert checkpoint['job_id'] == 'job-1' and not checkpoint.get('rejected')
+    elif outcome == 'uncited':
+        with pytest.raises(RuntimeError, match='Independent source-word pronunciation reference unavailable'):
+            await generate()
+        assert len(server.jobs) == 1
+        checkpoint = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+        assert checkpoint['job_id'] == 'job-1' and not checkpoint.get('rejected')
     else:
         await generate()
         meta_path = directory / 'tts_input_part_001_generated.json'
@@ -1901,6 +1910,13 @@ async def test_word_hint_requires_acoustic_proof_even_when_asr_returns_exact_sou
         assert len(server.jobs) == 1
         repaired = json.loads(meta_path.read_text())
         assert repaired['integrity']['pronunciation']['required_word_phone_confirmation']['word_hint_references'][0]['phones'][-1] == 'AH'
+        repaired['integrity']['pronunciation']['required_word_phone_confirmation'].pop('source_word_reference_policy_version')
+        meta_path.write_text(json.dumps(repaired))
+        await generate()
+        assert len(server.jobs) == 1
+        upgraded = json.loads(meta_path.read_text())['integrity']['pronunciation']['required_word_phone_confirmation']
+        assert upgraded['source_word_reference_policy_version'] == 1
+        assert set(upgraded['independent_word_references']) == {'SATA'}
 
 
 @pytest.mark.asyncio
