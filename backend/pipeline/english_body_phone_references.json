@@ -1,6 +1,19 @@
 {
   "version": 1,
   "entries": {
+    "lidar": {
+      "variants": [["L", "AY", "D", "AA", "R"]],
+      "source_url": "https://www.merriam-webster.com/dictionary/lidar",
+      "source_location": "Pronunciation li-dar: long i followed by stressed dar; no unstressed vowel after D",
+      "verified_on": "2026-10-08"
+    },
+    "ebitda": {
+      "variants": [["EH", "B", "IH", "T", "D", "AH"]],
+      "ipa": ["ˈebɪtdə"],
+      "source_url": "https://dictionary.cambridge.org/pronunciation/english/ebitda",
+      "source_location": "British pronunciation retains both T and D before final schwa",
+      "verified_on": "2026-10-08"
+    },
     "configuration": {
       "variants": [
         ["K", "AH", "N", "F", "IH", "G", "AH", "R", "EY", "SH", "AH", "N"],

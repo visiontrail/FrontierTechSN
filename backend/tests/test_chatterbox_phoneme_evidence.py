@@ -79,6 +79,8 @@ def test_cited_presents_verb_variant_preserves_every_degree_letter_and_source_wo
     ('FOMO', 'f oʊ m oʊ', 'f ɪ l m oʊ'),
     ('CRISPR', 'k ɹ ɪ s p ɚ', 'k ɹ ɪ s p'),
     ('JPEG', 'dʒ eɪ p ɛ ɡ', 'dʒ eɪ p ɛ k'),
+    ('LIDAR', 'l aɪ d ɑːɹ', 'l aɪ ɾ ɑːɹ'),
+    ('EBITDA', 'ɛ b ɪ t d ə', 'ɛ b ɪ ɾ ə'),
 ])
 def test_cited_native_word_reference_does_not_accept_caption_autocorrection(term, phones, incorrect):
     source = f'The report mentions {term} today.'
