@@ -2094,6 +2094,10 @@ if (requestHelperStart >= 0) {
 }
 chatgptImage = chatgptImage.replace('export const imageCommand =',
   fs.readFileSync(path.join(runtimeDir, 'patches', 'chatgpt-image-request.js'), 'utf8') + '\n\nexport const imageCommand =')
+chatgptImage = chatgptImage.replace(
+  'else await page.goto(`https://${CHATGPT_DOMAIN}/new`, { settleMs: 2000 });',
+  'else await prepareChatGPTImageComposer(page);',
+)
 fs.writeFileSync(chatgptImagePath, chatgptImage)
 
 let ask = fs.readFileSync(askPath, 'utf8')

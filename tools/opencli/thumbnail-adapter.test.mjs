@@ -286,6 +286,29 @@ test('image command records submission, wait failure and canonical link without 
   assert.ok(!JSON.stringify(diagnostics).includes('Private thumbnail prompt'))
 })
 
+test('unsubmitted image navigation recovers only its owned window and has bounded fallback', async () => {
+  const source = fs.readFileSync(path.join(runtime, 'patches/chatgpt-image-request.js'), 'utf8').replaceAll('export ', '')
+  const prepare = vm.runInNewContext(source + '\nprepareChatGPTImageComposer', {})
+  const calls = []
+  await prepare({
+    async goto(url) { calls.push(['goto', url]); throw new Error('Navigation rejected.') },
+    async closeWindow() { calls.push(['close-owned-window']) },
+    async newTab(url) { calls.push(['new-owned-tab', url]); return 'owned-image-target' },
+    async setActivePage(id) { calls.push(['select', id]) },
+  })
+  assert.deepEqual(calls, [
+    ['goto', 'https://chatgpt.com/new'], ['close-owned-window'],
+    ['goto', 'https://chatgpt.com/new'], ['new-owned-tab', 'https://chatgpt.com/new'],
+    ['select', 'owned-image-target'],
+  ])
+  let closed = false
+  await assert.rejects(prepare({
+    async goto() { throw new Error('Browser permission denied') },
+    async closeWindow() { closed = true },
+  }), /permission denied/)
+  assert.equal(closed, false)
+})
+
 test('image setup/export allowance matches Python and preserves other command budgets', () => {
   const source = fs.readFileSync(path.join(copied, 'dist/src/execution.js'), 'utf8')
   const start = source.indexOf('const attachmentSetupSeconds =')

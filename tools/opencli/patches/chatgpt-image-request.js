@@ -18,6 +18,30 @@ export function chatGPTImageRequestState(stateFile, prompt) {
     } };
 }
 
+export async function prepareChatGPTImageComposer(page) {
+    // Only used before submission. Never recover an owned turn by opening a new chat.
+    const url = 'https://chatgpt.com/new';
+    const rejected = error => /Navigation rejected/i.test(String(error?.message || error));
+    try {
+        await page.goto(url, { settleMs: 2000 });
+        return;
+    } catch (error) {
+        if (!rejected(error)) throw error;
+    }
+    // The persistent automation window can retain an unusable navigation target.
+    // These APIs affect this command's owned session, not ordinary browser tabs.
+    if (typeof page.closeWindow === 'function') await page.closeWindow();
+    try {
+        await page.goto(url, { settleMs: 2000 });
+    } catch (error) {
+        if (!rejected(error) || typeof page.newTab !== 'function'
+            || typeof page.setActivePage !== 'function') throw error;
+        const target = await page.newTab(url);
+        if (!target) throw error;
+        await page.setActivePage(target);
+    }
+}
+
 export async function recoverChatGPTImageRequest(page, prior, prompt, timeout) {
     // A saved candidate URL never authorizes output by itself. Recover only
     // after the latest user message matches the exact submitted image prompt.
