@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR
 
@@ -1912,6 +1913,26 @@ _RENDERERS = {
 }
 
 
+def _media_overlay_title(plan: ScenePlan, shot: dict) -> str:
+    """Reuse a short, grounded title even when cached shots contain narration.
+
+    Keep full copy in the plan for narration/review and editorial cards. A
+    media overlay only needs a label; never invent a summary or cut off a claim.
+    Wide characters count twice so CJK titles fit the same two-line budget.
+    """
+    copy = shot.get("copy", [])
+    candidates = [*copy[:1], plan.news_webpage_headline, plan.headline,
+                  *copy[1:], *plan.items, plan.kicker]
+    for value in candidates:
+        text = " ".join(str(value or "").split()).rstrip(".。")
+        units = sum(2 if unicodedata.east_asian_width(c) in {"W", "F"} else 1 for c in text)
+        if text and units <= 72 and len(text.split()) <= 12:
+            return text
+    # Omit the label if every candidate is prose. The source and narration
+    # remain available; a sliced sentence can silently lose a qualification.
+    return ""
+
+
 def _render_media_shots(plan: ScenePlan) -> str:
     """Render AI-ordered shots, never a video overlay left on an empty plate."""
     accent = accent_hex(plan.accent, plan.theme)
@@ -1927,13 +1948,18 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .shot-media.contained-photo {{ width:46%; padding:56px 32px 100px 64px; }}
   #{sid} .shot-panel {{ position:absolute; inset:0; padding:76px 110px 180px; box-sizing:border-box; font-family:{SANS}; }}
   #{sid} .shot-panel.editorial {{ background:{bg}; color:{ink}; display:flex; flex-direction:column; justify-content:center; }}
-  #{sid} .shot-panel.visual {{ color:#F5F2EA; background:linear-gradient(0deg,rgba(9,11,19,.92),rgba(9,11,19,0) 76%); display:flex; flex-direction:column; justify-content:flex-end; }}
+  #{sid} .shot-panel.visual {{ color:#F5F2EA; background:none; padding:64px 76px 140px;
+      display:flex; flex-direction:column; justify-content:flex-end; align-items:flex-start; }}
   #{sid} .shot-panel.contained-photo {{ left:46%; padding:100px 80px 160px 40px; justify-content:center; background:{bg}; color:{ink}; }}
   #{sid} .contained-photo .shot-credit {{ top:34px; right:32px; max-width:calc(100% - 64px); box-sizing:border-box; }}
   #{sid} .shot-kicker {{ font-size:25px; text-transform:uppercase; letter-spacing:.18em; font-weight:700; margin-bottom:22px; color:{label_ink}; }}
   #{sid} .visual .shot-kicker {{ color:#F5F2EA; }}
   #{sid} .shot-title {{ font-size:{headline_size(plan.headline, base=86, floor=54)}px; line-height:1.08; font-weight:800; letter-spacing:-.025em; max-width:1530px; margin:0 0 35px; }}
-  #{sid} .visual .shot-title {{ max-width:1400px; margin-bottom:24px; font-size:66px; }}
+  #{sid} .visual .shot-title {{ max-width:880px; margin:0; font-size:44px; line-height:1.15;
+      font-weight:650; letter-spacing:-.015em; overflow-wrap:anywhere;
+      display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }}
+  #{sid} .shot-overlay {{ max-width:924px; box-sizing:border-box; padding:18px 22px;
+      border-left:4px solid {accent}; border-radius:8px; background:rgba(9,11,19,.82); color:#F5F2EA; }}
   #{sid} .shot-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px; }}
   #{sid} .shot-grid.cards .shot-card:last-child:nth-child(odd) {{ grid-column:1 / -1; }}
   #{sid} .shot-card {{ position:relative; background:{card}; border-left:5px solid {accent}; padding:30px 34px; min-height:126px; display:flex; align-items:center; gap:24px; }}
@@ -1949,7 +1975,7 @@ def _render_media_shots(plan: ScenePlan) -> str:
   #{sid} .visual .shot-card {{ padding:0; margin-top:16px; border:0; min-height:0; background:none; }}
   #{sid} .visual .shot-number {{ display:none; }}
   #{sid} .contained-photo .shot-kicker {{ color:{label_ink}; }}
-  #{sid} .contained-photo .shot-title {{ font-size:54px; }}
+  #{sid} .contained-photo .shot-title {{ font-size:44px; }}
   #{sid} .contained-photo .shot-copy {{ font-size:30px; }}
   #{sid} .shot-credit {{ position:absolute; top:34px; right:48px; max-width:1100px; border-radius:16px; padding:9px 18px; background:rgba(9,11,19,.82); color:#F5F2EA; font-size:20px; }}
   #{sid} .shot-rule {{ height:5px; width:140px; background:{accent}; margin-bottom:24px; transform-origin:left; }}
@@ -1959,12 +1985,15 @@ def _render_media_shots(plan: ScenePlan) -> str:
     if plan.frame.orientation == "portrait":
         css += f"""
   #{sid} .shot-panel {{ padding:130px 64px 300px; }}
-  #{sid} .shot-title, #{sid} .visual .shot-title {{ font-size:66px; }}
+  #{sid} .shot-title {{ font-size:66px; }}
+  #{sid} .shot-panel.visual {{ padding:100px 64px 300px; }}
+  #{sid} .visual .shot-title {{ font-size:42px; }}
+  #{sid} .shot-overlay {{ max-width:100%; }}
   #{sid} .shot-grid, #{sid} .shot-grid.split {{ grid-template-columns:1fr; }}
   #{sid} .shot-credit {{ max-width:860px; right:35px; top:65px; }}
   #{sid} .shot-media.contained-photo {{ width:100%; height:58%; padding:70px 64px 28px; }}
   #{sid} .shot-panel.contained-photo {{ left:0; top:58%; padding:35px 64px 160px; justify-content:flex-start; }}
-  #{sid} .contained-photo .shot-title {{ font-size:46px; }}
+  #{sid} .contained-photo .shot-title {{ font-size:42px; }}
   #{sid} .contained-photo .shot-credit {{ position:static; order:10; margin-top:18px; max-width:100%; }}
 """
     markup = []
@@ -2001,9 +2030,9 @@ def _render_media_shots(plan: ScenePlan) -> str:
         texts = [text for text in shot["copy"] if text != plan.headline]
         if not texts and editorial:
             texts = list(shot["copy"])
-        title = plan.headline if editorial else shot["copy"][0]
+        title = plan.headline if editorial else _media_overlay_title(plan, shot)
         if not editorial:
-            texts = shot["copy"][1:]
+            texts = []
         cards = "".join(
             f'<div class="shot-card {"dense" if len(text) > 135 else ""}" id="{prefix}-card-{i}">'
             f'<span class="shot-number">{i + 1:02d}</span><div class="shot-copy">{_esc(text)}</div></div>'
@@ -2014,10 +2043,12 @@ def _render_media_shots(plan: ScenePlan) -> str:
             f'<div id="{prefix}-panel" class="clip shot-panel {"editorial" if editorial else "visual"}{" contained-photo" if portrait_photo else ""}" '
             f'{timing} data-track-index="{panel_track}">'
             + (f'<div class="shot-orbit" id="{prefix}-orbit" data-layout-ignore></div>' if editorial else "")
-            + f'<div class="shot-kicker" id="{prefix}-kicker">{_esc(plan.kicker)}</div>'
-            + f'<div class="shot-rule" id="{prefix}-rule"></div>'
-            + f'<div class="shot-title" id="{prefix}-title">{_esc(title)}</div>'
-            + f'<div class="shot-grid {layout}">{cards}</div>'
+            + (f'<div class="shot-kicker" id="{prefix}-kicker">{_esc(plan.kicker)}</div>'
+               f'<div class="shot-rule" id="{prefix}-rule"></div>' if editorial else '')
+            + ('<div class="shot-overlay">' if not editorial and title else '')
+            + (f'<div class="shot-title" id="{prefix}-title">{_esc(title)}</div>' if title else '')
+            + ('</div>' if not editorial and title else '')
+            + (f'<div class="shot-grid {layout}">{cards}</div>' if editorial else '')
             + (f'<div class="shot-credit">{_esc(shot["credit"])}</div>' if shot.get("credit") else "")
             + '</div>'
         )

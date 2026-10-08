@@ -23,11 +23,15 @@ Each shot has:
 - copy_ids: a JSON array of 1-5 exact string ids from this scene's editorial_copy.
   Required on EVERY shot, including footage, article captures and holds; never
   leave it empty or substitute asset ids, copy text, or another scene's ids.
-  Usually 1-3 for a visual shot, 2-5 for editorial graphics. Never invent copy.
-  Preserve reporting attribution.
-  Prefer the existing concise headline/items over long verbatim narration. Do
-  not display the same claim twice in different wording on the same shot. Use a
-  narration sentence only when the concise copy does not convey that detail.
+  Use ONE concise headline/item for a visual shot, 2-5 for editorial graphics.
+  Visual shots include footage, collages, images, article captures and holds:
+  their overlay is a short title only, at most 12 words / 72 characters (36 CJK
+  characters), displayed in at most two small lines near the edge. Never select
+  a full narration paragraph as a visual title or add supporting copy over the
+  picture. If no concise copy is available, select the closest supplied copy;
+  the renderer will use a short scene/source headline or omit the title.
+  Keep detailed sentences on editorial graphics and in the narration. Never
+  invent copy, lose reporting attribution, or show the same claim twice.
 - layout: "cards", "focus", or "split". Choose by information shape. Cards suit
   parallel facts; focus suits one assertion; split pairs related pieces of copy.
 - transition: "wipe" or "iris"; choose a restrained, coherent rhythm.

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.pipeline import media_shots as ms, scene_kit, composer
+from backend.pipeline.video_format import LANDSCAPE, PORTRAIT
 from PIL import Image
 
 
@@ -97,6 +98,54 @@ def test_image_inventory_measures_pixels_and_preserves_portrait_fit(tmp_path, si
 def test_logo_fit_survives_mixed_shot_inventory(tmp_path):
     Image.new("RGB", (432, 212)).save(tmp_path / "logo.png")
     assert ms.inventory({"news_image_src": "logo.png", "news_image_fit": "contain"}, tmp_path)[0]["fit"] == "contain"
+
+
+@pytest.mark.parametrize("kind", ["article", "public_footage", "paper_collage", "image", "hold"])
+@pytest.mark.parametrize("frame", [LANDSCAPE, PORTRAIT])
+def test_media_overlay_replaces_cached_narration_with_short_source_title(kind, frame):
+    narration = (
+        "The lineup spans the flagship Surface Laptop Ultra and models from Dell, "
+        "Lenovo, MSI, HP and Asus, starting as low as two thousand five hundred "
+        "ninety-nine dollars and, per the report's headline, running up to seven thousand."
+    )
+    title = "The first Nvidia RTX Spark laptops cost up to $7,000"
+    shot = {"kind": kind, "src": "../source.mp4" if kind in {"public_footage", "paper_collage"} else "../source.png",
+            "start": 0, "duration": 8, "copy": [narration, "Supporting detail"], "credit": "The Verge"}
+    kit = scene_kit.ScenePlan(id="scene-09", duration=8, frame=frame, kicker="LAPTOPS",
+                              headline="Finally, laptops.", news_webpage_headline=title,
+                              media_shots=(shot,))
+    rendered = scene_kit.render_scene(kit)
+    assert f'id="scene-09-shot-1-title">{title}</div>' in rendered
+    assert narration not in rendered and "Supporting detail" not in rendered
+    assert 'class="shot-grid ' not in rendered and 'class="shot-kicker"' not in rendered
+    assert '<div class="shot-credit">The Verge</div>' in rendered
+    # Cached evidence stays intact; only the display changes.
+    assert shot["copy"] == [narration, "Supporting detail"]
+    assert 'data-start="0.00" data-duration="8.00"' in rendered
+    assert "linear-gradient(0deg" not in rendered
+    assert "-webkit-line-clamp:2" in rendered
+
+
+def test_overlay_prefers_short_selected_fact_and_never_slices_long_claims():
+    kit = scene_kit.ScenePlan(id="scene-02", duration=8, headline="A short scene title")
+    assert scene_kit._media_overlay_title(kit, {"copy": ["  Prices   up to $7,000. "]}) == "Prices up to $7,000"
+    long_claim = "The manufacturer plans to offer this service worldwide, but only after regulatory approval."
+    assert scene_kit._media_overlay_title(kit, {"copy": [long_claim]}) == "A short scene title"
+    kit.headline = long_claim
+    assert scene_kit._media_overlay_title(kit, {"copy": [long_claim]}) == ""
+    kit.kicker = "笔记本电脑"
+    assert scene_kit._media_overlay_title(kit, {"copy": ["一" * 37]}) == "笔记本电脑"
+    assert scene_kit._media_overlay_title(kit, {"copy": ["一" * 36]}) == "一" * 36
+
+
+def test_editorial_shots_keep_detailed_copy_that_media_overlays_omit():
+    detail = "A complete supporting sentence belongs on an editorial information card."
+    kit = scene_kit.ScenePlan(id="scene-02", duration=8, headline="Short title", media_shots=(
+        {"kind": "editorial", "start": 0, "duration": 8, "copy": ["Short title", detail]},
+    ))
+    rendered = scene_kit.render_scene(kit)
+    assert detail in rendered and 'class="shot-grid focus"' in rendered
+    assert '<div class="shot-overlay">' not in rendered
 
 
 def test_editorial_copy_preserves_initials_titles_and_decimals():
