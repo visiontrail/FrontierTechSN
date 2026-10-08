@@ -318,7 +318,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 8
+OBSERVATION_SPELLING_VERSION = 9
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:

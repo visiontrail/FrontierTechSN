@@ -99,6 +99,45 @@ def test_unknown_or_malformed_apostrophe_words_remain_unsupported(source):
     assert not report['supported'] and not report['passed']
 
 
+@pytest.mark.parametrize(('source', 'term', 'spoken', 'phones', 'suffix'), [
+    ("AI's.", 'AI', 'eigh eye', 'eɪ aɪ', ' z'),
+    ('AI’s.', 'AI', 'eigh eye', 'eɪ aɪ', ' z'),
+    ('AIs.', 'AI', 'eigh eye', 'eɪ aɪ', ' z'),
+    ('GPUs.', 'GPU', 'gee pee you', 'dʒ iː p iː j uː', ' z'),
+    ("RF's.", 'RF', 'R F', 'ɑːɹ ɛ f', ' s'),
+    ("HX's.", 'HX', 'H ex', 'eɪ tʃ ɛ k s', ' ɪ z'),
+    ("HX's.", 'HX', 'H ex', 'eɪ tʃ ɛ k s', ' ə z'),
+    ("U.S.'s.", 'U.S.', 'you ess', 'j uː ɛ s', ' ɪ z'),
+])
+def test_spelled_letter_inflection_requires_every_letter_and_the_regular_ending(
+        source, term, spoken, phones, suffix):
+    prepared = edits(source, term, spoken)
+    assert evidence.compare_source(source, prepared, phones + suffix)['passed']
+    assert not evidence.compare_source(source, prepared, phones)['passed']
+    assert not evidence.compare_source(source, prepared, phones + ' ɛ s')['passed']
+    assert not evidence.compare_source(source, prepared, phones + suffix + ' eɪ')['passed']
+
+
+def test_possessive_openai_retains_the_prefix_following_words_and_letter_vowels():
+    source = "OpenAI's own."
+    prepared = edits(source, 'AI', 'eigh eye')
+    phones = 'oʊ p ə n eɪ aɪ z oʊ n'
+    assert evidence.compare_source(source, prepared, phones)['passed']
+    assert not evidence.compare_source(source, prepared, phones.replace('eɪ aɪ', 'aɪ aɪ'))['passed']
+    assert not evidence.compare_source(source, prepared, phones.replace('aɪ z', 'aɪ'))['passed']
+    assert not evidence.compare_source(source, prepared, phones.replace('aɪ z', 'aɪ aɪ z'))['passed']
+
+
+def test_letter_suffix_allomorph_does_not_accept_the_wrong_consonant():
+    assert not evidence.compare_source("RF's.", edits("RF's.", 'RF', 'R F'), 'ɑːɹ ɛ f z')['passed']
+    assert not evidence.compare_source("AI's.", edits("AI's.", 'AI', 'eigh eye'), 'eɪ aɪ s')['passed']
+
+
+@pytest.mark.parametrize('source', ["AI'something.", "AI's's.", 'AIss.'])
+def test_inflection_matching_does_not_discard_an_unknown_continuation(source):
+    assert not evidence.compare_source(source, edits(source, 'AI', 'eigh eye'), 'eɪ aɪ z')['passed']
+
+
 @pytest.mark.parametrize('defect', ['hash', 'model', 'revision', 'conditioned'])
 def test_phone_provenance_requires_the_exact_unconditioned_waveform(tmp_path, defect):
     wav = tmp_path / 'original.wav'

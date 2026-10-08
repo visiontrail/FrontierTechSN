@@ -17,7 +17,7 @@ from backend.pipeline import tts_pronunciation as pronunciation
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 6
+EVIDENCE_VERSION = 7
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -162,6 +162,23 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
                 ordinary_units.append(False)
                 index += 1
         cursor = end
+        suffix = re.match(r"(?:['’]s|s)(?![A-Za-z0-9'’])", text[end:])
+        if suffix:
+            # Regular plurals/genitives of named letters retain the complete
+            # final letter, then /s/, /z/, or /iz/ according to its last phone.
+            # These endings do not authorize another S letter name or permit
+            # removal of the source suffix. Word readings use their dictionary.
+            endings = set()
+            for variant in parts[-1]:
+                if variant[-1] in {'S', 'Z', 'SH', 'ZH', 'CH', 'JH'}:
+                    endings.update({('IH', 'Z'), ('AH', 'Z')})
+                elif variant[-1] in {'P', 'T', 'K', 'F', 'TH'}:
+                    endings.add(('S',))
+                else:
+                    endings.add(('Z',))
+            parts.append(sorted(endings))
+            ordinary_units.append(False)
+            cursor += suffix.end()
     ordinary(text[cursor:])
     # A dictionary word's coda /z/ can devoice before the next word's /s/.
     # Keep the source word and following onset; consonant-continuation
