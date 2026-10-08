@@ -364,7 +364,9 @@ async def require_audio_window(app_url: str, *, allow_composing: bool = False) -
 async def audit_audio(directory: Path, source: str, plan: dict) -> dict:
     audio = directory / 'audio'
     reports, offset = [], 0
-    for part in sorted(audio.glob('tts_input_part_*.txt')):
+    parts = sorted(path for path in audio.glob('tts_input_part_*.txt')
+                   if re.fullmatch(r'tts_input_part_[0-9]{3,}\.txt', path.name))
+    for part in parts:
         text = part.read_text()
         start = source.index(text, offset)
         offset = start + len(text)

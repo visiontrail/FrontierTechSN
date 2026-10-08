@@ -429,3 +429,36 @@ async def test_finished_narration_window_keeps_web_and_private_validator_version
     assert report['application_runtime'] == application
     assert report['validation_runtime'] == validator
     assert report['production_audio_anchors'][0]['audio_sha256'] == validation.sha(validation.Path(task['audio_path']))
+
+
+@pytest.mark.asyncio
+async def test_final_audio_audit_ignores_delivery_sidecars_without_omitting_canonical_parts(tmp_path, monkeypatch):
+    texts = ['The AI report is ready.', 'The GPU report is ready.']
+    source = '\n'.join(texts)
+    plan = {'edits': [], 'plan_sha256': 'frozen-plan'}
+    audio = tmp_path / 'audio'
+    audio.mkdir()
+    monkeypatch.setattr(validation.chatterbox, '_cached_part', lambda *_args, **_kwargs: True)
+    for index, text in enumerate(texts, 1):
+        part = audio / f'tts_input_part_{index:03d}.txt'
+        part.write_text(text)
+        wav = part.with_name(part.stem + '_generated.wav')
+        wav.write_bytes(text.encode())
+        identity = {'text': text, 'synthesis_text': text, 'voice': 'space-en-f1', 'language': 'en',
+                    'pronunciation_plan_sha256': plan['plan_sha256'], 'synthesis_speed_ratio': 1.0}
+        validation.write(validation.tts._part_metadata_path(wav), {
+            'identity': identity, 'synthesis_request': {'text': text}})
+        validation.write(audio / 'verification' / part.stem / 'transcript.json', words(text))
+        target = tmp_path / 'independent' / part.stem
+        validation.write(target / 'transcript.json', words(text))
+        validation.write(target / 'identity.json', {'audio_sha256': validation.sha(wav),
+            'source_sha256': validation.sha(part), 'plan_sha256': plan['plan_sha256'],
+            'model': validation.SECONDARY_MODEL})
+        part.with_name(part.stem + '_tail_12345678.txt').write_text(text)
+    (audio / 'tts_input_part_001_diagnostic.txt').write_text('An unrelated diagnostic.')
+    result = await validation.audit_audio(tmp_path, source, plan)
+    assert result['passed']
+    assert [row['part'] for row in result['parts']] == ['tts_input_part_001.txt', 'tts_input_part_002.txt']
+    (audio / 'tts_input_part_002.txt').write_text('Changed canonical source.')
+    with pytest.raises(ValueError):
+        await validation.audit_audio(tmp_path, source, plan)
