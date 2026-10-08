@@ -6,6 +6,21 @@ The project uses a media pipeline derived from Video-Promotional. Runtime data, 
 
 ## Daily production
 
+Explainer productions retain a persisted production slot across failures, repairs,
+and service interruptions. The shared worker waits for that same project to be
+resumed or explicitly cancelled before starting another video, including Morning
+Desk. A Morning Desk run that is already executing finishes first. Ordinary new
+plans keep the existing queue policy. Recovery does not automatically retry a
+failed provider request; resume the original project to reuse its checkpoints.
+The Explainer queue API exposes the retained slot as `reservation`, separately
+from the task that is actually `active`. Use **Cancel and release slot** (or remove
+a queued recovery) to intentionally allow other productions to proceed. Service
+shutdown records `interrupted`; only an explicit cancellation records
+`cancellation_reason=user`. Historical cancelled projects are not auto-resumed.
+For maintenance, call `POST /api/explainers/{id}/pause` instead of `/cancel`;
+after repairing, resume through the original `/script`, `/render`, or `/queue`
+operation. Pausing retains the slot and provider checkpoints without retrying.
+
 Each daily run follows these steps and stops if a required check fails:
 
 1. Fetch all enabled sources in the 23-source catalog and require at least three working sources.

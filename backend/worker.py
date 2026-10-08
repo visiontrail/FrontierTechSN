@@ -144,7 +144,16 @@ async def _worker_loop():
     logger.info("Background worker started")
     while True:
         try:
+            # Recovery owns the original production slot even while failed or
+            # interrupted. Never start another video during a repair gap.
+            if explainers.production_owner():
+                if not await explainers.run_next_queued():
+                    await asyncio.sleep(1)
+                continue
             task = await get_next_queued_task()
+            # A recovery may have been enqueued during the database await.
+            if explainers.production_owner():
+                continue
             if not task:
                 # Both studios share this single consumer. A full explainer
                 # holds the worker through writing and rendering, while due

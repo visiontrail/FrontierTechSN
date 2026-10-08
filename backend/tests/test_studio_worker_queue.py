@@ -1,7 +1,7 @@
 """The actual worker serializes both production paths without provider calls."""
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -173,4 +173,128 @@ def test_cancelling_explainer_does_not_stop_shared_worker(queue_runtime, monkeyp
             await asyncio.gather(job, return_exceptions=True)
         assert not studio._jobs
 
+    asyncio.run(scenario())
+
+
+def test_failed_explainer_reserves_worker_through_repair_and_resume(queue_runtime, monkeypatch):
+    async def scenario():
+        first, second = topic("Recover me"), topic("Later")
+        studio.start(first['id'], 'full')
+        studio.start(second['id'], 'full')
+        failed, news_done = asyncio.Event(), asyncio.Event()
+        order = []
+        attempts = 0
+
+        async def write(project, *args):
+            nonlocal attempts
+            if project['id'] == first['id']:
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError('Provider offline')
+            return [{'id': 'scene-001', 'narration': 'Recall first.',
+                     'visual_prompt': 'A learner closes a book.'}]
+
+        async def render(project, *args):
+            order.append(project['title'])
+            return {'video_path': 'final.mp4'}
+
+        async def idle(_):
+            if studio.read_project(first['id'])['status'] == 'failed':
+                failed.set()
+            await asyncio.Event().wait()
+
+        next_news = AsyncMock(side_effect=[queue_runtime, None])
+        # Only offer Morning Desk once the Explainer has actually failed.
+        async def next_task():
+            if attempts:
+                if next_news.await_count < 2:
+                    return await next_news()
+            return None
+
+        async def news(*args, **kwargs):
+            order.append('news')
+            news_done.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(worker, 'get_next_queued_task', next_task)
+        monkeypatch.setattr(worker, 'run_pipeline', news)
+        monkeypatch.setattr(studio, 'write_script', write)
+        monkeypatch.setattr('backend.explainer_pipeline.render_project', render)
+        # Replace the idle sleep only; no provider is called by these tests.
+        with patch.object(worker.asyncio, 'sleep', idle), patch('backend.database.list_tasks', AsyncMock(return_value=[])):
+            job = asyncio.create_task(worker._worker_loop())
+            try:
+                await asyncio.wait_for(failed.wait(), 2)
+                next_news.assert_not_awaited()
+                owner = studio.production_owner()
+                assert owner['id'] == first['id']
+                assert not await studio.run_next_queued()
+                state = await studio.queue_state()
+                assert state['reservation']['id'] == first['id']
+                # Repair edits and service recovery must retain the disk claim.
+                studio.update_project(first['id'], studio.ProjectUpdate(
+                    **{**{k: owner[k] for k in studio.ProjectInput.model_fields}, 'title': 'Repaired'},
+                    revision=owner['revision']))
+                studio.recover_interrupted()
+                studio.start(first['id'], 'full')
+                assert studio.queue_positions()[first['id']] == 1
+            finally:
+                job.cancel()
+                await asyncio.gather(job, return_exceptions=True)
+        # Fresh worker simulates a restart; only persisted project state remains.
+        job = asyncio.create_task(worker._worker_loop())
+        try:
+            await asyncio.wait_for(news_done.wait(), 2)
+            assert order == ['Repaired', 'news']
+            assert studio.read_project(first['id'])['status'] == 'completed'
+            assert studio.production_owner() is None
+            assert studio.read_project(second['id'])['status'] == 'queued'
+        finally:
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+def test_running_morning_finishes_before_reserved_recovery(queue_runtime, monkeypatch):
+    async def scenario():
+        project = topic('Recover after Morning Desk')
+        news_entered, release_news, resumed = [asyncio.Event() for _ in range(3)]
+        order = []
+        supplied = False
+
+        async def next_news():
+            nonlocal supplied
+            if not supplied:
+                supplied = True
+                return queue_runtime
+            return None
+
+        async def news(*args, **kwargs):
+            order.append('news:start')
+            news_entered.set()
+            await release_news.wait()
+            order.append('news:end')
+
+        async def write(*args, **kwargs):
+            order.append('explainer:resume')
+            resumed.set()
+            return [{'id': 'scene-001', 'narration': 'Recall first.',
+                     'visual_prompt': 'A learner closes a book.'}]
+
+        monkeypatch.setattr(worker, 'get_next_queued_task', next_news)
+        monkeypatch.setattr(worker, 'run_pipeline', news)
+        monkeypatch.setattr(studio, 'write_script', write)
+        job = asyncio.create_task(worker._worker_loop())
+        try:
+            await asyncio.wait_for(news_entered.wait(), 2)
+            studio.patch_project(project['id'], {'status': 'interrupted'})
+            studio.start(project['id'], 'script')
+            assert studio.production_owner()['id'] == project['id']
+            assert order == ['news:start']
+            release_news.set()
+            await asyncio.wait_for(resumed.wait(), 2)
+            assert order == ['news:start', 'news:end', 'explainer:resume']
+        finally:
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
     asyncio.run(scenario())

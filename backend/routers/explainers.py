@@ -80,6 +80,15 @@ async def cancel(project_id: str):
     return studio.public_project(await studio.cancel(project_id))
 
 
+@router.post("/{project_id}/pause")
+async def pause(project_id: str):
+    _call(studio.read_project, project_id)
+    try:
+        return studio.public_project(await studio.pause(project_id))
+    except studio.ConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.get("/{project_id}/assets/{relative:path}")
 async def asset(project_id: str, relative: str):
     _call(studio.read_project, project_id)

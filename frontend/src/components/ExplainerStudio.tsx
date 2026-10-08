@@ -285,14 +285,15 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
             <button type="button" onClick={() => void act('save')} disabled={locked || (!!project && !dirty) || !form.title.trim()}>{pending === 'save' ? 'Saving…' : taskDetail ? 'Save changes' : 'Save topic plan'}</button>
           </div>
 
-          {taskDetail && project && (running || queued || project.error || ['cancelled', 'interrupted'].includes(project.status)) && <section className="explainer-progress-panel" aria-label="Production progress">
+          {taskDetail && project && (running || queued || project.production || project.error || ['cancelled', 'interrupted'].includes(project.status)) && <section className="explainer-progress-panel" aria-label="Production progress">
             <div className="explainer-section-heading"><div><p className="explainer-eyebrow">PRODUCTION</p><h2>{STATUS[project.status]}</h2></div>
-              {(running || queued) && <button type="button" disabled={!!pending} onClick={() => void act(queued ? 'dequeue' : 'cancel')}>{pending === 'dequeue' ? 'Removing…' : pending === 'cancel' ? 'Cancelling…' : queued ? 'Remove from queue' : 'Cancel run'}</button>}</div>
+              {(running || queued || project.production) && <button type="button" disabled={!!pending} onClick={() => void act(queued ? 'dequeue' : 'cancel')}>{pending === 'dequeue' ? 'Removing…' : pending === 'cancel' ? 'Cancelling…' : queued ? 'Remove from queue' : project.production && !running ? 'Cancel and release slot' : 'Cancel run'}</button>}</div>
             <p role="status" aria-live="polite">{queued ? queue?.message || 'Waiting for the production slot.' : progress?.message || 'Preparing…'}</p>
             {queued && <p className="explainer-muted">{project.queue?.position ? `Queue position ${project.queue.position}. ` : ''}Remove this topic from the queue to edit it. You can keep planning other topics while it waits.</p>}
             {running && <progress max={100} value={percentage} aria-label="Video generation progress" />}
             {progress && progress.total > 0 && <small>{progress.completed} / {progress.total}</small>}
             {project.error && <p className="explainer-small-error">{project.error}</p>}
+            {project.production && !running && <p className="explainer-muted">Your production slot is reserved through repairs. Resume this project to continue before other waiting videos, or cancel to release the slot.</p>}
             {!running && !queued && <p className="explainer-muted">Edit the research or settings, then add the topic to the queue again.</p>}
           </section>}
 

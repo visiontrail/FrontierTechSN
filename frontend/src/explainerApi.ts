@@ -48,6 +48,8 @@ export interface ExplainerProject extends ExplainerForm {
   created_at: string
   updated_at: string
   error: string | null
+  production?: { operation: 'script' | 'render' | 'full' | null; started_at: string } | null
+  cancellation_reason?: 'user' | 'service_interruption' | 'maintenance' | null
   queue?: { operation: 'script' | 'render' | 'full'; enqueued_at: string; position: number | null } | null
   logs: string[]
   progress: { completed: number; total: number; message: string }
@@ -62,6 +64,7 @@ export interface ExplainerProject extends ExplainerForm {
 
 export interface ExplainerQueue {
   active: { kind: 'morning_desk' | 'explainer'; id: string; title: string } | null
+  reservation?: { kind: 'explainer'; id: string; title: string; status: ExplainerStatus } | null
   items: ExplainerProject[]
   message: string
 }

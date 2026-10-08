@@ -165,7 +165,8 @@ def create_project(data: ProjectInput) -> dict:
                "created_at": stamp, "updated_at": stamp,
                "status": "script_ready" if data.scenes else "draft", "error": None,
                "progress": {"completed": 0, "total": 0, "message": ""},
-               "logs": [], "artifacts": {}, "queue": None}
+               "logs": [], "artifacts": {}, "queue": None, "production": None,
+               "cancellation_reason": None}
     with _lock:
         _write(project_dir(project_id) / "project.json", project)
     return project
@@ -397,14 +398,16 @@ async def _run(project_id: str, operation: str) -> None:
             project = patch_project(project_id, {"scenes": scenes,
                                       "status": "script_ready" if operation == "script" else "generating_audio",
                                       "error": None, "artifacts": {},
+                                      **({"production": None} if operation == "script" and
+                                         (project.get("production") or {}).get("operation") == "script" else {}),
                                       "progress": {"completed": len(scenes), "total": len(scenes), "message": "Script ready"}})
         if operation != "script":
             from backend.explainer_pipeline import render_project
             artifacts = await render_project(project, directory, lambda changes: patch_project(project_id, changes), log)
-            patch_project(project_id, {"status": "completed", "artifacts": artifacts, "error": None})
+            patch_project(project_id, {"status": "completed", "artifacts": artifacts, "error": None, "production": None})
         log("Completed " + operation)
     except asyncio.CancelledError:
-        patch_project(project_id, {"status": "cancelled", "error": "Generation cancelled; completed artifacts are retained."})
+        _record_interruption(project_id)
         raise
     except Exception as exc:
         from backend.provider_credentials import redact_api_keys
@@ -416,12 +419,41 @@ async def _run(project_id: str, operation: str) -> None:
         _jobs.pop(project_id, None)
 
 
+def production_owner(projects: list[dict] | None = None) -> dict | None:
+    """A failed/paused production keeps its slot until completion or explicit release.
+
+    Read the claim from disk, not _jobs: it must survive process shutdown and
+    operator repairs. Legacy cancelled projects are never implicitly adopted.
+    """
+    if projects is None:
+        projects = list_projects()
+    owners = [project for project in projects if project.get("production")]
+    return min(owners, key=lambda p: (p["production"]["started_at"], p["id"]), default=None)
+
+
+def _record_interruption(project_id: str) -> None:
+    with _lock:
+        project = read_project(project_id)
+        if project.get("cancellation_reason") == "user":
+            patch_project(project_id, {"status": "cancelled", "production": None,
+                          "error": "Generation cancelled by user; completed artifacts are retained."})
+        else:
+            # Old running projects have no recorded operation; require the
+            # operator to select it on resume rather than guessing script/full.
+            production = project.get("production") or {"operation": None, "started_at": project["updated_at"]}
+            patch_project(project_id, {"status": "interrupted", "production": production,
+                          "cancellation_reason": "maintenance" if project.get("cancellation_reason") == "maintenance" else "service_interruption",
+                          "error": "Generation interrupted; production slot and completed work retained. Resume or cancel to release the slot."})
+
+
 def _queued_projects(projects: list[dict] | None = None) -> list[dict]:
     if projects is None:
         projects = list_projects()
     return sorted((project for project in projects
                    if project["status"] == "queued" and project.get("queue")),
-                  key=lambda project: (project["queue"].get("sequence", 0),
+                  key=lambda project: (0 if project.get("production") else 1,
+                                       (project.get("production") or {}).get("started_at", ""),
+                                       project["queue"].get("sequence", 0),
                                        project["queue"]["enqueued_at"], project["id"]))
 
 
@@ -448,10 +480,16 @@ def start(project_id: str, operation: Operation) -> dict:
             if model_language != "multilingual" and model_language != project["language"]:
                 raise ValueError("Selected TTS model does not support the script language")
         sequence = max((p["queue"].get("sequence", 0) for p in _queued_projects()), default=0) + 1
+        production = project.get("production")
+        if not production and project["status"] in {"failed", "interrupted"} and project.get("cancellation_reason") != "user":
+            production = {"operation": operation, "started_at": project["updated_at"]}
         queue = {"operation": operation, "enqueued_at": now(), "sequence": sequence,
                  "previous": {key: project.get(key) for key in ("status", "error", "progress")}}
+        progress = (dict(project["progress"]) if production else
+                    {"completed": 0, "total": len(project["scenes"])})
+        progress["message"] = "Waiting to resume; production slot retained" if production else "Waiting in the video queue"
         return patch_project(project_id, {"status": "queued", "queue": queue, "error": None,
-                    "progress": {"completed": 0, "total": len(project["scenes"]), "message": "Waiting in the video queue"}})
+                    "cancellation_reason": None, "progress": progress, "production": production})
 
 
 async def run_next_queued() -> bool:
@@ -463,14 +501,20 @@ async def run_next_queued() -> bool:
         if any(project["status"] in ACTIVE for project in projects):
             return False
         queued = _queued_projects(projects)
+        owner = production_owner(projects)
+        if owner:
+            queued = [project for project in queued if project["id"] == owner["id"]]
         if not queued:
             return False
         project = queued[0]
         project_id = project["id"]
         operation = project["queue"]["operation"]
         needs_script = operation == "script" or (operation == "full" and not project["scenes"])
+        production = dict(project.get("production") or {"started_at": now()})
+        if not production.get("operation"):
+            production["operation"] = operation
         patch_project(project_id, {"status": "writing_script" if needs_script else "generating_audio",
-                      "queue": None, "error": None, "artifacts": {},
+                      "queue": None, "error": None, "artifacts": {}, "production": production,
                       "progress": {"completed": 0, "total": len(project["scenes"]), "message": "Starting " + operation}})
         task = asyncio.create_task(_run(project_id, operation), name=f"explainer-{project_id}")
         _jobs[project_id] = task
@@ -485,7 +529,7 @@ async def run_next_queued() -> bool:
         # A task cancelled before its first instruction cannot run _run's cleanup.
         _jobs.pop(project_id, None)
         if task.cancelled() and read_project(project_id)["status"] in ACTIVE:
-            patch_project(project_id, {"status": "cancelled", "error": "Generation cancelled; artifacts retained."})
+            _record_interruption(project_id)
     return True
 
 
@@ -500,17 +544,24 @@ async def queue_state() -> dict:
                         "title": task.generated_title or task.source_title or task.id}
                        for task in await list_tasks() if task.status in NEWS_ACTIVE), None)
     queued = _queued_projects(projects)
+    owner = production_owner(projects)
     positions = queue_positions(queued)
     items = [public_project(project, positions) for project in queued]
-    if active and active["kind"] == "morning_desk":
+    if active and active["kind"] == "morning_desk" and owner:
+        message = "Waiting for the running Morning Desk to finish. The reserved Explainer resumes next."
+    elif active and active["kind"] == "morning_desk":
         message = "Waiting for Morning Desk to finish. Planned videos run one at a time."
     elif active:
         message = "An Explainer is running. Remaining plans will follow in queue order."
+    elif owner:
+        message = "Explainer production slot retained. Resume or cancel the interrupted production before other videos can start."
     elif items:
         message = "Waiting for the shared worker. Ready Morning Desk tasks run first."
     else:
         message = "Add topic plans to generate videos one at a time."
-    return {"active": active, "items": items, "message": message}
+    reservation = ({"kind": "explainer", "id": owner["id"], "title": owner["title"],
+                    "status": owner["status"], **owner["production"]} if owner else None)
+    return {"active": active, "reservation": reservation, "items": items, "message": message}
 
 
 def remove_from_queue(project_id: str) -> dict:
@@ -521,7 +572,8 @@ def remove_from_queue(project_id: str) -> dict:
             raise ConflictError("This plan is no longer waiting in the queue. Reload to see its current status.")
         previous = (project.get("queue") or {}).get("previous") or {}
         return patch_project(project_id, {"status": previous.get("status") or ("script_ready" if project["scenes"] else "draft"),
-                     "error": previous.get("error"), "queue": None,
+                     "error": previous.get("error"), "queue": None, "production": None,
+                     "cancellation_reason": "user",
                      "progress": previous.get("progress") or {"completed": 0, "total": 0, "message": ""}})
 
 
@@ -530,6 +582,9 @@ async def cancel(project_id: str) -> dict:
         project = read_project(project_id)
         if project["status"] == "queued":
             return remove_from_queue(project_id)
+        if project_id in _jobs or project.get("production") or project["status"] in ACTIVE:
+            patch_project(project_id, {"cancellation_reason": "user", "production": None,
+                          "status": "cancelled", "error": "Generation cancelled by user; completed artifacts are retained."})
     task = _jobs.get(project_id)
     if task:
         task.cancel()
@@ -537,14 +592,33 @@ async def cancel(project_id: str) -> dict:
         # Cancellation before the coroutine's first instruction still needs persistence.
         _jobs.pop(project_id, None)
         if read_project(project_id)["status"] in ACTIVE:
-            patch_project(project_id, {"status": "cancelled", "error": "Generation cancelled; artifacts retained."})
+            _record_interruption(project_id)
+    return read_project(project_id)
+
+
+async def pause(project_id: str) -> dict:
+    """Pause for repair without releasing the production's place in the worker."""
+    with _lock:
+        project = read_project(project_id)
+        if project["status"] not in ACTIVE and not project.get("production"):
+            raise ConflictError("Only a started production can be paused for repair")
+        patch_project(project_id, {"cancellation_reason": "maintenance", "queue": None})
+        task = _jobs.get(project_id)
+        if task:
+            task.cancel()
+        else:
+            _record_interruption(project_id)
+    if task:
+        await asyncio.gather(task, return_exceptions=True)
+        if read_project(project_id)["status"] in ACTIVE:
+            _record_interruption(project_id)
     return read_project(project_id)
 
 
 def recover_interrupted() -> None:
     for project in list_projects():
         if project["status"] in ACTIVE and project["id"] not in _jobs:
-            patch_project(project["id"], {"status": "interrupted", "error": "Service stopped during generation. Retry to reuse completed work."})
+            _record_interruption(project["id"])
 
 
 async def stop_jobs() -> None:

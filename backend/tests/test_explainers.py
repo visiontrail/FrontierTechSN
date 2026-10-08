@@ -275,7 +275,7 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(studio.read_project(project["id"])["status"], "script_ready")
         self.assertEqual((await self.client.post(f"/api/explainers/{project['id']}/dequeue")).status_code, 409)
 
-    async def test_failed_job_does_not_block_next_plan(self):
+    async def test_failed_job_holds_slot_until_explicit_cancel(self):
         first = studio.create_project(project_input())
         second = studio.create_project(project_input())
         studio.start(first["id"], "script")
@@ -283,6 +283,10 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(studio, "write_script", AsyncMock(side_effect=[RuntimeError("Provider offline"), [scene()]])):
             self.assertTrue(await studio.run_next_queued())
             self.assertEqual(studio.read_project(first["id"])["status"], "failed")
+            self.assertFalse(await studio.run_next_queued())
+            self.assertEqual(studio.production_owner()["id"], first["id"])
+            await studio.cancel(first["id"])
+            self.assertIsNone(studio.production_owner())
             self.assertTrue(await studio.run_next_queued())
         self.assertEqual(studio.read_project(second["id"])["status"], "script_ready")
 
@@ -304,7 +308,8 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await runner
         self.assertFalse(studio._jobs)
-        self.assertEqual(studio.read_project(first["id"])["status"], "cancelled")
+        self.assertEqual(studio.read_project(first["id"])["status"], "interrupted")
+        self.assertEqual(studio.production_owner()["id"], first["id"])
         self.assertEqual(studio.read_project(second["id"])["status"], "queued")
 
     async def test_queue_api_reports_active_news_and_runs_full_without_existing_scenes(self):
@@ -371,3 +376,76 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "language"):
             studio.start(realtime["id"], "render")
         self.assertEqual(studio.tts_language("vibevoice-1.5b"), "multilingual")
+
+    async def test_full_video_reservation_survives_script_only_repair(self):
+        project = studio.create_project(project_input())
+        with patch.object(studio, 'write_script', AsyncMock(side_effect=RuntimeError('Offline'))):
+            studio.start(project['id'], 'full')
+            await studio.run_next_queued()
+        original_claim = studio.production_owner()['production']
+        with patch.object(studio, 'write_script', AsyncMock(return_value=[scene()])):
+            studio.start(project['id'], 'script')
+            await studio.run_next_queued()
+        self.assertEqual(studio.read_project(project['id'])['status'], 'script_ready')
+        self.assertEqual(studio.production_owner()['production'], original_claim)
+        with patch('backend.explainer_pipeline.render_project', AsyncMock(return_value={'video_path': 'final.mp4'})):
+            studio.start(project['id'], 'render')
+            await studio.run_next_queued()
+        self.assertIsNone(studio.production_owner())
+
+    async def test_restart_and_requeue_preserve_claim_progress_and_release_explicitly(self):
+        project = studio.create_project(project_input(scenes=[scene()]))
+        claim = {'operation': 'render', 'started_at': '2026-10-08T01:00:00+00:00'}
+        progress = {'completed': 25, 'total': 669, 'message': 'Scene 7'}
+        studio.patch_project(project['id'], {'status': 'generating_images', 'production': claim,
+                                           'progress': progress})
+        studio.recover_interrupted()
+        interrupted = studio.read_project(project['id'])
+        self.assertEqual(interrupted['status'], 'interrupted')
+        self.assertEqual(interrupted['cancellation_reason'], 'service_interruption')
+        self.assertEqual(interrupted['production'], claim)
+        resumed = studio.start(project['id'], 'render')
+        self.assertEqual(resumed['progress']['completed'], 25)
+        self.assertEqual(resumed['progress']['total'], 669)
+        released = studio.remove_from_queue(project['id'])
+        self.assertEqual(released['cancellation_reason'], 'user')
+        self.assertIsNone(studio.production_owner())
+        # Requeue after explicitly releasing it is an ordinary plan.
+        studio.start(project['id'], 'render')
+        self.assertIsNone(studio.production_owner())
+
+    async def test_legacy_cancelled_project_is_not_automatically_reserved(self):
+        project = studio.create_project(project_input(scenes=[scene()]))
+        studio.patch_project(project['id'], {'status': 'cancelled'})
+        studio.recover_interrupted()
+        self.assertIsNone(studio.production_owner())
+        self.assertEqual(studio.read_project(project['id'])['status'], 'cancelled')
+
+    async def test_maintenance_pause_keeps_worker_slot_and_original_operation(self):
+        project = studio.create_project(project_input())
+        entered = asyncio.Event()
+
+        async def slow(*args):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with patch.object(studio, 'write_script', side_effect=slow):
+            studio.start(project['id'], 'full')
+            runner = asyncio.create_task(studio.run_next_queued())
+            await entered.wait()
+            response = await self.client.post(f"/api/explainers/{project['id']}/pause")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['status'], 'interrupted')
+            self.assertEqual(response.json()['cancellation_reason'], 'maintenance')
+            self.assertEqual(response.json()['production']['operation'], 'full')
+            self.assertTrue(await runner)
+        self.assertEqual(studio.production_owner()['id'], project['id'])
+        self.assertEqual((await self.client.post(f"/api/explainers/{project['id']}/cancel")).json()['cancellation_reason'], 'user')
+        self.assertIsNone(studio.production_owner())
+
+    async def test_pause_does_not_claim_an_unstarted_or_cancelled_project(self):
+        project = studio.create_project(project_input())
+        studio.start(project['id'], 'full')
+        response = await self.client.post(f"/api/explainers/{project['id']}/pause")
+        self.assertEqual(response.status_code, 409)
+        self.assertIsNone(studio.production_owner())
