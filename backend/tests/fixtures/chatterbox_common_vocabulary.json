@@ -15,7 +15,7 @@
   },
   "contextual_readings": "SQL GUI JSON YAML GIF JPEG TIFF AVIF ZIP RAR TAR NAS SAN ARM OK ASAP ISO RFID FAQ ICLR WASM RAG LOL AFAIK TLDR",
   "mixed_case_and_symbols": "OpenAI ChatGPT xAI QbitAI AIBase mRNA PhD WiFi Wi-Fi eSIM eGPU iOS macOS NVMe PCIe SoC SaaS PaaS IaaS NoSQL MySQL PostgreSQL MLOps AIOps R&D M&A P&L C++ C#",
-  "mode_overrides": {"SATA": ["keep", "spell"]},
+  "mode_overrides": {"SATA": ["keep", "spell"], "PET": "keep"},
   "overrides": {
     "IT": "The IT department checks the system.",
     "US": "The US delegation attends the meeting.",
@@ -65,6 +65,7 @@
   "dotted_forms": "A.I. A.P.I. C.P.U. G.P.U. G.P.T. B.B.C. C.N.N. U.S. U.S.A. U.K. E.U. U.N. I.B.M.",
   "product_forms": "GPT4 GPT-4 GPT4o GPT-4o GPT-5 GPT-5.2 ChatGPT4 ChatGPT-4 RTX5090 RTX-5090 HBM3E FP8 FP16 DDR5 PCIe5 NVMe2 IPv4 IPv6 HTTP2 TLS1.3 GLM-5 GLM-6",
   "reference_readings": [
+    {"term": "PET", "valid_readings": ["pet"], "source": "https://dictionary.cambridge.org/pronunciation/english/pet-scan"},
     {"term": "SQL", "valid_readings": ["letter names", "sequel"], "source": "https://learn.microsoft.com/en-us/sql/odbc/reference/structured-query-language-sql"},
     {"term": "SaaS", "valid_readings": ["sass"], "source": "https://info.microsoft.com/rs/157-GQE-382/images/Enterprise_Cloud_Strategy_2nd_Edition_ebook_mobile.pdf"}
   ]

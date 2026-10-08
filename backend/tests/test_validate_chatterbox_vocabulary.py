@@ -40,6 +40,23 @@ def test_sata_corpus_does_not_force_a_common_word_reading_to_be_spelled():
     assert case['expected_actions']['SATA'] == ['keep', 'spell']
 
 
+def test_medical_pet_reference_uses_its_conventional_word_reading_without_changing_source():
+    current_fixture = fixture()
+    previous_fixture = copy.deepcopy(current_fixture)
+    previous_fixture['mode_overrides'].pop('PET')
+    previous_fixture['reference_readings'] = [row for row in previous_fixture['reference_readings'] if row['term'] != 'PET']
+    current = validation.corpus(current_fixture)
+    previous = validation.corpus(previous_fixture)
+    assert [(row['id'], row['term'], row['text'], row['category']) for row in current] == [
+        (row['id'], row['term'], row['text'], row['category']) for row in previous]
+    changed = [(old, new) for old, new in zip(previous, current, strict=True) if old != new]
+    assert len(changed) == 1 and changed[0][0]['term'] == 'PET'
+    assert changed[0][0]['expected_actions'] == {'PET': 'spell'}
+    assert changed[0][1]['expected_actions'] == {'PET': 'keep'}
+    assert next(row for row in current_fixture['reference_readings'] if row['term'] == 'PET')['source'] == (
+        'https://dictionary.cambridge.org/pronunciation/english/pet-scan')
+
+
 def test_duplicate_inventory_entries_are_rejected():
     value = copy.deepcopy(fixture())
     value['contextual_readings'] += ' AI'
