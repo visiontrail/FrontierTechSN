@@ -13,7 +13,8 @@ from pathlib import Path
 
 import cmudict
 
-from backend.pipeline import tts_pronunciation as pronunciation
+from backend.pipeline import tts, tts_pronunciation as pronunciation
+from backend.spoken_numbers import integer_words
 from backend.pipeline.tts_phone_references import (
     WORD_REFERENCES, entries as supplemental_word_references,
     policy_contract as reference_contract,
@@ -25,7 +26,8 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 25
+EVIDENCE_VERSION = 26
+NUMERIC_REFERENCE_SOURCE = 'https://dictionaryblog.cambridge.org/tag/numbers/'
 SOURCE_WORD_REFERENCE_POLICY_VERSION = 1
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PRERHOTIC_VOWEL_SOURCE = 'https://opentext.ku.edu/amenglishpronunciation/chapter/chapter-1/'
@@ -130,6 +132,33 @@ def independent_word_reference(word: str) -> dict:
     return result
 
 
+def source_number_words(literal: str) -> list[str]:
+    """Keep a bounded written value and its decimal precision intact."""
+    if not re.fullmatch(r'[0-9]{1,6}(?:\.[0-9]{1,6})?', literal):
+        raise ValueError('Source number exceeds the supported numeric reference bounds')
+    whole, dot, fraction = literal.partition('.')
+    digits = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine')
+    words = ([digits[int(digit)] for digit in whole] if len(whole) > 1 and whole.startswith('0')
+             else integer_words(int(whole)).replace('-', ' ').split())
+    return words + (['point', *(digits[int(digit)] for digit in fraction)] if dot else [])
+
+
+def source_number_readings(literal: str) -> list[list[str]]:
+    """Additional identifier/year groups must round-trip to the same value."""
+    forms = [source_number_words(literal)]
+    if len(literal) == 4 and literal.isascii() and literal.isdigit() and not literal.startswith('0'):
+        first, last = int(literal[:2]), int(literal[2:])
+        if first >= 10 and last >= 10:
+            paired = [*source_number_words(literal[:2]), *source_number_words(literal[2:])]
+            if tts._lexical_tokens(' '.join(paired)) == [literal]:
+                forms.append(paired)
+        elif first >= 10 and last == 0:
+            hundred = [*source_number_words(literal[:2]), 'hundred']
+            if tts._lexical_tokens(' '.join(hundred)) == [literal]:
+                forms.append(hundred)
+    return forms
+
+
 def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]:
     dictionary = lexicon()
     parts = []
@@ -137,10 +166,12 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
     before_vowel_references = {}
 
     def ordinary(fragment):
+        if re.search(r'\d\.\d+\.\d', fragment):
+            raise ValueError('Multi-component source version requires an explicit reading reference')
         if (re.search(r"[^A-Za-z0-9\s.,:;!?'’\-\u2014\u2013]", fragment)
                 or re.search(r"(?<![A-Za-z])['’]|['’](?![A-Za-z])", fragment)):
             raise ValueError('Source interval contains unsupported symbols')
-        for match in re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)*(?:-[A-Za-z]+)*|\d+", fragment):
+        for match in re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)*(?:-[A-Za-z]+)*|\d+(?:\.\d+)?", fragment):
             # Use the dictionary's complete possessive/contraction entry.
             # Never discard a suffix or infer phones for an unknown word.
             word = match[0].replace('’', "'")
@@ -154,10 +185,23 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
                 parts.append(LETTER_PHONES[word])
                 ordinary_units.append(False)
                 continue
-            if word.isdigit():
-                if len(word) != 1:
-                    raise ValueError('Multi-digit source number requires a supported numeric reference')
-                word = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine')[int(word)]
+            if re.fullmatch(r'\d+(?:\.\d+)?', word):
+                if len(source_number_readings(word)) == 1:
+                    ordinary(' '.join(source_number_words(word)))
+                else:
+                    combined = set()
+                    for form in source_number_readings(word):
+                        states = {()}
+                        for number_word in form:
+                            choices = dictionary.get(number_word) or []
+                            if not choices:
+                                raise ValueError('Source numeric word lacks a dictionary reference')
+                            states = {(*prefix, *(re.sub(r'\d', '', phone) for phone in variant))
+                                      for prefix in states for variant in choices}
+                        combined.update(states)
+                    parts.append(sorted(combined))
+                    ordinary_units.append(True)
+                continue
             variants = dictionary.get(word.casefold()) or []
             reference = supplemental_word_references().get(word.casefold())
             if reference:
@@ -294,6 +338,8 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     if word_refs:
         report['word_hint_references'] = word_refs
         report['source_word_reference_policy_version'] = SOURCE_WORD_REFERENCE_POLICY_VERSION
+    if re.search(r'\d{2}|\d\.\d', text):
+        report['numeric_reference_source'] = NUMERIC_REFERENCE_SOURCE
     unedited = text
     for edit in sorted(edits, key=lambda row: row['start'], reverse=True):
         unedited = unedited[:edit['start']] + ' ' + unedited[edit['end']:]

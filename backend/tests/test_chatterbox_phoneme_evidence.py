@@ -363,7 +363,7 @@ def test_vowel_repetitions_survive_consonant_continuation_normalization():
 
 @pytest.mark.parametrize(('source', 'phones'), [
     ('UnsupportedQbitThing today.', 't ə d eɪ'),
-    ('The value is 21.', 'ð ə v æ l j uː ɪ z t uː'),
+    ('The value is 1234567.', 'ð ə v æ l j uː ɪ z t uː'),
     ('Today.', 'ϕ'),
 ])
 def test_unsupported_reference_or_phone_never_claims_acceptance(source, phones):
@@ -486,6 +486,72 @@ def test_legacy_numeric_source_cannot_treat_a_model_letter_as_an_indefinite_arti
     assert evidence.compare_source(source,[],PREFIX+'eɪ t uː eɪ'+ENDING)['passed']
     assert not evidence.compare_source(source,[],PREFIX+'ɐ t uː eɪ'+ENDING)['passed']
     assert not evidence.compare_source(source,[],PREFIX+'eɪ t uː ɐ'+ENDING)['passed']
+
+
+@pytest.mark.parametrize(('literal', 'words'), [
+    ('16', ['sixteen']), ('58', ['fifty', 'eight']),
+    ('200', ['two', 'hundred']), ('5090', ['five', 'thousand', 'ninety']),
+    ('01', ['zero', 'one']), ('5.2', ['five', 'point', 'two']),
+    ('1.03', ['one', 'point', 'zero', 'three']),
+])
+def test_numeric_source_reference_retains_value_leading_zeros_and_fraction_precision(literal, words):
+    assert evidence.source_number_words(literal) == words
+
+
+def test_multi_digit_product_retains_each_letter_and_exact_number():
+    source = 'The report mentions FP16 today.'
+    prepared = edits(source, 'FP', 'eff pee')
+    correct = PREFIX + 'ɛ f p iː s ɪ k s t iː n' + ENDING
+    assert evidence.compare_source(source, prepared, correct)['passed']
+    for changed in [correct.replace('s ɪ k s t iː n', 's ɪ k s t i'),
+                    correct.replace('ɛ f p iː', 'ɛ f'), correct + ' s ɪ k s t iː n']:
+        assert not evidence.compare_source(source, prepared, changed)['passed']
+    wrong = evidence.compare_source('The value is 21.', [], 'ð ə v æ l j uː ɪ z t uː')
+    assert wrong['supported'] and not wrong['passed']
+
+
+def test_decimal_model_requires_point_and_does_not_merge_or_reorder_digits():
+    source = 'The report mentions GPT-5.2 today.'
+    prepared = edits(source, 'GPT', 'gee pee tee')
+    correct = PREFIX + 'dʒ iː p iː t iː f aɪ v p ɔɪ n t t uː' + ENDING
+    assert evidence.compare_source(source, prepared, correct)['passed']
+    for changed in [correct.replace('p ɔɪ n t ', ''),
+                    correct.replace('f aɪ v p ɔɪ n t t uː', 'f aɪ v t w ɛ n t i t uː'),
+                    correct.replace('f aɪ v p ɔɪ n t t uː', 't uː p ɔɪ n t f aɪ v')]:
+        assert not evidence.compare_source(source, prepared, changed)['passed']
+
+
+def test_fractional_leading_zero_and_trailing_zero_are_audible_source_precision():
+    source = 'The value is 1.03.'
+    correct = 'ð ə v æ l j uː ɪ z w ʌ n p ɔɪ n t z ɪ ɹ oʊ θ ɹ iː'
+    assert evidence.compare_source(source, [], correct)['passed']
+    assert not evidence.compare_source(source, [], correct.replace('z ɪ ɹ oʊ ', ''))['passed']
+    assert evidence.source_number_words('1.30') == ['one', 'point', 'three', 'zero']
+    unsupported = evidence.compare_source('The value is 1.2.3.', [], correct)
+    assert not unsupported['supported'] and not unsupported['passed']
+
+
+def test_numeric_reference_never_drops_a_leading_zero_or_unbounded_source():
+    source = 'The report mentions GD01 today.'
+    prepared = edits(source, 'GD', 'gee dee')
+    correct = PREFIX + 'dʒ iː d iː z ɪ ɹ oʊ w ʌ n' + ENDING
+    assert evidence.compare_source(source, prepared, correct)['passed']
+    assert not evidence.compare_source(source, prepared, correct.replace('z ɪ ɹ oʊ ', ''))['passed']
+    with pytest.raises(ValueError, match='bounds'):
+        evidence.source_number_words('1234567')
+
+
+def test_four_digit_identifier_groups_must_preserve_the_exact_written_value():
+    assert ['fifty', 'ninety'] in evidence.source_number_readings('5090')
+    assert ['nineteen', 'hundred'] in evidence.source_number_readings('1900')
+    assert ['twenty', 'twenty', 'seven'] in evidence.source_number_readings('2027')
+    source = 'The report mentions RTX5090 today.'
+    prepared = edits(source, 'RTX', 'ar tee ex')
+    correct = PREFIX + 'ɑːɹ t iː ɛ k s f ɪ f t i n aɪ n t i' + ENDING
+    assert evidence.compare_source(source, prepared, correct)['passed']
+    assert not evidence.compare_source(source, prepared, correct.replace('n aɪ n t i', 'eɪ t i'))['passed']
+    assert evidence.source_number_readings('5.2') == [['five', 'point', 'two']]
+    assert evidence.source_number_readings('01') == [['zero', 'one']]
 
 
 def test_ordinary_dictionary_word_nasal_fricative_transition_preserves_the_complete_source():
