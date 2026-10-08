@@ -82,6 +82,26 @@ def test_body_reference_does_not_change_frozen_word_hint_policy13_bytes():
     assert contract['prompt_sha256'] == '83ffb1466fdb9be77e69a2f89952ebf1fc7922deddc43e7caa938e83addf0e85'
 
 
+def test_ordinary_connects_coda_elision_retains_every_pcie_letter_and_plural():
+    source = 'The PCIe interface connects the device.'
+    prepared = edits(source, 'PCIe', 'pee see eye ee')
+    phones = 'ð ə p iː s iː aɪ i ɪ n t ɚ f eɪ s k ə n ɛ k s ð ə d ᵻ v aɪ s'
+    report = evidence.compare_source(source, prepared, phones)
+    assert report['passed']
+    assert report['ordinary_coda_elision_reference'] == evidence.ORDINARY_CODA_ELISION_SOURCE
+    for changed in [phones.replace('aɪ i ɪ', 'aɪ ɪ'),
+                    phones.replace('k ə n ɛ k s', 'k ə n ɛ k'),
+                    phones.replace('k ə n ɛ k s', 'k ə n æ k s'), phones + ' iː']:
+        assert not evidence.compare_source(source, prepared, changed)['passed']
+
+
+def test_ordinary_coda_elision_never_drops_a_spelled_t_letter():
+    source = 'The report mentions KTS today.'
+    prepared = edits(source, 'KTS', 'kay tee ess')
+    assert evidence.compare_source(source, prepared, PREFIX + 'k eɪ t iː ɛ s' + ENDING)['passed']
+    assert not evidence.compare_source(source, prepared, PREFIX + 'k eɪ ɛ s' + ENDING)['passed']
+
+
 def edits(source, term, spoken):
     return tts_pronunciation.validate_decisions(source, [
         {'id': 0, 'source': term, 'action': 'spell', 'spoken': spoken,

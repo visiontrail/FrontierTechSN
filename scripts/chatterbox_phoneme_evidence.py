@@ -24,7 +24,8 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 11
+EVIDENCE_VERSION = 12
+ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -139,6 +140,12 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
                 # authorizes an extra D. All vowels and closing words remain.
                 if variant[-2:] == ('N', 'Z'):
                     references.add((*variant[:-2], 'N', 'D', 'Z'))
+                # Natural /t/ elision in an ordinary word-final /kts/
+                # cluster (connects -> connec[s]). All source vowels and
+                # the plural /s/ remain. Spelled letters use separate units,
+                # so their T /ti:/ can never enter this rule.
+                if variant[-3:] == ('K', 'T', 'S'):
+                    references.add((*variant[:-3], 'K', 'S'))
             parts.append(sorted(references))
             ordinary_units.append(True)
 
@@ -228,6 +235,10 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     if body_cited:
         report['cited_body_word_references'] = body_cited
         report['body_reference_sha256'] = body_reference_contract()['reference_sha256']
+    if any(tuple(re.sub(r'\d', '', phone) for phone in variant)[-3:] == ('K', 'T', 'S')
+           for word in re.findall(r'[A-Za-z]+', unedited)
+           for variant in (lexicon().get(word.casefold()) or [])):
+        report['ordinary_coda_elision_reference'] = ORDINARY_CODA_ELISION_SOURCE
     try:
         observed = observed_phones(phones)
         parts = reference_parts(text, edits)
