@@ -1444,6 +1444,65 @@ async def test_independent_audit_rejection_never_replenishes_retry_budget(setup_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['passed', 'still_wrong', 'unavailable'])
+async def test_acoustic_reference_upgrade_reaudits_independent_rejection_without_new_jobs(
+        setup_client, outcome):
+    from scripts.chatterbox_phoneme_evidence import EVIDENCE_VERSION
+    server, script, directory, _verifier, _generate = setup_client
+
+    async def reject(*_args):
+        raise tts.TtsIntegrityError('Independent vocabulary audit rejected speech: unsupported word')
+
+    async def generate(auditor):
+        return await chatterbox._generate_chatterbox(
+            str(script), str(directory), 'jane', 'en', log=None, emit=lambda _message: None,
+            verify_text=True, part_auditor=auditor,
+        )
+
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate(reject)
+    before = {}
+    for path in directory.glob('tts_input_part_001.request-*.json'):
+        row = json.loads(path.read_text())
+        row['rejection_acoustic_reference_version'] = EVIDENCE_VERSION - 1
+        path.write_text(json.dumps(row))
+        before[path.name] = (row['job_id'], row['idempotency_key'], row['identity'])
+    archived = {str(path): path.read_bytes() for path in
+                (directory / 'verification/tts_input_part_001').rglob('rejected-*') if path.is_file()}
+    calls = 0
+
+    async def revised(*_args):
+        nonlocal calls
+        calls += 1
+        if outcome == 'unavailable':
+            raise RuntimeError('Independent decoder unavailable')
+        if outcome == 'still_wrong':
+            raise tts.TtsIntegrityError('Independent vocabulary audit rejected speech: wrong phones')
+        return {'passed': True}
+
+    if outcome == 'passed':
+        await generate(revised)
+        assert calls == 1
+        row = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+        assert row['revalidated_after_rejection']['acoustic_reference_version'] == EVIDENCE_VERSION
+    elif outcome == 'unavailable':
+        with pytest.raises(RuntimeError, match='decoder unavailable'):
+            await generate(revised)
+        assert calls == 1
+    else:
+        for _ in range(2):
+            with pytest.raises(tts.TtsIntegrityError):
+                await generate(revised)
+        assert calls == chatterbox.MAX_INTEGRITY_ATTEMPTS
+    assert len(server.jobs) == chatterbox.MAX_INTEGRITY_ATTEMPTS
+    for path in directory.glob('tts_input_part_001.request-*.json'):
+        row = json.loads(path.read_text())
+        assert (row['job_id'], row['idempotency_key'], row['identity']) == before[path.name]
+    for path, contents in archived.items():
+        assert Path(path).read_bytes() == contents
+
+
+@pytest.mark.asyncio
 async def test_independent_audit_uncertainty_preserves_cached_audio_and_request(setup_client):
     server, script, directory, _verifier, generate = setup_client
     await generate()

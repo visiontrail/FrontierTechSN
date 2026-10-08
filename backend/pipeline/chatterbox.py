@@ -701,6 +701,7 @@ async def _generate_chatterbox(
     if not config.CHATTERBOX_TTS_API_KEY:
         raise RuntimeError("Set CHATTERBOX_TTS_API_KEY in Admin -> System -> Voice & TTS")
     contract = cache_contract()
+    from scripts.chatterbox_phoneme_evidence import EVIDENCE_VERSION as acoustic_reference_version
     if frozen_tail_cleanup_version is not None:
         if (type(frozen_tail_cleanup_version) is not int
                 or frozen_tail_cleanup_version not in {0, contract.get('tail_cleanup_version', 0)}):
@@ -830,6 +831,7 @@ async def _generate_chatterbox(
                         if not retained.exists():
                             retained.write_bytes(original.read_bytes())
                     checkpoint["rejected"] = "Chatterbox independent part audit: " + str(exc)
+                    checkpoint['rejection_acoustic_reference_version'] = acoustic_reference_version
                     _write_json(request_path, checkpoint)
                     emit(f"Chatterbox part {index}: independent audit rejected cached audio; remaining bounded attempts retained")
                     cached = None
@@ -863,6 +865,18 @@ async def _generate_chatterbox(
                     and checkpoint.get('job_id')
                     and checkpoint.get('rejection_observation_version', 0) < OBSERVATION_SPELLING_VERSION
                 )
+                # A cited reference upgrade can resolve an earlier unknown
+                # word. Re-audit the same persisted job, without resetting its
+                # attempt budget or changing the provider request identity.
+                acoustic_rechecking = bool(
+                    str(checkpoint.get('rejected') or '').startswith((
+                        'Independent vocabulary audit rejected speech:',
+                        'Chatterbox independent part audit:',
+                    ))
+                    and checkpoint.get('job_id')
+                    and checkpoint.get('rejection_acoustic_reference_version', 0) < acoustic_reference_version
+                )
+                rechecking = rechecking or acoustic_rechecking
                 if checkpoint.get("rejected") and not rechecking:
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
                         if audit_all_parts:
@@ -965,17 +979,21 @@ async def _generate_chatterbox(
                     rejected.mkdir(parents=True, exist_ok=True)
                     marker = (f'rechecked-{attempt}-spelling-{OBSERVATION_SPELLING_VERSION}'
                               if rechecking else f'rejected-{attempt}')
+                    if acoustic_rechecking:
+                        marker += f'-phones-{acoustic_reference_version}'
                     evidence = rejected / marker
                     evidence.mkdir(exist_ok=True)
                     _write_json(rejected / 'rejection.json', {
                         **_read_json(rejected / 'observation_binding.json'),
                         'error': str(exc), 'observation_spelling_version': OBSERVATION_SPELLING_VERSION,
+                        'acoustic_reference_version': acoustic_reference_version,
                     })
                     for report_path in rejected.glob("*.json"):
                         (evidence / report_path.name).write_bytes(report_path.read_bytes())
                     os.replace(staged, rejected / f"{marker}.wav")
                     checkpoint["rejected"] = str(exc)
                     checkpoint['rejection_observation_version'] = OBSERVATION_SPELLING_VERSION
+                    checkpoint['rejection_acoustic_reference_version'] = acoustic_reference_version
                     _write_json(request_path, checkpoint)
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
                         if audit_all_parts:
@@ -991,6 +1009,7 @@ async def _generate_chatterbox(
                 if rechecking:
                     checkpoint['revalidated_after_rejection'] = {
                         'observation_spelling_version': OBSERVATION_SPELLING_VERSION,
+                        'acoustic_reference_version': acoustic_reference_version,
                         'audio_sha256': tts._file_sha256(path),
                     }
                     _write_json(request_path, checkpoint)
