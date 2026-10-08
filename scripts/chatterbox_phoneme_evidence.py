@@ -24,8 +24,9 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 12
+EVIDENCE_VERSION = 13
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
+PRERHOTIC_VOWEL_SOURCE = 'https://opentext.ku.edu/amenglishpronunciation/chapter/chapter-1/'
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -74,10 +75,21 @@ def collapse_consonant_continuations(phones: list[str] | tuple[str, ...]) -> tup
 def observed_phones(phones: str) -> tuple[str, ...]:
     keys = sorted(IPA, key=len, reverse=True)
     values = []
-    for token in phones.split():
-        raw = re.sub(r'[ːˈˌ]', '', token)
+    tokens = [re.sub(r'[ːˈˌ]', '', token) for token in phones.split()]
+    for index, raw in enumerate(tokens):
         cursor = 0
         while cursor < len(raw):
+            # North American /ɔr/ can be realized as [or]. Restrict the
+            # observed [o] to an immediately following rhotic; standalone
+            # [o] and letter-name vowels keep their distinct requirements.
+            following = raw[cursor + 1:]
+            if (raw[cursor] == 'o' and
+                    (following.startswith(('ɹ', 'r')) or
+                     (not following and index + 1 < len(tokens)
+                      and tokens[index + 1].startswith(('ɹ', 'r'))))):
+                values.append('AO')
+                cursor += 1
+                continue
             match = next((key for key in keys if raw.startswith(key, cursor)), None)
             if match is None:
                 raise ValueError(f'Unsupported observed phone at {cursor}: {raw[cursor:cursor + 4]}')
@@ -216,6 +228,8 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     report = {'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
               'raw_phones': phones, 'supported': False, 'passed': False,
               'method': 'complete_source_phone_sequence', 'evidence_version': EVIDENCE_VERSION}
+    if re.search(r'o[ːˈˌ]*(?:\s+)?[ɹr]', phones):
+        report['prerhotic_vowel_reference'] = PRERHOTIC_VOWEL_SOURCE
     word_refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
                  for edit in edits if edit.get('kind') == 'word']
     if word_refs:

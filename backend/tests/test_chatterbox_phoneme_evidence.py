@@ -143,6 +143,27 @@ def test_phone_token_boundaries_do_not_merge_the_schwa_with_the_next_word_r():
     assert evidence.observed_phones('ɚ') == ('ER',)
 
 
+@pytest.mark.parametrize('prerhotic', ['oːɹ', 'oː ɹ', 'oɹ', 'o r'])
+def test_documented_prerhotic_o_preserves_the_complete_source_and_named_r(prerhotic):
+    source = 'The report mentions BRB today.'
+    prepared = edits(source, 'BRB', 'bee R bee')
+    phones = PREFIX.replace('ɔːɹ', prerhotic) + 'b iː ɑːɹ b iː' + ENDING
+    report = evidence.compare_source(source, prepared, phones)
+    assert report['supported'] and report['passed']
+    assert report['prerhotic_vowel_reference'] == evidence.PRERHOTIC_VOWEL_SOURCE
+    assert not evidence.compare_source(source, prepared, phones.replace('ɑːɹ', 'oːɹ'))['passed']
+    assert not evidence.compare_source(source, prepared, phones + ' ɑːɹ')['passed']
+
+
+def test_prerhotic_normalization_does_not_erase_vowel_only_letter_identity_or_another_r_name():
+    source = 'The report mentions AI today.'
+    prepared = edits(source, 'AI', 'eigh eye')
+    assert not evidence.compare_source(source, prepared, PREFIX + 'aɪ aɪ' + ENDING)['passed']
+    assert evidence.observed_phones('oʊ ɑːɹ') == ('OW', 'AA', 'R')
+    with pytest.raises(ValueError, match='Unsupported observed phone'):
+        evidence.observed_phones('o t')
+
+
 def test_vowel_repetitions_survive_consonant_continuation_normalization():
     assert evidence.observed_phones('aɪ aɪ ɑːɹ ɹ') == ('AY', 'AY', 'AA', 'R')
 
