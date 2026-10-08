@@ -24,9 +24,10 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 13
+EVIDENCE_VERSION = 14
 ORDINARY_CODA_ELISION_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PRERHOTIC_VOWEL_SOURCE = 'https://opentext.ku.edu/amenglishpronunciation/chapter/chapter-1/'
+ORDINARY_FLAP_SOURCE = 'https://journals.sagepub.com/doi/10.1177/0023830908098542'
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -49,7 +50,7 @@ IPA = {
     'd': 'D', 'k': 'K', 'ɡ': 'G', 'g': 'G', 'f': 'F', 'v': 'V',
     'θ': 'TH', 'ð': 'DH', 's': 'S', 'z': 'Z', 'ʃ': 'SH', 'ʒ': 'ZH',
     'h': 'HH', 'm': 'M', 'n': 'N', 'ŋ': 'NG', 'l': 'L', 'ɹ': 'R',
-    'r': 'R', 'j': 'Y', 'w': 'W', 'l̩': 'L',
+    'r': 'R', 'j': 'Y', 'w': 'W', 'l̩': 'L', 'ɾ': 'DX',
 }
 VOWELS = {'AA', 'AE', 'AH', 'AO', 'AW', 'AY', 'EH', 'ER', 'EY', 'IH', 'IY', 'OW', 'OY', 'UH', 'UW'}
 
@@ -138,6 +139,15 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
                 if (len(variant) >= 3 and variant[-2:] == ['AH0', 'L']
                         and re.sub(r'\d', '', variant[-3]) not in VOWELS):
                     references.add(tuple(re.sub(r'\d', '', p) for p in (*variant[:-2], 'L')))
+                # American English /t,d/ can flap between vowels before an
+                # unstressed syllable. Keep the flap distinct from T/D and
+                # offer it only inside an ordinary dictionary word; named
+                # letters never gain a flap pronunciation or lose a vowel.
+                plain = tuple(re.sub(r'\d', '', p) for p in variant)
+                for index in range(1, len(variant) - 1):
+                    if (plain[index] in {'T', 'D'} and plain[index - 1] in VOWELS
+                            and plain[index + 1] in VOWELS and variant[index + 1].endswith('0')):
+                        references.add((*plain[:index], 'DX', *plain[index + 1:]))
             # A word-internal nasal/fricative transition may include the
             # homorganic stop (n-sh -> n-t-sh, decoded as n-ch). Apply only
             # inside dictionary words, never to independently named letters.
@@ -230,6 +240,8 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
               'method': 'complete_source_phone_sequence', 'evidence_version': EVIDENCE_VERSION}
     if re.search(r'o[ːˈˌ]*(?:\s+)?[ɹr]', phones):
         report['prerhotic_vowel_reference'] = PRERHOTIC_VOWEL_SOURCE
+    if 'ɾ' in phones:
+        report['ordinary_flap_reference'] = ORDINARY_FLAP_SOURCE
     word_refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
                  for edit in edits if edit.get('kind') == 'word']
     if word_refs:

@@ -102,6 +102,25 @@ def test_ordinary_coda_elision_never_drops_a_spelled_t_letter():
     assert not evidence.compare_source(source, prepared, PREFIX + 'k eɪ ɛ s' + ENDING)['passed']
 
 
+@pytest.mark.parametrize(('source', 'phones'), [
+    ('Meeting.', 'm iː ɾ ɪ ŋ'), ('Data.', 'd eɪ ɾ ə'), ('Genetic.', 'dʒ ə n ɛ ɾ ɪ k'),
+])
+def test_dictionary_word_intervocalic_flap_retains_all_vowels_and_following_words(source, phones):
+    report = evidence.compare_source(source, [], phones)
+    assert report['supported'] and report['passed']
+    assert report['ordinary_flap_reference'] == evidence.ORDINARY_FLAP_SOURCE
+    assert not evidence.compare_source(source, [], phones + ' iː')['passed']
+
+
+def test_flap_is_not_a_global_t_d_substitution_or_a_named_letter_pronunciation():
+    source = 'The report mentions TD today.'
+    prepared = edits(source, 'TD', 'tee dee')
+    assert not evidence.compare_source(source, prepared, PREFIX + 'ɾ iː d iː' + ENDING)['passed']
+    assert not evidence.compare_source(source, prepared, PREFIX + 't iː ɾ iː' + ENDING)['passed']
+    assert not evidence.compare_source('Today.', [], 't ə ɾ eɪ')['passed']
+    assert not evidence.compare_source('Meeting.', [], 'm iː ɾ ŋ')['passed']
+
+
 def edits(source, term, spoken):
     return tts_pronunciation.validate_decisions(source, [
         {'id': 0, 'source': term, 'action': 'spell', 'spoken': spoken,
