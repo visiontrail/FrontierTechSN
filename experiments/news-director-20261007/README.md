@@ -30,7 +30,15 @@ Copy `review.html` into the experiment output directory. Keep this loopback serv
 .venv/bin/python experiments/news-director-20261007/serve.py --directory outputs/director-lab-20261007-v1 --port 8127
 ```
 
-Then open `http://127.0.0.1:8127/review.html`. Playback, chapter selection, frame stepping and timestamped review notes all use `timeline.json`. Notes stay in local browser storage until the user exports them. The server supports media byte ranges, binds only to loopback, and does not write feedback to the repository.
+Then open `http://127.0.0.1:8127/review.html`. Playback, chapter selection, frame stepping and timestamped review notes all use `timeline.json`. Notes stay in local browser storage until the user exports them. The server supports media byte ranges, defaults to loopback, and does not write feedback to the repository.
+
+For access from another device on the same LAN, start it with an explicit bind address:
+
+```sh
+.venv/bin/python experiments/news-director-20261007/serve.py --directory outputs/director-lab-20261007-v1 --host 0.0.0.0 --port 8127
+```
+
+Open `http://<this-computer-LAN-IP>:8127/review.html` on that device. All video, timeline and image URLs are relative, so they use the same LAN address. Feedback remains local to each browser and address; export notes to transfer them between devices.
 
 ## Delivery checks
 

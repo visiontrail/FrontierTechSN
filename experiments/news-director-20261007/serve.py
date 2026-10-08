@@ -1,4 +1,4 @@
-"""Loopback-only review server with byte-range support for reliable media seeks."""
+"""Review server with configurable binding and byte-range support for media seeks."""
 import argparse
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -52,8 +52,13 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--directory', type=Path, required=True)
+    parser.add_argument('--host', default='127.0.0.1', help='Bind address; use 0.0.0.0 for LAN access')
     parser.add_argument('--port', type=int, default=8127)
     args = parser.parse_args()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), partial(Handler, directory=str(args.directory.resolve())))
-    print(f'http://127.0.0.1:{args.port}/review.html', flush=True)
+    server = ThreadingHTTPServer((args.host, args.port), partial(Handler, directory=str(args.directory.resolve())))
+    print(f'Listening on {args.host}:{args.port}', flush=True)
+    if args.host == '0.0.0.0':
+        print(f'Open http://<this-computer-LAN-IP>:{args.port}/review.html from another device.', flush=True)
+    else:
+        print(f'http://{args.host}:{args.port}/review.html', flush=True)
     server.serve_forever()
