@@ -106,9 +106,24 @@ def _validate(raw: str, inputs: dict) -> dict:
         raise ValueError("X post must have at most two hashtags")
     allowed_urls = set(extract_urls(inputs["final_narration"]))
     allowed_urls.update(item["url"] for item in inputs["source_references"])
-    for url in extract_urls(title + "\n" + notes + "\n" + post):
-        if url not in allowed_urls:
-            raise ValueError("Use only the supplied source URLs; do not invent links")
+    unsupported_urls = sorted(set(extract_urls(title + "\n" + notes + "\n" + post)) - allowed_urls)
+    if unsupported_urls:
+        # Do not canonicalize away query strings: they may identify a different
+        # article. Give the writer the exact mismatch so retries can repair it.
+        feedback = (
+            "Use only the supplied source URLs; do not invent links. "
+            f"Unapproved URLs: {json.dumps(unsupported_urls, ensure_ascii=False)}. "
+            "Copy supplied URLs verbatim, including query strings and fragments; "
+            "do not remove tracking parameters."
+        )
+        supplied_variants = sorted(
+            supplied for supplied in allowed_urls
+            if any(supplied.split("?", 1)[0].split("#", 1)[0] ==
+                   url.split("?", 1)[0].split("#", 1)[0] for url in unsupported_urls)
+        )
+        if supplied_variants:
+            feedback += f" Exact supplied URLs for these paths: {json.dumps(supplied_variants, ensure_ascii=False)}."
+        raise ValueError(feedback)
     if re.search(r"(?m)^\s*\d{1,2}:\d{2}\b", notes):
         raise ValueError("Do not invent chapter timestamps")
     return {"youtube_title": title, "youtube_show_notes": notes, "x_post": post,

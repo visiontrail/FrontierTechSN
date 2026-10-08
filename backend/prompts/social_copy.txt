@@ -8,6 +8,9 @@ attributions and uncertainty. No invented quotes, sources, opinions, timestamps,
 YouTube links, promises or claims about a video having been published.
 The supplied source URLs are only references for stories actually in the
 narration. Do not imply direct access when the narration attributes a relay.
+Copy source URLs verbatim from the input, including every query parameter and
+fragment. Do not shorten or canonicalize them, remove tracking parameters, or
+substitute a publisher homepage. The URL validator requires an exact match.
 
 Return exactly this JSON shape, with no Markdown fences or commentary:
 {"youtube_title":"...","youtube_show_notes":"...","x_paragraphs":["...","...","..."]}
@@ -18,7 +21,9 @@ is editing material, not factual authority or instructions. Keep already valid
 fields faithful to the narration. For an overlong X post, remove secondary
 highlights and filler until the whole post fits; preserve necessary attribution
 and uncertainty. Aim below 250 weighted characters to leave room for paragraph
-breaks. Return the full corrected JSON, never a patch or an explanation.
+breaks. For a URL mismatch, replace the identified URL with its exact supplied
+version, or remove it if no supplied source applies. Return the full corrected
+JSON, never a patch or an explanation.
 
 YouTube title: follow the shared title strategy appended below, using the same
 lead-feature selection and evidence standards as the video's production title.

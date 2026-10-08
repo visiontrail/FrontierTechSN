@@ -93,6 +93,31 @@ class CopyValidationTests(unittest.TestCase):
         value = sc._validate(draft(youtube_show_notes="Source: https://example.com/report"), self.inputs)
         self.assertIn("https://example.com/report", value["youtube_show_notes"])
 
+    def test_stripped_query_feedback_identifies_exact_supplied_url(self):
+        stripped = "https://www.wsj.com/opinion/let-physics-regulate-the-ai-industry-e1ee9084"
+        supplied = stripped + "?mod=rss_Technology"
+        self.inputs["source_references"] = [{"url": supplied}]
+        with self.assertRaises(ValueError) as rejected:
+            sc._validate(draft(youtube_show_notes=f"WSJ Opinion: {stripped}"), self.inputs)
+        self.assertIn(f'Unapproved URLs: ["{stripped}"]', str(rejected.exception))
+        self.assertIn(f'Exact supplied URLs for these paths: ["{supplied}"]', str(rejected.exception))
+        value = sc._validate(draft(youtube_show_notes=f"WSJ Opinion: {supplied}"), self.inputs)
+        self.assertEqual(value["youtube_show_notes"], f"WSJ Opinion: {supplied}")
+
+    def test_url_diagnostics_do_not_relax_exact_source_validation(self):
+        supplied = "https://example.com/report?article=1&source=rss#findings"
+        self.inputs["source_references"] = [{"url": supplied}]
+        for changed in [
+            "https://example.com/report?article=2&source=rss#findings",
+            "https://example.com/report?article=1&source=rss",
+            "https://example.com/report",
+            "https://example.com/other?article=1&source=rss#findings",
+            "https://invented.example.com/report?article=1&source=rss#findings",
+        ]:
+            with self.subTest(url=changed), self.assertRaisesRegex(ValueError, "Unapproved URLs"):
+                sc._validate(draft(youtube_show_notes=changed), self.inputs)
+        self.assertEqual(sc._validate(draft(youtube_show_notes=supplied), self.inputs)["youtube_show_notes"], supplied)
+
 
 class CopyGenerationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -168,6 +193,22 @@ class CopyGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<humanizer_skill>", self.chat.await_args.args[0])
         for call in self.chat.await_args_list:
             self.assertIn("<shared_title_strategy>", call.args[0])
+
+    async def test_url_retry_receives_exact_repair_and_preserves_source_query(self):
+        stripped = "https://www.wsj.com/opinion/let-physics-regulate-the-ai-industry-e1ee9084"
+        supplied = stripped + "?mod=rss_Technology"
+        self.task.source_url = supplied
+        invalid = draft(youtube_show_notes=f"Source: {stripped}")
+        self.chat.side_effect = [invalid, draft(youtube_show_notes=f"Source: {supplied}")]
+        result, _ = await self.generate()
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(self.chat.await_count, 2)
+        payload = json.loads(self.chat.await_args.args[1])
+        self.assertIn(supplied, payload["validation_feedback"])
+        self.assertIn("Unapproved URLs", payload["validation_feedback"])
+        self.assertEqual(payload["previous_draft"], invalid)
+        self.assertEqual(result["copy"]["youtube_show_notes"], f"Source: {supplied}")
+        self.assertIn("Copy source URLs verbatim", self.chat.await_args.args[0])
 
     async def test_retry_failure_preserves_last_good_copy(self):
         good, _ = await self.generate()
