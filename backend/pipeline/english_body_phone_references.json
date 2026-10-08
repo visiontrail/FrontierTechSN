@@ -1,6 +1,13 @@
 {
   "version": 1,
   "entries": {
+    "yaml": {
+      "variants": [["Y", "AE", "M", "AH", "L"]],
+      "ipa": ["jæməl"],
+      "source_url": "https://yaml.org/spec/1.2.2/",
+      "source_location": "Abstract: YAML rhymes with camel; initial Y plus the dictionary camel rhyme",
+      "verified_on": "2026-10-08"
+    },
     "covid": {
       "variants": [["K", "OW", "V", "IH", "D"]],
       "ipa": ["ˈkəʊvɪd"],

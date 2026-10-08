@@ -89,6 +89,16 @@ def test_cited_native_word_reference_does_not_accept_caption_autocorrection(term
     assert not evidence.compare_source(source, [], PREFIX + phones + ENDING + ' t')['passed']
 
 
+def test_yaml_published_rhyme_preserves_its_word_reading_and_every_source_word():
+    source = 'The report mentions YAML today.'
+    phones = PREFIX + 'j æ m əl' + ENDING
+    report = evidence.compare_source(source, [], phones)
+    assert report['supported'] and report['passed']
+    assert report['cited_body_word_references']['yaml']['source_url'] == 'https://yaml.org/spec/1.2.2/'
+    assert not evidence.compare_source(source, [], PREFIX + 'j eɪ m əl' + ENDING)['passed']
+    assert not evidence.compare_source(source, [], phones + ' ɛ l')['passed']
+
+
 def test_body_reference_does_not_change_frozen_word_hint_policy13_bytes():
     from backend.pipeline import tts_pronunciation
     contract = tts_pronunciation.policy_contract(policy_version=13)
