@@ -203,6 +203,13 @@ or corpus changes still stop the run. Existing completed jobs and provider WAVs
 remain bound to their original identities. New production runs keep the current
 delivery cleanup behavior.
 
+Policy 8 retains the policy 7 prompt and word-hint contract. After the actual
+`pee dee F` trial passed both recognizers, whole-source phone verification and
+the physical gates, it recommends standalone F in longer spelled candidates,
+or F. for an isolated letter. The remaining letters stay explicit; original
+letters, their order, digits and source text remain unchanged. This applies
+to the letter's articulation rather than an entity replacement table.
+
 Each batch writes its mode audit, production request checkpoints, WAV metadata,
 primary and independent transcripts, detailed target audits and outcome.
 `summary.json` becomes passing only after every frozen batch has completed and

@@ -461,8 +461,8 @@ def test_policy6_keeps_v5_bytes_and_disambiguates_m_without_changing_source_lett
     text='The report mentions CMAME today.'
     _,edits=pronunciation.validate_decisions(text,decisions_for(text,{'CMAME':'see M eigh M ee'}))
     assert pronunciation.render_span(text,0,len(text),edits)=='The report mentions see M eigh M ee today.'
-    assert 'standalone M' in pronunciation.prompt_path().read_text()
-    assert 'N/M/R rules' in pronunciation.prompt_path().read_text()
+    assert 'standalone M' in pronunciation.prompt_path(policy_version=6).read_text()
+    assert 'N/M/R rules' in pronunciation.prompt_path(policy_version=6).read_text()
 
 
 def test_single_m_hint_can_be_distinct_while_retaining_its_model_digit():
@@ -477,4 +477,19 @@ def test_policy6_keeps_r_as_the_same_letter_in_ocr_and_numeric_fragments():
     _,edits=pronunciation.validate_decisions(text,decisions_for(text,{'OCR':'oh see R','R':'R.'}))
     assert pronunciation.render_span(text,0,len(text),edits)=='oh see R and R. 2 remain source identifiers.'
     assert text=='OCR and R2 remain source identifiers.'
-    assert 'Prefer standalone R' in pronunciation.prompt_path().read_text()
+    assert 'Prefer standalone R' in pronunciation.prompt_path(policy_version=6).read_text()
+
+
+def test_policy8_preserves_word_policy7_and_uses_f_without_changing_other_letters():
+    old = pronunciation.policy_contract(policy_version=7)
+    latest = pronunciation.policy_contract()
+    assert old['prompt_sha256'] != latest['prompt_sha256']
+    assert pronunciation.compatible_policy(old, latest)
+    assert pronunciation.prompt_path(policy_version=7).name == 'tts_pronunciation_v7.txt'
+    assert 'standalone F' in pronunciation.prompt_path().read_text()
+    source = 'The report mentions PDF today.'
+    _, edits = pronunciation.validate_decisions(source, decisions_for(source, {'PDF': 'pee dee F'}))
+    assert pronunciation.render_span(source, 0, len(source), edits) == 'The report mentions pee dee F today.'
+    source = 'F2 is unchanged.'
+    _, edits = pronunciation.validate_decisions(source, decisions_for(source, {'F': 'F.'}))
+    assert pronunciation.render_span(source, 0, len(source), edits) == 'F. 2 is unchanged.'
