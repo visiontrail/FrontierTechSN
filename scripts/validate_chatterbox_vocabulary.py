@@ -137,6 +137,11 @@ def prepare(directory: Path, fixture: dict, observed: dict | None) -> dict:
         previous = read(marker)['identity']['cache_contract']
         policy = previous.get('pronunciation_policy')
         compatible = {**contract, 'pronunciation_policy': policy}
+        previous_tail = previous.get('trailing_speech_verifier_version')
+        if previous_tail in {1, 2} and contract['trailing_speech_verifier_version'] == 3:
+            # This gate upgrade rechecks the same WAV and request identity.
+            # Preserve the frozen corpus instead of allocating a fresh budget.
+            compatible['trailing_speech_verifier_version'] = previous_tail
         if 'tail_cleanup_version' not in previous and compatible.get('tail_cleanup_version') == 1:
             compatible.pop('tail_cleanup_version')
         if (isinstance(policy, dict) and pronunciation.compatible_policy(policy, contract['pronunciation_policy'])

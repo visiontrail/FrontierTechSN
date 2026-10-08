@@ -26,7 +26,7 @@ from backend.pipeline import tts, tts_pronunciation as pronunciation
 
 MODEL_ID = "chatterbox-multilingual"
 VERIFIER_VERSION = 3
-TRAILING_SPEECH_VERIFIER_VERSION = 2
+TRAILING_SPEECH_VERIFIER_VERSION = 3
 SYMBOL_INITIALISM_POLICY_VERSION = 1
 SYMBOL_INITIALISM_RE = re.compile(r"\b([A-Z])&([A-Z])\b")
 SYNTHESIS_LETTER_SEPARATOR_RE = re.compile(r"(?<=[A-Za-z])[-.]+(?=[A-Za-z])")
@@ -299,14 +299,27 @@ def _trailing_speech_report(text: str, words: list[dict]) -> dict:
     """Reject a clearly observed extra phrase after an exact complete source.
 
     Ordinary spelling/recognition differences retain their advisory policy.
-    A final insertion of any word, with every source word matched
-    and the exact opening retained but closing displaced, is extra speech.
+    A repeated closing phrase is extra speech even if ASR changed an earlier
+    word. Require at least two exact closing words on both sides of the repeat.
     """
     expected = tts._lexical_tokens(text)
     observed, _ = tts._transcript_tokens(words)
     opcodes = SequenceMatcher(a=expected, b=observed, autojunk=False).get_opcodes()
     exact_prefix = len(opcodes) == 2 and opcodes[0] == ("equal", 0, len(expected), 0, len(expected))
     extra = observed[len(expected):] if exact_prefix and opcodes[-1][0] == "insert" else []
+    if not extra and len(opcodes) >= 2:
+        preceding, ending = opcodes[-2:]
+        tag, start, end, left, right = ending
+        if (tag == "insert" and start == end == len(expected)
+                and preceding[0] == "equal" and preceding[2] == len(expected)):
+            closing = expected[preceding[1]:preceding[2]]
+            added = observed[left:right]
+            # Only an observed repeat of an aligned source ending defeats
+            # earlier advisory differences. An isolated added word or a
+            # source-authored repetition cannot satisfy this condition.
+            if any(added[:size] == closing[-size:]
+                   for size in range(2, min(len(closing), len(added)) + 1)):
+                extra = added
     rejected = bool(extra)
     return {"version": TRAILING_SPEECH_VERIFIER_VERSION,
             "required": bool(words), "passed": not rejected,

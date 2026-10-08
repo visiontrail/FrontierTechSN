@@ -136,6 +136,22 @@ def test_frozen_corpus_cannot_rebind_submitted_provider_jobs(tmp_path):
         validation.prepare(tmp_path / 'run', value, None)
 
 
+@pytest.mark.parametrize('previous_version', [1, 2])
+def test_tail_gate_upgrade_preserves_frozen_corpus_and_rejects_other_provider_changes(tmp_path, monkeypatch, previous_version):
+    current = validation.chatterbox.cache_contract()
+    previous = {**current, 'trailing_speech_verifier_version': previous_version}
+    monkeypatch.setattr(validation.chatterbox, 'cache_contract', lambda: previous)
+    directory = tmp_path / 'run'
+    saved = validation.prepare(directory, fixture(), None)
+    marker_bytes = (directory / 'corpus.json').read_bytes()
+    monkeypatch.setattr(validation.chatterbox, 'cache_contract', lambda: current)
+    assert validation.prepare(directory, fixture(), None) == saved
+    assert (directory / 'corpus.json').read_bytes() == marker_bytes
+    monkeypatch.setattr(validation.chatterbox, 'cache_contract', lambda: {**current, 'seed': current['seed'] + 1})
+    with pytest.raises(ValueError, match='Frozen corpus'):
+        validation.prepare(directory, fixture(), None)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('selected', [[], [0], [3], [1, 1], [True], ['1'], (1,)])
 async def test_batch_resume_selection_rejects_invalid_indices_before_any_remote_work(tmp_path, monkeypatch, selected):

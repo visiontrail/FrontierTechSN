@@ -61,6 +61,19 @@ async def test_observer_cannot_clear_positive_extra_tail_detection(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_repeated_closing_with_missing_opening_cannot_be_cleared_by_spelling_or_observer(tmp_path, monkeypatch):
+    source = "The OpenAI's result is available."
+    raw = "OpenAI's results is available. Is available."
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=([{'text': raw}], {})))
+    observer = AsyncMock(side_effect=AssertionError('A positively observed repeat must be rejected'))
+    monkeypatch.setattr(chatterbox_phonemes, 'confirm', observer)
+    with pytest.raises(tts.TtsIntegrityError, match='trailing speech'):
+        await chatterbox._verify_pronunciation(tmp_path / 'audio.wav', source, tmp_path / 'verification',
+            emit=lambda _message: None, edits=tts_pronunciation.candidates(source))
+    observer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_missing_primary_observation_remains_unavailable(tmp_path, monkeypatch):
     source='The report mentions AI today.'
     monkeypatch.setattr(av_sync,'ensure_word_transcript',AsyncMock(return_value=([],{})))

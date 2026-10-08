@@ -1039,6 +1039,27 @@ def test_trailing_speech_guard_rejects_extra_phrases_with_complete_source(observ
     )["passed"] is passed
 
 
+@pytest.mark.parametrize("observed,passed", [
+    ("OpenAI's results is available. Is available.", False),
+    ("The open AI's results is available. Is available.", False),
+    ("OpenAI's results is available.", True),
+    ("OpenAI's results is available. Available.", True),
+    ("OpenAI's results is available. A different observation.", True),
+])
+def test_repeated_closing_phrase_is_rejected_despite_earlier_advisory_differences(observed, passed):
+    report = chatterbox._trailing_speech_report(
+        "The OpenAI's result is available.", [{"text": word} for word in observed.split()],
+    )
+    assert report['passed'] is passed
+    if not passed:
+        assert report['extra_words'] == ['is', 'available']
+
+
+def test_source_authored_repeated_ending_is_not_extra_speech():
+    source = "The result is available. Is available."
+    assert chatterbox._trailing_speech_report(source, [{'text': source}])['passed']
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("defect", ["missing", "null", "stale", "failed", "missing_passed"])
 async def test_tail_gate_upgrade_reuses_completed_good_audio_without_resynthesis(setup_client, defect):
@@ -1090,6 +1111,34 @@ async def test_tail_gate_rejects_legacy_extra_speech_and_preserves_bounded_retry
     assert "unrequested trailing speech" in json.loads(
         (directory / "tts_input_part_001.request-0.json").read_text()
     )["rejected"]
+    await generate()
+    assert len(server.jobs) == 2
+
+
+@pytest.mark.asyncio
+async def test_tail_gate_rechecks_legacy_repeat_with_missing_opening_using_remaining_attempt(setup_client, monkeypatch):
+    server, script, directory, verifier, generate = setup_client
+    source = 'The result is available.'
+    raw = 'Result is available. Is available.'
+    script.write_text(source)
+    await generate()
+    path = directory / 'tts_input_part_001_generated.json'
+    metadata = json.loads(path.read_text())
+    metadata['integrity']['pronunciation'].update(
+        transcript=raw, trailing_speech={'version': 2, 'passed': True})
+    path.write_text(json.dumps(metadata))
+    original_key = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())['idempotency_key']
+    verifier.side_effect = [advisory_report(), advisory_report()]
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(side_effect=[
+        ([{'text': raw}], {'passed': True}), ([{'text': source}], {'passed': True}),
+    ]))
+    await generate()
+    assert len(server.jobs) == 2
+    assert [job['request']['seed'] for job in server.jobs.values()] == [42, 43]
+    original = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+    assert original['idempotency_key'] == original_key
+    assert 'unrequested trailing speech' in original['rejected']
+    assert (directory / 'verification/tts_input_part_001/rejected-0.wav').exists()
     await generate()
     assert len(server.jobs) == 2
 
