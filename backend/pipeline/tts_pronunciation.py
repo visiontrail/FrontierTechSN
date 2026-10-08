@@ -201,10 +201,15 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             edits.append(edit)
         elif action == 'word' and (policy_version or IMPLEMENTED_POLICY_VERSION) >= 7:
             from backend.pipeline.tts_word_pronunciation import validate_word_hint
-            phones = validate_word_hint(candidate['source'], spoken, row.get('phones'),
-                                        version=4 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 13 else
-                                        3 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 12 else
-                                        2 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 10 else 1)
+            try:
+                phones = validate_word_hint(candidate['source'], spoken, row.get('phones'),
+                                            version=4 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 13 else
+                                            3 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 12 else
+                                            2 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 10 else 1)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Candidate {candidate['id']} ({candidate['source']}), word hint {spoken!r}: {exc}"
+                ) from exc
             edits.append({**candidate, 'spoken': spoken, 'kind': 'word', 'phones': phones})
         else:
             raise ValueError("Pronunciation action must be keep, spell or a supported word hint")

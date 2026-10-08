@@ -99,3 +99,26 @@ async def test_submitted_job_blocks_feedback_replanning(tmp_path, model):
         )
     model.assert_not_awaited()
     assert checkpoint.read_text() == '{"job_id":"original"}'
+
+
+@pytest.mark.asyncio
+async def test_failed_word_plan_identifies_the_exact_occurrence_for_bounded_repair(tmp_path, model):
+    text = 'The DRAM and OLED chips are ready.'
+    valid_dram = {'id': 0, 'source': 'DRAM', 'action': 'word', 'spoken': 'D, ram',
+                  'phones': ['D', 'IY', 'R', 'AE', 'M'], 'reason': 'Conventional memory word reading.'}
+    invalid_oled = {'id': 1, 'source': 'OLED', 'action': 'word', 'spoken': 'oh, led',
+                    'phones': ['OW', 'L', 'EH', 'D'], 'reason': 'Conventional display word reading.'}
+    raw = json.dumps({'decisions': [valid_dram, invalid_oled]})
+    model.side_effect = [raw, json.dumps({'decisions': [valid_dram, {
+        'id': 1, 'source': 'OLED', 'action': 'keep', 'spoken': 'OLED',
+        'reason': 'Preserve every source letter in the native word reading.'}]})]
+    policy = pronunciation.policy_contract(policy_version=12)
+    result = await pronunciation.prepare_pronunciation(text, tmp_path, policy=policy, emit=lambda _: None)
+    assert model.await_count == pronunciation.MAX_PLAN_ATTEMPTS
+    feedback = json.loads(model.await_args_list[1].args[1])
+    assert feedback['previous_response'] == raw
+    assert "Candidate 1 (OLED), word hint 'oh, led'" in feedback['validation_error']
+    assert 'preserve every source letter' in feedback['validation_error']
+    assert result['synthesis_text'] == 'The D, ram and OLED chips are ready.'
+    assert result['identity']['policy'] == policy
+    assert not list(tmp_path.glob('*.request-*.json'))
