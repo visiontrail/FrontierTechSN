@@ -18,10 +18,13 @@ from backend.pipeline.tts_phone_references import (
     WORD_REFERENCES, entries as supplemental_word_references,
     policy_contract as reference_contract,
 )
+from scripts.chatterbox_body_phone_references import (
+    entries as body_word_references, policy_contract as body_reference_contract,
+)
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 10
+EVIDENCE_VERSION = 11
 LETTER_PHONES = {
     'A': [('EY',)], 'B': [('B', 'IY')], 'C': [('S', 'IY')],
     'D': [('D', 'IY')], 'E': [('IY',)], 'F': [('EH', 'F')],
@@ -110,6 +113,9 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
             reference = supplemental_word_references().get(word.casefold())
             if reference:
                 variants = [*variants, *reference['variants']]
+            body_reference = body_word_references().get(word.casefold())
+            if body_reference:
+                variants = [*variants, *body_reference['variants']]
             if not variants:
                 raise ValueError(f'No source pronunciation reference for {word}')
             references = {tuple(re.sub(r'\d', '', p) for p in variant) for variant in variants}
@@ -216,6 +222,12 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     if cited:
         report['cited_word_references'] = cited
         report['word_reference_sha256'] = reference_contract()['reference_sha256']
+    body_cited = {word.casefold(): body_word_references()[word.casefold()]
+                  for word in re.findall(r'[A-Za-z]+', unedited)
+                  if word.casefold() in body_word_references()}
+    if body_cited:
+        report['cited_body_word_references'] = body_cited
+        report['body_reference_sha256'] = body_reference_contract()['reference_sha256']
     try:
         observed = observed_phones(phones)
         parts = reference_parts(text, edits)

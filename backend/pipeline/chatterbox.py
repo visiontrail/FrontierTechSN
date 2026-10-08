@@ -872,6 +872,8 @@ async def _generate_chatterbox(
                     str(checkpoint.get('rejected') or '').startswith((
                         'Independent vocabulary audit rejected speech:',
                         'Chatterbox independent part audit:',
+                        'Required complete-source phone sequence differs from the source',
+                        'Word-hint audio differs from its complete source phone sequence',
                     ))
                     and checkpoint.get('job_id')
                     and checkpoint.get('rejection_acoustic_reference_version', 0) < acoustic_reference_version

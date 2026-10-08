@@ -60,6 +60,28 @@ def test_cited_esim_word_does_not_omit_its_prefix_vowel():
     assert not evidence.compare_source(source, [], PREFIX + 'iː ɛ s aɪ ɛ m' + ENDING)['passed']
 
 
+def test_cited_presents_verb_variant_preserves_every_degree_letter_and_source_word():
+    source = 'The PhD student presents the research.'
+    prepared = edits(source, 'PhD', 'pee aitch dee')
+    phones = 'ð ə p iː eɪ tʃ d iː s t uː d ə n t p ɹ ᵻ z ɛ n t s ð ə ɹ iː s ɜː tʃ'
+    report = evidence.compare_source(source, prepared, phones)
+    assert report['passed'] and report['supported']
+    assert report['cited_body_word_references']['presents']['source_url'] == (
+        'https://www.oxfordlearnersdictionaries.com/definition/english/present_3')
+    for changed in [phones.replace('p iː eɪ tʃ', 'eɪ tʃ'),
+                    phones.replace('ð ə p iː', 'ɐ p iː'),
+                    phones.replace('ɹ iː s ɜː tʃ', 'ɹ iː s ɜː'), phones + ' d iː']:
+        assert not evidence.compare_source(source, prepared, changed)['passed']
+
+
+def test_body_reference_does_not_change_frozen_word_hint_policy13_bytes():
+    from backend.pipeline import tts_pronunciation
+    contract = tts_pronunciation.policy_contract(policy_version=13)
+    assert contract['word_hint_contract']['supplemental_word_references']['reference_sha256'] == (
+        '64412398b4a22ab8273596108b55d40a50d5675e2537ddb6f78eb619153fdd8b')
+    assert contract['prompt_sha256'] == '83ffb1466fdb9be77e69a2f89952ebf1fc7922deddc43e7caa938e83addf0e85'
+
+
 def edits(source, term, spoken):
     return tts_pronunciation.validate_decisions(source, [
         {'id': 0, 'source': term, 'action': 'spell', 'spoken': spoken,

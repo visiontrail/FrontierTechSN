@@ -1445,13 +1445,18 @@ async def test_independent_audit_rejection_never_replenishes_retry_budget(setup_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('outcome', ['passed', 'still_wrong', 'unavailable'])
+@pytest.mark.parametrize('rejection', [
+    'Independent vocabulary audit rejected speech: unsupported word',
+    'Required complete-source phone sequence differs from the source',
+    'Word-hint audio differs from its complete source phone sequence',
+])
 async def test_acoustic_reference_upgrade_reaudits_independent_rejection_without_new_jobs(
-        setup_client, outcome):
+        setup_client, outcome, rejection):
     from scripts.chatterbox_phoneme_evidence import EVIDENCE_VERSION
     server, script, directory, _verifier, _generate = setup_client
 
     async def reject(*_args):
-        raise tts.TtsIntegrityError('Independent vocabulary audit rejected speech: unsupported word')
+        raise tts.TtsIntegrityError(rejection)
 
     async def generate(auditor):
         return await chatterbox._generate_chatterbox(
