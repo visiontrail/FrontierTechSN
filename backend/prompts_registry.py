@@ -41,6 +41,13 @@ class PromptSpec:
 # (plus its .txt file) is all it takes to expose it in the admin console.
 PROMPT_REGISTRY: list[PromptSpec] = [
     PromptSpec(
+        key="explainer_visual_logic",
+        file="explainer_visual_logic.txt",
+        label="Explainer visual logic",
+        stage="Explainer",
+        description="Shared physical, spatial and narrative coherence rules for storyboards, image generation and pixel review.",
+    ),
+    PromptSpec(
         key="social_copy",
         file="social_copy.txt",
         label="Social upload copy",

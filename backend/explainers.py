@@ -270,14 +270,17 @@ def _word_count(text: str, language: str) -> int:
 async def write_script(project: dict, directory: Path, log) -> list[dict]:
     """Chapter-sized writes avoid truncating long scripts and checkpoint completed chapters."""
     from backend.pipeline.digester import _chat, _resolve_provider
+    from backend.explainer_visual_review import visual_logic_rules
 
     endpoint, model, key = await _resolve_provider(None, None, None)
     language = project["language"]
     words_per_minute = 240 if language == "zh" else 145
     total_words = project["target_minutes"] * words_per_minute
     chapter_count = min(15, max(1, math.ceil(project["target_minutes"] / 3)))
-    cache_key = hashlib.sha256(json.dumps({key: project[key] for key in
-        ("title", "research", "language", "target_minutes", "style")}, sort_keys=True,
+    visual_rules = visual_logic_rules()
+    cache_inputs = {key: project[key] for key in ("title", "research", "language", "target_minutes", "style")}
+    cache_inputs["visual_logic_rules"] = visual_rules
+    cache_key = hashlib.sha256(json.dumps(cache_inputs, sort_keys=True,
         ensure_ascii=False).encode()).hexdigest()[:24]
     directory = directory / "writing" / cache_key
     directory.mkdir(parents=True, exist_ok=True)
@@ -288,6 +291,7 @@ async def write_script(project: dict, directory: Path, log) -> list[dict]:
         "Preserve uncertainty. Return strictly the requested JSON. There is no news format, date "
         "intro, source audit or approval stage. Write speech in " + ("English" if language == "en" else "Mandarin Chinese")
         + ". Tone: " + project["style"]["writing_tone"]
+        + "\nApply these rules when planning every scene's visual description:\n" + visual_rules
     )
     context = json.dumps({"title": project["title"], "research": project["research"],
                           "target_minutes": project["target_minutes"], "target_words_or_characters": total_words}, ensure_ascii=False)

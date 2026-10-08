@@ -38,6 +38,19 @@ class Providers:
         self.image_calls = []
         self.motion_calls = []
         self.motion_failure = False
+        self.review_calls = []
+        self.review_failures = 0
+
+    async def review(self, image, scene, style, directory, log):
+        self.review_calls.append(pipeline._sha(image))
+        passed = len(self.review_calls) > self.review_failures
+        report = {"passed": passed, "image_sha256": pipeline._sha(image),
+                  "checks": [{"criterion": "object_structure", "verdict": "pass" if passed else "fail",
+                              "evidence": "The tool has a disconnected working part",
+                              "repair": "Reconnect the working part" if not passed else ""}]}
+        path = directory / "test-review.json"
+        path.write_text(json.dumps(report))
+        return report, path
 
     async def audio(self, script_path, output_dir, voices, tts_model, log):
         self.audio_calls.append((Path(script_path).read_text(), voices, tts_model))
@@ -80,7 +93,93 @@ def providers(monkeypatch):
     monkeypatch.setattr(pipeline, "generate_tts", fixture.audio)
     monkeypatch.setattr(pipeline, "_generate_still", fixture.image)
     monkeypatch.setattr(pipeline, "_generate_video", fixture.motion)
+    monkeypatch.setattr(pipeline, "review_image", fixture.review)
     return fixture
+
+
+def test_image_logic_repair_retains_candidates_and_reuses_verified_result(tmp_path, providers):
+    async def run():
+        providers.review_failures = 1
+        scene, style = _project()["scenes"][0], _project()["style"]
+        final, record = await pipeline._image(scene, style, tmp_path)
+        assert len(providers.image_calls) == len(providers.review_calls) == 2
+        assert "Reconnect the working part" in providers.image_calls[1]
+        assert len(list(final.parent.glob("attempt-*/image.png"))) == 2
+        assert (tmp_path / record["visual_review_path"]).is_file()
+        assert await pipeline._image(scene, style, tmp_path) == (final, record)
+        assert len(providers.image_calls) == len(providers.review_calls) == 2
+    asyncio.run(run())
+
+
+def test_rejected_illustration_never_reaches_scene_render_and_retries_are_bounded(tmp_path, providers):
+    async def run():
+        providers.review_failures = 100
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="visual logic failed"):
+                await pipeline.render_project(_project(), tmp_path, lambda _: None, lambda _: None)
+        assert len(providers.image_calls) == pipeline.MAX_IMAGE_ATTEMPTS
+        assert len(providers.audio_calls) == 1
+        assert not list(tmp_path.rglob("clip.mp4"))
+        assert json.loads((tmp_path / "manifest.json").read_text())["status"] == "failed"
+    asyncio.run(run())
+
+
+def test_review_outage_preserves_generated_candidate_for_retry(tmp_path, providers, monkeypatch):
+    async def unavailable(*args):
+        raise RuntimeError("Visual logic review unavailable")
+
+    async def run():
+        scene, style = _project()["scenes"][0], _project()["style"]
+        monkeypatch.setattr(pipeline, "review_image", unavailable)
+        with pytest.raises(RuntimeError, match="review unavailable"):
+            await pipeline._image(scene, style, tmp_path)
+        assert len(providers.image_calls) == 1
+        monkeypatch.setattr(pipeline, "review_image", providers.review)
+        final, _ = await pipeline._image(scene, style, tmp_path)
+        assert final.is_file() and len(providers.image_calls) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reject_old", [False, True])
+def test_legacy_artwork_requires_review_before_reuse(tmp_path, providers, reject_old):
+    async def run():
+        scene, style = _project()["scenes"][0], _project()["style"]
+        prompt = pipeline._legacy_image_prompt(scene, style)
+        key = pipeline._hash({"version": pipeline.CONTRACT_VERSION, "prompt": prompt})
+        stage = pipeline._stage(tmp_path, scene["id"], "image", key)
+        old, _ = await providers.image(prompt, stage)
+        old.rename(stage / "image.png")
+        old = stage / "image.png"
+        before = pipeline._sha(old)
+        pipeline._write(stage / "prompt.txt", prompt, tmp_path)
+        pipeline._complete(stage, key, [old, stage / "prompt.txt"], tmp_path, conversation_url="old-url")
+        providers.image_calls.clear()
+        providers.review_failures = int(reject_old)
+        final, record = await pipeline._image(scene, style, tmp_path)
+        assert pipeline._sha(old) == before
+        assert len(providers.image_calls) == int(reject_old)
+        assert record["provenance"]["kind"] == ("generated" if reject_old else "reviewed_legacy")
+        assert final.is_file()
+    asyncio.run(run())
+
+
+def test_submitted_legacy_turn_is_recovered_before_new_policy_review(tmp_path, providers, monkeypatch):
+    scene, style = _project()["scenes"][0], _project()["style"]
+    prompt = pipeline._legacy_image_prompt(scene, style)
+    key = pipeline._hash({"version": pipeline.CONTRACT_VERSION, "prompt": prompt})
+    stage = pipeline._stage(tmp_path, scene["id"], "image", key)
+    pipeline._write(stage / "prompt.txt", prompt, tmp_path)
+    (stage / "chatgpt-image-request.json").write_text('{"state":"submitted"}')
+
+    async def recover(request, target):
+        assert request == prompt and target == stage
+        assert (target / "chatgpt-image-request.json").is_file()
+        return await providers.image(request, target)
+
+    monkeypatch.setattr(pipeline, "_generate_still", recover)
+    final, record = asyncio.run(pipeline._image(scene, style, tmp_path))
+    assert final.is_file() and record["provenance"]["kind"] == "reviewed_legacy"
+    assert len(providers.image_calls) == len(providers.review_calls) == 1
 
 
 @pytest.mark.parametrize("mode", ["none", "subtle"])

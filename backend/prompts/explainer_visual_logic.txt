@@ -1,0 +1,17 @@
+Every frame must be spatially, physically and causally coherent, including stylized illustrations.
+
+Before drawing, choose one camera viewpoint and work out the layout, each object's orientation, its visible and hidden surfaces, and how the characters interact with it. Express important spatial relationships in the visual description. Simplify the composition if the requested details cannot all be seen from one plausible viewpoint.
+
+Keep perspective, depth, occlusion and relative scale consistent. Opaque surfaces hide what is behind them. Details belong on the functional surface of the correct object; do not duplicate, invert or move them onto another surface merely to make them visible to the audience.
+
+Check the camera's view separately from each character's view. A surface visible to the audience is not automatically visible or usable by the character. Place the character and camera on physically compatible sides of every object involved in an interaction. Reconstruct near/far sides from the object's connected parts and occlusion; if the character would actually face the hidden or nonfunctional side, change the camera or object orientation. Do not show mutually incompatible viewpoints in a single literal object.
+
+Preserve each object's recognizable construction, connected parts, material properties and intended operation. Bodies and limbs must connect coherently. Characters must be able to see, reach, hold and operate the depicted objects from their positions. Show credible contact, support, grip, balance and force for the action. Do not merge unrelated bodies or objects, add unexplained parts, or depict impossible penetration or unsupported physical effects.
+
+Depict the correct agent, action, object and outcome for the narration. A result must follow from the shown interaction; a decorative resemblance is not enough. Keep quantities and relationships meaningful. Do not invent scientific mechanisms, data or literal physical claims to illustrate an abstract idea.
+
+Hand-drawn proportions, sparse line anatomy and simplified shading are intentional style choices. Explicit metaphors, diagrams, thought bubbles and symbolic marks may be nonliteral when clearly recognizable as such; their internal relationships must still make sense. Never use stylization as an excuse for an impossible ordinary object or action. If literal realism conflicts with legibility, choose a simpler physically possible view or a clearly separate conceptual diagram.
+
+Use simple unlabeled shapes, grids and pictograms where the scene needs information-bearing objects. Do not invent readable formulas, labels or interface text. Keep any symbolic inset visually distinct from the literal scene. Do not add a prop, diagram or extra character merely because these rules mention it.
+
+Inspect the finished composition for contradictions across viewpoint, object construction, body-object interaction, physical cause and effect, and narrative meaning before returning it. Correct a contradiction by changing the composition, not by hiding it under decorative detail.

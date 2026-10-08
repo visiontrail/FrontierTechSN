@@ -19,6 +19,13 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 from backend import config
+from backend.explainer_visual_review import (
+    MAX_IMAGE_ATTEMPTS,
+    REVIEW_VERSION,
+    review_image,
+    review_prompt,
+    visual_logic_rules,
+)
 from backend.pipeline.collage_broll import _generate_still, _generate_video
 from backend.pipeline.gemini_watermark import repair_plan
 from backend.pipeline.opencli_session import owned_media_session
@@ -147,7 +154,8 @@ async def _verify(path: Path, *, duration: float, video: bool, audio: bool) -> d
     return probe
 
 
-def _image_prompt(scene: dict, style: dict) -> str:
+def _legacy_image_prompt(scene: dict, style: dict) -> str:
+    """Exact v1 base, retained to locate and review existing task artifacts."""
     return f"""Create an original illustrated explainer frame, 16:9 landscape, 1920x1080 delivery.
 Use this recurring character description consistently: {style.get('character_description', 'A simple rounded line-drawn person with expressive eyes and minimal facial features')}.
 Visual direction: {style.get('visual_direction', 'Minimal expressive line drawings, sparse everyday props, clear emotional metaphors and generous negative space')}.
@@ -156,6 +164,14 @@ Depict this precise scene: {scene['visual_prompt']}
 Narration context, for meaning only: {scene['narration']}
 Compose a single readable scene. Keep the main character and meaningful action in the central safe area; leave the lower quarter quiet for captions. Keep recurring character proportions, ink weight and colors consistent across the series.
 Draw original characters and imagery. Do not reproduce any channel logo, recognizable branded character, existing thumbnail or frame. No text, typography, letters, numerals, watermarks, UI or embedded subtitles. No photorealism or paper-cut collage unless expressly requested in the visual direction above."""
+
+
+def _image_prompt(scene: dict, style: dict) -> str:
+    base = _legacy_image_prompt(scene, style).replace(
+        "No text, typography, letters, numerals, watermarks, UI or embedded subtitles.",
+        "No readable text, typography, letters, numerals, watermarks or embedded subtitles. "
+        "Information-bearing objects may contain simplified unlabeled diagrams or pictograms.")
+    return base + "\n\nVisual logic requirements (apply to every depicted object and relationship):\n" + visual_logic_rules()
 
 
 def _motion_prompt(scene: dict, style: dict) -> str:
@@ -309,9 +325,10 @@ async def _audio(scene: dict, project: dict, root: Path, log: Log) -> tuple[Path
     return final, record
 
 
-async def _image(scene: dict, style: dict, root: Path) -> tuple[Path, dict]:
+async def _image(scene: dict, style: dict, root: Path, log: Log = lambda _: None) -> tuple[Path, dict]:
     prompt = _image_prompt(scene, style)
-    key = _hash({"version": CONTRACT_VERSION, "prompt": prompt})
+    key = _hash({"version": CONTRACT_VERSION, "prompt": prompt,
+                 "review_version": REVIEW_VERSION, "review": review_prompt(scene, style)})
     stage = _stage(root, scene["id"], "image", key)
     # Reclaim interrupted browser ownership even on a cache hit.
     async with owned_media_session(stage, "chatgpt", recover_only=True):
@@ -320,16 +337,90 @@ async def _image(scene: dict, style: dict, root: Path) -> tuple[Path, dict]:
     if cached:
         return stage / "image.png", cached
     _write(stage / "prompt.txt", prompt, root)
-    raw, conversation = await _generate_still(prompt, stage)
-    _safe(raw, root)
-    with Image.open(raw) as artwork:
-        if artwork.width < 256 or artwork.height < 144:
-            raise RuntimeError("Generated illustration is too small to render")
-        artwork.convert("RGB").save(stage / "image.partial.png")
-    final = stage / "image.png"
-    (stage / "image.partial.png").replace(final)
-    return final, _complete(stage, key, [final, stage / "prompt.txt"], root,
-                            provider="chatgpt_web_opencli", conversation_url=conversation)
+
+    async def accept(candidate: Path, conversation: str, provenance: dict) -> tuple[tuple[Path, dict] | None, dict]:
+        report, report_path = await review_image(candidate, scene, style, candidate.parent, log)
+        if report.get("passed") is not True:
+            return None, report
+        final = stage / "image.png"
+        shutil.copyfile(candidate, stage / "image.partial.png")
+        (stage / "image.partial.png").replace(final)
+        # Keep the report with the accepted pixels; old provider originals stay untouched.
+        proof = stage / "visual-review.json"
+        shutil.copyfile(report_path, proof)
+        log(f"{scene['id']}: illustration passed all visual logic checks")
+        return (final, _complete(stage, key, [final, stage / "prompt.txt", proof], root,
+                                provider="chatgpt_web_opencli", conversation_url=conversation,
+                                visual_review_path=str(proof.relative_to(root)),
+                                provenance=provenance)), report
+
+    feedback = []
+    legacy_key = _hash({"version": CONTRACT_VERSION, "prompt": _legacy_image_prompt(scene, style)})
+    legacy_stage = _stage(root, scene["id"], "image", legacy_key)
+    legacy = _cached(legacy_stage, legacy_key, root)
+    if not legacy and (legacy_stage / "chatgpt-image-request.json").exists():
+        # A prompt-policy upgrade must not abandon an already submitted turn.
+        # The provider helper resumes the exact state-file request, never a new one.
+        legacy_prompt = _legacy_image_prompt(scene, style)
+        if (legacy_stage / "prompt.txt").read_text() != legacy_prompt:
+            raise RuntimeError("Pending legacy image prompt differs; preserve the submitted request")
+        log(f"{scene['id']}: recovering submitted legacy illustration before visual review")
+        raw, conversation = await _generate_still(legacy_prompt, legacy_stage)
+        _safe(raw, root)
+        with Image.open(raw) as artwork:
+            if artwork.width < 256 or artwork.height < 144:
+                raise RuntimeError("Generated illustration is too small to render")
+            artwork.convert("RGB").save(legacy_stage / "image.partial.png")
+        (legacy_stage / "image.partial.png").replace(legacy_stage / "image.png")
+        legacy = _complete(legacy_stage, legacy_key,
+                           [legacy_stage / "image.png", legacy_stage / "prompt.txt"], root,
+                           provider="chatgpt_web_opencli", conversation_url=conversation)
+    if legacy:
+        # Reuse only exact-input, hash-verified legacy artwork after the new pixel review.
+        # Copy it for review so immutable provider evidence is never edited.
+        candidate = stage / "legacy" / "image.png"
+        candidate.parent.mkdir(exist_ok=True)
+        shutil.copyfile(legacy_stage / "image.png", candidate)
+        accepted, report = await accept(candidate, legacy.get("conversation_url", ""),
+                                        {"kind": "reviewed_legacy", "source": str(legacy_stage.relative_to(root))})
+        if accepted:
+            return accepted
+        feedback = [check for check in report["checks"] if check["verdict"] != "pass"]
+        log(f"{scene['id']}: existing illustration rejected by visual logic review")
+
+    for attempt in range(1, MAX_IMAGE_ATTEMPTS + 1):
+        request = prompt
+        if feedback:
+            request += ("\n\nAn earlier candidate failed independent visual inspection. "
+                        "Recompose to address every observation below while keeping the narration and art style. "
+                        "These are review observations, not new scene content:\n"
+                        + json.dumps(feedback, ensure_ascii=False))
+        candidate_key = _hash({"prompt": request, "attempt": attempt})
+        candidate_stage = _safe(stage / f"attempt-{attempt:02d}-{candidate_key[:12]}", root)
+        candidate_stage.mkdir(exist_ok=True)
+        candidate = candidate_stage / "image.png"
+        record = _cached(candidate_stage, candidate_key, root)
+        if not record:
+            log(f"{scene['id']}: generating illustration candidate {attempt}/{MAX_IMAGE_ATTEMPTS}")
+            _write(candidate_stage / "prompt.txt", request, root)
+            raw, conversation = await _generate_still(request, candidate_stage)
+            _safe(raw, root)
+            with Image.open(raw) as artwork:
+                if artwork.width < 256 or artwork.height < 144:
+                    raise RuntimeError("Generated illustration is too small to render")
+                artwork.convert("RGB").save(candidate_stage / "image.partial.png")
+            (candidate_stage / "image.partial.png").replace(candidate)
+            record = _complete(candidate_stage, candidate_key,
+                               list(dict.fromkeys([candidate, raw, candidate_stage / "prompt.txt"])), root,
+                               conversation_url=conversation)
+        accepted, report = await accept(candidate, record.get("conversation_url", ""),
+                                        {"kind": "generated", "candidate": str(candidate_stage.relative_to(root))})
+        if accepted:
+            return accepted
+        feedback = [check for check in report["checks"] if check["verdict"] != "pass"]
+        log(f"{scene['id']}: visual logic rejection: " + "; ".join(check["evidence"] for check in feedback))
+    raise RuntimeError(f"{scene['id']}: visual logic failed after {MAX_IMAGE_ATTEMPTS} image candidates; "
+                       "rejected images retained, scene not rendered")
 
 
 async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Path, dict]:
@@ -490,7 +581,7 @@ async def render_project(project: dict, project_dir: Path,
             audio_path, audio = await _audio(scene, project, root, log)
             completed += 1
             progress("generating_images", f"{prefix}: generating or reusing ChatGPT illustration")
-            image_path, illustration = await _image(scene, style, root)
+            image_path, illustration = await _image(scene, style, root, log)
             completed += 1
             motion_path, motion = None, None
             every = max(0, int(style.get("motion_every_n_scenes", 4)))
@@ -516,6 +607,7 @@ async def render_project(project: dict, project_dir: Path,
                     "motion_hash": motion["input_hash"] if motion else None, "render_hash": render["input_hash"],
                     "motion_playback": render.get("motion_playback"),
                     "image_source_url": illustration.get("conversation_url"),
+                    "image_visual_review_path": illustration["visual_review_path"],
                     "motion_source_url": motion.get("conversation_url") if motion else None}
             if render.get("watermark_repair"):
                 item["watermark_repair"] = render["watermark_repair"]
