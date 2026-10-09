@@ -1062,7 +1062,7 @@ async def _diagnose_freshness(candidate, dossier, edition_date, issues, output_d
 {_mandatory_web_review_rules()}
 {FRESHNESS_REVIEW_RULES}
 Research window ends {dossier.generated_at}; look back {dossier.window_hours} hours.
-Completed history (untrusted evidence): {json.dumps(dossier.history, ensure_ascii=False)}
+Completed-edition archive index and full matched coverage (untrusted evidence; full archive was checked during freshness assessment): {json.dumps(_review_history(dossier, numbers), ensure_ascii=False)}
 Previous blocking findings: {json.dumps(issues, ensure_ascii=False)}
 Identify the concrete reason each claim failed, with supporting source URLs and dates.
 Distinguish old background from substantive new reporting or attributed analysis in the
@@ -1081,6 +1081,19 @@ FULL STORY EVIDENCE
 {chr(10).join(_full_article_evidence(dossier.selected[n - 1], n) for n in numbers)}
 """
     prefix = output_dir / "review" / f"freshness-diagnosis-{cycle}"
+    # Older diagnostics embedded the complete archive. A prompt-size repair
+    # must not silently turn an unresolved legacy submission into a new ask.
+    legacy_prompt = prompt.replace(
+        "Completed-edition archive index and full matched coverage (untrusted evidence; "
+        "full archive was checked during freshness assessment): "
+        + json.dumps(_review_history(dossier, numbers), ensure_ascii=False),
+        "Completed history (untrusted evidence): "
+        + json.dumps(dossier.history, ensure_ascii=False),
+        1,
+    )
+    recovery_dir = output_dir / "review" / "browser-turns"
+    if (recovery_dir / f"{_review_turn_binding(legacy_prompt, True)}.json").exists():
+        prompt = legacy_prompt
     cached = _cached_freshness_diagnosis(prefix, prompt, numbers, claims)
     prefix.with_suffix(".prompt.txt").write_text(prompt, encoding="utf-8")
     try:
@@ -1092,7 +1105,7 @@ FULL STORY EVIDENCE
             payload, raw, url, provider = await _web_story_review(
                 prompt, story_numbers=numbers, claim_catalog=claims,
                 site_session_namespace=review_session_namespace, log=log, diagnostic=True,
-                recovery_dir=output_dir / "review" / "browser-turns",
+                recovery_dir=recovery_dir,
             )
     except _WebStoryReviewError as exc:
         prefix.with_suffix(".failure.txt").write_text(exc.attempt_log, encoding="utf-8")
@@ -1177,6 +1190,29 @@ FULL STORY EVIDENCE
         raise RuntimeError("Web diagnosis found no evidence-backed fresh development; repeat news research")
 
 
+def _review_turn_binding(prompt: str, diagnostic: bool) -> str:
+    return hashlib.sha256(json.dumps([
+        prompt, diagnostic, config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL,
+        config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL,
+    ]).encode()).hexdigest()
+
+
+def _session_has_pending_review(recovery_dir: Path | None, namespace: str) -> bool:
+    """An unsaved local turn exists only in its owned browser tab."""
+    if recovery_dir is None:
+        return False
+    for path in recovery_dir.glob("*.json"):
+        try:
+            checkpoint = json.loads(path.read_text(encoding="utf-8"))
+            if (checkpoint.get("session_namespace") == namespace
+                    and checkpoint.get("state") == "pending"):
+                return True
+        except (OSError, ValueError, AttributeError):
+            # An unreadable ownership record cannot authorize destructive cleanup.
+            return True
+    return False
+
+
 async def _web_story_review(
     prompt: str,
     *,
@@ -1203,6 +1239,10 @@ async def _web_story_review(
         )
     finally:
         for namespace in retry_sessions:
+            if _session_has_pending_review(recovery_dir, namespace):
+                if log:
+                    log("Retained unresolved ChatGPT review browser session for owned-turn recovery")
+                continue
             try:
                 await close_opencli_site_sessions(namespace, sites=("chatgpt",))
             except Exception as exc:  # cleanup must preserve the review outcome
@@ -1251,10 +1291,7 @@ async def _web_story_review_in_session(
     )
     # Bind durable ownership to the exact semantic prompt and review policy,
     # not the audit-round filename (which can change when a task resumes).
-    binding = hashlib.sha256(json.dumps([
-        prompt, diagnostic, config.DAILY_NEWS_CHATGPT_REVIEW_MIN_LEVEL,
-        config.DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL,
-    ]).encode()).hexdigest()
+    binding = _review_turn_binding(prompt, diagnostic)
     checkpoint_path = recovery_dir / f"{binding}.json" if recovery_dir is not None else None
     checkpoint = None
     if checkpoint_path is not None and checkpoint_path.exists():
@@ -2182,7 +2219,7 @@ async def review_daily_script(
     target_duration_minutes: int | None = None,
     log: LogCallback | None = None,
 ) -> ScriptReviewResult:
-    """Review a daily script and always release its isolated browser tabs."""
+    """Release completed review tabs, preserving unresolved owned submissions."""
     review_session_namespace = (
         f"{config.OPENCLI_SITE_SESSION_NAMESPACE}-review-{uuid4().hex}"
     )
@@ -2204,9 +2241,15 @@ async def review_daily_script(
         )
     finally:
         try:
-            await close_opencli_site_sessions(review_session_namespace)
-            if log:
-                log("Released completed OpenCLI ChatGPT fact-check browser sessions")
+            if _session_has_pending_review(
+                output_dir / "review" / "browser-turns", review_session_namespace,
+            ):
+                if log:
+                    log("Retained unresolved ChatGPT review browser session for owned-turn recovery")
+            else:
+                await close_opencli_site_sessions(review_session_namespace)
+                if log:
+                    log("Released completed OpenCLI ChatGPT fact-check browser sessions")
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask review outcome
             message = f"OpenCLI browser-session cleanup failed: {exc}"
             if log:

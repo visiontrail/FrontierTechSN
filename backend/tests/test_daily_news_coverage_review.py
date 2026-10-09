@@ -175,6 +175,72 @@ def test_saved_diagnosis_requires_exact_prompt_and_valid_owned_response(coverage
     assert review._cached_freshness_diagnosis(prefix, "exact prompt", [7], claims) is None
 
 
+def test_diagnosis_compacts_verified_history_but_recovers_legacy_submission(coverage_case, tmp_path):
+    from backend.daily_news.freshness import fingerprint
+
+    script, dossier, claims = coverage_case
+    dossier.history = [
+        {"key": "matching", "edition_date": "2026-09-20", "title": "Same event",
+         "url": "https://example.com/match", "script": "Full matching spoken facts"},
+        {"key": "other", "edition_date": "2026-09-20", "title": "Other event",
+         "url": "https://example.com/other", "script": "Unrelated long archive " * 1000},
+    ]
+    dossier.freshness_policy_version = 1
+    dossier.selected[6].freshness.update(
+        policy_version=1, history_sha256=fingerprint(dossier.history),
+        matched_history_keys=["matching"],
+    )
+    issue = review._batch_payload(
+        "W7AF@7.0,7.2", [7], claim_catalog=claims, require_web=True,
+    )["issues"][0]
+    directory = tmp_path / "review"
+    directory.mkdir()
+    seen = []
+
+    async def stop_before_browser(prompt, **kwargs):
+        seen.append(prompt)
+        raise RuntimeError("capture only")
+
+    def run():
+        with (
+            patch.object(review, "_web_story_review", AsyncMock(side_effect=stop_before_browser)),
+            pytest.raises(RuntimeError, match="capture only"),
+        ):
+            asyncio.run(review._diagnose_freshness(
+                script, dossier, date(2026, 9, 21), [issue], tmp_path, cycle=1,
+                review_session_namespace="test", ai_endpoint=None, ai_model=None,
+                provider_id=None, log=None,
+            ))
+
+    run()
+    compact = seen[-1]
+    assert "Full matching spoken facts" in compact
+    assert "Other event" in compact and "https://example.com/other" in compact
+    assert "Unrelated long archive" not in compact
+    assert "MANDATORY LIVE-WEB VERIFICATION" in compact
+    assert dossier.selected[6].evidence_text in compact
+    legacy = compact.replace(
+        "Completed-edition archive index and full matched coverage (untrusted evidence; "
+        "full archive was checked during freshness assessment): "
+        + json.dumps(review._review_history(dossier, [7]), ensure_ascii=False),
+        "Completed history (untrusted evidence): " + json.dumps(dossier.history, ensure_ascii=False),
+        1,
+    )
+    checkpoints = directory / "browser-turns"
+    checkpoints.mkdir()
+    checkpoint = checkpoints / f"{review._review_turn_binding(legacy, True)}.json"
+    saved = json.dumps({"state": "pending", "request_id": "a" * 32})
+    checkpoint.write_text(saved)
+    run()
+    assert seen[-1] == legacy
+    assert checkpoint.read_text() == saved
+
+    # An unverified archive binding still carries full evidence, never a lossy index.
+    dossier.selected[6].freshness["history_sha256"] = "mismatched"
+    run()
+    assert "Unrelated long archive" in seen[-1]
+
+
 @pytest.mark.parametrize("decision", ["include", "exclude"])
 def test_diagnosis_reassesses_same_captured_evidence_and_invalidates_receipt(coverage_case, tmp_path, decision):
     from backend.daily_news import freshness

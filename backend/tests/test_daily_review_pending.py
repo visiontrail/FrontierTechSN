@@ -105,7 +105,7 @@ def test_restart_recovers_saved_nonce_without_preflight_or_resubmission(tmp_path
 
     with (
         patch.object(review, "run_opencli", AsyncMock(side_effect=resumed)),
-        patch.object(review, "close_opencli_site_sessions", AsyncMock()),
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()) as close,
         patch.object(review, "_target_recovery_poll_delays", return_value=(0, 0)),
         patch.object(review.asyncio, "sleep", AsyncMock()),
     ):
@@ -116,6 +116,10 @@ def test_restart_recovers_saved_nonce_without_preflight_or_resubmission(tmp_path
             with pytest.raises(review._WebStoryReviewError, match="no duplicate prompt"):
                 run_review(tmp_path)
     assert json.loads(path.read_text())["state"] == ("complete" if recovered else "pending")
+    if recovered:
+        close.assert_awaited_once()
+    else:
+        close.assert_not_awaited()
 
     if recovered:
         # A crash between recovery and the caller's response-file write also
@@ -152,3 +156,32 @@ def test_durable_verdict_is_bound_to_exact_prompt_and_policy(tmp_path):
         with patch.object(review.config, "DAILY_NEWS_CHATGPT_REVIEW_MAX_LEVEL", "high"):
             run_review(tmp_path)
     assert len(asks) == 3
+
+
+@pytest.mark.parametrize("state,owner,retained", [
+    ("pending", "same", True),
+    ("complete", "same", False),
+    ("pending", "unrelated", False),
+])
+def test_daily_review_cleanup_preserves_only_its_unresolved_turn(tmp_path, state, owner, retained):
+    from datetime import date
+
+    async def failed_review(*args, review_session_namespace, **kwargs):
+        directory = tmp_path / "review/browser-turns"
+        directory.mkdir(parents=True)
+        (directory / "owned.json").write_text(json.dumps({
+            "session_namespace": review_session_namespace if owner == "same" else "unrelated",
+            "state": state,
+        }))
+        raise RuntimeError("original failure")
+
+    with (
+        patch.object(review, "_review_daily_script", AsyncMock(side_effect=failed_review)),
+        patch.object(review, "close_opencli_site_sessions", AsyncMock()) as close,
+        pytest.raises(RuntimeError, match="original failure"),
+    ):
+        asyncio.run(review.review_daily_script(
+            "draft", object(), date(2026, 10, 9), tmp_path, language="en",
+            closing_remarks="Closing.", ai_endpoint=None, ai_model=None, provider_id=None,
+        ))
+    assert close.await_count == (0 if retained else 1)
