@@ -7,7 +7,9 @@ from backend import config, explainers
 from backend.daily_news.freshness import completion_guard
 from backend.database import (
     compare_and_set_task_status,
+    get_next_priority_morning_task,
     get_next_queued_task,
+    get_unfinished_priority_morning_task,
     get_task,
     update_task,
 )
@@ -140,26 +142,85 @@ def _read_marker_options(marker: Path) -> dict:
     return value
 
 
+async def _run_explainer_with_priority_checks() -> bool:
+    """Keep watching Morning Desk admission while the serial worker awaits a plan."""
+    job = asyncio.create_task(explainers.run_next_queued())
+    try:
+        while not job.done():
+            await asyncio.wait({job}, timeout=1)
+            if job.done():
+                break
+            try:
+                priority = await get_next_priority_morning_task()
+            except Exception:
+                logger.exception("Could not check Morning Desk priority; keeping the Explainer running")
+                continue
+            if priority:
+                await _yield_explainer_to_morning_desk()
+        return await job
+    finally:
+        if not job.done():
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+
+
+async def _yield_explainer_to_morning_desk() -> None:
+    owner = explainers.production_owner()
+    if owner:
+        try:
+            # Drain provider cleanup before starting another production.
+            await explainers.pause_for_morning_desk(owner["id"])
+        except explainers.ConflictError:
+            # A simultaneous user cancellation or completion can release the
+            # claim after lookup. A still-held claim is a genuine conflict.
+            current_owner = explainers.production_owner()
+            if current_owner and current_owner["id"] == owner["id"]:
+                raise
+    # Browser cleanup retains a journal if its first attempt failed. Reclaim
+    # only the paused project's exact owned sessions before admitting news;
+    # a later loop retries a failed cleanup while preserving both productions.
+    from backend.pipeline.opencli_session import owned_media_session
+    for project in explainers.priority_suspensions():
+        artifacts = explainers.project_dir(project["id"]) / "artifacts"
+        for journal in artifacts.rglob("browser-session-*.json"):
+            site = journal.stem.removeprefix("browser-session-")
+            if site in ("chatgpt", "gemini"):
+                async with owned_media_session(journal.parent, site, recover_only=True):
+                    pass
+
+
 async def _worker_loop():
     logger.info("Background worker started")
     while True:
         try:
-            # Recovery owns the original production slot even while failed or
-            # interrupted. Never start another video during a repair gap.
-            if explainers.production_owner():
-                if not await explainers.run_next_queued():
+            task = await get_next_priority_morning_task()
+            if not task:
+                if explainers.priority_suspensions() and await get_unfinished_priority_morning_task():
                     await asyncio.sleep(1)
-                continue
-            # User-planned Explainers precede queued news at an idle boundary.
-            # Await the entire production; never preempt already-running work.
-            if await explainers.run_next_queued():
-                continue
-            task = await get_next_queued_task()
-            # A recovery or topic may arrive during the database await.
-            if explainers.production_owner():
-                continue
-            if await explainers.run_next_queued():
-                continue
+                    continue
+                # This loop cannot run while a news pipeline is active. A
+                # quality retry stays QUEUED and is selected above, so the
+                # Explainer stays paused through all Morning Desk attempts.
+                explainers.resume_after_morning_desk()
+                if explainers.production_owner():
+                    if not await _run_explainer_with_priority_checks():
+                        await asyncio.sleep(1)
+                    continue
+                if await _run_explainer_with_priority_checks():
+                    continue
+                task = await get_next_queued_task()
+                # Admission may arrive during either awaited lookup. Select
+                # Morning Desk again before honoring an Explainer reservation.
+                priority_task = await get_next_priority_morning_task()
+                if priority_task:
+                    task = priority_task
+                else:
+                    if explainers.production_owner():
+                        continue
+                    if await _run_explainer_with_priority_checks():
+                        continue
+            if task and task.source_type == "news_daily" and not task.config.publish_test_mode:
+                await _yield_explainer_to_morning_desk()
             if not task:
                 # Keep the clock-to-execution gap tight for scheduled plans.
                 # Due scheduled tasks are also prioritized by the database.

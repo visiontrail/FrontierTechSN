@@ -17,6 +17,8 @@ def queue_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "_active_log_queues", {})
     monkeypatch.setattr(worker, "compare_and_set_task_status", AsyncMock(return_value=True))
     monkeypatch.setattr(worker, "update_task", AsyncMock())
+    monkeypatch.setattr(worker, "get_next_priority_morning_task", AsyncMock(return_value=None))
+    monkeypatch.setattr(worker, "get_unfinished_priority_morning_task", AsyncMock(return_value=None))
     task = TaskResponse(
         id="morning-desk-queue-test", created_at="2026-09-28T00:00:00Z",
         updated_at="2026-09-28T00:00:00Z", source_type="news_daily", source_url="{}",
@@ -26,6 +28,195 @@ def queue_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "get_task", AsyncMock(return_value=task.model_copy(
         update={"status": TaskStatus.AWAITING_REVIEW})))
     return task
+
+
+def test_priority_morning_preempts_and_resumes_original_before_next_topic(queue_runtime, monkeypatch):
+    async def scenario():
+        first, second = topic("Original"), topic("Next")
+        studio.start(first["id"], "full")
+        studio.start(second["id"], "full")
+        entered, cleaned, news_entered, release_news, resumed = [asyncio.Event() for _ in range(5)]
+        priority_available = False
+        priority_claimed = False
+        order = []
+        attempts = 0
+
+        async def priority():
+            return queue_runtime if priority_available and not priority_claimed else None
+
+        async def claim(*args, **kwargs):
+            nonlocal priority_claimed
+            priority_claimed = True
+            return True
+
+        async def write(project, *args, **kwargs):
+            nonlocal attempts
+            if project["id"] == first["id"]:
+                attempts += 1
+                if attempts == 1:
+                    order.append("explainer:start")
+                    entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        await asyncio.sleep(0)
+                        order.append("explainer:cleanup")
+                        cleaned.set()
+                else:
+                    order.append("explainer:resume")
+                    resumed.set()
+            else:
+                order.append("next:start")
+            return [{"id": "scene-001", "narration": "Recall first.",
+                     "visual_prompt": "A learner closes a book."}]
+
+        async def news(*args, **kwargs):
+            assert cleaned.is_set()
+            assert not studio._jobs
+            assert studio.read_project(first["id"])["cancellation_reason"] == "morning_desk"
+            order.append("news:start")
+            news_entered.set()
+            await release_news.wait()
+            order.append("news:end")
+
+        monkeypatch.setattr(worker, "get_next_priority_morning_task", priority)
+        monkeypatch.setattr(worker, "get_next_queued_task", AsyncMock(return_value=None))
+        monkeypatch.setattr(worker, "compare_and_set_task_status", claim)
+        monkeypatch.setattr(worker, "run_pipeline", news)
+        monkeypatch.setattr(studio, "write_script", write)
+        monkeypatch.setattr("backend.explainer_pipeline.render_project", AsyncMock(return_value={"video_path": "final.mp4"}))
+        job = asyncio.create_task(worker._worker_loop())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            original_production = dict(studio.read_project(first["id"])["production"])
+            priority_available = True
+            await asyncio.wait_for(news_entered.wait(), 3)
+            paused = studio.read_project(first["id"])
+            assert paused["production"] == original_production
+            assert paused["status"] == "interrupted"
+            assert order == ["explainer:start", "explainer:cleanup", "news:start"]
+            release_news.set()
+            await asyncio.wait_for(resumed.wait(), 3)
+            assert order[:5] == ["explainer:start", "explainer:cleanup", "news:start", "news:end", "explainer:resume"]
+        finally:
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_waiting_priority_morning_yields_reserved_explainer(queue_runtime, monkeypatch):
+    async def scenario():
+        project = topic("Reserved recovery")
+        studio.start(project["id"], "full")
+        studio.patch_project(project["id"], {
+            "status": "interrupted", "queue": None,
+            "production": {"operation": "full", "started_at": "2026-10-08T00:00:00Z"},
+            "cancellation_reason": "service_interruption",
+        })
+        admitted = True
+        order = []
+        news_done = asyncio.Event()
+
+        async def priority():
+            return queue_runtime if admitted else None
+
+        async def news(*args, **kwargs):
+            nonlocal admitted
+            order.append("news")
+            assert studio.production_owner() is None
+            assert studio.priority_suspensions()[0]["id"] == project["id"]
+            admitted = False
+            news_done.set()
+
+        async def write(*args, **kwargs):
+            order.append("recovery")
+            return [{"id": "scene-001", "narration": "Recall first.",
+                     "visual_prompt": "A learner closes a book."}]
+
+        monkeypatch.setattr(worker, "get_next_priority_morning_task", priority)
+        monkeypatch.setattr(worker, "get_next_queued_task", AsyncMock(return_value=None))
+        monkeypatch.setattr(worker, "run_pipeline", news)
+        monkeypatch.setattr(studio, "write_script", write)
+        monkeypatch.setattr("backend.explainer_pipeline.render_project", AsyncMock(return_value={"video_path": "final.mp4"}))
+        job = asyncio.create_task(worker._worker_loop())
+        try:
+            await asyncio.wait_for(news_done.wait(), 2)
+            for _ in range(20):
+                if "recovery" in order:
+                    break
+                await asyncio.sleep(.01)
+            assert order[:2] == ["news", "recovery"]
+        finally:
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_priority_poll_failure_does_not_cancel_running_explainer(queue_runtime, monkeypatch):
+    async def scenario():
+        release = asyncio.Event()
+        cancelled = []
+
+        async def run():
+            try:
+                await release.wait()
+                return True
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        async def priority():
+            release.set()
+            raise RuntimeError("Temporary database lookup failure")
+
+        monkeypatch.setattr(studio, "run_next_queued", run)
+        monkeypatch.setattr(worker, "get_next_priority_morning_task", priority)
+        assert await worker._run_explainer_with_priority_checks()
+        assert not cancelled
+
+    asyncio.run(scenario())
+
+
+def test_paused_explainer_waits_for_morning_review_to_finish(queue_runtime, monkeypatch):
+    async def scenario():
+        project = topic("Paused production")
+        studio.start(project["id"], "full")
+        studio.patch_project(project["id"], {
+            "status": "interrupted", "queue": None,
+            "production": {"operation": "full", "started_at": "2026-10-08T00:00:00Z"},
+            "cancellation_reason": "service_interruption",
+        })
+        await studio.pause_for_morning_desk(project["id"])
+        reviewing = True
+        checked, resumed = asyncio.Event(), asyncio.Event()
+
+        async def pending():
+            checked.set()
+            return queue_runtime.model_copy(update={"status": TaskStatus.AWAITING_REVIEW}) if reviewing else None
+
+        async def write(*args, **kwargs):
+            resumed.set()
+            return [{"id": "scene-001", "narration": "Recall first.",
+                     "visual_prompt": "A learner closes a book."}]
+
+        monkeypatch.setattr(worker, "get_unfinished_priority_morning_task", pending)
+        monkeypatch.setattr(worker, "get_next_queued_task", AsyncMock(return_value=None))
+        monkeypatch.setattr(studio, "write_script", write)
+        monkeypatch.setattr("backend.explainer_pipeline.render_project", AsyncMock(return_value={"video_path": "final.mp4"}))
+        job = asyncio.create_task(worker._worker_loop())
+        try:
+            await asyncio.wait_for(checked.wait(), 2)
+            assert studio.read_project(project["id"])["cancellation_reason"] == "morning_desk"
+            assert not resumed.is_set()
+            reviewing = False
+            await asyncio.wait_for(resumed.wait(), 2)
+        finally:
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
 def topic(title):

@@ -13,6 +13,7 @@ from backend.pipeline.multimodal_review import (
     _review_result_payload,
 )
 from backend.pipeline.opencli import run_opencli
+from backend.pipeline.opencli_session import owned_media_session
 
 CHECKS = ("perspective", "object_structure", "body_object_interaction",
           "physical_causality", "narrative_meaning")
@@ -141,17 +142,29 @@ async def review_image(image: Path, scene: dict, style: dict, directory: Path, l
         log(f"{scene['id']}: reviewing actual illustration logic with {provider}")
         result = None
         try:
-            result = await run_opencli(_review_command(provider, prompt, image, timeout), timeout=timeout + 90)
-            payload = await _review_result_payload(
-                result, provider=provider, prompt=prompt, sheet=image, timeout=timeout,
-                phase=phase, batch_index=1, attempt=attempt, log=log)
-            verdict = validate_review(payload, scene["id"])
-            report = {"version": REVIEW_VERSION, "image_sha256": image_sha,
-                      "prompt_sha256": prompt_sha, "provider": provider, "payload": payload, **verdict}
-            temporary = report_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-            temporary.replace(report_path)
-            return report, report_path  # A valid rejection is authoritative; never seek a nicer verdict.
+            # Review tabs need the same durable cleanup as generation tabs when
+            # Morning Desk pauses this production. Isolate each exact review
+            # from the candidate's generation session and from other providers.
+            owner = directory / f"review-session-{key}-{provider}"
+            owner.mkdir(exist_ok=True)
+            async with owned_media_session(owner, provider) as namespace:
+                args = _review_command(provider, prompt, image, timeout)
+                args[args.index("--site-session") + 1] = "persistent"
+                result = await run_opencli(
+                    args, timeout=timeout + 90, site_session_namespace=namespace)
+                payload = await _review_result_payload(
+                    result, provider=provider, prompt=prompt, sheet=image, timeout=timeout,
+                    phase=phase, batch_index=1, attempt=attempt, log=log,
+                    site_session_namespace=namespace)
+                # Save the verdict before cleanup awaits: a pause while closing
+                # the tab must still reuse the completed review on resume.
+                verdict = validate_review(payload, scene["id"])
+                report = {"version": REVIEW_VERSION, "image_sha256": image_sha,
+                          "prompt_sha256": prompt_sha, "provider": provider, "payload": payload, **verdict}
+                temporary = report_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                temporary.replace(report_path)
+                return report, report_path  # A valid rejection is authoritative; never seek a nicer verdict.
         except Exception as exc:
             errors.append(f"{provider}: {exc}")
         finally:

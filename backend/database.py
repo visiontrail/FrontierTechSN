@@ -1019,6 +1019,53 @@ async def reset_orphaned_tasks() -> int:
         await db.close()
 
 
+async def get_next_priority_morning_task() -> TaskResponse | None:
+    """Return the oldest due real Morning Desk for worker preemption.
+
+    Validation runs do not replace the daily edition or interrupt an Explainer.
+    A future scheduled task remains parked until its requested start time.
+    """
+    return await _get_priority_morning_task((TaskStatus.QUEUED,))
+
+
+async def get_unfinished_priority_morning_task() -> TaskResponse | None:
+    """Keep an interrupted Explainer parked while real Morning Desk is unfinished.
+
+    Awaiting review still belongs to the Morning Desk handoff: returning control
+    to the Explainer at that boundary would consume its production reservation
+    before the daily edition has finished.
+    """
+    unfinished = tuple(
+        status for status in TaskStatus
+        if status not in {TaskStatus.COMPLETE, TaskStatus.FAILED}
+    )
+    return await _get_priority_morning_task(unfinished)
+
+
+async def _get_priority_morning_task(
+    statuses: tuple[TaskStatus, ...],
+) -> TaskResponse | None:
+    now = datetime.now(timezone.utc).isoformat()
+    db = await get_db()
+    try:
+        placeholders = ", ".join("?" for _ in statuses)
+        rows = await db.execute_fetchall(
+            f"""SELECT * FROM tasks
+               WHERE status IN ({placeholders}) AND source_type = 'news_daily'
+                 AND origin_type = 'daily_news'
+                 AND COALESCE(json_extract(config_json, '$.publish_test_mode'), 0) = 0
+                 AND CASE WHEN json_valid(source_url)
+                     THEN COALESCE(json_extract(source_url, '$.test_mode'), 0)
+                     ELSE 0 END = 0
+                 AND (scheduled_at IS NULL OR scheduled_at <= ?)
+               ORDER BY created_at ASC, id ASC LIMIT 1""",
+            tuple(status.value for status in statuses) + (now,),
+        )
+        return _row_to_response(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
 async def get_next_queued_task() -> TaskResponse | None:
     """Return the oldest queued task that is due to start.
 

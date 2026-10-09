@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,13 +13,77 @@ from backend.models import (
     DailyAutomationResponse,
     DailyAutomationSettings,
     ScriptFormat,
+    SourceType,
     TaskConfig,
     TaskResponse,
+    TaskStatus,
 )
 from backend.daily_news.scriptwriter import morning_opening
 
 logger = logging.getLogger(__name__)
 _scheduler_task: asyncio.Task | None = None
+# The scheduler, manual button and hourly safety check share one admission
+# boundary. In particular, a schedule tick cannot race an hourly check into
+# creating two copies of the same daily edition.
+_admission_lock = asyncio.Lock()
+
+
+@dataclass(frozen=True)
+class DailyTaskAdmission:
+    task: TaskResponse
+    created: bool
+    reason: str
+
+
+def _daily_payload(task: TaskResponse) -> dict:
+    try:
+        payload = json.loads(task.source_url or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_real_daily_task(task: TaskResponse) -> bool:
+    return (
+        task.source_type == SourceType.NEWS_DAILY
+        and task.origin_type == "daily_news"
+        and not task.config.publish_test_mode
+        and not _daily_payload(task).get("test_mode", False)
+    )
+
+
+async def ensure_daily_task(
+    settings: DailyAutomationSettings,
+    *,
+    edition_date: date,
+    trigger: str,
+) -> DailyTaskAdmission:
+    """Admit one real daily edition, independently of the Explainer worker.
+
+    The task database is authoritative: a lost scheduler receipt must not
+    duplicate an edition, and a stale receipt must not suppress a missing one.
+    A queued or unfinished older edition is kept as the active Morning Desk
+    before creating another. The production worker handles its priority over
+    an Explainer and restores that same Explainer afterward.
+    """
+    async with _admission_lock:
+        tasks = [
+            task for task in await database.list_tasks() if _is_real_daily_task(task)
+        ]
+        edition_id = edition_date.isoformat()
+        for task in tasks:
+            if (
+                task.origin_id == edition_id
+                or _daily_payload(task).get("edition_date") == edition_id
+            ):
+                return DailyTaskAdmission(task, False, "edition_exists")
+        for task in reversed(tasks):
+            if task.status not in {TaskStatus.COMPLETE, TaskStatus.FAILED}:
+                return DailyTaskAdmission(task, False, "morning_in_progress")
+        task = await _create_daily_task(
+            settings, edition_date=edition_date, trigger=trigger
+        )
+        return DailyTaskAdmission(task, True, "created")
 
 
 def _settings_path() -> Path:
@@ -111,6 +176,24 @@ def response() -> DailyAutomationResponse:
 
 
 async def create_daily_task(
+    settings: DailyAutomationSettings,
+    *,
+    edition_date: date,
+    trigger: str,
+    test_mode: bool = False,
+) -> TaskResponse:
+    # Explicit manual/test runs retain their separate-run semantics while
+    # sharing admission with the idempotent scheduled and hourly entry points.
+    async with _admission_lock:
+        return await _create_daily_task(
+            settings,
+            edition_date=edition_date,
+            trigger=trigger,
+            test_mode=test_mode,
+        )
+
+
+async def _create_daily_task(
     settings: DailyAutomationSettings,
     *,
     edition_date: date,
@@ -220,19 +303,20 @@ async def _scheduler_loop() -> None:
             settings = load_settings()
             if settings.enabled:
                 now = datetime.now(timezone.utc)
-                state = _read_json(_state_path())
-                due, edition_date = _is_due(settings, now, state)
-                if due and (settings.catch_up_after_restart or now - datetime.combine(
-                    edition_date,
-                    time(*(int(part) for part in settings.generation_time.split(":"))),
-                    ZoneInfo(settings.timezone),
-                ).astimezone(timezone.utc) < timedelta(hours=2)):
-                    task = await create_daily_task(
+                # Due schedules always enter priority admission, even after a
+                # long Explainer or restart. The database, rather than the
+                # scheduler's last-run receipt, prevents duplicate editions.
+                due, edition_date = _is_due(settings, now, {})
+                if due:
+                    admission = await ensure_daily_task(
                         settings,
                         edition_date=edition_date,
                         trigger="schedule",
                     )
-                    logger.info("Daily scheduler queued task %s", task.id)
+                    if admission.created:
+                        logger.info(
+                            "Daily scheduler queued priority task %s", admission.task.id
+                        )
             await asyncio.sleep(20)
         except asyncio.CancelledError:
             raise

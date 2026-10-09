@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 
 from backend.daily_news.scheduler import (
     create_daily_task,
+    ensure_daily_task,
     load_settings,
     response,
     save_settings,
@@ -120,3 +121,25 @@ async def run_daily_now(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/ensure-today")
+async def ensure_daily_today():
+    """Hourly safety entry point; scheduling being disabled does not block it."""
+    settings = load_settings()
+    try:
+        edition_date = datetime.now(ZoneInfo(settings.timezone)).date()
+        admission = await ensure_daily_task(
+            settings,
+            edition_date=edition_date,
+            trigger="hourly_check",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "task": admission.task,
+        "created": admission.created,
+        "reason": admission.reason,
+        "edition_date": edition_date.isoformat(),
+        "trigger": "hourly_check",
+    }

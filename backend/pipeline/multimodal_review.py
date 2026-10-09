@@ -367,6 +367,7 @@ def _response_payload(stdout: str) -> dict:
 async def _review_result_payload(
     result, *, provider: str, prompt: str, sheet: Path, timeout: int,
     phase: str, batch_index: int, attempt: int, log: LogCallback | None,
+    site_session_namespace: str | None = None,
 ) -> dict:
     """Read an unfinished ChatGPT answer to completion in its original conversation."""
     try:
@@ -388,9 +389,11 @@ async def _review_result_payload(
             detail = await run_opencli([
                 "chatgpt", "detail", conversation_id, "--wait", "true",
                 "--timeout", str(timeout), "--stable", "12", "--refresh", "true",
-                "--window", "foreground", "--site-session", "ephemeral",
+                "--window", "foreground", "--site-session",
+                "persistent" if site_session_namespace else "ephemeral",
                 "--keep-tab", "false", "-f", "json",
-            ], timeout=timeout + 90)
+            ], timeout=timeout + 90, **(
+                {"site_session_namespace": site_session_namespace} if site_session_namespace else {}))
             rows = json.loads(detail.stdout)
             if (not isinstance(rows, list) or len(rows) != 2
                     or not all(isinstance(row, dict) for row in rows)

@@ -166,7 +166,7 @@ def create_project(data: ProjectInput) -> dict:
                "status": "script_ready" if data.scenes else "draft", "error": None,
                "progress": {"completed": 0, "total": 0, "message": ""},
                "logs": [], "artifacts": {}, "queue": None, "production": None,
-               "cancellation_reason": None}
+               "cancellation_reason": None, "priority_pause": None}
     with _lock:
         _write(project_dir(project_id) / "project.json", project)
     return project
@@ -177,6 +177,8 @@ def update_project(project_id: str, data: ProjectUpdate) -> dict:
         project = read_project(project_id)
         if project["status"] == "queued":
             raise ConflictError("This plan is queued. Remove it from the queue before editing.")
+        if project.get("priority_pause"):
+            raise ConflictError("This production is paused for Morning Desk. Cancel it before editing.")
         if project["status"] in ACTIVE:
             raise ConflictError("Generation is running. Cancel or wait before editing.")
         if project["revision"] != data.revision:
@@ -423,11 +425,13 @@ def production_owner(projects: list[dict] | None = None) -> dict | None:
     """A failed/paused production keeps its slot until completion or explicit release.
 
     Read the claim from disk, not _jobs: it must survive process shutdown and
-    operator repairs. Legacy cancelled projects are never implicitly adopted.
+    operator repairs. A temporary Morning Desk pause retains the claim on disk
+    while yielding its worker slot. Legacy cancelled projects are never adopted.
     """
     if projects is None:
         projects = list_projects()
-    owners = [project for project in projects if project.get("production")]
+    owners = [project for project in projects if project.get("production")
+              and not (project.get("priority_pause") and project.get("cancellation_reason") == "morning_desk")]
     return min(owners, key=lambda p: (p["production"]["started_at"], p["id"]), default=None)
 
 
@@ -435,8 +439,17 @@ def _record_interruption(project_id: str) -> None:
     with _lock:
         project = read_project(project_id)
         if project.get("cancellation_reason") == "user":
-            patch_project(project_id, {"status": "cancelled", "production": None,
+            patch_project(project_id, {"status": "cancelled", "production": None, "priority_pause": None,
                           "error": "Generation cancelled by user; completed artifacts are retained."})
+        elif project.get("priority_pause") and project.get("cancellation_reason") == "morning_desk":
+            progress = dict(project.get("progress") or {})
+            progress["message"] = "Paused for Morning Desk; completed work is retained"
+            recovery = ("The original production will resume after Morning Desk finishes."
+                        if project["priority_pause"].get("auto_resume")
+                        else "Its existing manual recovery policy is retained.")
+            patch_project(project_id, {"status": "interrupted", "queue": None,
+                          "error": "Paused for Morning Desk. " + recovery,
+                          "progress": progress})
         else:
             # Old running projects have no recorded operation; require the
             # operator to select it on resume rather than guessing script/full.
@@ -469,6 +482,8 @@ def start(project_id: str, operation: Operation) -> dict:
             raise ValueError("Unknown generation operation")
         if project_id in _jobs or project["status"] in ACTIVE | {"queued"}:
             raise ConflictError("Generation is already running or queued")
+        if project.get("priority_pause"):
+            raise ConflictError("This production is waiting for Morning Desk to finish")
         ProjectInput.model_validate({key: project[key] for key in ProjectInput.model_fields})
         needs_script = operation == "script" or (operation == "full" and not project["scenes"])
         if needs_script and len(project["research"].strip()) < 40:
@@ -513,6 +528,8 @@ async def run_next_queued() -> bool:
         production = dict(project.get("production") or {"started_at": now()})
         if not production.get("operation"):
             production["operation"] = operation
+        production.setdefault("enqueued_at", project["queue"]["enqueued_at"])
+        production.setdefault("sequence", project["queue"].get("sequence", 0))
         patch_project(project_id, {"status": "writing_script" if needs_script else "generating_audio",
                       "queue": None, "error": None, "artifacts": {}, "production": production,
                       "progress": {"completed": 0, "total": len(project["scenes"]), "message": "Starting " + operation}})
@@ -545,9 +562,14 @@ async def queue_state() -> dict:
                        for task in await list_tasks() if task.status in NEWS_ACTIVE), None)
     queued = _queued_projects(projects)
     owner = production_owner(projects)
+    suspended = priority_suspensions(projects)
     positions = queue_positions(queued)
     items = [public_project(project, positions) for project in queued]
-    if active and active["kind"] == "morning_desk" and owner:
+    if suspended:
+        message = ("Explainer paused for Morning Desk. Its original production resumes when Morning Desk finishes."
+                   if any(project["priority_pause"].get("auto_resume") for project in suspended)
+                   else "Explainer paused for Morning Desk. Completed work is retained; recovery remains manual.")
+    elif active and active["kind"] == "morning_desk" and owner:
         message = "Waiting for the running Morning Desk to finish. The reserved Explainer resumes next."
     elif active and active["kind"] == "morning_desk":
         message = "Waiting for Morning Desk to finish. Planned videos run one at a time."
@@ -559,8 +581,10 @@ async def queue_state() -> dict:
         message = "Waiting for the shared worker. Queued Explainers run before waiting Morning Desk tasks."
     else:
         message = "Add topic plans to generate videos one at a time."
-    reservation = ({"kind": "explainer", "id": owner["id"], "title": owner["title"],
-                    "status": owner["status"], **owner["production"]} if owner else None)
+    reservation_project = owner or next(iter(suspended), None)
+    reservation = ({"kind": "explainer", "id": reservation_project["id"], "title": reservation_project["title"],
+                    "status": reservation_project["status"], **reservation_project["production"]}
+                   if reservation_project else None)
     return {"active": active, "reservation": reservation, "items": items, "message": message}
 
 
@@ -572,7 +596,7 @@ def remove_from_queue(project_id: str) -> dict:
             raise ConflictError("This plan is no longer waiting in the queue. Reload to see its current status.")
         previous = (project.get("queue") or {}).get("previous") or {}
         return patch_project(project_id, {"status": previous.get("status") or ("script_ready" if project["scenes"] else "draft"),
-                     "error": previous.get("error"), "queue": None, "production": None,
+                     "error": previous.get("error"), "queue": None, "production": None, "priority_pause": None,
                      "cancellation_reason": "user",
                      "progress": previous.get("progress") or {"completed": 0, "total": 0, "message": ""}})
 
@@ -583,11 +607,12 @@ async def cancel(project_id: str) -> dict:
         if project["status"] == "queued":
             return remove_from_queue(project_id)
         if project_id in _jobs or project.get("production") or project["status"] in ACTIVE:
-            patch_project(project_id, {"cancellation_reason": "user", "production": None,
+            patch_project(project_id, {"cancellation_reason": "user", "production": None, "priority_pause": None,
                           "status": "cancelled", "error": "Generation cancelled by user; completed artifacts are retained."})
     task = _jobs.get(project_id)
     if task:
-        task.cancel()
+        if not task.cancelling():
+            task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         # Cancellation before the coroutine's first instruction still needs persistence.
         _jobs.pop(project_id, None)
@@ -602,10 +627,18 @@ async def pause(project_id: str) -> dict:
         project = read_project(project_id)
         if project["status"] not in ACTIVE and not project.get("production"):
             raise ConflictError("Only a started production can be paused for repair")
-        patch_project(project_id, {"cancellation_reason": "maintenance", "queue": None})
+        if project.get("priority_pause"):
+            priority_pause = dict(project["priority_pause"])
+            priority_pause["auto_resume"] = False
+            priority_pause["previous"] = {**priority_pause["previous"], "status": "interrupted",
+                                          "cancellation_reason": "maintenance"}
+            patch_project(project_id, {"priority_pause": priority_pause})
+        else:
+            patch_project(project_id, {"cancellation_reason": "maintenance", "queue": None})
         task = _jobs.get(project_id)
         if task:
-            task.cancel()
+            if not task.cancelling():
+                task.cancel()
         else:
             _record_interruption(project_id)
     if task:
@@ -613,6 +646,88 @@ async def pause(project_id: str) -> dict:
         if read_project(project_id)["status"] in ACTIVE:
             _record_interruption(project_id)
     return read_project(project_id)
+
+
+def priority_suspensions(projects: list[dict] | None = None) -> list[dict]:
+    """Read temporary Morning Desk suspensions from disk across service restarts."""
+    if projects is None:
+        projects = list_projects()
+    return sorted((project for project in projects if project.get("production")
+                   and project.get("priority_pause") and project.get("cancellation_reason") == "morning_desk"),
+                  key=lambda project: (project["production"]["started_at"], project["id"]))
+
+
+async def pause_for_morning_desk(project_id: str) -> dict:
+    """Yield the production slot only after the original job finishes cleanup."""
+    with _lock:
+        project = read_project(project_id)
+        task = _jobs.get(project_id)
+        if not project.get("priority_pause"):
+            if project.get("cancellation_reason") == "user" or (
+                    project["status"] not in ACTIVE and not project.get("production")):
+                raise ConflictError("Only a running or reserved production can yield to Morning Desk")
+            production = dict(project.get("production") or {
+                "operation": (project.get("queue") or {}).get("operation"),
+                "started_at": project["updated_at"],
+            })
+            previous = {key: project.get(key) for key in ("status", "error", "progress", "queue", "cancellation_reason")}
+            operation = production.get("operation") or (project.get("queue") or {}).get("operation")
+            priority_pause = {
+                "paused_at": now(), "previous": previous, "operation": operation,
+                "auto_resume": operation in {"script", "render", "full"}
+                    and project["status"] in ACTIVE | {"queued", "interrupted"}
+                    and project.get("cancellation_reason") != "maintenance",
+            }
+            patch_project(project_id, {"priority_pause": priority_pause, "production": production,
+                          "cancellation_reason": "morning_desk", "queue": None})
+        if task and not task.done():
+            # Concurrent priority checks must not cancel cleanup a second time.
+            if not task.cancelling():
+                task.cancel()
+        else:
+            _record_interruption(project_id)
+    if task:
+        await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+        _jobs.pop(project_id, None)
+        if read_project(project_id)["status"] in ACTIVE:
+            _record_interruption(project_id)
+    return read_project(project_id)
+
+
+def resume_after_morning_desk() -> list[str]:
+    """Restore original plans after the caller confirms priority news is finished."""
+    resumed = []
+    with _lock:
+        for project in priority_suspensions():
+            project_id = project["id"]
+            if project_id in _jobs:
+                continue
+            suspension = project["priority_pause"]
+            previous = suspension["previous"]
+            operation = suspension.get("operation")
+            if suspension.get("auto_resume") and operation in {"script", "render", "full"}:
+                production = project["production"]
+                queue = previous.get("queue") or {
+                    "operation": operation,
+                    "enqueued_at": production.get("enqueued_at") or production["started_at"],
+                    "sequence": production.get("sequence", 0),
+                    "previous": {"status": "interrupted", "error": previous.get("error"),
+                                 "progress": project.get("progress")},
+                }
+                progress = dict(project.get("progress") or {})
+                progress["message"] = "Morning Desk finished; waiting to resume the original production"
+                patch_project(project_id, {"status": "queued", "queue": queue, "error": None,
+                              "cancellation_reason": None, "priority_pause": None, "progress": progress})
+                resumed.append(project_id)
+            else:
+                # Maintenance and failed productions keep their manual recovery policy.
+                restored = dict(previous)
+                if restored["status"] in ACTIVE:
+                    reason = "maintenance" if restored.get("cancellation_reason") == "maintenance" else "service_interruption"
+                    restored.update(status="interrupted", cancellation_reason=reason, queue=None,
+                                    error="Generation interrupted; select the original operation to resume.")
+                patch_project(project_id, {**restored, "priority_pause": None})
+    return resumed
 
 
 def recover_interrupted() -> None:
