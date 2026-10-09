@@ -88,8 +88,11 @@ def test_review_cache_is_bound_to_pixels_scene_and_rules(tmp_path, monkeypatch):
         assert len(calls) == 4
         await review.review_image(image, scene, {"character_description": "Thin line limbs"}, tmp_path, lambda _: None)
         assert len(calls) == 5
+        scene["on_screen_text"] = "11:47 PM"
+        await review.review_image(image, scene, {"character_description": "Thin line limbs"}, tmp_path, lambda _: None)
+        assert len(calls) == 6
         # Review revisions must retain every original provider response.
-        assert len(list(tmp_path.glob("response-explainer_logic-*-gemini.json"))) == 5
+        assert len(list(tmp_path.glob("response-explainer_logic-*-gemini.json"))) == 6
     asyncio.run(run())
 
 
