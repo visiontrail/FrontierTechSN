@@ -9,6 +9,17 @@ PREFIX = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z '
 ENDING = ' t ə d eɪ'
 
 
+def test_complete_upper_prefix_mixed_word_keeps_its_final_vowel():
+    source = 'The report mentions AQuA today.'
+    row = tts_pronunciation.candidates(source,policy_version=17)[0]
+    _, prepared = tts_pronunciation.validate_decisions(source,[{**row,'action':'word',
+        'spoken':'aqua,','phones':['AE','K','W','AH'],'reason':'Complete dictionary word reading.'}],policy_version=17)
+    correct = PREFIX+'æ k w ə'+ENDING
+    assert evidence.compare_source(source,prepared,correct)['passed']
+    assert not evidence.compare_source(source,prepared,PREFIX+'æ k w'+ENDING)['passed']
+    assert not evidence.compare_source(source,prepared,correct+' ə')['passed']
+
+
 def test_contextual_word_final_d_requires_both_exact_source_transcripts():
     source = 'The report mentions AI-derived today.'
     row = tts_pronunciation.candidates(source)[0]

@@ -676,6 +676,55 @@ def test_policy16_cloud_spelling_retains_repeated_lowercase_letters():
         pronunciation.validate_decisions(text, [{**decision, 'spoken': 'eye eigh ess'}], policy_version=16)
 
 
+@pytest.mark.parametrize('name', ['AQuA', 'ASCiI', 'ABcdE', 'ABCdeF'])
+def test_policy17_upper_prefix_mixed_candidates_are_complete_and_non_overlapping(name):
+    text = f'The report mentions {name} today.'
+    found = pronunciation.candidates(text, policy_version=17)
+    assert len(found) == 1 and found[0]['source'] == name
+    assert text[found[0]['start']:found[0]['end']] == name
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=17))
+    assert pronunciation.POLICY_VERSION == 13
+
+
+def test_policy17_mixed_candidate_keeps_last_letter_in_spelled_mode():
+    text = 'The AQuA result is available.'
+    row = pronunciation.candidates(text, policy_version=17)[0]
+    decision = {**row,'action':'spell','spoken':'eigh cue you eigh','reason':'All four source letters.'}
+    _, edits = pronunciation.validate_decisions(text, [decision], policy_version=17)
+    assert pronunciation.render_span(text, 0, len(text), edits) == 'The eigh cue you eigh result is available.'
+    with pytest.raises(ValueError, match='every source letter'):
+        pronunciation.validate_decisions(text, [{**decision,'spoken':'eigh cue you'}], policy_version=17)
+
+
+def test_policy17_complete_mixed_word_is_eligible_for_existing_dictionary_hint():
+    text = 'The report mentions AQuA today.'
+    row = pronunciation.candidates(text, policy_version=17)[0]
+    _, edits = pronunciation.validate_decisions(text, [{**row,'action':'word','spoken':'aqua,',
+        'phones':['AE','K','W','AH'],'reason':'Complete source dictionary word reading.'}], policy_version=17)
+    assert pronunciation.render_span(text, 0, len(text), edits) == 'The report mentions aqua, today.'
+    assert edits[0]['source'] == 'AQuA' and edits[0]['word_hint_version'] == 5
+
+
+def test_policy17_does_not_capture_mixed_names_inside_urls_or_larger_words():
+    text = 'https://example.com/AQuA XAQuA AQuAClient remain.'
+    assert not any(row['source']=='AQuA' for row in pronunciation.candidates(text, policy_version=17))
+    assert pronunciation.candidates('AQuA', policy_version=16)[0]['source'] == 'AQu'
+
+
+@pytest.mark.asyncio
+async def test_policy17_cannot_rebind_submitted_partial_mixed_plan(tmp_path, mock_model):
+    _resolve, chat = mock_model
+    source = 'The report mentions AQuA today.'
+    chat.return_value = json.dumps({'decisions':[{**row,'action':'keep','spoken':row['source'],
+        'reason':'Native word reading.'} for row in pronunciation.candidates(source,policy_version=16)]})
+    await pronunciation.prepare_pronunciation(source,tmp_path,policy=pronunciation.policy_contract(policy_version=16),emit=lambda _:None)
+    checkpoint=tmp_path/'tts_input_part_001.request-0.json';checkpoint.write_text('{"identity":"original","idempotency_key":"same","job_id":"original-job"}')
+    original_checkpoint=checkpoint.read_bytes();original_plan=(tmp_path/'tts_pronunciation.json').read_bytes()
+    with pytest.raises(RuntimeError,match='preserving their request identities'):
+        await pronunciation.prepare_pronunciation(source,tmp_path,policy=pronunciation.policy_contract(policy_version=17),emit=lambda _:None)
+    assert checkpoint.read_bytes()==original_checkpoint and (tmp_path/'tts_pronunciation.json').read_bytes()==original_plan
+
+
 @pytest.mark.parametrize(('name', 'cue', 'phones'), [
     ('PaaS', 'pass', ['P', 'AE', 'S']), ('IaaS', 'eye as', ['AY', 'AE', 'Z']),
 ])

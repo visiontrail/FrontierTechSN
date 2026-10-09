@@ -15,7 +15,7 @@ from backend import config
 CANDIDATE_POLICY_VERSION = 13
 IMPLEMENTED_POLICY_VERSION = 13
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -36,6 +36,7 @@ PROGRAMMING_NAME_RE = re.compile(r'(?<![A-Za-z0-9_+#])C(?:\+\+|#)(?![A-Za-z+#])'
 PROGRAMMING_CUES = {'C++': 'see plus plus', 'C#': 'see sharp'}
 PROGRAMMING_CUE_VERSION = 1
 SHORT_MIXED_ACRONYM_RE = re.compile(r'(?<![A-Za-z])[A-Z][a-z]{1,3}[A-Z](?![A-Za-z])')
+UPPER_PREFIX_MIXED_ACRONYM_RE = re.compile(r'(?<![A-Za-z])[A-Z]{2,3}[a-z]{1,2}[A-Z](?![A-Za-z])')
 
 # An alphabet validates the model's proposed sounds; it never decides which
 # names to change. The model selects each occurrence and its spoken spelling.
@@ -102,6 +103,8 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
         result['programming_cue_sha256'] = _digest((PROGRAMMING_NAME_RE.pattern, PROGRAMMING_CUES))
     if version >= 16:
         result['short_mixed_acronym_pattern_sha256'] = _digest(SHORT_MIXED_ACRONYM_RE.pattern)
+    if version >= 17:
+        result['upper_prefix_mixed_acronym_pattern_sha256'] = _digest(UPPER_PREFIX_MIXED_ACRONYM_RE.pattern)
     return result
 
 
@@ -111,7 +114,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {14, 15, 16}:
+    if policy.get('version') in {14, 15, 16, 17}:
         return policy == policy_contract(policy_version=policy['version'])
     if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         try:
@@ -179,6 +182,15 @@ def candidates(text: str, *, policy_version: int | None = None) -> list[dict]:
             if (any(start < match.end() and end > match.start() for start, end in protected)
                     or any(row['start'] < match.end() and row['end'] > match.start() for row in result)):
                 continue
+            result.append({'id': 0, 'start': match.start(), 'end': match.end(), 'source': match[0]})
+    if version >= 17:
+        for match in UPPER_PREFIX_MIXED_ACRONYM_RE.finditer(text):
+            if any(start < match.end() and end > match.start() for start, end in protected):
+                continue
+            # AQuA/ASCiI are one complete short candidate. Replace only
+            # legacy fragments fully contained inside this exact word span.
+            result = [row for row in result if not
+                      (match.start() <= row['start'] and row['end'] <= match.end())]
             result.append({'id': 0, 'start': match.start(), 'end': match.end(), 'source': match[0]})
     if version >= 14:
         result.sort(key=lambda row: row['start'])
