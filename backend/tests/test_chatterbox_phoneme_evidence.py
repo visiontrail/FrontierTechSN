@@ -9,6 +9,27 @@ PREFIX = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z '
 ENDING = ' t ə d eɪ'
 
 
+def test_independent_ordinary_word_alternatives_can_cooccur_without_changing_letter_names():
+    text = 'The report mentions CBC today.'
+    _, edits = tts_pronunciation.validate_decisions(text, [{'id': 0, 'source': 'CBC',
+        'action': 'spell', 'spoken': 'see bee see', 'reason': 'Retain all three letter names.'}])
+    phones = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n tʃ ə n d z s iː b iː s iː t ə d eɪ'
+    report = evidence.compare_source(text, edits, phones)
+    assert report['passed'] and report['evidence_version'] == evidence.EVIDENCE_VERSION
+    assert not evidence.compare_source(text, edits, phones.replace('b iː', 'b'))['passed']
+    assert not evidence.compare_source(text, edits, phones + ' t ə d eɪ')['passed']
+
+
+def test_composed_ordinary_word_variants_do_not_add_a_stop_inside_named_letters():
+    text = 'NS NZ.'
+    _, edits = tts_pronunciation.validate_decisions(text, [
+        {'id': 0, 'source': 'NS', 'action': 'spell', 'spoken': 'enn ess', 'reason': 'Named letters.'},
+        {'id': 1, 'source': 'NZ', 'action': 'spell', 'spoken': 'enn zee', 'reason': 'Named letters.'},
+    ])
+    assert evidence.compare_source(text, edits, 'ɛ n ɛ s ɛ n z iː')['passed']
+    assert not evidence.compare_source(text, edits, 'ɛ n tʃ ɛ s ɛ n d z iː')['passed']
+
+
 def test_official_full_postgresql_word_phone_reference_never_adds_named_s_or_loses_q_vowel():
     source='The report mentions PostgreSQL today.'
     row=tts_pronunciation.candidates(source,policy_version=18)[0]

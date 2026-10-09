@@ -26,7 +26,7 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 29
+EVIDENCE_VERSION = 30
 SYMBOL_CONJUNCTION_REFERENCE_VERSION = 1
 SYMBOL_INITIALISM_RE = re.compile(r'\b([A-Z])&([A-Z])\b')
 CONTEXTUAL_CLUSTER_REFERENCE_VERSION = 1
@@ -266,6 +266,10 @@ def reference_parts(text: str, edits: list[dict], *, contextual_word_cluster=Fal
                 for index in range(len(variant) - 1):
                     if variant[index:index + 2] == ('N', 'SH'):
                         references.add((*variant[:index], 'N', 'CH', *variant[index + 2:]))
+            # Compose independent alternatives within the same ordinary
+            # word. The new N-CH variant can also retain its final N-D-Z
+            # coda; named-letter units never enter either transformation.
+            for variant in list(references):
                 # A voiced stop can occur in a word-final /nz/ coda, e.g.
                 # mentions -> mention[d]s. Restrict this reference alternative
                 # to the dictionary word's final cluster: neither a syllable
