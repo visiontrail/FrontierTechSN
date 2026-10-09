@@ -1879,6 +1879,34 @@ chatgptUtils = replaceWithinFunction(chatgptUtils,
   `if (el.closest('.markdown, pre, code, [data-markdown-text-tone="user-message"], [data-markdown-text-style="assistant-message"]')) continue;`,
   'ChatGPT generation ignores quoted semantic message content',
 )
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getChatGPTVisibleImageUrls(page) {', 'export async function waitForChatGPTImages(',
+  `            const imgs = Array.from(document.querySelectorAll('img')).filter(img =>
+                img instanceof HTMLImageElement && isVisible(img)
+            );`,
+  String.raw`            // Background galleries can have zero layout size after the final
+            // blob is fully loaded. Accept only the explicit generated-image UI;
+            // ordinary hidden images, uploads and partial canvases still fail.
+            const isLoadedBackgroundResult = (img) => {
+                if (document.visibilityState !== 'hidden' || !img.complete
+                    || img.naturalWidth < 128 || img.naturalHeight < 128
+                    || !/^Generated image \\d+$/i.test(img.getAttribute('alt') || '')
+                    || !/^(?:https?:|blob:)/i.test(img.currentSrc || img.src || '')
+                    || !img.closest('[data-testid="generated-image-preview"]')
+                    || !img.closest('[data-testid="generated-image-gallery"]')) return false;
+                for (let node = img; node; node = node.parentElement) {
+                    const style = window.getComputedStyle(node);
+                    if (node.hidden || node.getAttribute('aria-hidden') === 'true'
+                        || style.display === 'none' || style.visibility === 'hidden'
+                        || style.visibility === 'collapse' || style.contentVisibility === 'hidden') return false;
+                }
+                return true;
+            };
+            const imgs = Array.from(document.querySelectorAll('img')).filter(img =>
+                img instanceof HTMLImageElement && (isVisible(img) || isLoadedBackgroundResult(img))
+            );`,
+  'ChatGPT loaded background image gallery without layout',
+)
 const chatgptOwnedTurnHelpers = `export function chatGPTPromptMatches(actual, expected) {
     const actualText = cleanPromptText(actual);
     const expectedText = cleanPromptText(expected);

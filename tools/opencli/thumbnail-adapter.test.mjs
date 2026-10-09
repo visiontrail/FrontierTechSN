@@ -7,6 +7,56 @@ import test, { after } from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+function backgroundImagePage(options = {}) {
+  class Element {
+    constructor(attributes = {}, parentElement = null) {
+      this.attributes = attributes
+      this.parentElement = parentElement
+      this.className = ''
+      this.style = { display: 'block', visibility: 'visible', contentVisibility: 'visible' }
+    }
+    getAttribute(key) { return this.attributes[key] ?? null }
+    getBoundingClientRect() { return { width: options.layout ? 480 : 0, height: options.layout ? 270 : 0 } }
+    querySelector() { return null }
+    closest(selector) {
+      if (selector === '[data-testid="generated-image-preview"]') return options.preview === false ? null : preview
+      if (selector === '[data-testid="generated-image-gallery"]') return options.gallery === false ? null : gallery
+      if (selector.startsWith('section[')) return options.upload ? new Element({ 'data-turn': 'user' }) : null
+      return null
+    }
+  }
+  class Image extends Element {}
+  const gallery = new Element({ 'data-testid': 'generated-image-gallery' })
+  const preview = new Element({ 'data-testid': 'generated-image-preview' }, gallery)
+  const image = new Image({ alt: options.alt ?? 'Generated image 1' }, preview)
+  Object.assign(image, { complete: options.complete ?? true, naturalWidth: options.width ?? 1672,
+    naturalHeight: 941, src: options.src ?? 'blob:https://chatgpt.com/owned-image' })
+  if (options.hidden) gallery.style[options.hidden] = options.hidden === 'display' ? 'none' : 'hidden'
+  if (options.ariaHidden) gallery.attributes['aria-hidden'] = 'true'
+  if (options.hiddenAttribute) gallery.hidden = true
+  const context = { HTMLElement: Element, HTMLImageElement: Image, HTMLCanvasElement: class {}, URL,
+    document: { visibilityState: options.visibility ?? 'hidden', querySelectorAll(selector) { return selector === 'img' ? [image] : [] } },
+    window: { location: { href: savedUrl }, getComputedStyle: element => element.style } }
+  return { async evaluate(script) { return vm.runInNewContext(script, context) } }
+}
+
+test('background generation result survives a zero-size gallery layout', async () => {
+  const source = fs.readFileSync(path.join(copied, 'clis/chatgpt/utils.js'), 'utf8')
+  const start = source.indexOf('export async function getChatGPTVisibleImageUrls(page) {')
+  const end = source.indexOf('export async function waitForChatGPTImages(', start)
+  const detect = vm.runInNewContext(source.slice(start, end).replace('export ', '') + '\ngetChatGPTVisibleImageUrls', {
+    unwrapEvaluateResult: value => value, requireArrayEvaluateResult: value => value,
+  })
+  assert.deepEqual(Array.from(await detect(backgroundImagePage())), ['blob:https://chatgpt.com/owned-image'])
+  assert.deepEqual(Array.from(await detect(backgroundImagePage({ layout: true, visibility: 'visible' }))), ['blob:https://chatgpt.com/owned-image'])
+  for (const options of [
+    { visibility: 'visible' }, { preview: false }, { gallery: false }, { complete: false }, { width: 0 },
+    { alt: 'Uploaded image' }, { src: 'data:image/png;base64,partial' }, { upload: true },
+    { hidden: 'display' }, { hidden: 'visibility' }, { hidden: 'contentVisibility' },
+    { ariaHidden: true }, { hiddenAttribute: true },
+  ]) assert.deepEqual(Array.from(await detect(backgroundImagePage(options))), [], JSON.stringify(options))
+})
+
 // Apply the complete postinstall patch only to a disposable adapter tree.
 // Nothing imports the installed adapter or contacts the browser/daemon.
 const runtime = path.dirname(fileURLToPath(import.meta.url))
