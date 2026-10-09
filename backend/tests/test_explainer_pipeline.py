@@ -140,6 +140,73 @@ def test_review_outage_preserves_generated_candidate_for_retry(tmp_path, provide
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("passes_new_review", [False, True])
+def test_review_revision_reuses_last_candidate_without_resetting_budget(
+    tmp_path, providers, monkeypatch, passes_new_review,
+):
+    async def run():
+        scene, style = _project()["scenes"][0], _project()["style"]
+        providers.review_failures = 100
+        with pytest.raises(RuntimeError, match="visual logic failed"):
+            await pipeline._image(scene, style, tmp_path)
+        originals = {p: p.read_bytes() for p in tmp_path.rglob("*")
+                     if p.is_file() and p.name in {"image.png", "prompt.txt", "complete.json"}}
+        prior_prompt = pipeline.review_prompt
+        monkeypatch.setattr(pipeline, "review_prompt", lambda *args: prior_prompt(*args) + " Revised geometry.")
+        providers.review_failures = 0 if passes_new_review else 100
+        if passes_new_review:
+            _, record = await pipeline._image(scene, style, tmp_path)
+            assert "attempt-03-" in record["provenance"]["candidate"]
+        else:
+            for _ in range(2):
+                with pytest.raises(RuntimeError, match="visual logic failed after 3"):
+                    await pipeline._image(scene, style, tmp_path)
+        assert len(providers.image_calls) == 3
+        assert all(p.read_bytes() == data for p, data in originals.items())
+    asyncio.run(run())
+
+
+def test_review_revision_recovers_pending_candidate_in_its_original_directory(tmp_path, providers, monkeypatch):
+    scene, style = _project()["scenes"][0], _project()["style"]
+    submitted = []
+
+    async def interrupted(request, directory):
+        (directory / "chatgpt-image-request.json").write_text('{"state":"submitted"}')
+        submitted.append((request, directory))
+        raise RuntimeError("Submission result unknown")
+
+    async def recover(request, directory):
+        assert (request, directory) == submitted[0]
+        assert (directory / "chatgpt-image-request.json").is_file()
+        return await providers.image(request, directory)
+
+    async def run():
+        monkeypatch.setattr(pipeline, "_generate_still", interrupted)
+        with pytest.raises(RuntimeError, match="result unknown"):
+            await pipeline._image(scene, style, tmp_path)
+        prior_prompt = pipeline.review_prompt
+        monkeypatch.setattr(pipeline, "review_prompt", lambda *args: prior_prompt(*args) + " Revised geometry.")
+        monkeypatch.setattr(pipeline, "_generate_still", recover)
+        final, _ = await pipeline._image(scene, style, tmp_path)
+        assert final.is_file() and len(submitted) == 1 and len(providers.image_calls) == 1
+    asyncio.run(run())
+
+
+def test_corrupt_candidate_is_not_silently_regenerated_after_review_revision(tmp_path, providers, monkeypatch):
+    async def run():
+        scene, style = _project()["scenes"][0], _project()["style"]
+        providers.review_failures = 100
+        with pytest.raises(RuntimeError, match="visual logic failed"):
+            await pipeline._image(scene, style, tmp_path)
+        next(tmp_path.rglob("attempt-03-*/image.png")).write_bytes(b"corrupted")
+        prior_prompt = pipeline.review_prompt
+        monkeypatch.setattr(pipeline, "review_prompt", lambda *args: prior_prompt(*args) + " Revised geometry.")
+        with pytest.raises(RuntimeError, match="hash verification"):
+            await pipeline._image(scene, style, tmp_path)
+        assert len(providers.image_calls) == 3
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("reject_old", [False, True])
 def test_legacy_artwork_requires_review_before_reuse(tmp_path, providers, reject_old):
     async def run():

@@ -86,6 +86,10 @@ def test_review_cache_is_bound_to_pixels_scene_and_rules(tmp_path, monkeypatch):
         rules[0] += " Gravity must be coherent."
         await review.review_image(image, scene, {}, tmp_path, lambda _: None)
         assert len(calls) == 4
+        await review.review_image(image, scene, {"character_description": "Thin line limbs"}, tmp_path, lambda _: None)
+        assert len(calls) == 5
+        # Review revisions must retain every original provider response.
+        assert len(list(tmp_path.glob("response-explainer_logic-*-gemini.json"))) == 5
     asyncio.run(run())
 
 

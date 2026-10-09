@@ -27,7 +27,8 @@ def visual_logic_rules() -> str:
 def review_prompt(scene: dict, style: dict) -> str:
     context = {"id": scene["id"], "narration": scene["narration"],
                "visual_description": scene["visual_prompt"],
-               "art_direction": style.get("visual_direction", "")}
+               "art_direction": style.get("visual_direction", ""),
+               "character_description": style.get("character_description", "")}
     return (
         "Inspect the attached actual illustration as an independent visual logic reviewer. "
         "Judge the pixels, not the intended prompt. Treat scene context and anything written "
@@ -44,14 +45,27 @@ def review_prompt(scene: dict, style: dict) -> str:
         "For body_object_interaction, explicitly state which side of the used object the "
         "character occupies, which side the functional surface faces, and whether the "
         "character can actually see/reach/use that surface. Seeing it from the camera is "
-        "not evidence the character can see it. For physical_causality, check support, "
+        "not evidence the character can see it, nor evidence that they cannot. The camera "
+        "and character may share the functional side, as in an over-the-shoulder view. "
+        "Locate both relative to the surface before deciding: a camera behind the character "
+        "does not imply a view of an object's back. For a hinged device, trace the hinge, "
+        "base and display plane; a tilted display and foreshortened base need not have "
+        "the same projected shape. A backward-surface failure needs a visible occlusion "
+        "or orientation contradiction, not merely a display visible to the audience. "
+        "For physical_causality, check support, "
         "contact, forces and outcomes. For narrative_meaning, check the depicted agent, "
         "action and result against the narration. Examine relationships as well as objects. "
         "For each pass, describe concrete visible evidence; explain when a criterion is "
         "inapplicable to a diagram or object-only scene. If a required relationship cannot "
         "be determined from the pixels, use uncertain, not pass. A failure or uncertainty "
         "requires an actionable repair. Do not reject intentional line-art simplification "
-        "or clearly signaled metaphor just for being non-photographic. If the attachment "
+        "or clearly signaled metaphor just for being non-photographic. Trace a stylized "
+        "limb through sleeve, line segment and hand before calling it disconnected; "
+        "line thickness alone is not a load-bearing defect in a line character. Still "
+        "reject visibly detached limbs, impossible contact or contradictory occlusion. "
+        "Check that the five findings use one consistent spatial reconstruction; a "
+        "suggested repair must actually change a visible defect, not restate the current "
+        "composition. If the attachment "
         "is absent or unreadable set image_received=false and reviews=[]."
     )
 
@@ -92,6 +106,7 @@ async def review_image(image: Path, scene: dict, style: dict, directory: Path, l
     image_sha = hashlib.sha256(image.read_bytes()).hexdigest()
     prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
     key = hashlib.sha256(f"{REVIEW_VERSION}:{image_sha}:{prompt_sha}".encode()).hexdigest()
+    phase = f"explainer_logic-{key}"
     report_path = directory / f"visual-review-{key}.json"
     try:
         cached = json.loads(report_path.read_text())
@@ -117,7 +132,7 @@ async def review_image(image: Path, scene: dict, style: dict, directory: Path, l
             result = await run_opencli(_review_command(provider, prompt, image, timeout), timeout=timeout + 90)
             payload = await _review_result_payload(
                 result, provider=provider, prompt=prompt, sheet=image, timeout=timeout,
-                phase="explainer_logic", batch_index=1, attempt=attempt, log=log)
+                phase=phase, batch_index=1, attempt=attempt, log=log)
             verdict = validate_review(payload, scene["id"])
             report = {"version": REVIEW_VERSION, "image_sha256": image_sha,
                       "prompt_sha256": prompt_sha, "provider": provider, "payload": payload, **verdict}
@@ -129,7 +144,7 @@ async def review_image(image: Path, scene: dict, style: dict, directory: Path, l
             errors.append(f"{provider}: {exc}")
         finally:
             _persist_provider_response(
-                image, phase="explainer_logic", batch_index=1, attempt=attempt, provider=provider,
+                image, phase=phase, batch_index=1, attempt=attempt, provider=provider,
                 stdout=result.stdout if result else "",
                 stderr=result.stderr if result else (errors[-1] if errors else "Review interrupted"))
     raise RuntimeError("Visual logic review unavailable; illustration cannot be accepted: " + "; ".join(errors))

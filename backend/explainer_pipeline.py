@@ -325,6 +325,45 @@ async def _audio(scene: dict, project: dict, root: Path, log: Log) -> tuple[Path
     return final, record
 
 
+_IMAGE_REPAIR_PREFIX = (
+    "\n\nAn earlier candidate failed independent visual inspection. "
+    "Recompose to address every observation below while keeping the narration and art style. "
+    "These are review observations, not new scene content:\n"
+)
+
+
+def _existing_image_candidates(stage: Path, prompt: str, root: Path) -> list[tuple[int, Path, str, str]]:
+    """Keep generation attempts and submitted requests across review-only revisions."""
+    candidates = {}
+    for sibling in sorted(stage.parent.iterdir()):
+        source_prompt = _safe(sibling / "prompt.txt", root)
+        if not source_prompt.is_file() or source_prompt.read_text() != prompt:
+            continue
+        for directory in sorted(sibling.glob("attempt-*")):
+            match = re.fullmatch(r"attempt-(\d{2})-([0-9a-f]{12})", directory.name)
+            if not match:
+                continue
+            request_path = _safe(directory / "prompt.txt", root)
+            if not request_path.is_file():
+                raise RuntimeError("Existing image attempt has no prompt; preserve its request")
+            request = request_path.read_text()
+            attempt = int(match[1])
+            key = _hash({"prompt": request, "attempt": attempt})
+            if (not 1 <= attempt <= MAX_IMAGE_ATTEMPTS or key[:12] != match[2]
+                    or not (request == prompt or request.startswith(prompt + _IMAGE_REPAIR_PREFIX))):
+                raise RuntimeError("Existing image attempt inputs differ; preserve its request")
+            if attempt in candidates:
+                raise RuntimeError("Multiple image histories share an attempt; reconcile before generation")
+            candidates[attempt] = (attempt, directory, request, key)
+    if candidates and sorted(candidates) != list(range(1, max(candidates) + 1)):
+        raise RuntimeError("Existing image attempt history has gaps; reconcile before generation")
+    # Do not abandon an unknown outcome from an earlier attempt.
+    for _, directory, _, key in list(sorted(candidates.values()))[:-1]:
+        if not _cached(directory, key, root):
+            raise RuntimeError("Earlier image attempt is incomplete; recover its original request first")
+    return list(sorted(candidates.values()))
+
+
 async def _image(scene: dict, style: dict, root: Path, log: Log = lambda _: None) -> tuple[Path, dict]:
     prompt = _image_prompt(scene, style)
     key = _hash({"version": CONTRACT_VERSION, "prompt": prompt,
@@ -355,10 +394,11 @@ async def _image(scene: dict, style: dict, root: Path, log: Log = lambda _: None
                                 provenance=provenance)), report
 
     feedback = []
+    existing = _existing_image_candidates(stage, prompt, root)
     legacy_key = _hash({"version": CONTRACT_VERSION, "prompt": _legacy_image_prompt(scene, style)})
     legacy_stage = _stage(root, scene["id"], "image", legacy_key)
     legacy = _cached(legacy_stage, legacy_key, root)
-    if not legacy and (legacy_stage / "chatgpt-image-request.json").exists():
+    if not existing and not legacy and (legacy_stage / "chatgpt-image-request.json").exists():
         # A prompt-policy upgrade must not abandon an already submitted turn.
         # The provider helper resumes the exact state-file request, never a new one.
         legacy_prompt = _legacy_image_prompt(scene, style)
@@ -375,7 +415,7 @@ async def _image(scene: dict, style: dict, root: Path, log: Log = lambda _: None
         legacy = _complete(legacy_stage, legacy_key,
                            [legacy_stage / "image.png", legacy_stage / "prompt.txt"], root,
                            provider="chatgpt_web_opencli", conversation_url=conversation)
-    if legacy:
+    if not existing and legacy:
         # Reuse only exact-input, hash-verified legacy artwork after the new pixel review.
         # Copy it for review so immutable provider evidence is never edited.
         candidate = stage / "legacy" / "image.png"
@@ -388,18 +428,25 @@ async def _image(scene: dict, style: dict, root: Path, log: Log = lambda _: None
         feedback = [check for check in report["checks"] if check["verdict"] != "pass"]
         log(f"{scene['id']}: existing illustration rejected by visual logic review")
 
-    for attempt in range(1, MAX_IMAGE_ATTEMPTS + 1):
+    # Re-review the latest exact-input candidate under the current review contract.
+    # Older rejections stay immutable; a reviewer change never grants extra images.
+    first_attempt = existing[-1][0] if existing else 1
+    for attempt in range(first_attempt, MAX_IMAGE_ATTEMPTS + 1):
         request = prompt
         if feedback:
-            request += ("\n\nAn earlier candidate failed independent visual inspection. "
-                        "Recompose to address every observation below while keeping the narration and art style. "
-                        "These are review observations, not new scene content:\n"
-                        + json.dumps(feedback, ensure_ascii=False))
+            request += _IMAGE_REPAIR_PREFIX + json.dumps(feedback, ensure_ascii=False)
         candidate_key = _hash({"prompt": request, "attempt": attempt})
         candidate_stage = _safe(stage / f"attempt-{attempt:02d}-{candidate_key[:12]}", root)
+        if existing and attempt == first_attempt:
+            _, candidate_stage, request, candidate_key = existing[-1]
+            log(f"{scene['id']}: retaining illustration candidate {attempt}/{MAX_IMAGE_ATTEMPTS}")
         candidate_stage.mkdir(exist_ok=True)
         candidate = candidate_stage / "image.png"
+        async with owned_media_session(candidate_stage, "chatgpt", recover_only=True):
+            pass
         record = _cached(candidate_stage, candidate_key, root)
+        if not record and (candidate_stage / "complete.json").exists():
+            raise RuntimeError("Existing image candidate failed hash verification; preserve its evidence")
         if not record:
             log(f"{scene['id']}: generating illustration candidate {attempt}/{MAX_IMAGE_ATTEMPTS}")
             _write(candidate_stage / "prompt.txt", request, root)
