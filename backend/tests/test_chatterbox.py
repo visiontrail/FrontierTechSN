@@ -1638,6 +1638,110 @@ async def test_complete_audit_checks_later_parts_after_rejection_without_partial
 
 
 @pytest.mark.asyncio
+async def test_selected_audit_retains_original_part_numbers_and_never_creates_narration(setup_client, monkeypatch):
+    server, script, directory, _verifier, _generate = setup_client
+    source = 'The API report is ready.\nThe GPU report is ready.\nThe BBC report is ready.'
+    script.write_text(source)
+    concat = AsyncMock(side_effect=AssertionError('A selected audit cannot concatenate narration'))
+    monkeypatch.setattr(tts, '_concat_wav_parts', concat)
+    async def audit(_wav, text, _edits):
+        assert text == 'The GPU report is ready.'
+        return {'passed': True}
+    async def run():
+        return await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _: None, verify_text=True, part_auditor=audit,
+            audit_all_parts=True, selected_audit_parts=[2])
+    with pytest.raises(chatterbox.ChatterboxAuditSelectionComplete) as result:
+        await run()
+    assert len(server.jobs) == 1
+    assert result.value.report['selected_parts'] == [2]
+    assert result.value.report['selection_passed']
+    assert not result.value.report['passed'] and not result.value.report['all_parts_observed']
+    assert not result.value.report['narration_output_created']
+    assert [row['part'] for row in result.value.report['parts']] == [2]
+    checkpoint = directory / 'tts_input_part_002.request-0.json'
+    before = checkpoint.read_bytes()
+    assert not list(directory.glob('tts_input_part_001.request-*.json'))
+    assert not list(directory.glob('tts_input_part_003.request-*.json'))
+    assert not (directory / 'tts_manifest.json').exists()
+    with pytest.raises(chatterbox.ChatterboxAuditSelectionComplete):
+        await run()
+    assert len(server.jobs) == 1 and checkpoint.read_bytes() == before
+    assert script.read_text() == source
+    concat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_selected_audit_spends_only_remaining_original_attempts(setup_client):
+    server, script, directory, _verifier, _generate = setup_client
+    script.write_text('The API report is ready.\nThe GPU report is ready.')
+    reject = False
+    async def audit(_wav, _text, _edits):
+        if reject:
+            raise tts.TtsIntegrityError('Required complete-source phone sequence differs from the source')
+        return {'passed': True}
+    async def run():
+        return await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _: None, verify_text=True, part_auditor=audit,
+            audit_all_parts=True, selected_audit_parts=[2])
+    with pytest.raises(chatterbox.ChatterboxAuditSelectionComplete):
+        await run()
+    first = json.loads((directory / 'tts_input_part_002.request-0.json').read_text())
+    reject = True
+    with pytest.raises(chatterbox.ChatterboxAuditSelectionComplete) as result:
+        await run()
+    assert not result.value.report['selection_passed']
+    assert result.value.report['parts'][0]['status'] == 'rejected'
+    assert len(server.jobs) == 3
+    current = json.loads((directory / 'tts_input_part_002.request-0.json').read_text())
+    assert all(current[key] == first[key] for key in ['identity', 'idempotency_key', 'job_id'])
+    assert not list(directory.glob('tts_input_part_001.request-*.json'))
+    with pytest.raises(chatterbox.ChatterboxAuditSelectionComplete):
+        await run()
+    assert len(server.jobs) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('selection', [[], [0], [True], [1, 1], [3], '1'])
+async def test_selected_audit_invalid_indexes_never_submit_speech(setup_client, selection):
+    server, script, directory, _verifier, _generate = setup_client
+    async def audit(*_args):
+        return {'passed': True}
+    with pytest.raises(ValueError):
+        await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _: None, verify_text=True, part_auditor=audit,
+            audit_all_parts=True, selected_audit_parts=selection)
+    assert not server.jobs
+
+
+@pytest.mark.asyncio
+async def test_selected_audit_observation_timeout_preserves_the_same_job_and_budget(setup_client):
+    server, script, directory, _verifier, _generate = setup_client
+    script.write_text('The API report is ready.\nThe GPU report is ready.')
+    unavailable = True
+    async def audit(*_args):
+        if unavailable:
+            raise TimeoutError('Unconditioned observation unavailable')
+        return {'passed': True}
+    async def run(**kwargs):
+        return await chatterbox._generate_chatterbox(str(script), str(directory), 'jane', 'en',
+            log=None, emit=lambda _: None, verify_text=True, part_auditor=audit,
+            audit_all_parts=True, selected_audit_parts=[2], **kwargs)
+    with pytest.raises(TimeoutError):
+        await run()
+    checkpoint = directory / 'tts_input_part_002.request-0.json'
+    before = checkpoint.read_bytes()
+    assert not json.loads(before).get('rejected')
+    unavailable = False
+    blocked = AsyncMock(side_effect=AssertionError('A completed job cannot be resubmitted'))
+    with pytest.raises(chatterbox.ChatterboxAuditSelectionComplete) as result:
+        await run(before_submit=blocked)
+    assert result.value.report['selection_passed']
+    assert len(server.jobs) == 1 and checkpoint.read_bytes() == before
+    blocked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_complete_audit_stops_on_uncertainty_and_resumes_identical_job(setup_client):
     server, script, directory, _verifier, _generate = setup_client
     script.write_text('The API report is ready.\nThe GPU report is ready.\nThe BBC report is ready.')

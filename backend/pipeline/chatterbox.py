@@ -755,6 +755,14 @@ def _continuity_report(text: str, chunks: list[str], parts: list[Path], rows: li
     }
 
 
+class ChatterboxAuditSelectionComplete(Exception):
+    """Return private audit evidence without producing a partial narration."""
+
+    def __init__(self, report: dict):
+        super().__init__('Chatterbox selected-part audit completed without narration output')
+        self.report = report
+
+
 async def _generate_chatterbox(
     script_path: str, output_dir: str, voice: str, language: str, *,
     log, emit, verify_text: bool = False,
@@ -764,6 +772,7 @@ async def _generate_chatterbox(
     frozen_pronunciation_policy: dict | None = None,
     pronunciation_audio_feedback: dict | None = None,
     frozen_tail_cleanup_version: int | None = None,
+    selected_audit_parts: list[int] | None = None,
 ) -> str:
     # The service can speak 23 languages. The project's existing source-word,
     # ASR and subtitle contract is currently certified for English only.
@@ -771,6 +780,12 @@ async def _generate_chatterbox(
         raise ValueError("The Chatterbox video adapter currently validates English narration only")
     if audit_all_parts and (not verify_text or part_auditor is None):
         raise ValueError("Complete part auditing requires text verification and an independent part auditor")
+    if selected_audit_parts is not None:
+        if (not audit_all_parts or not isinstance(selected_audit_parts, list)
+                or not selected_audit_parts
+                or any(type(part) is not int or part < 1 for part in selected_audit_parts)
+                or len(set(selected_audit_parts)) != len(selected_audit_parts)):
+            raise ValueError('A private part selection requires unique positive indexes and complete part auditing')
     if not config.CHATTERBOX_TTS_API_KEY:
         raise RuntimeError("Set CHATTERBOX_TTS_API_KEY in Admin -> System -> Voice & TTS")
     contract = cache_contract()
@@ -829,7 +844,12 @@ async def _generate_chatterbox(
         chunks = _split_text(cleaned, max_words=contract["chunk_words"],
                              max_chars=min(contract["max_chars"], int(capabilities["max_chars"])),
                              pronunciation_edits=pronunciation_plan["edits"])
-        emit(f"Chatterbox: {len(chunks)} bounded request(s), natural 1.0x speech, voice={voice}")
+        if selected_audit_parts is not None and any(part > len(chunks) for part in selected_audit_parts):
+            raise ValueError('A private audit part index exceeds the frozen source chunk count')
+        if selected_audit_parts is None:
+            emit(f"Chatterbox: {len(chunks)} bounded request(s), natural 1.0x speech, voice={voice}")
+        else:
+            emit(f"Chatterbox private audit: {len(selected_audit_parts)}/{len(chunks)} source parts, natural 1.0x speech, voice={voice}")
         synthesis_directory = directory / "synthesis"
         synthesis_directory.mkdir(exist_ok=True)
         parts, metadata_rows = [], []
@@ -841,8 +861,13 @@ async def _generate_chatterbox(
                     'source_sha256': hashlib.sha256(normalized.encode()).hexdigest(),
                     'plan_sha256': pronunciation_plan['plan_sha256'],
                     'expected_parts': len(chunks), 'observed_parts': len(coverage),
-                    'all_parts_observed': len(coverage) == len(chunks),
-                    'passed': len(coverage) == len(chunks) and not rejected_parts,
+                    'all_parts_observed': selected_audit_parts is None and len(coverage) == len(chunks),
+                    'passed': selected_audit_parts is None and len(coverage) == len(chunks) and not rejected_parts,
+                    **({'selected_parts': selected_audit_parts,
+                        'selection_observed': len(coverage) == len(selected_audit_parts),
+                        'selection_passed': len(coverage) == len(selected_audit_parts) and not rejected_parts,
+                        'narration_output_created': False}
+                       if selected_audit_parts is not None else {}),
                     'parts': coverage,
                 })
         save_coverage()
@@ -850,6 +875,8 @@ async def _generate_chatterbox(
         for index, text in enumerate(chunks, 1):
             start = normalized.index(text, source_offset)
             source_offset = start + len(text)
+            if selected_audit_parts is not None and index not in selected_audit_parts:
+                continue
             synthesis_text = _render_provider_span(
                 normalized, start, source_offset, pronunciation_plan["edits"],
             )
@@ -1105,6 +1132,9 @@ async def _generate_chatterbox(
                                  'status': 'accepted', 'audio_sha256': metadata['audio_sha256']})
                 save_coverage()
                 break
+        if selected_audit_parts is not None:
+            save_coverage()
+            raise ChatterboxAuditSelectionComplete(_read_json(directory / 'tts_audit_coverage.json'))
         if rejected_parts:
             raise tts.TtsIntegrityError('Chatterbox complete part audit retained integrity rejections: ' + json.dumps(rejected_parts))
     if contract.get('tail_cleanup_version'):
