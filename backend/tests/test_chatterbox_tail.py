@@ -144,6 +144,63 @@ def test_each_part_requires_its_own_metadata(part):
         chatterbox_tail.prepare_delivery_parts([source], [])
 
 
+def test_long_post_speech_gap_is_cleaned_before_continuity_acceptance(part):
+    from backend.pipeline import tts
+
+    source, metadata = part
+    with wave.open(str(source), "rb") as reader:
+        samples = np.frombuffer(reader.readframes(reader.getnframes()), dtype="<i2").copy()
+    samples[24000:45600] = 1  # 0.9 s silence, then a non-speech tail.
+    with wave.open(str(source), "wb") as writer:
+        writer.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+        writer.writeframes(samples.tobytes())
+    original = source.read_bytes()
+    metadata['audio_sha256'] = hashlib.sha256(original).hexdigest()
+    words = [{'text': 'ending.', 'start': .8, 'end': 1.0}]
+    with pytest.raises(tts.TtsIntegrityError, match='continuity ceiling'):
+        tts._validate_pocket_internal_silence(source, words)
+    recovery = chatterbox_tail.verify_tail_continuity(
+        source, metadata['integrity'], words, source.parent,
+        expected_audio_sha256=metadata['audio_sha256'],
+    )
+    assert recovery['provider_internal_silence']['passed'] is False
+    assert recovery['delivery_internal_silence']['passed'] is True
+    metadata['integrity']['internal_silence'] = recovery['provider_internal_silence']
+    metadata['integrity']['continuity_tail_recovery'] = recovery
+    delivered, rows = chatterbox_tail.prepare_delivery_parts([source], [metadata])
+    assert source.read_bytes() == original
+    assert rows[0]['audio_sha256'] == recovery['cleanup']['output_audio_sha256']
+    assert rows[0]['integrity']['internal_silence']['passed'] is True
+    assert tts._validate_pocket_internal_silence(delivered[0], words)['passed'] is True
+
+
+@pytest.mark.parametrize('defect', ['internal_pause', 'weak_transcript', 'extra_speech', 'wrong_hash'])
+def test_tail_continuity_cannot_hide_real_gaps_or_missing_proof(part, defect):
+    from backend.pipeline import tts
+
+    source, metadata = part
+    with wave.open(str(source), 'wb') as writer:
+        writer.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+        writer.writeframes(np.concatenate((np.full(24000, 1200), np.zeros(24000),
+                                          np.full(12000, 1200))).astype('<i2').tobytes())
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    evidence = metadata['integrity']
+    if defect == 'internal_pause':
+        evidence['speech_end_seconds'] = 2.4
+    elif defect == 'weak_transcript':
+        evidence['exact_asr_word_coverage'] = .7
+    elif defect == 'extra_speech':
+        evidence['pronunciation'] = {'passed': True, 'trailing_speech': {'passed': False}}
+    else:
+        digest = '0' * 64
+    original = source.read_bytes()
+    with pytest.raises(tts.TtsIntegrityError, match='continuity ceiling'):
+        chatterbox_tail.verify_tail_continuity(source, evidence, [], source.parent,
+                                              expected_audio_sha256=digest)
+    assert source.read_bytes() == original
+    assert not list(source.parent.glob('continuity-tail-*.wav'))
+
+
 def test_weak_evidence_cannot_hide_a_changed_provider_waveform(part):
     source, metadata = part
     metadata["integrity"]["accepted"] = False

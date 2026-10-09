@@ -17,6 +17,81 @@ from backend.pipeline import av_sync, chatterbox, chatterbox_independent, compos
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('repairable', [True, False])
+async def test_recover_tail_continuity_reuses_owned_job_and_keeps_real_pause_budget(setup_client, monkeypatch, repairable):
+    from backend.pipeline import chatterbox_tail
+
+    server, script, directory, verifier, generate = setup_client
+    source_words = script.read_text().split()
+    words = [{'text': word, 'start': index * .2, 'end': (index + 1) * .2}
+             for index, word in enumerate(source_words)]
+    if not repairable:
+        words[-1].update(start=2.9, end=3.1)  # The gap precedes actual source speech.
+    # The complete source ends at 2 s; a 0.9 s quiet tail precedes residue.
+    payload = io.BytesIO()
+    with wave.open(payload, 'wb') as writer:
+        writer.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+        writer.writeframes(struct.pack('<h', 1000) * 48000 + b'\x00\x00' * 21600
+                           + struct.pack('<h', 1000) * 4800)
+    raw = payload.getvalue()
+    handle = server.handle
+
+    def service(request):
+        response = handle(request)
+        if request.method == 'POST':
+            job = server.jobs[response.json()['id']]
+            job['audio'] = raw
+            job['audio_sha256'] = hashlib.sha256(raw).hexdigest()
+        return response
+
+    server.handle = service
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(words, {'passed': True})))
+
+    async def inspect(path, text, verification, **kwargs):
+        return await tts._inspect_narration_part(path, text, verification, emit=kwargs['emit'],
+                                               provider_label='Chatterbox',
+                                               validate_pocket_continuity=kwargs['validate_pocket_continuity'])
+
+    verifier.side_effect = inspect
+    recover = chatterbox_tail.verify_tail_continuity
+
+    def old_rejection(source, integrity, words, verification, **kwargs):
+        return tts._validate_pocket_internal_silence(source, words)
+
+    monkeypatch.setattr(chatterbox_tail, 'verify_tail_continuity', old_rejection)
+    monkeypatch.setattr(chatterbox, 'TAIL_CONTINUITY_RECOVERY_VERSION', 0)
+    with pytest.raises(tts.TtsIntegrityError, match='continuity ceiling'):
+        await generate()
+    assert len(server.post_keys) == 3
+    prior = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+    monkeypatch.setattr(chatterbox_tail, 'verify_tail_continuity', recover)
+    monkeypatch.setattr(chatterbox, 'TAIL_CONTINUITY_RECOVERY_VERSION', 1)
+    if not repairable:
+        with pytest.raises(tts.TtsIntegrityError, match='continuity ceiling'):
+            await generate()
+        before = list(server.requests)
+        with pytest.raises(tts.TtsIntegrityError, match='exhausted audio integrity attempts'):
+            await generate()
+        assert len(server.post_keys) == 3
+        assert [r for r in server.requests[len(before):] if r[1].startswith('/v1/jobs')] == []
+        for index in range(3):
+            checkpoint = json.loads((directory / f'tts_input_part_001.request-{index}.json').read_text())
+            assert checkpoint['tail_continuity_recovery_version'] == 1
+        return
+    output = await generate()
+    current = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+    assert len(server.post_keys) == 3  # No synthesis on recovery or cache reuse.
+    assert current['job_id'] == prior['job_id']
+    assert current['idempotency_key'] == prior['idempotency_key']
+    assert current['identity'] == prior['identity']
+    assert current['revalidated_after_rejection']['tail_continuity_recovery_version'] == 1
+    assert (directory / 'tts_input_part_001_generated.wav').read_bytes() == raw
+    assert tts._validate_pocket_internal_silence(output, words)['passed'] is True
+    await generate()
+    assert len(server.post_keys) == 3
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("voices, expected", [(None, "space-en-f1"), (["jane"], "jane"), (["default"], "default")])
 async def test_dispatcher_uses_official_default_but_preserves_explicit_chatterbox_voice(tmp_path, monkeypatch, voices, expected):
     generate = AsyncMock(return_value=str(tmp_path / "audio.wav"))

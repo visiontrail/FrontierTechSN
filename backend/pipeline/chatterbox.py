@@ -27,6 +27,7 @@ from backend.pipeline import tts, tts_pronunciation as pronunciation
 MODEL_ID = "chatterbox-multilingual"
 VERIFIER_VERSION = 3
 TRAILING_SPEECH_VERIFIER_VERSION = 3
+TAIL_CONTINUITY_RECOVERY_VERSION = 1
 SYMBOL_INITIALISM_POLICY_VERSION = 1
 SYMBOL_INITIALISM_RE = re.compile(r"\b([A-Z])&([A-Z])\b")
 SYNTHESIS_LETTER_SEPARATOR_RE = re.compile(r"(?<=[A-Za-z])[-.]+(?=[A-Za-z])")
@@ -978,7 +979,13 @@ async def _generate_chatterbox(
                     and checkpoint.get('job_id')
                     and checkpoint.get('rejection_acoustic_reference_version', 0) < acoustic_reference_version
                 )
-                rechecking = rechecking or acoustic_rechecking
+                tail_rechecking = bool(
+                    contract.get('tail_cleanup_version') and verify_text
+                    and str(checkpoint.get('rejected') or '').startswith('Pocket TTS produced an internal')
+                    and checkpoint.get('job_id')
+                    and checkpoint.get('tail_continuity_recovery_version', 0) < TAIL_CONTINUITY_RECOVERY_VERSION
+                )
+                rechecking = rechecking or acoustic_rechecking or tail_rechecking
                 if checkpoint.get("rejected") and not rechecking:
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
                         if audit_all_parts:
@@ -1005,7 +1012,8 @@ async def _generate_chatterbox(
                     _write_json(request_path, checkpoint)
                 job_id = checkpoint["job_id"]
                 if rechecking:
-                    emit(f'Chatterbox part {index}: rechecking the same completed job after spelling-observation repair')
+                    reason = 'tail-continuity repair' if tail_rechecking else 'spelling-observation repair'
+                    emit(f'Chatterbox part {index}: rechecking the same completed job after {reason}')
                 emit(f"Chatterbox part {index}/{len(chunks)}: following job {job_id}")
                 deadline = time.monotonic() + config.TTS_TIMEOUT
                 previous_status = None
@@ -1059,15 +1067,38 @@ async def _generate_chatterbox(
                     })
                     _validate_audio(staged, synthesis_text)
                     if verify_text:
-                        integrity = await tts._verify_orpheus_part(
-                            staged, text, verification, emit=emit,
-                            asr_advisory=True, provider_label="Chatterbox",
-                            validate_pocket_continuity=True,
-                        )
+                        continuity_failure = None
+                        try:
+                            integrity = await tts._verify_orpheus_part(
+                                staged, text, verification, emit=emit,
+                                asr_advisory=True, provider_label="Chatterbox",
+                                validate_pocket_continuity=True,
+                            )
+                        except tts.TtsIntegrityError as exc:
+                            if (not contract.get('tail_cleanup_version') or
+                                    not str(exc).startswith('Pocket TTS produced an internal')):
+                                raise
+                            continuity_failure = exc
+                            integrity = await tts._verify_orpheus_part(
+                                staged, text, verification, emit=emit,
+                                asr_advisory=True, provider_label="Chatterbox",
+                                validate_pocket_continuity=False,
+                            )
                         integrity["pronunciation"] = await _verify_pronunciation(
                             staged, text, verification, emit=emit,
                             edits=chunk_edits,
                         )
+                        if continuity_failure is not None:
+                            from backend.pipeline import av_sync
+                            from backend.pipeline.chatterbox_tail import verify_tail_continuity
+                            words, _ = await av_sync.ensure_word_transcript(staged, verification, minimum_words=1)
+                            recovery = verify_tail_continuity(
+                                staged, integrity, words, verification,
+                                expected_audio_sha256=job['audio_sha256'],
+                            )
+                            integrity['internal_silence'] = recovery['provider_internal_silence']
+                            integrity['continuity_tail_recovery'] = recovery
+                            emit('Chatterbox continuity: verified tail derivative passed; provider audio retained')
                     else:
                         integrity = {"method": "duration_only_preview", "verified": True,
                                      "internal_silence": tts._validate_pocket_internal_silence(staged)}
@@ -1083,6 +1114,8 @@ async def _generate_chatterbox(
                               if rechecking else f'rejected-{attempt}')
                     if acoustic_rechecking:
                         marker += f'-phones-{acoustic_reference_version}'
+                    if tail_rechecking:
+                        marker += f'-tail-{TAIL_CONTINUITY_RECOVERY_VERSION}'
                     evidence = rejected / marker
                     evidence.mkdir(exist_ok=True)
                     _write_json(rejected / 'rejection.json', {
@@ -1096,6 +1129,7 @@ async def _generate_chatterbox(
                     checkpoint["rejected"] = str(exc)
                     checkpoint['rejection_observation_version'] = OBSERVATION_SPELLING_VERSION
                     checkpoint['rejection_acoustic_reference_version'] = acoustic_reference_version
+                    checkpoint['tail_continuity_recovery_version'] = TAIL_CONTINUITY_RECOVERY_VERSION
                     _write_json(request_path, checkpoint)
                     if attempt + 1 == MAX_INTEGRITY_ATTEMPTS:
                         if audit_all_parts:
@@ -1113,6 +1147,7 @@ async def _generate_chatterbox(
                         'observation_spelling_version': OBSERVATION_SPELLING_VERSION,
                         'acoustic_reference_version': acoustic_reference_version,
                         'audio_sha256': tts._file_sha256(path),
+                        'tail_continuity_recovery_version': TAIL_CONTINUITY_RECOVERY_VERSION,
                     }
                     _write_json(request_path, checkpoint)
                 metadata = {

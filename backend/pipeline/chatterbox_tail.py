@@ -9,6 +9,34 @@ from pathlib import Path
 from backend.pipeline.tts_tail_cleanup import VERSION, clean_verified_tail
 
 
+def verify_tail_continuity(source: Path, integrity: dict, words: list[dict],
+                           verification: Path, *, expected_audio_sha256: str) -> dict:
+    """Prove a delivery derivative passes continuity before accepting its source.
+
+    Only the existing complete-speech tail proof can authorize a derivative.
+    Real internal pauses, weak transcripts and extra speech still fail. Keep
+    the provider waveform and its failed measurement as provenance.
+    """
+    from backend.pipeline import tts
+
+    original = tts._pocket_internal_silence_report(source, words)
+    output = verification / f"continuity-tail-{expected_audio_sha256}.wav"
+    # This is a disposable verification derivative; delivery creates its own
+    # hash-bound artifact after the provider file receives its permanent name.
+    output.unlink(missing_ok=True)
+    try:
+        proof = clean_verified_tail(source, output, integrity,
+                                    expected_audio_sha256=expected_audio_sha256)
+        if not proof["applied"]:
+            tts._validate_pocket_internal_silence(source, words)
+            raise RuntimeError("Continuity recovery requires an evidenced tail defect")
+        checked = tts._validate_pocket_internal_silence(output, words)
+        return {"provider_internal_silence": original, "delivery_internal_silence": checked,
+                "cleanup": proof, "verification_derivative_retained": False}
+    finally:
+        output.unlink(missing_ok=True)
+
+
 def prepare_delivery_parts(parts: list[Path], metadata_rows: list[dict]) -> tuple[list[Path], list[dict]]:
     if len(parts) != len(metadata_rows):
         raise ValueError("Tail cleanup requires metadata for every source part")
@@ -46,6 +74,10 @@ def prepare_delivery_parts(parts: list[Path], metadata_rows: list[dict]) -> tupl
         reports.append(report)
         if hashlib.sha256(source.read_bytes()).hexdigest() != digest:
             raise RuntimeError("Provider waveform changed during tail cleanup; refusing to join it")
+        recovery = integrity.get("continuity_tail_recovery")
+        if recovery and (not report["applied"] or report["output_audio_sha256"] !=
+                         recovery["cleanup"]["output_audio_sha256"]):
+            raise RuntimeError("Delivery differs from the tail verified by the continuity gate")
         if not report["applied"]:
             delivered.append(source)
             rows.append(metadata)
@@ -57,7 +89,9 @@ def prepare_delivery_parts(parts: list[Path], metadata_rows: list[dict]) -> tupl
         row["integrity"]["tail_cleanup"] = report
         from backend.pipeline.tts import _pocket_internal_silence_report
         row["integrity"]["provider_internal_silence"] = row["integrity"].get("internal_silence")
-        row["integrity"]["internal_silence"] = _pocket_internal_silence_report(output)
+        row["integrity"]["internal_silence"] = (
+            recovery["delivery_internal_silence"] if recovery else _pocket_internal_silence_report(output)
+        )
         # ASR/phone observations still name the immutable provider waveform;
         # the proof records that every speech sample survives in this derivative.
         output.with_suffix(".json").write_text(json.dumps(row, indent=2, allow_nan=False) + "\n")
