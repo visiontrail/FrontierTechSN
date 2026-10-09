@@ -7,6 +7,45 @@ from backend.pipeline import tts_word_pronunciation as word
 from scripts import chatterbox_phoneme_evidence as evidence
 
 
+@pytest.mark.parametrize(('name', 'phones', 'wrong'), [
+    ('PaaS', ['P', 'AE', 'S'], ['P', 'AA', 'Z']),
+    ('IaaS', ['AY', 'AE', 'Z'], ['IY', 'AH', 'Z']),
+])
+def test_cited_cloud_reference_is_opt_in_and_rejects_native_wrong_vowels(name, phones, wrong):
+    assert word.validate_word_hint(name, name+',', phones, version=5) == phones
+    with pytest.raises(ValueError):
+        word.validate_word_hint(name, name+',', phones, version=4)
+    with pytest.raises(ValueError):
+        word.validate_word_hint(name, name+',', wrong, version=5)
+    assert word.policy_contract(version=4)['supplemental_word_references']['version'] == 1
+    assert word.policy_contract(version=5)['supplemental_word_references']['version'] == 2
+
+
+@pytest.mark.parametrize(('source', 'cue', 'phones'), [
+    ('PaaS', 'pass', ['P', 'AE', 'S']),
+    ('IaaS', 'eye as', ['AY', 'AE', 'Z']),
+    ('GUI', 'gooey', ['G', 'UW', 'IY']),
+])
+def test_homophone_cue_requires_independently_known_source_and_exact_dictionary_cue(source, cue, phones):
+    assert word.validate_homophone_hint(source, cue, phones) == phones
+    with pytest.raises(ValueError):
+        word.validate_homophone_hint(source, cue, phones, version=4)
+    with pytest.raises(ValueError):
+        word.validate_homophone_hint(source, cue+' today', phones)
+
+
+@pytest.mark.parametrize(('source', 'cue', 'phones'), [
+    ('PaaS', 'paz', ['P', 'AA', 'Z']),
+    ('PaaS', 'zzunknown', ['P', 'AE', 'S']),
+    ('IaaS', 'eye eye as', ['AY', 'AE', 'Z']),
+    ('ZZUnknown', 'pass', ['P', 'AE', 'S']),
+    ('GUI', 'goo', ['G', 'UW', 'IY']),
+])
+def test_homophone_cue_cannot_prove_unknown_source_or_change_its_complete_phones(source, cue, phones):
+    with pytest.raises(ValueError):
+        word.validate_homophone_hint(source, cue, phones)
+
+
 def word_row(**changes):
     return {'id': 0, 'source': 'SATA', 'action': 'word', 'spoken': 'sat, a',
             'phones': ['S', 'AE', 'T', 'AH'], 'reason': 'Keep the conventional word reading.', **changes}

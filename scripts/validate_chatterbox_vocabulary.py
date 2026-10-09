@@ -182,7 +182,7 @@ def mode_report(text: str, cases: list[dict], plan: dict) -> dict:
                 continue
             expected = case['expected_actions'].get(decision['source'])
             allowed = [expected] if isinstance(expected, str) else expected
-            selected_mode = 'keep' if decision['action'] == 'word' else decision['action']
+            selected_mode = 'keep' if decision['action'] in {'word', 'sound'} else decision['action']
             if allowed and selected_mode not in allowed:
                 failures.append({'case_id': case['id'], 'source': decision['source'],
                                  'expected_action': expected, 'actual_decision': decision})

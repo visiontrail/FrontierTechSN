@@ -644,6 +644,51 @@ def programming_decisions(text):
             for row in pronunciation.candidates(text, policy_version=15)]
 
 
+def test_policy16_short_mixed_cloud_acronyms_are_complete_and_not_embedded_or_protected():
+    text = 'PaaS IaaS SoC PhD use https://example.com/PaaS and XPaaS and PaaServices.'
+    found = pronunciation.candidates(text, policy_version=16)
+    assert [r['source'] for r in found] == ['PaaS', 'IaaS', 'SoC', 'PhD', 'XP']
+    assert [r['id'] for r in found] == list(range(5))
+    for version in range(3, 16):
+        assert not any(r['source'] in {'PaaS', 'IaaS'} for r in pronunciation.candidates(text, policy_version=version))
+    assert pronunciation.POLICY_VERSION == 13
+
+
+@pytest.mark.parametrize(('name', 'phones'), [('PaaS', ['P', 'AE', 'S']), ('IaaS', ['AY', 'AE', 'Z'])])
+def test_policy16_cited_cloud_word_hint_preserves_source_and_binds_hint_version(name, phones):
+    text = f'The {name} service works.'
+    row = pronunciation.candidates(text, policy_version=16)[0]
+    _, edits = pronunciation.validate_decisions(text, [{**row, 'action': 'word', 'spoken': name+',',
+        'phones': phones, 'reason': 'Cited cloud-service word reading.'}], policy_version=16)
+    assert pronunciation.render_span(text, 0, len(text), edits) == f'The {name}, service works.'
+    assert edits[0]['word_hint_version'] == 5
+    assert pronunciation.word_hint_reference(edits[0])['word_hint_version'] == 5
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=16))
+
+
+def test_policy16_cloud_spelling_retains_repeated_lowercase_letters():
+    text = 'The IaaS service works.'
+    row = pronunciation.candidates(text, policy_version=16)[0]
+    decision = {**row, 'action': 'spell', 'spoken': 'eye double eigh ess', 'reason': 'Published conventional letter reading.'}
+    _, edits = pronunciation.validate_decisions(text, [decision], policy_version=16)
+    assert pronunciation.render_span(text, 0, len(text), edits) == 'The eye double eigh ess service works.'
+    with pytest.raises(ValueError, match='every source letter'):
+        pronunciation.validate_decisions(text, [{**decision, 'spoken': 'eye eigh ess'}], policy_version=16)
+
+
+@pytest.mark.parametrize(('name', 'cue', 'phones'), [
+    ('PaaS', 'pass', ['P', 'AE', 'S']), ('IaaS', 'eye as', ['AY', 'AE', 'Z']),
+])
+def test_policy16_phonetic_word_cue_is_versioned_and_canonical_text_unchanged(name, cue, phones):
+    text = f'The {name} service works.'
+    row = pronunciation.candidates(text, policy_version=16)[0]
+    _, edits = pronunciation.validate_decisions(text, [{**row, 'action':'sound', 'spoken':cue,
+        'phones':phones, 'reason':'Independent cited word reading with identical ordinary dictionary cue.'}], policy_version=16)
+    assert pronunciation.render_span(text, 0, len(text), edits) == f'The {cue} service works.'
+    assert text == f'The {name} service works.'
+    assert pronunciation.word_hint_reference(edits[0])['word_hint_type'] == 'homophone'
+
+
 def test_policy15_programming_cues_retain_both_operators_and_source():
     text = 'The programmer reads a C++ example and a C# example.'
     _, edits = pronunciation.validate_decisions(text, programming_decisions(text), policy_version=15)

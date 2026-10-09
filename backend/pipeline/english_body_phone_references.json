@@ -133,6 +133,30 @@
       "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/present_3",
       "source_location": "Verb forms: he / she / it presents",
       "verified_on": "2026-10-08"
+    },
+    "paas": {
+      "variants": [["P", "AE", "S"]],
+      "source_url": "https://bishopfox.com/cybersecurity-style-guide/list-of-terms/p",
+      "source_location": "PaaS entry explicitly gives the word reading pass. ARPABET derives from the independent CMU pass entry; the reference does not authorize an expanded phrase or changed source spelling.",
+      "verified_on": "2026-10-09"
+    },
+    "iaas": {
+      "variants": [["AY", "AE", "Z"]],
+      "source_url": "https://www.pluralsight.com/resources/blog/cloud/what-is-cloud-migration",
+      "source_location": "Cloud service models, IaaS: commonly spelled I-A-A-S and sometimes pronounced eye-azz. AY-AE-Z transcribes this published respelling; it is not a published IPA quote. A model must still select the contextual word or letter reading.",
+      "verified_on": "2026-10-09"
+    },
+    "saas": {
+      "variants": [["S", "AE", "S"]],
+      "source_url": "https://www.pluralsight.com/resources/blog/cloud/what-is-cloud-migration",
+      "source_location": "Cloud service models, SaaS explicitly gives word reading sass, alongside the S-A-A-S initialism. ARPABET derives from CMU sass. Contextual pronunciation decisions remain mandatory.",
+      "verified_on": "2026-10-09"
+    },
+    "am": {
+      "variants": [["AH", "M"]],
+      "source_url": "https://dictionary.cambridge.org/pronunciation/english/am",
+      "source_location": "English verb am, British and American pronunciation entries distinguish strong /æm/ and weak /əm/. AH-M supplements the dictionary verb form only; explicit named-letter edits retain A /eɪ/ and M /ɛm/.",
+      "verified_on": "2026-10-09"
     }
   }
 }

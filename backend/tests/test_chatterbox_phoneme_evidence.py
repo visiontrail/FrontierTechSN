@@ -9,6 +9,60 @@ PREFIX = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z '
 ENDING = ' t ə d eɪ'
 
 
+def test_published_weak_verb_am_never_reduces_named_letters():
+    source = 'The note reads I AM ready.'
+    assert evidence.compare_source(source, [], 'ð ə n oʊ t ɹ iː d z aɪ ə m ɹ ɛ d i')['passed']
+    named = 'The report mentions AM today.'
+    row = tts_pronunciation.candidates(named)[0]
+    _, prepared = tts_pronunciation.validate_decisions(named, [{**row,'action':'spell',
+        'spoken':'eigh em','reason':'Two named letters in this context.'}])
+    assert evidence.compare_source(named, prepared, PREFIX+'eɪ ɛ m'+ENDING)['passed']
+    assert not evidence.compare_source(named, prepared, PREFIX+'ə m'+ENDING)['passed']
+
+
+def test_cited_saas_word_requires_complete_source_and_does_not_authorize_new_vowels():
+    source = 'The report mentions SaaS today.'
+    assert evidence.compare_source(source, [], PREFIX+'s æ s'+ENDING)['passed']
+    assert not evidence.compare_source(source, [], PREFIX+'s ɑː z'+ENDING)['passed']
+
+
+@pytest.mark.parametrize(('name', 'phones', 'wrong'), [
+    ('PaaS', 'p æ s', 'p ɑː z'), ('IaaS', 'aɪ æ z', 'iː ɐ z'),
+])
+def test_opt_in_cloud_word_reference_requires_exact_source_phones_and_bound_version(name, phones, wrong):
+    source = f'The report mentions {name} today.'
+    row = tts_pronunciation.candidates(source, policy_version=16)[0]
+    declared = ['P', 'AE', 'S'] if name == 'PaaS' else ['AY', 'AE', 'Z']
+    _, prepared = tts_pronunciation.validate_decisions(source, [{**row, 'action':'word',
+        'spoken':name+',', 'phones':declared, 'reason':'Published cloud word pronunciation.'}], policy_version=16)
+    correct = PREFIX + phones + ENDING
+    report = evidence.compare_source(source, prepared, correct)
+    assert report['supported'] and report['passed']
+    assert report['word_hint_references'][0]['word_hint_version'] == 5
+    assert report['independent_word_references'][name]['supplemental_word_reference_contract']['version'] == 2
+    assert not evidence.compare_source(source, prepared, PREFIX + wrong + ENDING)['passed']
+    assert not evidence.compare_source(source, prepared, correct + ' t ə d eɪ')['passed']
+    assert not evidence.compare_source(source, [{k:v for k,v in prepared[0].items() if k!='word_hint_version'}], correct)['supported']
+
+
+@pytest.mark.parametrize(('name', 'cue', 'declared', 'phones'), [
+    ('PaaS', 'pass', ['P','AE','S'], 'p æ s'), ('IaaS', 'eye as', ['AY','AE','Z'], 'aɪ æ z'),
+])
+def test_source_word_phonetic_cue_is_checked_against_original_source_not_its_own_words(name, cue, declared, phones):
+    source = f'The report mentions {name} today.'
+    row = tts_pronunciation.candidates(source, policy_version=16)[0]
+    _, prepared = tts_pronunciation.validate_decisions(source, [{**row,'action':'sound','spoken':cue,
+        'phones':declared,'reason':'Published source reading.'}], policy_version=16)
+    correct = PREFIX+phones+ENDING
+    report = evidence.compare_source(source, prepared, correct)
+    assert report['supported'] and report['passed']
+    assert report['source_sha256'] == hashlib.sha256(source.encode()).hexdigest()
+    assert report['word_hint_references'][0]['word_hint_type'] == 'homophone'
+    assert not evidence.compare_source(source, prepared, correct+' p æ s')['passed']
+    tampered = [{**prepared[0], 'source':'ZZZZ'}]
+    assert not evidence.compare_source(source.replace(name,'ZZZZ'), tampered, correct)['supported']
+
+
 @pytest.mark.parametrize(('source_name', 'cue', 'phones', 'wrong'), [
     ('C++', 'see plus plus', 's iː p l ʌ s p l ʌ s', 's iː p l ʌ s'),
     ('C#', 'see sharp', 's iː ʃ ɑːɹ p', 's iː ʃ ɑːɹ'),

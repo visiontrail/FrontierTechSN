@@ -11,6 +11,19 @@ def words(text):
     return [{'text': word} for word in text.split()]
 
 
+def test_cited_phonetic_word_cue_keeps_word_mode_and_cannot_satisfy_letter_mode():
+    source = 'The GUI displays the window.'
+    row = pronunciation.candidates(source, policy_version=16)[0]
+    decisions = [{**row, 'action':'sound', 'spoken':'gooey', 'phones':['G','UW','IY'],
+                  'reason':'Source-cited conventional word reading.'}]
+    identity = {'source_sha256':validation.hashlib.sha256(source.encode()).hexdigest(),
+                'language':'en', 'policy':pronunciation.policy_contract(policy_version=16)}
+    plan = pronunciation._plan(source, decisions, identity)
+    case = {'id':'case-gui','text':source,'expected_actions':{'GUI':'keep'}}
+    assert validation.mode_report(source, [case], plan)['passed']
+    assert not validation.mode_report(source, [{**case,'expected_actions':{'GUI':'spell'}}], plan)['passed']
+
+
 def fixture():
     return json.loads(validation.FIXTURE.read_text())
 

@@ -264,7 +264,7 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
             SOURCE_WORD_REFERENCE_POLICY_VERSION, independent_word_reference,
         )
         try:
-            source_references = {row['source']: independent_word_reference(row['source'])
+            source_references = {row['source']: independent_word_reference(row['source'], word_hint_version=row.get('word_hint_version', 4))
                                  for row in identity['word_hint_references']}
         except ValueError:
             return None
@@ -651,14 +651,14 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
             from scripts.chatterbox_phoneme_evidence import (
                 SOURCE_WORD_REFERENCE_POLICY_VERSION, independent_word_reference,
             )
-            source_references = {edit['source']: independent_word_reference(edit['source'])
+            source_references = {edit['source']: independent_word_reference(edit['source'], word_hint_version=edit.get('word_hint_version', 4))
                                  for edit in edits if edit.get('kind') == 'word'}
             if (acoustic.get('source_word_reference_policy_version') != SOURCE_WORD_REFERENCE_POLICY_VERSION
                     or set(acoustic.get('independent_word_references') or {}) != {
                         edit['source'] for edit in edits if edit.get('kind') == 'word'}
                     or _digest(acoustic.get('independent_word_references')) != _digest(source_references)):
                 raise RuntimeError('Independent source-word pronunciation reference unavailable; preserving the completed job')
-            refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
+            refs = [pronunciation.word_hint_reference(edit)
                     for edit in edits if edit.get('kind') == 'word']
             if acoustic.get('word_hint_references') != refs:
                 raise RuntimeError('Word-hint confirmation differs from its frozen phone references')
@@ -836,7 +836,7 @@ async def _generate_chatterbox(
                 "synthesis_speed_ratio": 1.0,
                 "synthesis_parameters": contract["synthesis_parameters"],
             }
-            word_refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
+            word_refs = [pronunciation.word_hint_reference(edit)
                          for edit in chunk_edits if edit.get('kind') == 'word']
             if word_refs:
                 identity['word_hint_references'] = word_refs

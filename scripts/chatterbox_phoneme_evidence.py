@@ -26,7 +26,7 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 27
+EVIDENCE_VERSION = 28
 PROGRAMMING_REFERENCES = {
     'C++': 'https://stroustrup.com/bs_faq.html',
     'C#': 'https://dotnet.microsoft.com/en-us/languages',
@@ -116,10 +116,13 @@ def ordinary_source_words(fragment: str) -> list[str]:
     return words
 
 
-def independent_word_reference(word: str) -> dict:
+def independent_word_reference(word: str, *, word_hint_version=4) -> dict:
     """The cue's own fragments cannot establish how its source word is read."""
     variants = lexicon().get(word.casefold()) or []
-    reference = supplemental_word_references().get(word.casefold())
+    if word_hint_version not in {1, 2, 3, 4, 5}:
+        raise ValueError('Unsupported independent word-hint reference version')
+    reference_version = 2 if word_hint_version >= 5 else 1
+    reference = supplemental_word_references(version=reference_version).get(word.casefold())
     if reference:
         variants = [*variants, *reference['variants']]
     body = body_reference_for(word)
@@ -133,6 +136,8 @@ def independent_word_reference(word: str) -> dict:
     if body or reference:
         selected = body or reference
         result.update(source_url=selected['source_url'], source_location=selected['source_location'])
+    if word_hint_version >= 5:
+        result['supplemental_word_reference_contract'] = reference_contract(version=reference_version)
     return result
 
 
@@ -282,9 +287,14 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
             cursor = end
             continue
         if edit.get('kind') == 'word':
-            from backend.pipeline.tts_word_pronunciation import validate_word_hint
-            phones = validate_word_hint(edit['source'], edit['spoken'], edit.get('phones'))
-            canonical = independent_word_reference(edit['source'])
+            from backend.pipeline.tts_word_pronunciation import validate_word_hint, validate_homophone_hint
+            hint_version = edit.get('word_hint_version', 4)
+            hint_type = edit.get('word_hint_type')
+            if hint_type not in {None, 'homophone'}:
+                raise ValueError('Unsupported word-hint type')
+            validate_hint = validate_homophone_hint if hint_type == 'homophone' else validate_word_hint
+            phones = validate_hint(edit['source'], edit['spoken'], edit.get('phones'), version=hint_version)
+            canonical = independent_word_reference(edit['source'], word_hint_version=hint_version)
             if collapse_consonant_continuations(phones) not in canonical['variants']:
                 raise ValueError('Word hint differs from the independent source-word pronunciation reference')
             ordinary(text[cursor:start])
@@ -354,7 +364,7 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
         report['prerhotic_vowel_reference'] = PRERHOTIC_VOWEL_SOURCE
     if 'ɾ' in phones:
         report['ordinary_flap_reference'] = ORDINARY_FLAP_SOURCE
-    word_refs = [{key: edit[key] for key in ('source', 'start', 'end', 'phones')}
+    word_refs = [pronunciation.word_hint_reference(edit)
                  for edit in edits if edit.get('kind') == 'word']
     programming_refs = {edit['source']: PROGRAMMING_REFERENCES[edit['source']]
                         for edit in edits if edit.get('kind') == 'programming'
@@ -384,7 +394,7 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     if word_refs:
         try:
             report['independent_word_references'] = {
-                edit['source']: independent_word_reference(edit['source']) for edit in word_refs}
+                edit['source']: independent_word_reference(edit['source'], word_hint_version=edit.get('word_hint_version', 4)) for edit in word_refs}
         except ValueError as error:
             report['unsupported_reason'] = str(error)
             return report
