@@ -1976,6 +1976,79 @@ async def test_opt_in_numeric_policy_sends_exact_decimal_words_and_reuses_the_sa
     assert script.read_text() == source
 
 
+@pytest.mark.parametrize('observed', ['ALDH 3B2', 'ALDH 3 B2', 'ALD H3B2', 'ALDH3 B2', 'ALDH 3 B 2'])
+def test_exact_source_model_identifier_can_repartition_internal_asr_groups(observed):
+    text = 'The report mentions ALDH3B2 today.'
+    _, edits = tts_pronunciation.validate_decisions(text, [
+        {**row, 'action':'spell', 'spoken':'eigh ell dee aitch' if row['source']=='ALDH' else 'bee',
+         'reason':'Source model identifier letters.'}
+        for row in tts_pronunciation.candidates(text)])
+    report = chatterbox._pronunciation_report(text, [{'text':f'The report mentions {observed} today.'}], edits)
+    assert report['passed']
+    assert report['normalized_transcript'] == 'the report mentions aldh3b2 today'
+
+
+@pytest.mark.parametrize('observed', ['ALDH 3B3', 'ALDH 3BB2', 'ALDH 3B02', 'ALDH 3 2', 'ALDIH 3B2', 'ALDH 3B2 3B2'])
+def test_model_repartition_never_changes_letters_digits_precision_or_repetitions(observed):
+    text = 'The report mentions ALDH3B2 today.'
+    assert not chatterbox._pronunciation_report(text, [{'text':f'The report mentions {observed} today.'}])['passed']
+
+
+def test_model_repartition_cannot_combine_separate_source_identifiers():
+    text = 'The report mentions ALDH3 B2 today.'
+    assert not chatterbox._pronunciation_report(text, [{'text':'The report mentions ALDH3B2 today.'}])['passed']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['matched', 'different', 'unavailable'])
+async def test_model_repartition_requires_whole_source_phone_confirmation(tmp_path, monkeypatch, status):
+    from backend.pipeline import chatterbox_phonemes
+    source = 'The report mentions ALDH3B2 today.'
+    _, edits = tts_pronunciation.validate_decisions(source, [
+        {**row,'action':'spell','spoken':'eigh ell dee aitch' if row['source']=='ALDH' else 'bee',
+         'reason':'Source model letters.'} for row in tts_pronunciation.candidates(source)])
+    wav = tmp_path/'provider.wav';wav.write_bytes(b'waveform-bound test fixture')
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=([
+        {'text':'The report mentions ALDH 3B2 today.'}], {})))
+    async def confirm(path, text, _edits, _directory):
+        if status == 'unavailable':return None
+        return {'supported':True,'passed':status=='matched','method':'complete_source_phone_sequence',
+                'audio_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+                'source_sha256':hashlib.sha256(text.encode()).hexdigest(),'conditioned_on_reference_text':False}
+    monkeypatch.setattr(chatterbox_phonemes, 'confirm', confirm)
+    if status == 'matched':
+        report = await chatterbox._verify_pronunciation(wav, source, tmp_path/'verify', emit=lambda _:None, edits=edits)
+        assert report['passed'] and report['source_bound_model_repartitions']
+        assert report['required_model_phone_confirmation']['passed']
+    else:
+        expected = tts.TtsIntegrityError if status == 'different' else RuntimeError
+        with pytest.raises(expected):
+            await chatterbox._verify_pronunciation(wav, source, tmp_path/'verify', emit=lambda _:None, edits=edits)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('proof', ['missing', 'wrong_audio', 'matched'])
+async def test_model_repartition_cache_requires_matching_source_waveform_proof(setup_client, proof):
+    server, script, directory, _verifier, generate = setup_client
+    source = 'The report mentions ALDH3B2 today.'
+    script.write_text(source)
+    await generate()
+    wav = directory/'tts_input_part_001_generated.wav'
+    metadata = json.loads(wav.with_suffix('.json').read_text())
+    guard = metadata['integrity']['pronunciation']
+    guard['source_bound_model_repartitions'] = [{'source_parts':['3','b','2'],'observed_parts':['3b2']}]
+    if proof != 'missing':
+        guard['required_model_phone_confirmation'] = {
+            'supported':True,'passed':True,'conditioned_on_reference_text':False,
+            'method':'complete_source_phone_sequence',
+            'source_sha256':hashlib.sha256(source.encode()).hexdigest(),
+            'audio_sha256':metadata['audio_sha256'] if proof=='matched' else 'different-waveform',
+        }
+    wav.with_suffix('.json').write_text(json.dumps(metadata))
+    assert bool(chatterbox._cached_part(wav, metadata['identity'], verify_text=True)) == (proof=='matched')
+    assert len(server.jobs) == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('name', ['C++', 'C#'])
 async def test_opt_in_programming_policy_sends_all_named_symbols_and_reuses_same_job(setup_client, monkeypatch, name):

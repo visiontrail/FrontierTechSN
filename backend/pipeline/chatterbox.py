@@ -280,6 +280,14 @@ def _cached_part(path: Path, identity: dict, *, verify_text: bool) -> dict | Non
                 or acoustic.get('source_sha256') != hashlib.sha256(identity['text'].encode()).hexdigest()
                 or acoustic.get('word_hint_references') != identity['word_hint_references']):
             return None
+    if verify_text and guard.get('source_bound_model_repartitions'):
+        acoustic = guard.get('required_model_phone_confirmation') or {}
+        if (acoustic.get('passed') is not True or acoustic.get('supported') is not True
+                or acoustic.get('conditioned_on_reference_text') is not False
+                or acoustic.get('method') != 'complete_source_phone_sequence'
+                or acoustic.get('audio_sha256') != metadata['audio_sha256']
+                or acoustic.get('source_sha256') != hashlib.sha256(identity['text'].encode()).hexdigest()):
+            return None
     if verify_text:
         # The existing ASR observation is bound to this verified waveform hash.
         # Recheck it when upgrading the tail gate, retaining the original job
@@ -343,7 +351,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:\.\d+)*(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 10
+OBSERVATION_SPELLING_VERSION = 11
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -516,6 +524,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     observed = separated
     # Collapse exact split spellings without discarding any observed letters.
     replacements = {}
+    model_repartitions = []
     for tag, start, end, left, right in SequenceMatcher(
         a=expected, b=observed, autojunk=False,
     ).get_opcodes():
@@ -528,6 +537,21 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         if (all(index in targets or index in symbol_conjunctions for index in indices)
                 and "".join(observed[left:right]) == "".join(expected[start:end])):
             replacements[left] = (right, expected[start:end])
+            continue
+        # ALDH3B2 may be transcribed as "ALDH 3B2" or "ALDH 3 B2".
+        # Repartition only an aligned block inside one original contiguous
+        # letter/digit identifier. Exact glyph equality retains every letter,
+        # digit, leading zero and repetition; adjacent source facts cannot join.
+        if (any(model_start <= start < end <= model_end
+                and re.fullmatch(r'[a-z0-9]+', spelling)
+                and re.search(r'[a-z]', spelling) and re.search(r'\d', spelling)
+                for model_start, model_end, spelling in embedded_ranges)
+                and any(index in targets for index in range(start, end))
+                and any(index in model_identifiers for index in range(start, end))
+                and "".join(observed[left:right]) == "".join(expected[start:end])):
+            replacements[left] = (right, expected[start:end])
+            model_repartitions.append({'source_parts': expected[start:end],
+                                       'observed_parts': observed[left:right], 'source_start': start})
             continue
         cursor, aligned = left, []
         for index in range(start, end):
@@ -595,6 +619,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             "protected_model_identifiers": [expected[index] for index in sorted(model_identifiers)],
             "transcript": tts._raw_transcript(words), "normalized_transcript": ' '.join(normalized),
             "observation_spelling_version": OBSERVATION_SPELLING_VERSION,
+            "source_bound_model_repartitions": model_repartitions,
             "differences": differences,
             "policy": "exact_initialism_occurrences"}
 
@@ -613,9 +638,10 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
     if not normalized_tail['passed']:
         report['trailing_speech'] = normalized_tail
     word_hint = any(edit.get('kind') == 'word' for edit in edits)
+    model_repartition = bool(report.get('source_bound_model_repartitions'))
     if word_hint:
         report['word_hint_required'] = True
-    if words and (not report['passed'] or word_hint) and report['trailing_speech']['passed']:
+    if words and (not report['passed'] or word_hint or model_repartition) and report['trailing_speech']['passed']:
         from backend.pipeline import chatterbox_phonemes
         acoustic = await chatterbox_phonemes.confirm(path, text, edits, directory)
         if acoustic is not None:
@@ -662,6 +688,17 @@ async def _verify_pronunciation(path: Path, text: str, directory: Path, *, emit,
                     for edit in edits if edit.get('kind') == 'word']
             if acoustic.get('word_hint_references') != refs:
                 raise RuntimeError('Word-hint confirmation differs from its frozen phone references')
+        if model_repartition:
+            report['required_model_phone_confirmation'] = acoustic
+            if acoustic is None or acoustic.get('supported') is not True:
+                report.update(passed=False, verification_status='model_phone_observation_unavailable')
+                _write_json(directory / 'pronunciation_report.json', report)
+                raise RuntimeError('Required model-identifier acoustic verification unavailable; preserving the completed job')
+            if acoustic.get('passed') is not True:
+                report.update(passed=False, verification_status='model_phone_mismatch')
+                _write_json(directory / 'pronunciation_report.json', report)
+                raise tts.TtsIntegrityError('Model-identifier audio differs from its complete source phone sequence')
+            report['verification_mode'] = 'required_model_identifier_phone_sequence'
     report["transcription"] = transcription
     _write_json(directory / "pronunciation_report.json", report)
     if not words and edits:
