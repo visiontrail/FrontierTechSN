@@ -9,6 +9,19 @@ PREFIX = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z '
 ENDING = ' t ə d eɪ'
 
 
+def test_official_full_postgresql_word_phone_reference_never_adds_named_s_or_loses_q_vowel():
+    source='The report mentions PostgreSQL today.'
+    row=tts_pronunciation.candidates(source,policy_version=18)[0]
+    _,edits=tts_pronunciation.validate_decisions(source,[{**row,'action':'sound','spoken':'post gress cue ell',
+        'phones':['P','OW','S','T','G','R','EH','S','K','Y','UW','EH','L'],'reason':'Official source reading.'}],policy_version=18)
+    correct=PREFIX+'p oʊ s t ɡ ɹ ɛ s k j uː ɛ l'+ENDING
+    report=evidence.compare_source(source,edits,correct)
+    assert report['supported'] and report['passed']
+    assert report['independent_word_references']['PostgreSQL']['supplemental_word_reference_contract']['version']==3
+    for wrong in [correct.replace('ɛ s k','ɛ ɛ s k'),correct.replace('k j uː','k uː'),correct+' ɛ l']:
+        assert not evidence.compare_source(source,edits,wrong)['passed']
+
+
 @pytest.mark.parametrize(('symbol', 'phones'), [
     ('P&L','p iː æ n d ɛ l'), ('R&D','ɑːɹ æ n d d iː'),
     ('M&A','ɛ m ə n d eɪ'), ('N&D','ɛ n ə n d d iː'),

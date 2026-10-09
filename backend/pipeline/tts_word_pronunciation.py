@@ -17,9 +17,9 @@ def lexicon():
     return cmudict.dict()
 
 
-@lru_cache(maxsize=5)
+@lru_cache(maxsize=6)
 def policy_contract(*, version=WORD_HINT_VERSION):
-    if version not in {1, 2, 3, 4, 5}:
+    if version not in {1, 2, 3, 4, 5, 6}:
         raise ValueError('Unsupported word-hint policy')
     with cmudict.dict_stream() as stream:
         dictionary_sha256 = hashlib.sha256(stream.read()).hexdigest()
@@ -27,7 +27,7 @@ def policy_contract(*, version=WORD_HINT_VERSION):
               'dictionary_sha256': dictionary_sha256}
     if version >= 4:
         from backend.pipeline.tts_phone_references import policy_contract as reference_contract
-        result['supplemental_word_references'] = reference_contract(version=2 if version >= 5 else 1)
+        result['supplemental_word_references'] = reference_contract(version=3 if version >= 6 else 2 if version >= 5 else 1)
     return result
 
 
@@ -37,8 +37,8 @@ def normalized(variant):
 
 def validate_homophone_hint(source, spoken, phones, *, version=5):
     """Allow an ordinary English cue only with identical independently known source phones."""
-    if version != 5 or not re.fullmatch(r'[A-Za-z]{3,32}', source):
-        raise ValueError('A phonetic cue requires the explicit version5 source-word policy')
+    if version not in {5, 6} or not re.fullmatch(r'[A-Za-z]{3,32}', source):
+        raise ValueError('A phonetic cue requires an explicit supported source-word policy')
     if (not isinstance(spoken, str) or len(spoken) > 128
             or not re.fullmatch(r'[A-Za-z][A-Za-z ,.-]*', spoken)):
         raise ValueError('A phonetic cue must contain ordinary English words and separators')
@@ -50,7 +50,7 @@ def validate_homophone_hint(source, spoken, phones, *, version=5):
         raise ValueError('A phonetic cue requires explicit valid ARPABET phones')
     from backend.pipeline.tts_phone_references import entries
     dictionary = lexicon()
-    reference = entries(version=2).get(source.casefold())
+    reference = entries(version=3 if version >= 6 else 2).get(source.casefold())
     canonical = [*(dictionary.get(source.casefold()) or []), *(reference['variants'] if reference else [])]
     wanted = tuple(phones)
     if not canonical or wanted not in {normalized(choice) for choice in canonical}:
@@ -68,7 +68,7 @@ def validate_homophone_hint(source, spoken, phones, *, version=5):
 
 
 def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
-    if version not in {1, 2, 3, 4, 5}:
+    if version not in {1, 2, 3, 4, 5, 6}:
         raise ValueError('Unsupported word-hint policy')
     pattern = r'[A-Za-z]{3,32}' if version >= 3 else r'[A-Z]{3,32}'
     if not re.fullmatch(pattern, source):
@@ -85,7 +85,7 @@ def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
         variants = dictionary.get(word.casefold()) or []
         if version >= 4:
             from backend.pipeline.tts_phone_references import entries
-            reference = entries(version=2 if version >= 5 else 1).get(word.casefold())
+            reference = entries(version=3 if version >= 6 else 2 if version >= 5 else 1).get(word.casefold())
             if reference:
                 variants = [*variants, *reference['variants']]
         return variants

@@ -9,13 +9,14 @@ import re
 PHONES = frozenset('AA AE AH AO AW AY B CH D DH EH ER EY F G HH IH IY JH K L M N NG OW OY P R S SH T TH UH UW V W Y Z ZH'.split())
 WORD_REFERENCES = Path(__file__).with_name('english_word_phone_references.json')
 WORD_REFERENCES_V2 = Path(__file__).with_name('english_word_phone_references_v2.json')
+WORD_REFERENCES_V3 = Path(__file__).with_name('english_word_phone_references_v3.json')
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=3)
 def _loaded_references(version=1):
-    if version not in {1, 2}:
+    if version not in {1, 2, 3}:
         raise ValueError('Unsupported supplemental word reference version')
-    raw = (WORD_REFERENCES if version == 1 else WORD_REFERENCES_V2).read_bytes()
+    raw = {1:WORD_REFERENCES, 2:WORD_REFERENCES_V2, 3:WORD_REFERENCES_V3}[version].read_bytes()
     payload = json.loads(raw)
     if (not isinstance(payload, dict) or payload.get('version') != version
             or not isinstance(payload.get('entries'), dict)):

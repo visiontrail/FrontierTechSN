@@ -1,0 +1,153 @@
+{
+  "version": 3,
+  "entries": {
+    "json": {
+      "variants": [
+        [
+          "JH",
+          "EY",
+          "S",
+          "AH",
+          "N"
+        ]
+      ],
+      "ipa": [
+        "ˈdʒeɪ.sən"
+      ],
+      "source_url": "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf",
+      "source_location": "Introduction, page iii, pronunciation footnote",
+      "verified_on": "2026-10-08"
+    },
+    "gif": {
+      "variants": [
+        [
+          "G",
+          "IH",
+          "F"
+        ],
+        [
+          "JH",
+          "IH",
+          "F"
+        ]
+      ],
+      "ipa": [
+        "ɡɪf",
+        "dʒɪf"
+      ],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/gif",
+      "source_location": "British and American pronunciation entries",
+      "verified_on": "2026-10-08"
+    },
+    "document": {
+      "variants": [
+        [
+          "D",
+          "AA",
+          "K",
+          "Y",
+          "UW",
+          "M",
+          "AH",
+          "N",
+          "T"
+        ]
+      ],
+      "ipa": [
+        "ˈdɑːkjumənt"
+      ],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/document_1",
+      "source_location": "American noun pronunciation, final syllable schwa",
+      "verified_on": "2026-10-08"
+    },
+    "esim": {
+      "variants": [
+        [
+          "IY",
+          "S",
+          "IH",
+          "M"
+        ]
+      ],
+      "ipa": [
+        "ˈiːsɪm"
+      ],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/esimtm",
+      "source_location": "British and American pronunciation entries",
+      "verified_on": "2026-10-08"
+    },
+    "gui": {
+      "variants": [
+        [
+          "G",
+          "UW",
+          "IY"
+        ]
+      ],
+      "ipa": [
+        "ˈɡuːi"
+      ],
+      "source_url": "https://www.oxfordlearnersdictionaries.com/definition/english/gui",
+      "source_location": "British and American word pronunciation entries",
+      "verified_on": "2026-10-08"
+    },
+    "paas": {
+      "variants": [
+        [
+          "P",
+          "AE",
+          "S"
+        ]
+      ],
+      "source_url": "https://bishopfox.com/cybersecurity-style-guide/list-of-terms/p",
+      "source_location": "PaaS entry explicitly gives the word reading pass. ARPABET derives from the independent CMU pass entry; the reference does not authorize an expanded phrase or changed source spelling.",
+      "verified_on": "2026-10-09"
+    },
+    "iaas": {
+      "variants": [
+        [
+          "AY",
+          "AE",
+          "Z"
+        ]
+      ],
+      "source_url": "https://www.pluralsight.com/resources/blog/cloud/what-is-cloud-migration",
+      "source_location": "Cloud service models, IaaS: commonly spelled I-A-A-S and sometimes pronounced eye-azz. AY-AE-Z transcribes this published respelling; it is not a published IPA quote. A model must still select the contextual word or letter reading.",
+      "verified_on": "2026-10-09"
+    },
+    "saas": {
+      "variants": [
+        [
+          "S",
+          "AE",
+          "S"
+        ]
+      ],
+      "source_url": "https://www.pluralsight.com/resources/blog/cloud/what-is-cloud-migration",
+      "source_location": "Cloud service models, SaaS explicitly gives word reading sass, alongside the S-A-A-S initialism. ARPABET derives from CMU sass. Contextual pronunciation decisions remain mandatory.",
+      "verified_on": "2026-10-09"
+    },
+    "postgresql": {
+      "variants": [
+        [
+          "P",
+          "OW",
+          "S",
+          "T",
+          "G",
+          "R",
+          "EH",
+          "S",
+          "K",
+          "Y",
+          "UW",
+          "EH",
+          "L"
+        ]
+      ],
+      "source_url": "https://www.postgresql.org/about/press/faq/",
+      "source_location": "Official pronunciation entry gives post-GRES-que-ell. ARPABET composition uses independent dictionary post and gress plus the conventional Q and L letter sounds. This is a compositional transcription of the published respelling, not a published IPA quote; it does not expand the name or authorize an extra named S.",
+      "verified_on": "2026-10-09"
+    }
+  }
+}

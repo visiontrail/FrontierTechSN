@@ -34,6 +34,16 @@ def test_homophone_cue_requires_independently_known_source_and_exact_dictionary_
         word.validate_homophone_hint(source, cue+' today', phones)
 
 
+@pytest.mark.parametrize('cue',['post gress cue ell','post-gress-queue-ell'])
+def test_version6_postgresql_official_cue_matches_every_source_phone(cue):
+    phones=['P','OW','S','T','G','R','EH','S','K','Y','UW','EH','L']
+    assert word.validate_homophone_hint('PostgreSQL',cue,phones,version=6)==phones
+    with pytest.raises(ValueError):word.validate_homophone_hint('PostgreSQL',cue,phones,version=5)
+    with pytest.raises(ValueError):word.validate_homophone_hint('PostgreSQL',cue+' ess',phones,version=6)
+    assert word.policy_contract(version=5)['supplemental_word_references']['version']==2
+    assert word.policy_contract(version=6)['supplemental_word_references']['version']==3
+
+
 @pytest.mark.parametrize(('source', 'cue', 'phones'), [
     ('PaaS', 'paz', ['P', 'AA', 'Z']),
     ('PaaS', 'zzunknown', ['P', 'AE', 'S']),

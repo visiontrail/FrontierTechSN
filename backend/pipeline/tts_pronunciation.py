@@ -15,7 +15,7 @@ from backend import config
 CANDIDATE_POLICY_VERSION = 13
 IMPLEMENTED_POLICY_VERSION = 13
 POLICY_VERSION = IMPLEMENTED_POLICY_VERSION
-SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+SUPPORTED_POLICY_VERSIONS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
 MAX_PLAN_ATTEMPTS = 2
 PROTECTED_TEXT_RE = re.compile(
     r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.\w+|\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/\S*)?",
@@ -94,7 +94,7 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
             result['candidate_boundary_version'] = 1
     if version >= 7:
         from backend.pipeline.tts_word_pronunciation import policy_contract as word_contract
-        result['word_hint_contract'] = word_contract(version=5 if version >= 16 else 4 if version >= 13 else 3 if version >= 12 else 2 if version >= 10 else 1).copy()
+        result['word_hint_contract'] = word_contract(version=6 if version >= 18 else 5 if version >= 16 else 4 if version >= 13 else 3 if version >= 12 else 2 if version >= 10 else 1).copy()
     if version >= 14:
         result['numeric_cue_version'] = NUMERIC_CUE_VERSION
         result['numeric_candidate_pattern_sha256'] = _digest((NUMERIC_MODEL_RE.pattern, NUMERIC_LITERAL_RE.pattern))
@@ -105,6 +105,8 @@ def policy_contract(*, policy_version: int | None = None) -> dict:
         result['short_mixed_acronym_pattern_sha256'] = _digest(SHORT_MIXED_ACRONYM_RE.pattern)
     if version >= 17:
         result['upper_prefix_mixed_acronym_pattern_sha256'] = _digest(UPPER_PREFIX_MIXED_ACRONYM_RE.pattern)
+    if version >= 18:
+        result['cited_whole_word_candidate_version'] = 1
     return result
 
 
@@ -114,7 +116,7 @@ def compatible_policy(policy: dict, current: dict | None = None) -> bool:
     implemented = {**current, 'version': IMPLEMENTED_POLICY_VERSION}
     if policy == implemented:
         return True
-    if policy.get('version') in {14, 15, 16, 17}:
+    if policy.get('version') in {14, 15, 16, 17, 18}:
         return policy == policy_contract(policy_version=policy['version'])
     if policy.get('version') in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         try:
@@ -192,6 +194,15 @@ def candidates(text: str, *, policy_version: int | None = None) -> list[dict]:
             result = [row for row in result if not
                       (match.start() <= row['start'] and row['end'] <= match.end())]
             result.append({'id': 0, 'start': match.start(), 'end': match.end(), 'source': match[0]})
+    if version >= 18:
+        from backend.pipeline.tts_phone_references import entries
+        references = entries(version=3)
+        for match in re.finditer(r'(?<![A-Za-z])[A-Za-z]{3,32}(?![A-Za-z])', text):
+            if (match[0].casefold() not in references or not any(char.isupper() for char in match[0][1:])
+                    or any(start < match.end() and end > match.start() for start, end in protected)):
+                continue
+            result = [row for row in result if not (match.start() <= row['start'] and row['end'] <= match.end())]
+            result.append({'id':0,'start':match.start(),'end':match.end(),'source':match[0]})
     if version >= 14:
         result.sort(key=lambda row: row['start'])
         for identifier, row in enumerate(result):
@@ -288,7 +299,8 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
             try:
                 validate_hint = validate_homophone_hint if action == 'sound' else validate_word_hint
                 phones = validate_hint(candidate['source'], spoken, row.get('phones'),
-                                            version=5 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 16 else
+                                            version=6 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 18 else
+                                            5 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 16 else
                                             4 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 13 else
                                             3 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 12 else
                                             2 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 10 else 1)
@@ -298,7 +310,7 @@ def validate_decisions(text: str, decisions: object, *, policy_version: int | No
                 ) from exc
             edit = {**candidate, 'spoken': spoken, 'kind': 'word', 'phones': phones}
             if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 16:
-                edit['word_hint_version'] = 5
+                edit['word_hint_version'] = 6 if (policy_version or IMPLEMENTED_POLICY_VERSION) >= 18 else 5
             if action == 'sound':
                 edit['word_hint_type'] = 'homophone'
             edits.append(edit)
@@ -418,7 +430,7 @@ async def prepare_pronunciation(text: str, directory: Path, *, policy: dict, emi
                 for row in found if row.get('kind') == 'programming']
         if policy['version'] >= 13:
             from backend.pipeline.tts_phone_references import entries
-            references = entries(version=2 if policy['version'] >= 16 else 1)
+            references = entries(version=3 if policy['version'] >= 18 else 2 if policy['version'] >= 16 else 1)
             cited = [
                 {'id': row['id'], 'source': row['source'], **references[row['source'].casefold()]}
                 for row in found if row['source'].casefold() in references

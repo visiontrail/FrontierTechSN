@@ -705,6 +705,30 @@ def test_policy17_complete_mixed_word_is_eligible_for_existing_dictionary_hint()
     assert edits[0]['source'] == 'AQuA' and edits[0]['word_hint_version'] == 5
 
 
+def test_policy18_cited_full_word_replaces_only_its_partial_capital_candidate():
+    text='The report mentions PostgreSQL and OpenAI today.'
+    assert [r['source'] for r in pronunciation.candidates(text,policy_version=18)]==['PostgreSQL','AI']
+    assert [r['source'] for r in pronunciation.candidates(text,policy_version=17)]==['SQL','AI']
+    assert pronunciation.POLICY_VERSION==13
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=18))
+
+
+def test_policy18_official_postgresql_cue_preserves_canonical_source_and_binds_reference6():
+    text='The report mentions PostgreSQL today.'
+    row=pronunciation.candidates(text,policy_version=18)[0]
+    phones=['P','OW','S','T','G','R','EH','S','K','Y','UW','EH','L']
+    _,edits=pronunciation.validate_decisions(text,[{**row,'action':'sound','spoken':'post gress cue ell',
+        'phones':phones,'reason':'Official complete-name pronunciation.'}],policy_version=18)
+    assert pronunciation.render_span(text,0,len(text),edits)=='The report mentions post gress cue ell today.'
+    assert edits[0]['word_hint_version']==6 and edits[0]['source']=='PostgreSQL'
+    assert text=='The report mentions PostgreSQL today.'
+
+
+def test_policy18_cited_word_never_changes_url_email_or_a_larger_name():
+    text='https://example.com/PostgreSQL PostgreSQL@example.com MyPostgreSQL remain.'
+    assert not any(r['source']=='PostgreSQL' for r in pronunciation.candidates(text,policy_version=18))
+
+
 def test_policy17_does_not_capture_mixed_names_inside_urls_or_larger_words():
     text = 'https://example.com/AQuA XAQuA AQuAClient remain.'
     assert not any(row['source']=='AQuA' for row in pronunciation.candidates(text, policy_version=17))
