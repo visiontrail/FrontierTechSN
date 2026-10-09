@@ -42,6 +42,23 @@ def test_failure_or_uncertainty_rejects_otherwise_passing_image(verdict):
     assert review.validate_review(value, "scene-001")["passed"] is False
 
 
+@pytest.mark.parametrize("verdict", ["fail", "uncertain"])
+def test_omitted_repair_is_only_allowed_for_pass(verdict):
+    value = payload()
+    value["reviews"][0]["checks"][0]["verdict"] = verdict
+    del value["reviews"][0]["checks"][0]["repair"]
+    with pytest.raises(ValueError, match="omitted visible evidence or repair"):
+        review.validate_review(value, "scene-001")
+
+
+@pytest.mark.parametrize("repair", [None, [], 0])
+def test_explicit_invalid_pass_repair_remains_invalid(repair):
+    value = payload()
+    value["reviews"][0]["checks"][0]["repair"] = repair
+    with pytest.raises(ValueError, match="omitted visible evidence or repair"):
+        review.validate_review(value, "scene-001")
+
+
 def test_review_cache_is_bound_to_pixels_scene_and_rules(tmp_path, monkeypatch):
     calls = []
 
@@ -87,6 +104,35 @@ def test_valid_rejection_never_asks_fallback_for_a_better_verdict(tmp_path, monk
     image.write_bytes(b"pixels")
     result, _ = asyncio.run(review.review_image(image, SCENE, {}, tmp_path, lambda _: None))
     assert result["passed"] is False and calls == ["gemini"]
+
+
+def test_rejection_with_omitted_pass_repairs_is_cached_without_fallback(tmp_path, monkeypatch):
+    value = payload()
+    for check in value["reviews"][0]["checks"]:
+        del check["repair"]
+    value["reviews"][0]["checks"][0].update(
+        verdict="fail", repair="Turn the laptop screen toward the character")
+    original = copy.deepcopy(value)
+    calls = []
+
+    async def provider(args, **kwargs):
+        calls.append(args[0])
+        return OpenCLIResult(tuple(args), 0, json.dumps(value), "")
+
+    monkeypatch.setattr(review, "run_opencli", provider)
+    monkeypatch.setattr(review.config, "AV_SYNC_REVIEW_FALLBACK_PROVIDER", "chatgpt")
+    image = tmp_path / "image.png"
+    image.write_bytes(b"pixels")
+
+    async def run():
+        first = await review.review_image(image, SCENE, {}, tmp_path, lambda _: None)
+        assert await review.review_image(image, SCENE, {}, tmp_path, lambda _: None) == first
+        return first[0]
+
+    result = asyncio.run(run())
+    assert not result["passed"] and calls == ["gemini"]
+    assert result["payload"] == original  # Preserve the provider's original evidence.
+    assert all(check["repair"] == "" for check in result["checks"][1:])
 
 
 def test_unavailable_review_blocks_image_instead_of_passing(tmp_path, monkeypatch):

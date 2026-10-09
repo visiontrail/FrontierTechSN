@@ -556,7 +556,7 @@ async def queue_state() -> dict:
     elif owner:
         message = "Explainer production slot retained. Resume or cancel the interrupted production before other videos can start."
     elif items:
-        message = "Waiting for the shared worker. Ready Morning Desk tasks run first."
+        message = "Waiting for the shared worker. Queued Explainers run before waiting Morning Desk tasks."
     else:
         message = "Add topic plans to generate videos one at a time."
     reservation = ({"kind": "explainer", "id": owner["id"], "title": owner["title"],

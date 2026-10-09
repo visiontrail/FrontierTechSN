@@ -67,6 +67,7 @@ def validate_review(payload: dict, scene_id: str) -> dict:
     if row.get("id") != scene_id or not isinstance(checks, list) or len(checks) != len(CHECKS):
         raise ValueError("Visual logic review has incomplete scene/check coverage")
     seen = set()
+    normalized = []
     for check in checks:
         if not isinstance(check, dict):
             raise ValueError("Visual logic check must be an object")
@@ -74,12 +75,16 @@ def validate_review(payload: dict, scene_id: str) -> dict:
         if criterion not in CHECKS or criterion in seen or verdict not in {"pass", "fail", "uncertain"}:
             raise ValueError("Visual logic review has invalid or duplicate criteria")
         seen.add(criterion)
-        evidence, repair = check.get("evidence"), check.get("repair")
+        # An omitted empty repair on a pass is not missing visual evidence.
+        # Keep fail/uncertain repairs mandatory and never change their verdict.
+        evidence = check.get("evidence")
+        repair = check.get("repair", "" if verdict == "pass" else None)
         if not isinstance(evidence, str) or not evidence.strip() or not isinstance(repair, str):
             raise ValueError("Visual logic review omitted visible evidence or repair")
         if (verdict == "pass") != (not repair.strip()):
             raise ValueError("Visual logic verdict contradicts its repair instruction")
-    return {"passed": all(check["verdict"] == "pass" for check in checks), "checks": checks}
+        normalized.append({**check, "repair": repair})
+    return {"passed": all(check["verdict"] == "pass" for check in normalized), "checks": normalized}
 
 
 async def review_image(image: Path, scene: dict, style: dict, directory: Path, log) -> tuple[dict, Path]:

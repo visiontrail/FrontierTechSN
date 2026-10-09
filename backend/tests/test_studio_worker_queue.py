@@ -35,7 +35,7 @@ def topic(title):
     ))
 
 
-def test_morning_desk_finishes_before_explainer_writing_and_rendering(queue_runtime, monkeypatch):
+def test_queued_explainer_precedes_waiting_morning_desk(queue_runtime, monkeypatch):
     async def scenario():
         project = topic("First explainer")
         studio.start(project["id"], "full")
@@ -73,11 +73,11 @@ def test_morning_desk_finishes_before_explainer_writing_and_rendering(queue_runt
         job = asyncio.create_task(worker._worker_loop())
         try:
             await asyncio.wait_for(news_entered.wait(), 2)
-            assert studio.read_project(project["id"])["status"] == "queued"
-            assert order == ["news:start"]
+            assert studio.read_project(project["id"])["status"] == "completed"
+            assert order == ["explainer:write", "explainer:render", "news:start"]
             release_news.set()
             await asyncio.wait_for(rendered.wait(), 2)
-            assert order == ["news:start", "news:end", "explainer:write", "explainer:render"]
+            assert order[:3] == ["explainer:write", "explainer:render", "news:start"]
         finally:
             job.cancel()
             await asyncio.gather(job, return_exceptions=True)
@@ -85,12 +85,12 @@ def test_morning_desk_finishes_before_explainer_writing_and_rendering(queue_runt
     asyncio.run(scenario())
 
 
-def test_new_morning_job_waits_for_whole_explainer_then_precedes_next_topic(queue_runtime, monkeypatch):
+def test_new_morning_job_waits_for_whole_explainer_and_next_queued_topic(queue_runtime, monkeypatch):
     async def scenario():
         first, second = topic("First"), topic("Second")
         studio.start(first["id"], "full")
         studio.start(second["id"], "full")
-        writing, release_write, rendering, release_render, second_done = [asyncio.Event() for _ in range(5)]
+        writing, release_write, rendering, release_render, news_done = [asyncio.Event() for _ in range(5)]
         news_available = False
         supplied = False
         order = []
@@ -115,12 +115,11 @@ def test_new_morning_job_waits_for_whole_explainer_then_precedes_next_topic(queu
             if project["id"] == first["id"]:
                 rendering.set()
                 await release_render.wait()
-            else:
-                second_done.set()
             return {"video_path": "final.mp4"}
 
         async def news(*args, **kwargs):
             order.append("news")
+            news_done.set()
 
         monkeypatch.setattr(worker, "get_next_queued_task", next_news)
         monkeypatch.setattr(worker, "run_pipeline", news)
@@ -135,8 +134,8 @@ def test_new_morning_job_waits_for_whole_explainer_then_precedes_next_topic(queu
             assert order == ["First:write", "First:render"]
             assert not supplied
             release_render.set()
-            await asyncio.wait_for(second_done.wait(), 2)
-            assert order == ["First:write", "First:render", "news", "Second:write", "Second:render"]
+            await asyncio.wait_for(news_done.wait(), 2)
+            assert order == ["First:write", "First:render", "Second:write", "Second:render", "news"]
         finally:
             job.cancel()
             await asyncio.gather(job, return_exceptions=True)
@@ -172,6 +171,43 @@ def test_cancelling_explainer_does_not_stop_shared_worker(queue_runtime, monkeyp
             job.cancel()
             await asyncio.gather(job, return_exceptions=True)
         assert not studio._jobs
+
+    asyncio.run(scenario())
+
+
+def test_explainer_enqueued_during_news_lookup_precedes_unclaimed_news(queue_runtime, monkeypatch):
+    async def scenario():
+        project = topic("Arrived during lookup")
+        queued = False
+        news_done = asyncio.Event()
+        order = []
+
+        async def next_news():
+            nonlocal queued
+            if not queued:
+                queued = True
+                studio.start(project["id"], "script")
+            return None if news_done.is_set() else queue_runtime
+
+        async def write(*args, **kwargs):
+            order.append("explainer")
+            return [{"id": "scene-001", "narration": "Recall first.",
+                     "visual_prompt": "A learner closes a book."}]
+
+        async def news(*args, **kwargs):
+            order.append("news")
+            news_done.set()
+
+        monkeypatch.setattr(worker, "get_next_queued_task", next_news)
+        monkeypatch.setattr(worker, "run_pipeline", news)
+        monkeypatch.setattr(studio, "write_script", write)
+        job = asyncio.create_task(worker._worker_loop())
+        try:
+            await asyncio.wait_for(news_done.wait(), 2)
+            assert order == ["explainer", "news"]
+        finally:
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
 
     asyncio.run(scenario())
 
@@ -245,10 +281,10 @@ def test_failed_explainer_reserves_worker_through_repair_and_resume(queue_runtim
         job = asyncio.create_task(worker._worker_loop())
         try:
             await asyncio.wait_for(news_done.wait(), 2)
-            assert order == ['Repaired', 'news']
+            assert order == ['Repaired', 'Later', 'news']
             assert studio.read_project(first['id'])['status'] == 'completed'
             assert studio.production_owner() is None
-            assert studio.read_project(second['id'])['status'] == 'queued'
+            assert studio.read_project(second['id'])['status'] == 'completed'
         finally:
             job.cancel()
             await asyncio.gather(job, return_exceptions=True)

@@ -150,16 +150,17 @@ async def _worker_loop():
                 if not await explainers.run_next_queued():
                     await asyncio.sleep(1)
                 continue
+            # User-planned Explainers precede queued news at an idle boundary.
+            # Await the entire production; never preempt already-running work.
+            if await explainers.run_next_queued():
+                continue
             task = await get_next_queued_task()
-            # A recovery may have been enqueued during the database await.
+            # A recovery or topic may arrive during the database await.
             if explainers.production_owner():
                 continue
+            if await explainers.run_next_queued():
+                continue
             if not task:
-                # Both studios share this single consumer. A full explainer
-                # holds the worker through writing and rendering, while due
-                # Morning Desk jobs take priority between productions.
-                if await explainers.run_next_queued():
-                    continue
                 # Keep the clock-to-execution gap tight for scheduled plans.
                 # Due scheduled tasks are also prioritized by the database.
                 await asyncio.sleep(1)
