@@ -2181,3 +2181,34 @@ async def test_policy19_storage_nas_cue_is_bound_at_http_and_cache_boundary(setu
     await run()
     assert len(server.jobs)==1 and (directory/'tts_input_part_001.request-0.json').read_bytes()==checkpoint
     assert script.read_text()==source
+
+
+@pytest.mark.asyncio
+async def test_policy20_cited_body_word_cue_is_bound_at_http_and_cache_boundary(setup_client, monkeypatch):
+    from backend.pipeline import chatterbox_phonemes
+    from scripts import chatterbox_phoneme_evidence as evidence
+    server,script,directory,_verifier,_generate=setup_client
+    source='The report mentions EBITDA today.';script.write_text(source)
+    row=tts_pronunciation.candidates(source,policy_version=20)[0]
+    decision={**row,'action':'sound','spoken':'ebb it duh',
+              'phones':['EH','B','IH','T','D','AH'],
+              'reason':'Cited complete word reading.'}
+    monkeypatch.setattr(digester,'_chat',AsyncMock(return_value=json.dumps({'decisions':[decision]})))
+    async def confirm(wav,text,edits,_directory):
+        report=evidence.compare_source(text,edits,'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z ɛ b ɪ t d ə t ə d eɪ')
+        return {**report,'audio_sha256':hashlib.sha256(wav.read_bytes()).hexdigest(),'conditioned_on_reference_text':False}
+    monkeypatch.setattr(chatterbox_phonemes,'confirm',confirm)
+    policy=tts_pronunciation.policy_contract(policy_version=20)
+    async def run():
+        return await chatterbox._generate_chatterbox(str(script),str(directory),'jane','en',log=None,emit=lambda _:None,verify_text=True,frozen_pronunciation_policy=policy)
+    await run()
+    assert len(server.jobs)==1
+    assert server.jobs['job-1']['request']['text']=='The report mentions ebb it duh today.'
+    metadata=json.loads((directory/'tts_input_part_001_generated.json').read_text())
+    assert metadata['identity']['text']==source
+    assert metadata['identity']['word_hint_references'][0]['word_hint_version']==8
+    assert metadata['integrity']['pronunciation']['required_word_phone_confirmation']['independent_word_references']['EBITDA']['cited_body_word_reference_contract']==evidence.body_reference_contract()
+    checkpoint=(directory/'tts_input_part_001.request-0.json').read_bytes()
+    await run()
+    assert len(server.jobs)==1 and (directory/'tts_input_part_001.request-0.json').read_bytes()==checkpoint
+    assert script.read_text()==source

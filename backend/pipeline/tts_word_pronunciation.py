@@ -17,9 +17,9 @@ def lexicon():
     return cmudict.dict()
 
 
-@lru_cache(maxsize=7)
+@lru_cache(maxsize=8)
 def policy_contract(*, version=WORD_HINT_VERSION):
-    if version not in {1, 2, 3, 4, 5, 6, 7}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8}:
         raise ValueError('Unsupported word-hint policy')
     with cmudict.dict_stream() as stream:
         dictionary_sha256 = hashlib.sha256(stream.read()).hexdigest()
@@ -28,6 +28,9 @@ def policy_contract(*, version=WORD_HINT_VERSION):
     if version >= 4:
         from backend.pipeline.tts_phone_references import policy_contract as reference_contract
         result['supplemental_word_references'] = reference_contract(version=4 if version >= 7 else 3 if version >= 6 else 2 if version >= 5 else 1)
+    if version >= 8:
+        from backend.pipeline.tts_body_phone_references import policy_contract as body_contract
+        result['cited_body_word_references'] = body_contract()
     return result
 
 
@@ -37,7 +40,7 @@ def normalized(variant):
 
 def validate_homophone_hint(source, spoken, phones, *, version=5):
     """Allow an ordinary English cue only with identical independently known source phones."""
-    if version not in {5, 6, 7} or not re.fullmatch(r'[A-Za-z]{3,32}', source):
+    if version not in {5, 6, 7, 8} or not re.fullmatch(r'[A-Za-z]{3,32}', source):
         raise ValueError('A phonetic cue requires an explicit supported source-word policy')
     if (not isinstance(spoken, str) or len(spoken) > 128
             or not re.fullmatch(r'[A-Za-z][A-Za-z ,.-]*', spoken)):
@@ -52,6 +55,11 @@ def validate_homophone_hint(source, spoken, phones, *, version=5):
     dictionary = lexicon()
     reference = entries(version=4 if version >= 7 else 3 if version >= 6 else 2).get(source.casefold())
     canonical = [*(dictionary.get(source.casefold()) or []), *(reference['variants'] if reference else [])]
+    if version >= 8:
+        from backend.pipeline.tts_body_phone_references import reference_for
+        body = reference_for(source)
+        if body:
+            canonical = (body['variants'] if body.get('replace_dictionary') else [*canonical, *body['variants']])
     wanted = tuple(phones)
     if not canonical or wanted not in {normalized(choice) for choice in canonical}:
         raise ValueError('A phonetic cue requires an independent complete-source pronunciation reference')
@@ -68,7 +76,7 @@ def validate_homophone_hint(source, spoken, phones, *, version=5):
 
 
 def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
-    if version not in {1, 2, 3, 4, 5, 6, 7}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8}:
         raise ValueError('Unsupported word-hint policy')
     pattern = r'[A-Za-z]{3,32}' if version >= 3 else r'[A-Z]{3,32}'
     if not re.fullmatch(pattern, source):
@@ -88,6 +96,11 @@ def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
             reference = entries(version=4 if version >= 7 else 3 if version >= 6 else 2 if version >= 5 else 1).get(word.casefold())
             if reference:
                 variants = [*variants, *reference['variants']]
+        if version >= 8:
+            from backend.pipeline.tts_body_phone_references import reference_for
+            body = reference_for(word)
+            if body:
+                variants = (body['variants'] if body.get('replace_dictionary') else [*variants, *body['variants']])
         return variants
 
     canonical = choices(source)
@@ -100,7 +113,11 @@ def validate_word_hint(source, spoken, phones, *, version=WORD_HINT_VERSION):
     if (not isinstance(phones, list) or not 1 <= len(phones) <= 64
             or any(not isinstance(phone, str) or phone not in PHONES for phone in phones)):
         raise ValueError('A word hint requires an explicit valid ARPABET phone sequence')
-    variants = [choices(word) for word in words]
+    # A one-word articulation cue retains the source's contextual reference
+    # even when the cue is lowercase, e.g. CUDA -> cuda,. Context does not
+    # transfer to fragments or a differently spelled homophone.
+    variants = ([canonical] if version >= 8 and len(words) == 1
+                else [choices(word) for word in words])
     if not all(variants):
         raise ValueError('Every word-hint fragment needs an English dictionary pronunciation')
     wanted = tuple(phones)

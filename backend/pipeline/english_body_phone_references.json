@@ -163,6 +163,21 @@
       "source_url": "https://dictionary.cambridge.org/pronunciation/english/derive",
       "source_location": "Compositional inflection reference: Cambridge UK and US derive /dɪˈraɪv/ plus regular voiced-consonant past ending /d/. The ending rule is independently documented at https://tfcs.baruch.cuny.edu/ed-endings/. This is an explicit compositional reference, not a quoted IPA entry for derived; its final D remains required in the standard audit.",
       "verified_on": "2026-10-09"
+    },
+    "cuda": {
+      "variants": [["K", "UW", "D", "AH"]],
+      "uppercase_only": true,
+      "source_url": "https://forums.developer.nvidia.com/t/cuda-2-1-faq-please-read-before-posting/6898",
+      "source_location": "NVIDIA CUDA FAQ version2.1, How do I pronounce CUDA: koo-duh. K-UW-D-AH is a compositional transcription using ordinary dictionary coo and duh, not a published IPA quote. This word reference does not authorize an added Q letter-name glide, acronym expansion, or changed source text.",
+      "verified_on": "2026-10-09"
+    },
+    "adas": {
+      "variants": [["EY", "D", "AE", "S"], ["EY", "D", "AA", "S"]],
+      "uppercase_only": true,
+      "replace_dictionary": true,
+      "source_url": "https://www.adasoncall.com/",
+      "source_location": "Automotive calibration provider, How do you even pronounce ADAS: A-DASS, rhyming with A bass (fish), with regional A-DOSS also described. These ARPABET forms compose the published respellings from named A and the cited rhyme. This reference covers the technical uppercase acronym; its explicitly cited variants take precedence over the different CMU EY-D-AH-Z variant and does not authorize expansion or a named-letter fallback.",
+      "verified_on": "2026-10-09"
     }
   }
 }

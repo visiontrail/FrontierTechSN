@@ -757,6 +757,24 @@ async def test_policy19_planner_receives_cited_storage_word_reference(tmp_path, 
     assert plan['edits'][0]['word_hint_version'] == 7
 
 
+@pytest.mark.asyncio
+async def test_policy20_planner_and_audio_reference_use_same_cited_whole_word(tmp_path, mock_model):
+    _, chat = mock_model
+    phones = ['EH', 'B', 'IH', 'T', 'D', 'AH']
+    chat.return_value = json.dumps({'decisions': [{'id': 0, 'source': 'EBITDA',
+        'action': 'sound', 'spoken': 'ebb it duh', 'phones': phones,
+        'reason': 'Retain the cited complete word reading.'}]})
+    source = 'The report mentions EBITDA today.'
+    plan = await pronunciation.prepare_pronunciation(source, tmp_path,
+        policy=pronunciation.policy_contract(policy_version=20), emit=lambda _: None)
+    payload = json.loads(chat.await_args.args[1])
+    assert payload['cited_word_phone_references'][0]['variants'] == [phones]
+    assert plan['synthesis_text'] == 'The report mentions ebb it duh today.'
+    assert plan['edits'][0]['word_hint_version'] == 8
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=20))
+    assert pronunciation.POLICY_VERSION == 13
+
+
 def test_policy17_does_not_capture_mixed_names_inside_urls_or_larger_words():
     text = 'https://example.com/AQuA XAQuA AQuAClient remain.'
     assert not any(row['source']=='AQuA' for row in pronunciation.candidates(text, policy_version=17))

@@ -7,6 +7,29 @@ from backend.pipeline import tts_word_pronunciation as word
 from scripts import chatterbox_phoneme_evidence as evidence
 
 
+@pytest.mark.parametrize(('source', 'cue', 'phones'), [
+    ('EBITDA', 'ebb it duh', ['EH', 'B', 'IH', 'T', 'D', 'AH']),
+    ('CUDA', 'coo duh', ['K', 'UW', 'D', 'AH']),
+    ('ADAS', 'aid ass', ['EY', 'D', 'AE', 'S']),
+])
+def test_shared_cited_word_reference_authorizes_only_matching_opt_in_cues(source, cue, phones):
+    assert word.validate_homophone_hint(source, cue, phones, version=8) == phones
+    with pytest.raises(ValueError):
+        word.validate_homophone_hint(source, cue, phones, version=7)
+    with pytest.raises(ValueError):
+        word.validate_homophone_hint(source, cue + ' today', phones, version=8)
+    assert tuple(phones) in evidence.independent_word_reference(source, word_hint_version=8)['variants']
+
+
+def test_shared_source_reference_preserves_context_and_replaces_unrelated_name():
+    with pytest.raises(ValueError):
+        word.validate_homophone_hint('ADAS', 'adas,', ['EY', 'D', 'AH', 'Z'], version=8)
+    with pytest.raises(ValueError):
+        word.validate_homophone_hint('cuda', 'coo duh', ['K', 'UW', 'D', 'AH'], version=8)
+    assert word.validate_word_hint('CUDA', 'cuda,', ['K', 'UW', 'D', 'AH'], version=8) == ['K', 'UW', 'D', 'AH']
+    assert word.policy_contract(version=8)['cited_body_word_references'] == evidence.body_reference_contract()
+
+
 def test_storage_nas_word_cue_uses_opt_in_cited_reference_without_spelling_fallback():
     phones = ['N', 'AE', 'S']
     assert word.validate_homophone_hint('NAS', 'nass', phones, version=7) == phones

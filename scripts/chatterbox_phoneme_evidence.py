@@ -26,7 +26,7 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 30
+EVIDENCE_VERSION = 31
 SYMBOL_CONJUNCTION_REFERENCE_VERSION = 1
 SYMBOL_INITIALISM_RE = re.compile(r'\b([A-Z])&([A-Z])\b')
 CONTEXTUAL_CLUSTER_REFERENCE_VERSION = 1
@@ -123,7 +123,7 @@ def ordinary_source_words(fragment: str) -> list[str]:
 def independent_word_reference(word: str, *, word_hint_version=4) -> dict:
     """The cue's own fragments cannot establish how its source word is read."""
     variants = lexicon().get(word.casefold()) or []
-    if word_hint_version not in {1, 2, 3, 4, 5, 6, 7}:
+    if word_hint_version not in {1, 2, 3, 4, 5, 6, 7, 8}:
         raise ValueError('Unsupported independent word-hint reference version')
     reference_version = 4 if word_hint_version >= 7 else 3 if word_hint_version >= 6 else 2 if word_hint_version >= 5 else 1
     reference = supplemental_word_references(version=reference_version).get(word.casefold())
@@ -142,6 +142,8 @@ def independent_word_reference(word: str, *, word_hint_version=4) -> dict:
         result.update(source_url=selected['source_url'], source_location=selected['source_location'])
     if word_hint_version >= 5:
         result['supplemental_word_reference_contract'] = reference_contract(version=reference_version)
+    if word_hint_version >= 8:
+        result['cited_body_word_reference_contract'] = body_reference_contract()
     return result
 
 
