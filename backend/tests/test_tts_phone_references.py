@@ -6,6 +6,17 @@ import pytest
 from backend.pipeline import tts_phone_references as references
 
 
+def test_version4_retains_old_references_and_adds_the_cited_nas_word_reading():
+    old = references.entries(version=3)
+    current = references.entries(version=4)
+    assert 'nas' not in old
+    assert {key: current[key] for key in old} == old
+    assert current['nas']['variants'] == [['N', 'AE', 'S']]
+    assert current['nas']['source_url'] == 'https://www.netlingo.com/word/nas.php'
+    assert references.policy_contract(version=4)['reference_sha256'] == hashlib.sha256(
+        references.WORD_REFERENCES_V4.read_bytes()).hexdigest()
+
+
 @pytest.mark.parametrize('defect', ['schema', 'unknown_phone', 'missing_citation', 'invalid_phone_type'])
 def test_invalid_cited_reference_data_fails_before_it_can_authorize_a_hint(tmp_path, monkeypatch, defect):
     payload = json.loads(references.WORD_REFERENCES.read_bytes())

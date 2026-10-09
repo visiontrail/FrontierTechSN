@@ -7,6 +7,20 @@ from backend.pipeline import tts_word_pronunciation as word
 from scripts import chatterbox_phoneme_evidence as evidence
 
 
+def test_storage_nas_word_cue_uses_opt_in_cited_reference_without_spelling_fallback():
+    phones = ['N', 'AE', 'S']
+    assert word.validate_homophone_hint('NAS', 'nass', phones, version=7) == phones
+    for version in [5, 6]:
+        with pytest.raises(ValueError, match='independent complete-source'):
+            word.validate_homophone_hint('NAS', 'nass', phones, version=version)
+    for cue, wrong in [('nays', ['N', 'EY', 'Z']), ('nass today', phones),
+                       ('nass', ['N', 'AH', 'S']), ('nass', ['N', 'AE'])]:
+        with pytest.raises(ValueError):
+            word.validate_homophone_hint('NAS', cue, wrong, version=7)
+    assert word.policy_contract(version=6)['supplemental_word_references']['version'] == 3
+    assert word.policy_contract(version=7)['supplemental_word_references']['version'] == 4
+
+
 @pytest.mark.parametrize(('name', 'phones', 'wrong'), [
     ('PaaS', ['P', 'AE', 'S'], ['P', 'AA', 'Z']),
     ('IaaS', ['AY', 'AE', 'Z'], ['IY', 'AH', 'Z']),
@@ -205,3 +219,16 @@ def test_word_coda_devoicing_is_limited_to_a_following_ordinary_s_onset():
         {'id': 0, 'source': 'ZS', 'action': 'spell', 'spoken': 'zee ess', 'reason': 'Two letter names.'},
     ])
     assert not evidence.compare_source('ZS.', edits, 's iː ɛ s')['passed']
+
+
+def test_storage_nas_complete_source_phones_reject_wrong_vowels_and_extra_tail():
+    text = "The report mentions NAS today."
+    _, edits = pronunciation.validate_decisions(text, [{"id": 0, "source": "NAS",
+        "action": "sound", "spoken": "nass", "phones": ["N", "AE", "S"],
+        "reason": "Contextual storage word reading."}], policy_version=19)
+    correct = "ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z n æ s t ə d eɪ"
+    report = evidence.compare_source(text, edits, correct)
+    assert report["passed"]
+    assert report["independent_word_references"]["NAS"]["supplemental_word_reference_contract"]["version"] == 4
+    assert not evidence.compare_source(text, edits, correct.replace("n æ s", "n ə s"))["passed"]
+    assert not evidence.compare_source(text, edits, correct + " t ə d eɪ")["passed"]

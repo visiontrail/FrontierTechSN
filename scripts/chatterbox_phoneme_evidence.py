@@ -123,9 +123,9 @@ def ordinary_source_words(fragment: str) -> list[str]:
 def independent_word_reference(word: str, *, word_hint_version=4) -> dict:
     """The cue's own fragments cannot establish how its source word is read."""
     variants = lexicon().get(word.casefold()) or []
-    if word_hint_version not in {1, 2, 3, 4, 5, 6}:
+    if word_hint_version not in {1, 2, 3, 4, 5, 6, 7}:
         raise ValueError('Unsupported independent word-hint reference version')
-    reference_version = 3 if word_hint_version >= 6 else 2 if word_hint_version >= 5 else 1
+    reference_version = 4 if word_hint_version >= 7 else 3 if word_hint_version >= 6 else 2 if word_hint_version >= 5 else 1
     reference = supplemental_word_references(version=reference_version).get(word.casefold())
     if reference:
         variants = [*variants, *reference['variants']]

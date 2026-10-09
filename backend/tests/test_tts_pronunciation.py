@@ -729,6 +729,34 @@ def test_policy18_cited_word_never_changes_url_email_or_a_larger_name():
     assert not any(r['source']=='PostgreSQL' for r in pronunciation.candidates(text,policy_version=18))
 
 
+def test_policy19_storage_nas_cue_keeps_word_mode_and_canonical_source():
+    text = 'The report mentions NAS today.'
+    decision = {'id': 0, 'source': 'NAS', 'action': 'sound', 'spoken': 'nass',
+                'phones': ['N', 'AE', 'S'], 'reason': 'Contextual storage word reading.'}
+    _, edits = pronunciation.validate_decisions(text, [decision], policy_version=19)
+    assert pronunciation.render_span(text, 0, len(text), edits) == 'The report mentions nass today.'
+    assert edits[0]['word_hint_version'] == 7 and edits[0]['word_hint_type'] == 'homophone'
+    assert pronunciation.word_hint_reference(edits[0])['word_hint_version'] == 7
+    assert pronunciation.compatible_policy(pronunciation.policy_contract(policy_version=19))
+    assert pronunciation.POLICY_VERSION == 13
+    with pytest.raises(ValueError, match='independent complete-source'):
+        pronunciation.validate_decisions(text, [decision], policy_version=18)
+
+
+@pytest.mark.asyncio
+async def test_policy19_planner_receives_cited_storage_word_reference(tmp_path, mock_model):
+    _, chat = mock_model
+    chat.return_value = json.dumps({'decisions': [{'id': 0, 'source': 'NAS',
+        'action': 'sound', 'spoken': 'nass', 'phones': ['N', 'AE', 'S'],
+        'reason': 'Use the cited storage word reading.'}]})
+    plan = await pronunciation.prepare_pronunciation('The report mentions NAS today.', tmp_path,
+        policy=pronunciation.policy_contract(policy_version=19), emit=lambda _: None)
+    payload = json.loads(chat.await_args.args[1])
+    assert payload['cited_word_phone_references'][0]['source'] == 'NAS'
+    assert payload['cited_word_phone_references'][0]['variants'] == [['N', 'AE', 'S']]
+    assert plan['edits'][0]['word_hint_version'] == 7
+
+
 def test_policy17_does_not_capture_mixed_names_inside_urls_or_larger_words():
     text = 'https://example.com/AQuA XAQuA AQuAClient remain.'
     assert not any(row['source']=='AQuA' for row in pronunciation.candidates(text, policy_version=17))
