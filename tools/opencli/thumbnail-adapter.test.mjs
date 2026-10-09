@@ -19,6 +19,10 @@ function backgroundImagePage(options = {}) {
     getBoundingClientRect() { return { width: options.layout ? 480 : 0, height: options.layout ? 270 : 0 } }
     querySelector() { return null }
     closest(selector) {
+      if (selector.startsWith('form,')) return options.composer || options.upload ? new Element() : null
+      if (selector === '[data-message-author-role], [data-turn], [data-chatgpt-search-unit-key]') {
+        return options.role ? new Element({ [options.roleAttribute || 'data-message-author-role']: options.role }) : null
+      }
       if (selector === '[data-testid="generated-image-preview"]') return options.preview === false ? null : preview
       if (selector === '[data-testid="generated-image-gallery"]') return options.gallery === false ? null : gallery
       if (selector.startsWith('section[')) return options.upload ? new Element({ 'data-turn': 'user' }) : null
@@ -26,16 +30,24 @@ function backgroundImagePage(options = {}) {
     }
   }
   class Image extends Element {}
+  class Canvas extends Element {
+    getContext() { return { getImageData: () => ({ data: [30, 30, 30, 255] }) } }
+    toDataURL() { return 'data:image/png;base64,preview' }
+  }
   const gallery = new Element({ 'data-testid': 'generated-image-gallery' })
   const preview = new Element({ 'data-testid': 'generated-image-preview' }, gallery)
-  const image = new Image({ alt: options.alt ?? 'Generated image 1' }, preview)
+  const Surface = options.surface === 'canvas' ? Canvas : options.surface === 'background' ? Element : Image
+  const image = new Surface({ alt: options.alt ?? 'Generated image 1' }, preview)
   Object.assign(image, { complete: options.complete ?? true, naturalWidth: options.width ?? 1672,
-    naturalHeight: 941, src: options.src ?? 'blob:https://chatgpt.com/owned-image' })
+    naturalHeight: 941, width: 480, height: 270, src: options.src ?? 'blob:https://chatgpt.com/owned-image' })
+  image.style.backgroundImage = 'url("blob:https://chatgpt.com/owned-image")'
   if (options.hidden) gallery.style[options.hidden] = options.hidden === 'display' ? 'none' : 'hidden'
   if (options.ariaHidden) gallery.attributes['aria-hidden'] = 'true'
   if (options.hiddenAttribute) gallery.hidden = true
-  const context = { HTMLElement: Element, HTMLImageElement: Image, HTMLCanvasElement: class {}, URL,
-    document: { visibilityState: options.visibility ?? 'hidden', querySelectorAll(selector) { return selector === 'img' ? [image] : [] } },
+  const selectorForSurface = options.surface === 'canvas' ? 'canvas'
+    : options.surface === 'background' ? '[style*="background-image"], [style*="background"]' : 'img'
+  const context = { HTMLElement: Element, HTMLImageElement: Image, HTMLCanvasElement: Canvas, URL,
+    document: { visibilityState: options.visibility ?? 'hidden', querySelectorAll(selector) { return selector === selectorForSurface ? [image] : [] } },
     window: { location: { href: savedUrl }, getComputedStyle: element => element.style } }
   return { async evaluate(script) { return vm.runInNewContext(script, context) } }
 }
@@ -55,6 +67,32 @@ test('background generation result survives a zero-size gallery layout', async (
     { hidden: 'display' }, { hidden: 'visibility' }, { hidden: 'contentVisibility' },
     { ariaHidden: true }, { hiddenAttribute: true },
   ]) assert.deepEqual(Array.from(await detect(backgroundImagePage(options))), [], JSON.stringify(options))
+})
+
+test('visible unsent and submitted reference images cannot complete image generation', async () => {
+  const source = fs.readFileSync(path.join(copied, 'clis/chatgpt/utils.js'), 'utf8')
+  const start = source.indexOf('export async function getChatGPTVisibleImageUrls(page) {')
+  const end = source.indexOf('export async function waitForChatGPTImages(', start)
+  const detect = vm.runInNewContext(source.slice(start, end).replace('export ', '') + '\ngetChatGPTVisibleImageUrls', {
+    unwrapEvaluateResult: value => value, requireArrayEvaluateResult: value => value,
+  })
+  const visible = { layout: true, visibility: 'visible', alt: '', preview: false, gallery: false }
+  for (const options of [
+    visible, { ...visible, composer: true }, { ...visible, upload: true },
+    { ...visible, role: 'user' }, { ...visible, role: 'fallback-turn-0:1:user', roleAttribute: 'data-chatgpt-search-unit-key' },
+    { layout: true, composer: true }, { layout: true, upload: true },
+  ]) assert.deepEqual(Array.from(await detect(backgroundImagePage(options))), [], JSON.stringify(options))
+  for (const options of [
+    { ...visible, role: 'assistant' }, { ...visible, role: 'assistant', roleAttribute: 'data-turn' },
+    { ...visible, role: 'fallback-turn-0:2:assistant', roleAttribute: 'data-chatgpt-search-unit-key' },
+  ]) assert.deepEqual(Array.from(await detect(backgroundImagePage(options))), ['blob:https://chatgpt.com/owned-image'])
+  for (const surface of ['background', 'canvas']) {
+    for (const extra of [{}, { composer: true }, { upload: true }]) {
+      assert.deepEqual(Array.from(await detect(backgroundImagePage({ ...visible, surface, ...extra }))), [])
+    }
+    assert.deepEqual(Array.from(await detect(backgroundImagePage({ ...visible, surface, role: 'assistant' }))),
+      [surface === 'canvas' ? 'data:image/png;base64,preview' : 'blob:https://chatgpt.com/owned-image'])
+  }
 })
 
 // Apply the complete postinstall patch only to a disposable adapter tree.

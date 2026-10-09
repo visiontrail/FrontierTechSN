@@ -1907,6 +1907,45 @@ chatgptUtils = replaceWithinFunction(chatgptUtils,
             );`,
   'ChatGPT loaded background image gallery without layout',
 )
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getChatGPTVisibleImageUrls(page) {', 'export async function waitForChatGPTImages(',
+  `            const isUserUploadPreview = (img) => {`,
+  `            // A stable blob URL is also used by unsent composer attachments.
+            // Require a generated gallery or an assistant-owned message surface.
+            const isGeneratedImageSurface = (node) => {
+                if (node.closest('form, [contenteditable="true"], [data-message-author-role="user"], [data-turn="user"], [data-chatgpt-search-unit-key$=":user"], [data-user-message-bubble]')) return false;
+                const turn = node.closest('[data-message-author-role], [data-turn], [data-chatgpt-search-unit-key]');
+                const role = turn?.getAttribute('data-message-author-role') || turn?.getAttribute('data-turn') || '';
+                const unit = turn?.getAttribute('data-chatgpt-search-unit-key') || '';
+                if (role === 'assistant' || /:assistant$/.test(unit)) return true;
+                if (node.closest('[data-testid="generated-image-preview"]')
+                    && node.closest('[data-testid="generated-image-gallery"]')) return true;
+                const heading = node.closest('section[data-testid^="conversation-turn"]')?.querySelector('h4')?.textContent || '';
+                return /chatgpt|assistant|助手/i.test(heading);
+            };
+            const isUserUploadPreview = (img) => {`,
+  'ChatGPT generated image ownership excludes composer and user attachments',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getChatGPTVisibleImageUrls(page) {', 'export async function waitForChatGPTImages(',
+  `                if (isUserUploadPreview(img)) continue;`,
+  `                if (!isGeneratedImageSurface(img) || isUserUploadPreview(img)) continue;`,
+  'ChatGPT image elements require generated output ownership',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getChatGPTVisibleImageUrls(page) {', 'export async function waitForChatGPTImages(',
+  `                if (!(el instanceof HTMLElement) || !isVisible(el) || isDecorative(el)) continue;`,
+  `                if (!(el instanceof HTMLElement) || !isVisible(el) || isDecorative(el)
+                    || !isGeneratedImageSurface(el)) continue;`,
+  'ChatGPT background images require generated output ownership',
+)
+chatgptUtils = replaceWithinFunction(chatgptUtils,
+  'export async function getChatGPTVisibleImageUrls(page) {', 'export async function waitForChatGPTImages(',
+  `                if (!(canvas instanceof HTMLCanvasElement) || !isVisible(canvas) || isDecorative(canvas)) continue;`,
+  `                if (!(canvas instanceof HTMLCanvasElement) || !isVisible(canvas) || isDecorative(canvas)
+                    || !isGeneratedImageSurface(canvas)) continue;`,
+  'ChatGPT canvas previews require generated output ownership',
+)
 const chatgptOwnedTurnHelpers = `export function chatGPTPromptMatches(actual, expected) {
     const actualText = cleanPromptText(actual);
     const expectedText = cleanPromptText(expected);
