@@ -907,6 +907,7 @@ test(`ChatGPT image upload recovers only supported native-picker failures: ${nat
     async evaluate(script) {
       if (script.includes('const reactiveInputs')) return true
       if (script.includes('const dt = new DataTransfer()')) { transfers++; return { ok: true } }
+      if (script.includes('__opencliChatGPTImageUpload_')) return true
       if (script.includes('matchedNames')) return true
       throw new Error('Unexpected upload operation')
     },
@@ -918,6 +919,65 @@ test(`ChatGPT image upload recovers only supported native-picker failures: ${nat
     await assert.rejects(uploadChatGPTImages(page, [image]), /Browser target crashed/)
     assert.equal(transfers, 0)
   }
+})
+}
+
+for (const scenario of ['complete', 'interrupted', 'truncated', 'missing-input', 'dispatch-error']) {
+test(`ChatGPT large image fallback preserves bytes and cleans partial transfers: ${scenario}`, async (t) => {
+  const files = videoFrameFixture(t, ['large.png', 'second.jpg'])
+  const payloads = [Buffer.alloc(2_424_957, 37), Buffer.alloc(900_001, 91)]
+  files.forEach((file, index) => fs.writeFileSync(file, payloads[index]))
+  let uploads = 0, chunks = 0, previewReads = 0
+  class Input {
+    files = []
+    __reactProps$fixture = { onChange: () => {
+      uploads++
+      if (scenario === 'dispatch-error') throw new Error('Upload handler failed')
+    } }
+  }
+  const input = new Input()
+  class Transfer {
+    files = []
+    items = { add: file => this.files.push(file) }
+  }
+  const context = vm.createContext({
+    document: { querySelector: () => scenario === 'missing-input' ? null : input },
+    HTMLInputElement: Input, DataTransfer: Transfer, File, Event, atob, Uint8Array,
+  })
+  const page = {
+    async sleep() {},
+    async setFileInput() { throw new Error('fileChooserOpened not received') },
+    async evaluate(script) {
+      // Match the production daemon cap, including JSON string expansion.
+      assert.ok(Buffer.byteLength(JSON.stringify({ action: 'exec', code: script })) < 1024 * 1024)
+      if (script.includes('const reactiveInputs')) return true
+      if (script.includes('matchedNames')) { previewReads++; return true }
+      if (script.includes('.chunks.push(')) {
+        chunks++
+        if (chunks === 2 && scenario === 'interrupted') throw new Error('Transfer interrupted')
+        if (chunks === 2 && scenario === 'truncated') return true
+      }
+      return vm.runInContext(script, context)
+    },
+  }
+  if (scenario === 'interrupted') await assert.rejects(uploadChatGPTImages(page, files), /Transfer interrupted/)
+  else if (scenario === 'truncated') await assert.rejects(uploadChatGPTImages(page, files), /transfer size mismatch/)
+  else if (scenario === 'dispatch-error') await assert.rejects(uploadChatGPTImages(page, files), /Upload handler failed/)
+  else {
+    const result = await uploadChatGPTImages(page, files)
+    assert.equal(result.ok, scenario === 'complete')
+    if (scenario === 'missing-input') assert.equal(result.reason, 'file input not found')
+  }
+  assert.equal(uploads, ['complete', 'dispatch-error'].includes(scenario) ? 1 : 0)
+  assert.equal(previewReads, scenario === 'complete' ? 1 : 0)
+  if (scenario === 'complete') {
+    assert.ok(chunks > 2)
+    for (let index = 0; index < files.length; index++) {
+      assert.equal(input.files[index].name, path.basename(files[index]))
+      assert.deepEqual(Buffer.from(await input.files[index].arrayBuffer()), payloads[index])
+    }
+  }
+  assert.equal(Object.keys(context).some(key => key.startsWith('__opencliChatGPTImageUpload_')), false)
 })
 }
 
@@ -951,6 +1011,7 @@ test(`ChatGPT selects the active image callback instead of the first generic fil
         },
       })
       if (script.includes('const dt = new DataTransfer()')) return { ok: true }
+      if (script.includes('__opencliChatGPTImageUpload_')) return true
       if (script.includes('matchedNames')) return true
       throw new Error('Unexpected upload operation')
     },

@@ -1022,6 +1022,49 @@ chatgptUtils = replaceWithinFunction(
   "!msg.includes('Not allowed') && !msg.includes('No element found') && !/fileChooserOpened|file chooser/i.test(msg)",
   'ChatGPT image upload missing native file chooser fallback',
 )
+if (!chatgptUtils.includes('__opencliChatGPTImageUpload_')) {
+  const patchUpload = (before, after, label) => {
+    chatgptUtils = replaceWithinFunction(chatgptUtils,
+      'export async function uploadChatGPTImages(page, imagePaths) {',
+      'export async function isGenerating(page) {', before, after, label)
+  }
+  patchUpload(
+    '        const fallbackResult = requireObjectEvaluateResult(unwrapEvaluateResult(await page.evaluate(`',
+    `        // The bridge rejects command bodies larger than 1 MiB. Transfer
+        // unchanged image bytes in bounded chunks, then dispatch one upload.
+        const transferKey = '__opencliChatGPTImageUpload_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+        let fallbackResult;
+        try {
+            const metadata = files.map(file => ({ name: file.name, mime: file.mime, length: file.base64.length, chunks: [] }));
+            await page.evaluate(\`globalThis[\${JSON.stringify(transferKey)}] = \${JSON.stringify(metadata)}; true\`);
+            for (let index = 0; index < files.length; index++) {
+                const base64 = files[index].base64;
+                for (let offset = 0; offset < base64.length; offset += 64 * 1024) {
+                    await page.evaluate(\`globalThis[\${JSON.stringify(transferKey)}][\${index}].chunks.push(\${JSON.stringify(base64.slice(offset, offset + 64 * 1024))}); true\`);
+                }
+            }
+            fallbackResult = requireObjectEvaluateResult(unwrapEvaluateResult(await page.evaluate(\``,
+    'ChatGPT bounded image transfer',
+  )
+  patchUpload(
+    '                const files = ${JSON.stringify(files)};',
+    `                const transferred = globalThis[\${JSON.stringify(transferKey)}];
+                if (!Array.isArray(transferred) || transferred.length !== \${files.length}) {
+                    throw new Error('ChatGPT image transfer is incomplete');
+                }
+                const files = transferred.map(file => {
+                    const base64 = file.chunks.join('');
+                    if (base64.length !== file.length) throw new Error('ChatGPT image transfer size mismatch');
+                    return { name: file.name, mime: file.mime, base64 };
+                });`,
+    'ChatGPT complete image transfer validation',
+  )
+  patchUpload(
+    "        `)), 'chatgpt image upload fallback');",
+    "        `)), 'chatgpt image upload fallback');\n        } finally {\n            await page.evaluate(`delete globalThis[${JSON.stringify(transferKey)}]; true`).catch(() => undefined);\n        }",
+    'ChatGPT image transfer cleanup on success or failure',
+  )
+}
 const rateLimitHelper = fs.readFileSync(
   path.join(runtimeDir, 'patches', 'chatgpt-rate-limit-helper.js'), 'utf8',
 )
