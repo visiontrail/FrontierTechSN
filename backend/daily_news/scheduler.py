@@ -8,7 +8,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from backend import config, database
+from backend import config, database, explainers
+from backend.daily_news.priority import hourly_preemption_window
 from backend.models import (
     DailyAutomationResponse,
     DailyAutomationSettings,
@@ -30,7 +31,7 @@ _admission_lock = asyncio.Lock()
 
 @dataclass(frozen=True)
 class DailyTaskAdmission:
-    task: TaskResponse
+    task: TaskResponse | None
     created: bool
     reason: str
 
@@ -57,6 +58,7 @@ async def ensure_daily_task(
     *,
     edition_date: date,
     trigger: str,
+    now: datetime | None = None,
 ) -> DailyTaskAdmission:
     """Admit one real daily edition, independently of the Explainer worker.
 
@@ -64,7 +66,8 @@ async def ensure_daily_task(
     duplicate an edition, and a stale receipt must not suppress a missing one.
     A queued or unfinished older edition is kept as the active Morning Desk
     before creating another. The production worker handles its priority over
-    an Explainer and restores that same Explainer afterward.
+    an Explainer and restores that same Explainer afterward. Hourly checks can
+    interrupt an Explainer only in the Singapore noon-to-deadline budget window.
     """
     async with _admission_lock:
         tasks = [
@@ -76,14 +79,40 @@ async def ensure_daily_task(
                 task.origin_id == edition_id
                 or _daily_payload(task).get("edition_date") == edition_id
             ):
+                task = await _authorize_scheduled_reuse(task, trigger)
                 return DailyTaskAdmission(task, False, "edition_exists")
         for task in reversed(tasks):
             if task.status not in {TaskStatus.COMPLETE, TaskStatus.FAILED}:
+                task = await _authorize_scheduled_reuse(task, trigger)
                 return DailyTaskAdmission(task, False, "morning_in_progress")
+        if trigger == "hourly_check":
+            allowed, reason = hourly_preemption_window(now)
+            has_explainer = any(
+                project["status"] in explainers.ACTIVE | {"queued"}
+                or project.get("production")
+                for project in explainers.list_projects()
+            )
+            if has_explainer and not allowed:
+                return DailyTaskAdmission(None, False, reason)
         task = await _create_daily_task(
             settings, edition_date=edition_date, trigger=trigger
         )
         return DailyTaskAdmission(task, True, "created")
+
+
+async def _authorize_scheduled_reuse(task: TaskResponse, trigger: str) -> TaskResponse:
+    """A due Schedule can adopt a waiting hourly edition without duplicating it."""
+    payload = _daily_payload(task)
+    if (
+        trigger == "schedule" and task.status == TaskStatus.QUEUED
+        and not task.output_dir and payload.get("trigger") == "hourly_check"
+    ):
+        payload.update(trigger="schedule", original_trigger="hourly_check")
+        await database.update_task(
+            task.id, source_url=json.dumps(payload, ensure_ascii=False)
+        )
+        return await database.get_task(task.id) or task
+    return task
 
 
 def _settings_path() -> Path:

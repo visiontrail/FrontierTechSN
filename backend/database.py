@@ -1024,6 +1024,8 @@ async def get_next_priority_morning_task() -> TaskResponse | None:
 
     Validation runs do not replace the daily edition or interrupt an Explainer.
     A future scheduled task remains parked until its requested start time.
+    A new hourly task can interrupt an Explainer only within its Singapore
+    production window; a started Morning Desk retains priority for retries.
     """
     return await _get_priority_morning_task((TaskStatus.QUEUED,))
 
@@ -1045,6 +1047,9 @@ async def get_unfinished_priority_morning_task() -> TaskResponse | None:
 async def _get_priority_morning_task(
     statuses: tuple[TaskStatus, ...],
 ) -> TaskResponse | None:
+    from backend.daily_news.priority import hourly_preemption_window
+
+    hourly_allowed, _ = hourly_preemption_window()
     now = datetime.now(timezone.utc).isoformat()
     db = await get_db()
     try:
@@ -1058,10 +1063,26 @@ async def _get_priority_morning_task(
                      THEN COALESCE(json_extract(source_url, '$.test_mode'), 0)
                      ELSE 0 END = 0
                  AND (scheduled_at IS NULL OR scheduled_at <= ?)
-               ORDER BY created_at ASC, id ASC LIMIT 1""",
+               ORDER BY created_at ASC, id ASC""",
             tuple(status.value for status in statuses) + (now,),
         )
-        return _row_to_response(rows[0]) if rows else None
+        for row in rows:
+            # output_dir is persisted when the news pipeline first starts.
+            # Once started, retries and review belong to the same production
+            # even when they extend beyond the hourly admission window.
+            if row["status"] == TaskStatus.QUEUED.value and not row["output_dir"]:
+                try:
+                    payload = json.loads(row["source_url"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("trigger") == "hourly_check"
+                    and not hourly_allowed
+                ):
+                    continue
+            return _row_to_response(row)
+        return None
     finally:
         await db.close()
 

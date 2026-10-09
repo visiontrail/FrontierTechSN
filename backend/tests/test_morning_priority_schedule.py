@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend import config, database
-from backend.daily_news import scheduler
+from backend.daily_news import priority, scheduler
 from backend.models import DailyAutomationSettings, TaskConfig, TaskStatus
 from backend.routers import daily_news
 
@@ -14,6 +14,13 @@ from backend.routers import daily_news
 @pytest.fixture
 def isolated_desk(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "tasks.db")
+    monkeypatch.setattr(config, "OUTPUTS_DIR", tmp_path / "outputs")
+    config.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    class WithinWindow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 9, 4, 30, tzinfo=timezone.utc).astimezone(tz)
+    monkeypatch.setattr(priority, "datetime", WithinWindow)
     monkeypatch.setattr(scheduler, "_state_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr(scheduler, "_admission_lock", asyncio.Lock())
     asyncio.run(database.init_db())

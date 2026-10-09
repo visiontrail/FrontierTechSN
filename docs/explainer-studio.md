@@ -15,9 +15,11 @@
 
 工作台顶部的 **Topic plans** 展示可继续编辑的选题，**Video queue** 展示等待项目的顺序、当前执行任务和等待原因。选题按实际入队顺序依次执行，不设置生成时间。
 
-Morning Desk 和 Explainer Studio 共用一个后台消费者。正式 Morning Desk 到期入队后享有优先级：消费者约每秒检查一次，暂停正在制作的 Explainer，等待提供方会话和本地子进程清理结束，再启动 Morning Desk。原 Explainer 的项目、操作类型、生产顺位、已完成素材和请求检查点保留；Morning Desk 结束后，原项目先于其他选题自动恢复。新闻质量重试或待审核期间保持暂停。未来定时任务和测试模式不会抢占 Explainer。此规则涵盖单独生成脚本、单独生成视频以及完整生成三个入口。
+Morning Desk 和 Explainer Studio 共用一个后台消费者。符合优先条件的正式 Morning Desk 入队后享有优先级：消费者约每秒检查一次，暂停正在制作的 Explainer，等待提供方会话和本地子进程清理结束，再启动 Morning Desk。原 Explainer 的项目、操作类型、生产顺位、已完成素材和请求检查点保留；Morning Desk 结束后，原项目先于其他选题自动恢复。新闻质量重试或待审核期间保持暂停。未来定时任务和测试模式不会抢占 Explainer。此规则涵盖单独生成脚本、单独生成视频以及完整生成三个入口。
 
-启用的 Morning Desk **Schedule** 到设定时间后确保当天任务存在，即使 Explainer 尚未完成或服务较晚重启，也不跳过当天任务。每小时巡检调用 `POST /api/daily-news/ensure-today`，独立于 Schedule 开关，按配方时区补齐当日正式节目。两种入口共用准入锁，并以数据库中的节目日期去重；同日已有任务或仍有未结束的 Morning Desk 时复用现有任务。手动 **Run now** 仍可明确创建额外节目，测试运行不计入当天正式节目。
+启用的 Morning Desk **Schedule** 到设定时间后确保当天任务存在，即使 Explainer 尚未完成或服务较晚重启，也不跳过当天任务。每小时巡检调用 `POST /api/daily-news/ensure-today`，独立于 Schedule 开关，按配方时区补齐当日正式节目。但巡检只有在新加坡时间 **12:00–14:00** 才能抢占正在执行、排队或保留生产占位的 Explainer：12:00 前不得抢占；14:00 后剩余时间不足六小时，不再为当天 20:00 截止时间抢占。没有 Explainer 占用时，巡检维持原有空闲启动行为。窗口外且有 Explainer 时接口返回 `task=null`、`created=false` 和 `before_noon` 或 `insufficient_time_before_deadline`。
+
+时间窗口同时约束巡检准入和未启动任务的优先领取；已经开始的新闻及其质量重试、待审核不受截止时间影响。Schedule 和明确的手动启动沿用原优先授权；到期 Schedule 可以提升同日尚未启动的巡检任务，无需创建重复节目。两种入口共用准入锁，并以数据库中的节目日期去重；同日已有任务或仍有未结束的 Morning Desk 时复用现有任务。手动 **Run now** 仍可明确创建额外节目，测试运行不计入当天正式节目。
 
 每日新加坡时间 20:00 发布、制作至少需要 6 小时时，14:00 是最晚启动线，应提前为审核、重试和发布留出时间。优先级解决排队阻塞，不能保证制作时间上限；发布继续遵循 Morning Desk 配方中的自动发布开关。
 

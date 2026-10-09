@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
@@ -125,14 +125,16 @@ async def run_daily_now(
 
 @router.post("/ensure-today")
 async def ensure_daily_today():
-    """Hourly safety entry point; scheduling being disabled does not block it."""
+    """Ensure today's edition without interrupting an Explainer outside its window."""
     settings = load_settings()
     try:
-        edition_date = datetime.now(ZoneInfo(settings.timezone)).date()
+        now = datetime.now(timezone.utc)
+        edition_date = now.astimezone(ZoneInfo(settings.timezone)).date()
         admission = await ensure_daily_task(
             settings,
             edition_date=edition_date,
             trigger="hourly_check",
+            now=now,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
