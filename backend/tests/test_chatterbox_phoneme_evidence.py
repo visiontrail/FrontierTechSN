@@ -9,6 +9,76 @@ PREFIX = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z '
 ENDING = ' t ə d eɪ'
 
 
+def test_contextual_word_final_d_requires_both_exact_source_transcripts():
+    source = 'The report mentions AI-derived today.'
+    row = tts_pronunciation.candidates(source)[0]
+    _, prepared = tts_pronunciation.validate_decisions(source, [{**row,'action':'spell',
+        'spoken':'eigh eye','reason':'Both AI letters.'}])
+    phones = PREFIX+'eɪ aɪ d ɚ aɪ v'+ENDING
+    words = [{'text':'The report mentions AI derived today.'}]
+    assert not evidence.compare_source(source, prepared, phones)['passed']
+    report = evidence.compare_contextual_word_cluster(source, prepared, phones, words, words)
+    assert report['supported'] and report['passed']
+    assert not report['overall_audio_acceptance']
+    wrong = [{'text':'The report mentions AI derive today.'}]
+    assert not evidence.compare_contextual_word_cluster(source, prepared, phones, words, wrong)['passed']
+    assert not evidence.compare_contextual_word_cluster(source, prepared, phones, wrong, words)['passed']
+    assert not evidence.compare_contextual_word_cluster(source, prepared, phones+' t ə', words, words)['passed']
+    assert not evidence.compare_contextual_word_cluster(source, prepared, phones.replace('eɪ aɪ','aɪ'), words, words)['passed']
+    ordinary = PREFIX+'eɪ aɪ d ᵻ ɹ aɪ v d'+ENDING
+    assert evidence.compare_source(source, prepared, ordinary)['passed']
+    assert evidence.compare_contextual_word_cluster(source, prepared, ordinary.replace('v d','v'), words, words)['passed']
+
+
+def test_contextual_cluster_does_not_drop_named_letter_vowels_or_d_before_vowels():
+    source = 'The report mentions DD today.'
+    row = tts_pronunciation.candidates(source)[0]
+    _, prepared = tts_pronunciation.validate_decisions(source, [{**row,'action':'spell',
+        'spoken':'dee dee','reason':'Two independent letter names.'}])
+    words = [{'text':source}]
+    assert not evidence.compare_contextual_word_cluster(source, prepared, PREFIX+'d iː'+ENDING, words, words)['passed']
+    source = 'They derived an answer.'
+    words = [{'text':source}]
+    phones = 'ð eɪ d ᵻ ɹ aɪ v ə n æ n s ɚ'
+    assert not evidence.compare_contextual_word_cluster(source, [], phones, words, words)['passed']
+
+
+def test_contextual_word_cluster_does_not_treat_a_named_t_as_an_ordinary_word():
+    source = 'They derived T today.'
+    start = source.index('T today')
+    prepared = [{'source':'T','start':start,'end':start+1,'spoken':'tee'}]
+    words = [{'text':source}]
+    phones = 'ð eɪ d ᵻ ɹ aɪ v t iː'+ENDING
+    assert not evidence.compare_contextual_word_cluster(source, prepared, phones, words, words)['passed']
+
+
+@pytest.mark.parametrize('defect', [None, 'same_model', 'conditioned', 'wrong_audio', 'wrong_source', 'wrong_transcript'])
+def test_contextual_observation_requires_bound_independent_recognizers(tmp_path, defect):
+    wav = tmp_path/'provider.wav'
+    wav.write_bytes(b'unchanged waveform binding fixture')
+    digest = hashlib.sha256(wav.read_bytes()).hexdigest()
+    source = 'They derived today.'
+    words = [{'text':source}]
+    transcript_digest = hashlib.sha256(source.encode()).hexdigest()
+    observation = {'audio_sha256':digest, 'model':evidence.MODEL, 'model_revision':evidence.REVISION,
+                   'conditioned_on_reference_text':False, 'phones':'ð eɪ d ɪ ɹ aɪ v t ə d eɪ'}
+    bindings = [{'model':model, 'audio_sha256':digest, 'source_sha256':transcript_digest,
+                 'transcript_sha256':transcript_digest, 'conditioned_on_reference_text':False}
+                for model in ['large', 'small']]
+    if defect == 'same_model':bindings[1]['model'] = 'large'
+    elif defect == 'conditioned':bindings[1]['conditioned_on_reference_text'] = True
+    elif defect == 'wrong_audio':bindings[1]['audio_sha256'] = 'different'
+    elif defect == 'wrong_source':bindings[1]['source_sha256'] = 'different'
+    elif defect == 'wrong_transcript':bindings[1]['transcript_sha256'] = 'different'
+    if defect:
+        with pytest.raises(ValueError):
+            evidence.audit_contextual_word_cluster_observation(wav, source, [], observation, words, words, recognizer_bindings=bindings)
+    else:
+        report = evidence.audit_contextual_word_cluster_observation(wav, source, [], observation, words, words, recognizer_bindings=bindings)
+        assert report['passed'] and report['audio_sha256'] == digest
+        assert not report['overall_audio_acceptance']
+
+
 def test_published_weak_verb_am_never_reduces_named_letters():
     source = 'The note reads I AM ready.'
     assert evidence.compare_source(source, [], 'ð ə n oʊ t ɹ iː d z aɪ ə m ɹ ɛ d i')['passed']

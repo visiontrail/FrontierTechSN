@@ -27,6 +27,8 @@ from scripts.chatterbox_body_phone_references import (
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
 EVIDENCE_VERSION = 28
+CONTEXTUAL_CLUSTER_REFERENCE_VERSION = 1
+CONTEXTUAL_CLUSTER_REFERENCE_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PROGRAMMING_REFERENCES = {
     'C++': 'https://stroustrup.com/bs_faq.html',
     'C#': 'https://dotnet.microsoft.com/en-us/languages',
@@ -168,7 +170,7 @@ def source_number_readings(literal: str) -> list[list[str]]:
     return forms
 
 
-def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]:
+def reference_parts(text: str, edits: list[dict], *, contextual_word_cluster=False) -> list[list[tuple[str, ...]]]:
     dictionary = lexicon()
     parts = []
     ordinary_units = []
@@ -353,7 +355,56 @@ def reference_parts(text: str, edits: list[dict]) -> list[list[tuple[str, ...]]]
             variants = set(parts[index])
             variants.update((*variant[:-1], 'S') for variant in parts[index] if variant[-1] == 'Z')
             parts[index] = sorted(variants)
+    if contextual_word_cluster:
+        # BBC's connected-speech reference permits /d/ elision between
+        # consonants. This conservative subset requires an ordinary word's
+        # final consonant-D cluster before an ordinary word starting in T.
+        # Named letters are separate non-ordinary units and remain exact.
+        for index in range(len(parts) - 1):
+            if (ordinary_units[index] and ordinary_units[index + 1]
+                    and all(variant[0] == 'T' for variant in parts[index + 1])):
+                variants = set(parts[index])
+                variants.update(variant[:-1] for variant in parts[index]
+                                if len(variant) > 1 and variant[-1] == 'D'
+                                and variant[-2] not in VOWELS)
+                parts[index] = sorted(variants)
     return parts
+
+
+def compare_contextual_word_cluster(text: str, edits: list[dict], phones: str,
+                                    primary_words: list[dict], secondary_words: list[dict]) -> dict:
+    """Supplement a phonetic difference only when both independent ASRs retain the exact source."""
+    standard = compare_source(text, edits, phones)
+    expected = tts._lexical_tokens(text)
+    transcripts = [' '.join(str(row.get('text', '')) for row in words)
+                   for words in (primary_words, secondary_words)]
+    exact = [tts._lexical_tokens(transcript) == expected for transcript in transcripts]
+    report = {'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
+              'method': 'complete_source_with_dual_exact_word_cluster_reference',
+              'contextual_cluster_reference_version': CONTEXTUAL_CLUSTER_REFERENCE_VERSION,
+              'source_url': CONTEXTUAL_CLUSTER_REFERENCE_SOURCE,
+              'source_location': 'BBC Talk about English, 11 July 2005, page 6: word-final t and d may disappear between consonant sounds. This subset allows only ordinary consonant-D before ordinary T, with both recognizers retaining every source word.',
+              'standard_phone_report': standard, 'exact_dual_source_transcripts': exact,
+              'transcript_sha256': [hashlib.sha256(value.encode()).hexdigest() for value in transcripts],
+              'supported': False, 'passed': False, 'overall_audio_acceptance': False}
+    if standard['passed'] or not standard['supported'] or not all(exact):
+        return report
+    try:
+        observed = observed_phones(phones)
+        parts = reference_parts(text, edits, contextual_word_cluster=True)
+    except (ValueError, KeyError) as error:
+        report['unsupported_reason'] = str(error)
+        return report
+    states = {()}
+    for variants in parts:
+        states = {joined for prefix in states for variant in variants
+                  if (joined := collapse_consonant_continuations((*prefix, *variant)))
+                  == observed[:len(joined)]}
+        if not states:
+            break
+    report.update(supported=True, passed=bool(observed) and observed in states,
+                  observed=list(observed), source_units=len(parts))
+    return report
 
 
 def compare_source(text: str, edits: list[dict], phones: str) -> dict:
@@ -436,4 +487,33 @@ def audit_observation(wav: Path, text: str, edits: list[dict], observation: dict
                   conditioned_on_reference_text=False, overall_audio_acceptance=False)
     if hashlib.sha256(wav.read_bytes()).hexdigest() != digest:
         raise ValueError('Waveform changed during its phone evidence audit')
+    return report
+
+
+def audit_contextual_word_cluster_observation(wav: Path, text: str, edits: list[dict],
+                                             observation: dict, primary_words: list[dict],
+                                             secondary_words: list[dict], *, recognizer_bindings: list[dict]) -> dict:
+    """Bind the supplemental phonetic reference to two unconditioned recognizers on this WAV."""
+    standard = audit_observation(wav, text, edits, observation)
+    digest = standard['audio_sha256']
+    source_digest = standard['source_sha256']
+    if (not isinstance(recognizer_bindings, list) or len(recognizer_bindings) != 2
+            or any(not isinstance(row, dict) or not isinstance(row.get('model'), str)
+                   or not row['model'] or row.get('audio_sha256') != digest
+                   or row.get('source_sha256') != source_digest
+                   or row.get('conditioned_on_reference_text') is not False
+                   for row in recognizer_bindings)
+            or recognizer_bindings[0]['model'] == recognizer_bindings[1]['model']):
+        raise ValueError('Contextual source audit requires two independent unconditioned recognizers bound to this waveform')
+    transcripts = [' '.join(str(row.get('text', '')) for row in words)
+                   for words in (primary_words, secondary_words)]
+    if any(binding.get('transcript_sha256') != hashlib.sha256(transcript.encode()).hexdigest()
+           for binding, transcript in zip(recognizer_bindings, transcripts, strict=True)):
+        raise ValueError('Contextual recognizer transcript differs from its waveform binding')
+    report = compare_contextual_word_cluster(text, edits, observation['phones'], primary_words, secondary_words)
+    report.update(audio_sha256=digest, model=MODEL, model_revision=REVISION,
+                  conditioned_on_reference_text=False, recognizer_bindings=recognizer_bindings,
+                  overall_audio_acceptance=False)
+    if hashlib.sha256(wav.read_bytes()).hexdigest() != digest:
+        raise ValueError('Waveform changed during its contextual source audit')
     return report

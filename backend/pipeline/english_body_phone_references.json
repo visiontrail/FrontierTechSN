@@ -157,6 +157,12 @@
       "source_url": "https://dictionary.cambridge.org/pronunciation/english/am",
       "source_location": "English verb am, British and American pronunciation entries distinguish strong /æm/ and weak /əm/. AH-M supplements the dictionary verb form only; explicit named-letter edits retain A /eɪ/ and M /ɛm/.",
       "verified_on": "2026-10-09"
+    },
+    "derived": {
+      "variants": [["D", "IH", "R", "AY", "V", "D"]],
+      "source_url": "https://dictionary.cambridge.org/pronunciation/english/derive",
+      "source_location": "Compositional inflection reference: Cambridge UK and US derive /dɪˈraɪv/ plus regular voiced-consonant past ending /d/. The ending rule is independently documented at https://tfcs.baruch.cuny.edu/ed-endings/. This is an explicit compositional reference, not a quoted IPA entry for derived; its final D remains required in the standard audit.",
+      "verified_on": "2026-10-09"
     }
   }
 }
