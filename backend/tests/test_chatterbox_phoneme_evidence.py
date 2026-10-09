@@ -9,6 +9,26 @@ PREFIX = 'ð ə ɹ ᵻ p ɔːɹ t m ɛ n ʃ ə n z '
 ENDING = ' t ə d eɪ'
 
 
+@pytest.mark.parametrize(('symbol', 'phones'), [
+    ('P&L','p iː æ n d ɛ l'), ('R&D','ɑːɹ æ n d d iː'),
+    ('M&A','ɛ m ə n d eɪ'), ('N&D','ɛ n ə n d d iː'),
+])
+def test_source_symbol_conjunction_retains_named_letter_vowels_and_source_and(symbol, phones):
+    text=f'The report mentions {symbol} today.'
+    report=evidence.compare_source(text,[],PREFIX+phones+ENDING)
+    assert report['supported'] and report['passed']
+    assert report['source_symbol_conjunction_reference_version']==1
+    assert not evidence.compare_source(text,[],PREFIX+phones.replace('æ n d ','').replace('ə n d ','')+ENDING)['passed']
+    assert not evidence.compare_source(text,[],PREFIX+phones+ENDING+' æ n d')['passed']
+
+
+def test_symbol_conjunction_does_not_invent_expansions_or_accept_wrong_named_vowels():
+    assert not evidence.compare_source('The report mentions P&L today.',[],PREFIX+'p iː æ n d æ l'+ENDING)['passed']
+    assert not evidence.compare_source('The report mentions R&D today.',[],PREFIX+'ɜɹ æ n d d iː'+ENDING)['passed']
+    assert not evidence.compare_source('The report mentions AT&T today.',[],PREFIX+'eɪ t iː æ n d t iː'+ENDING)['supported']
+    assert not evidence.compare_source('See https://example.com/P&L today.',[],'s iː p iː æ n d ɛ l'+ENDING)['supported']
+
+
 def test_complete_upper_prefix_mixed_word_keeps_its_final_vowel():
     source = 'The report mentions AQuA today.'
     row = tts_pronunciation.candidates(source,policy_version=17)[0]

@@ -26,7 +26,9 @@ from scripts.chatterbox_body_phone_references import (
 
 MODEL = 'facebook/wav2vec2-lv-60-espeak-cv-ft'
 REVISION = 'ae45363bf3413b374fecd9dc8bc1df0e24c3b7f4'
-EVIDENCE_VERSION = 28
+EVIDENCE_VERSION = 29
+SYMBOL_CONJUNCTION_REFERENCE_VERSION = 1
+SYMBOL_INITIALISM_RE = re.compile(r'\b([A-Z])&([A-Z])\b')
 CONTEXTUAL_CLUSTER_REFERENCE_VERSION = 1
 CONTEXTUAL_CLUSTER_REFERENCE_SOURCE = 'https://downloads.bbc.co.uk/worldservice/learningenglish/pronunciation/pdf/scripts/talkaboutenglish_pron2.pdf'
 PROGRAMMING_REFERENCES = {
@@ -177,6 +179,22 @@ def reference_parts(text: str, edits: list[dict], *, contextual_word_cluster=Fal
     before_vowel_references = {}
 
     def ordinary(fragment):
+        symbolic = list(SYMBOL_INITIALISM_RE.finditer(fragment))
+        if symbolic:
+            protected = [(row.start(), row.end()) for row in pronunciation.PROTECTED_TEXT_RE.finditer(fragment)]
+            cursor = 0
+            for match in symbolic:
+                if any(start < match.end() and end > match.start() for start, end in protected):
+                    raise ValueError('Protected source text cannot become a symbol initialism')
+                ordinary(fragment[cursor:match.start()])
+                parts.append(LETTER_PHONES[match[1]])
+                ordinary_units.append(False)
+                ordinary('and')
+                parts.append(LETTER_PHONES[match[2]])
+                ordinary_units.append(False)
+                cursor = match.end()
+            ordinary(fragment[cursor:])
+            return
         if re.search(r'\d\.\d+\.\d', fragment):
             raise ValueError('Multi-component source version requires an explicit reading reference')
         if (re.search(r"[^A-Za-z0-9\s.,:;!?'’\-\u2014\u2013]", fragment)
@@ -411,6 +429,8 @@ def compare_source(text: str, edits: list[dict], phones: str) -> dict:
     report = {'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
               'raw_phones': phones, 'supported': False, 'passed': False,
               'method': 'complete_source_phone_sequence', 'evidence_version': EVIDENCE_VERSION}
+    if SYMBOL_INITIALISM_RE.search(text):
+        report['source_symbol_conjunction_reference_version'] = SYMBOL_CONJUNCTION_REFERENCE_VERSION
     if re.search(r'o[ːˈˌ]*(?:\s+)?[ɹr]', phones):
         report['prerhotic_vowel_reference'] = PRERHOTIC_VOWEL_SOURCE
     if 'ɾ' in phones:
