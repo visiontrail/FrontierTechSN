@@ -287,6 +287,42 @@ async def _audio(scene: dict, project: dict, root: Path, log: Log) -> tuple[Path
     cached = _cached(stage, key, root)
     if cached:
         return stage / "narration.wav", cached
+    if "chatterbox_contract" in inputs and project.get("language") == "en":
+        # The added independent audit/tail checks need new evidence, not new
+        # synthesis. Reuse only the exact preceding contract, with every other
+        # synthesis, pronunciation and verifier input still identical.
+        previous_contract = {k: v for k, v in inputs["chatterbox_contract"].items()
+                             if k not in {"independent_audit_version", "waveform_tail_guard_version"}}
+        previous_key = _hash({**inputs, "chatterbox_contract": previous_contract})
+        previous = _safe(stage.parent / previous_key[:24], root)
+        old = _cached(previous, previous_key, root)
+        if old:
+            from backend.pipeline.chatterbox_independent import audit_part
+
+            plan_path = _safe(previous / "provider" / "tts_pronunciation.json", root)
+            plan = json.loads(plan_path.read_text())
+            if (plan.get("identity", {}).get("source_sha256") != hashlib.sha256(scene["narration"].encode()).hexdigest()
+                    or plan.get("identity", {}).get("policy") != previous_contract["pronunciation_policy"]):
+                raise RuntimeError("Existing narration pronunciation binding differs; preserve its audio")
+            log(f"{scene['id']}: checking existing narration against the new independent audio guards")
+            audit = await audit_part(previous / "narration.wav", scene["narration"], plan["edits"],
+                                     stage / "independent-audit")
+            if audit.get("passed") is not True or not _cached(previous, previous_key, root):
+                raise RuntimeError("Existing narration did not pass the new audio guards")
+            proof = stage / "reuse-audit.json"
+            _json(proof, audit, root)
+            for name in old["files"]:
+                source = _safe(previous / name, root)
+                target = _safe(stage / name, root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() and _sha(target) != _sha(source):
+                    raise RuntimeError("Narration migration output differs; preserve both artifacts")
+                shutil.copyfile(source, target)
+            details = {k: v for k, v in old.items() if k not in {"input_hash", "files"}}
+            record = _complete(stage, key, [stage / name for name in old["files"]] + [proof], root,
+                               **details, revalidated_from=str(previous.relative_to(root)))
+            log(f"{scene['id']}: original narration passed new guards and was reused without synthesis")
+            return stage / "narration.wav", record
     _write(stage / "script.txt", scene["narration"], root)
     script_path = stage / "script.txt"
     if requires_labels:

@@ -402,6 +402,47 @@ def test_chatterbox_outer_audio_cache_never_skips_changed_verification_or_parame
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("audit_passes", [True, False])
+def test_independent_guard_upgrade_rechecks_original_audio_without_synthesis(
+    tmp_path, providers, monkeypatch, audit_passes,
+):
+    from backend.pipeline import chatterbox_independent
+
+    project = {**_project(), "tts_model": "chatterbox-multilingual", "voice": "default"}
+    scene = project["scenes"][0]
+    current = chatterbox.cache_contract()
+    prior = {k: v for k, v in current.items()
+             if k not in {"independent_audit_version", "waveform_tail_guard_version"}}
+    monkeypatch.setattr(chatterbox, "cache_contract", lambda: prior)
+    original, old_record = asyncio.run(pipeline._audio(scene, project, tmp_path, lambda _: None))
+    plan = original.parent / "provider" / "tts_pronunciation.json"
+    plan.write_text(json.dumps({"identity": {
+        "source_sha256": pipeline.hashlib.sha256(scene["narration"].encode()).hexdigest(),
+        "policy": prior["pronunciation_policy"]}, "edits": []}))
+    originals = {p: p.read_bytes() for p in original.parent.rglob('*') if p.is_file()}
+    audited = []
+
+    async def audit(wav, text, edits, directory):
+        assert wav == original and text == scene["narration"] and edits == []
+        audited.append(wav)
+        return {"passed": audit_passes}
+
+    monkeypatch.setattr(chatterbox_independent, "audit_part", audit)
+    monkeypatch.setattr(chatterbox, "cache_contract", lambda: current)
+    for _ in range(2):
+        if audit_passes:
+            reused, record = asyncio.run(pipeline._audio(scene, project, tmp_path, lambda _: None))
+            assert reused.read_bytes() == original.read_bytes()
+            assert record["input_hash"] != old_record["input_hash"]
+            assert "reuse-audit.json" in record["files"]
+        else:
+            with pytest.raises(RuntimeError, match="did not pass"):
+                asyncio.run(pipeline._audio(scene, project, tmp_path, lambda _: None))
+    assert len(providers.audio_calls) == 1
+    assert len(audited) == (1 if audit_passes else 2)
+    assert all(p.read_bytes() == content for p, content in originals.items())
+
+
 def test_gemini_failure_is_visible_and_retry_preserves_audio_artwork(tmp_path, providers):
     async def run():
         project = _project()
