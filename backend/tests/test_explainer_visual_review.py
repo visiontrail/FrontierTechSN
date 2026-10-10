@@ -137,6 +137,16 @@ def test_clipboard_review_separates_page_direction_from_surface_visibility():
     assert "Clipboard reading geometry:" not in review.review_prompt(SCENE, {})
 
 
+@pytest.mark.parametrize("description", [
+    "A worker dragging text into a chat window, clipboard icon mid-transfer.",
+    "A researcher holding a clipboard beside a table with four cards.",
+    "Laboratory icons including a clipboard with a checklist.",
+])
+def test_overhead_geometry_does_not_invalidate_unrelated_clipboard_scenes(description):
+    scene = {**SCENE, "visual_prompt": description}
+    assert "Clipboard reading geometry:" not in review.review_prompt(scene, {})
+
+
 def test_rejection_with_omitted_pass_repairs_is_cached_without_fallback(tmp_path, monkeypatch):
     value = payload()
     for check in value["reviews"][0]["checks"]:

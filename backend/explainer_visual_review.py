@@ -32,11 +32,14 @@ def review_prompt(scene: dict, style: dict) -> str:
                "compositor_overlay_text": scene.get("on_screen_text", ""),
                "art_direction": style.get("visual_direction", ""),
                "character_description": style.get("character_description", "")}
-    # Keep unrelated approved scenes on their exact review contract. Clipboard
-    # scenes need an explicit distinction between face visibility and reading
-    # direction: "top faces the reader" reverses an ordinary held page.
+    # Keep unrelated approved scenes on their exact review contract. Overhead
+    # clipboard scenes need a distinction between face visibility and reading
+    # direction. A clipboard UI icon must not invalidate a laptop scene's review.
     clipboard_geometry = ""
-    if re.search(r"\bclipboards?\b", scene["visual_prompt"], re.IGNORECASE):
+    description = scene["visual_prompt"]
+    if (re.search(r"\bclipboards?\b", description, re.IGNORECASE)
+            and re.search(r"\b(?:overhead|from above|top[- ]down|bird['’]?s[- ]eye)\b",
+                          description, re.IGNORECASE)):
         clipboard_geometry = (
             "\n\nClipboard reading geometry: first establish the depicted action. "
             "Holding or carrying a clipboard against the body, or displaying it to "
