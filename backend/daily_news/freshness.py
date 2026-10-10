@@ -526,9 +526,12 @@ async def refresh_review_history(dossier, output_dir: Path, *, ai_endpoint=None,
 async def completion_guard(task):
     """Serialize history-check + publication + completion across local workers.
 
-    A completed prior edition arriving after review invalidates the snapshot;
+    A completed prior edition arriving or changing after review invalidates the snapshot;
     do not publish media against a review that never saw that history. Review
     resume refreshes the history and runs the normal bounded correction loop.
+    Removing historical items leaves the approved snapshot conservative: every
+    current item must still match an entire reviewed item, not just its key.
+    Keep the original snapshot and receipt bound together in that case.
     Existing pre-policy videos are not retroactively invalidated by a render.
     """
     path = Path(task.output_dir or config.OUTPUTS_DIR / task.id) / "research/dossier.json"
@@ -561,7 +564,8 @@ async def completion_guard(task):
                     raise RuntimeError("News script or freshness evidence changed after approval; resume daily review")
                 current = await load_history(date.fromisoformat(raw["edition_date"]), task.id,
                                              now=datetime.now(timezone.utc))
-                if fingerprint(current) != fingerprint(raw.get("history", [])):
+                reviewed_items = {fingerprint(item) for item in raw.get("history", [])}
+                if any(fingerprint(item) not in reviewed_items for item in current):
                     raise RuntimeError("Completed news history changed after review; resume daily review before publication")
             yield
         finally:

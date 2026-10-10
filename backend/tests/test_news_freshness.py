@@ -530,6 +530,50 @@ def test_retry_reuses_same_history_but_completion_race_invalidates_review(histor
         asyncio.run(check())
 
 
+def test_completion_keeps_review_after_history_deletion_but_rejects_edits(history_store):
+    prior = history_store("prior")
+    history_store("removed", script="Another previously completed story")
+    directory = history_store("current", edition="2026-09-20", status="publishing")
+    path = directory / "research/dossier.json"
+    raw = json.loads(path.read_text())
+    raw.update(
+        freshness_policy_version=1,
+        history=asyncio.run(freshness.load_history(EDITION, "current", now=NOW)),
+        generated_at=NOW.isoformat(), window_hours=36,
+    )
+    path.write_text(json.dumps(raw))
+    (directory / "review").mkdir()
+    report_path = directory / "review/fact_check_report.json"
+    report_path.write_text(json.dumps({
+        "passed": True, "freshness_review_key": freshness.review_binding(raw),
+        "final_contract": {"script_sha256": hashlib.sha256((directory / "script.txt").read_bytes()).hexdigest()},
+    }))
+    originals = [p.read_bytes() for p in (path, report_path)]
+    task = SimpleNamespace(id="current", source_type="news_daily", output_dir=str(directory), script_path=None)
+
+    async def check():
+        async with freshness.completion_guard(task):
+            return True
+
+    with sqlite3.connect(config.DB_PATH) as db:
+        db.execute("DELETE FROM tasks WHERE id = 'removed'")
+    assert asyncio.run(check())
+    assert [p.read_bytes() for p in (path, report_path)] == originals
+
+    # Same historical key, changed evidence: removal must not hide a mutation.
+    prior_path = prior / "research/dossier.json"
+    original_prior = prior_path.read_text()
+    changed = json.loads(original_prior)
+    changed["selected"][0]["title"] = "Changed historical evidence"
+    prior_path.write_text(json.dumps(changed))
+    with pytest.raises(RuntimeError, match="history changed"):
+        asyncio.run(check())
+    prior_path.write_text(original_prior)
+    history_store("new-prior", script="A newly completed story")
+    with pytest.raises(RuntimeError, match="history changed"):
+        asyncio.run(check())
+
+
 def test_completion_guard_serializes_concurrent_workers(history_store):
     directory = history_store("current", edition="2026-09-20", status="publishing")
     task = SimpleNamespace(id="current", source_type="news_daily", output_dir=str(directory))
