@@ -550,6 +550,28 @@ test('image timeout checkpoint recovers the original prompt without a second sen
   assert.equal(navigations.length, 2)
 })
 
+test('image composer waits for hydration in the same slot and fails within a bounded deadline', async () => {
+  const helper = fs.readFileSync(path.join(runtime, 'patches/chatgpt-image-request.js'), 'utf8').replaceAll('export ', '')
+  for (const readyAt of [3000, Infinity]) {
+    let clock = 0
+    const wait = vm.runInNewContext(helper + '\nwaitForChatGPTImageComposer', {
+      Date: { now: () => clock },
+      async ensureChatGPTComposer() {
+        if (clock < readyAt) throw new Error('ChatGPT composer is not available on the current page.')
+        return { hasComposer: true }
+      },
+    })
+    const result = wait({ async sleep(seconds) { clock += seconds * 1000 } })
+    if (readyAt === Infinity) await assert.rejects(result, /composer is not available/)
+    else assert.equal((await result).hasComposer, true)
+    assert.equal(clock, Math.min(readyAt, 30000))
+  }
+  const wait = vm.runInNewContext(helper + '\nwaitForChatGPTImageComposer', {
+    Date, async ensureChatGPTComposer() { throw new Error('AUTH_REQUIRED') },
+  })
+  await assert.rejects(wait({}), /AUTH_REQUIRED/)
+})
+
 test('image recovery rejects a different visible user prompt and never submits', async () => {
   const helper = fs.readFileSync(path.join(runtime, 'patches/chatgpt-image-request.js'), 'utf8').replaceAll('export ', '')
   const recover = vm.runInNewContext(helper + '\nrecoverChatGPTImageRequest', {

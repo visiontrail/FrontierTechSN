@@ -2210,7 +2210,8 @@ chatgptImage = chatgptImage.replace(
 )
 chatgptImage = chatgptImage.replace('import { clearChatGPTDraft,',
   'import { ensureChatGPTComposer, clearChatGPTDraft,')
-if (!chatgptImage.includes('const composerState = await ensureChatGPTComposer(page);')) {
+if (!chatgptImage.includes('const composerState = await ensureChatGPTComposer(page);')
+    && !chatgptImage.includes('const composerState = await waitForChatGPTImageComposer(page);')) {
   chatgptImage = chatgptImage.replace('            await clearChatGPTDraft(page);',
     `            const composerState = await ensureChatGPTComposer(page);
             if (!/^https:\\/\\/chatgpt\\.com(?:\\/|$)/.test(composerState.url || '')) {
@@ -2231,6 +2232,10 @@ if (!chatgptImage.includes("stage: 'image_wait_diagnostic'")) {
     'ChatGPT missing image diagnostics preserve request checkpoints',
   )
 }
+chatgptImage = chatgptImage.replace(
+  'const composerState = await ensureChatGPTComposer(page);',
+  'const composerState = await waitForChatGPTImageComposer(page);',
+)
 fs.writeFileSync(chatgptImagePath, chatgptImage)
 
 let ask = fs.readFileSync(askPath, 'utf8')

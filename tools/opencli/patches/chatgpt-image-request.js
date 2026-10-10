@@ -36,6 +36,21 @@ export async function prepareChatGPTImageComposer(page) {
     }
 }
 
+export async function waitForChatGPTImageComposer(page) {
+    // The navigation can finish before the editor mounts. This is strictly
+    // before submission; keep the same page and the original request slot.
+    const deadline = Date.now() + 30000;
+    while (true) {
+        try {
+            return await ensureChatGPTComposer(page);
+        } catch (error) {
+            if (error?.message !== 'ChatGPT composer is not available on the current page.'
+                || Date.now() >= deadline) throw error;
+            await page.sleep(Math.min(1, (deadline - Date.now()) / 1000));
+        }
+    }
+}
+
 export async function recoverChatGPTImageRequest(page, prior, prompt, timeout) {
     // A saved candidate URL never authorizes output by itself. Recover only
     // after the latest user message matches the exact submitted image prompt.
