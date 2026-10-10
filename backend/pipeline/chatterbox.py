@@ -89,6 +89,55 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+def _punctuation_repair(directory: Path, stem: str, identity: dict) -> tuple[dict, str]:
+    """Apply one explicit, immutable comma repair after exhausted pronunciation jobs.
+
+    The canonical text, voice, seeds and checks do not change. Original jobs
+    remain in their own namespace; a corrected input has its own bounded budget.
+    """
+    marker = directory / f"{stem}.punctuation-repair.json"
+    if not marker.exists():
+        return identity, stem
+    repair = _read_json(marker)
+    base = identity['synthesis_text']
+    position = repair.get('insert_after')
+    if (repair.get('version') != 1
+            or repair.get('source_sha256') != hashlib.sha256(identity['text'].encode()).hexdigest()
+            or repair.get('synthesis_sha256') != hashlib.sha256(base.encode()).hexdigest()
+            or type(position) is not int or not 0 < position < len(base)
+            or not base[position - 1].isalnum() or base[position] != ' '
+            or not isinstance(repair.get('reason'), str) or not repair['reason'].strip()):
+        raise RuntimeError('Invalid source-bound punctuation repair; preserving existing jobs')
+    originals = repair.get('original_request_sha256')
+    if not isinstance(originals, list) or len(originals) != MAX_INTEGRITY_ATTEMPTS:
+        raise RuntimeError('Punctuation repair requires all exhausted original requests')
+    for attempt, digest in enumerate(originals):
+        original = directory / f'{stem}.request-{attempt}.json'
+        payload = {'text': base, 'language_id': identity['language'], 'voice': identity['voice'],
+                   'seed': (identity['seed'] + attempt) % (2 ** 32),
+                   **identity['synthesis_parameters']}
+        checkpoint = _read_request_checkpoint(original)
+        if (not original.is_file() or tts._file_sha256(original) != digest
+                or checkpoint.get('identity') != _digest({'identity': identity, 'payload': payload})
+                or not checkpoint.get('job_id')
+                or not str(checkpoint.get('rejected', '')).startswith(
+                    'Chatterbox initialism pronunciation mismatch:')):
+            raise RuntimeError('Punctuation repair requires unchanged exhausted pronunciation jobs')
+    repair_digest = _digest(repair)
+    applied = directory / f'{stem}.punctuation-repair-applied.json'
+    if applied.exists() and _read_json(applied).get('repair_sha256') != repair_digest:
+        raise RuntimeError('Punctuation repair changed after activation; preserving its jobs')
+    wav = directory / f'{stem}_generated.wav'
+    if wav.exists() and _read_json(tts._part_metadata_path(wav)).get('identity', {}).get(
+            'punctuation_repair_sha256') != repair_digest:
+        raise RuntimeError('Punctuation repair cannot replace existing accepted audio')
+    if not applied.exists():
+        _write_json(applied, {'repair_sha256': repair_digest})
+    repaired = {**identity, 'synthesis_text': base[:position] + ',' + base[position:],
+                'punctuation_repair_sha256': repair_digest}
+    return repaired, f'{stem}.punctuation-repair'
+
+
 def _bind_verification(directory: Path, binding: dict) -> None:
     """Keep reports from another waveform out of the current attempt's evidence."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -905,6 +954,10 @@ async def _generate_chatterbox(
                          for edit in chunk_edits if edit.get('kind') == 'word']
             if word_refs:
                 identity['word_hint_references'] = word_refs
+            identity, request_stem = _punctuation_repair(directory, stem, identity)
+            synthesis_text = identity['synthesis_text']
+            if request_stem != stem:
+                (synthesis_directory / f'{request_stem}.txt').write_text(synthesis_text, encoding='utf-8')
             cached = _cached_part(path, identity, verify_text=verify_text)
             if cached and part_auditor is not None:
                 try:
@@ -916,7 +969,7 @@ async def _generate_chatterbox(
                     # A new independent audit may disprove a formerly accepted
                     # part. Preserve its original WAV and metadata, then spend
                     # only the remaining attempts of this same durable request.
-                    request_path = next((p for p in directory.glob(f"{stem}.request-*.json")
+                    request_path = next((p for p in directory.glob(f"{request_stem}.request-*.json")
                                          if _read_request_checkpoint(p).get("job_id") == cached["job_id"]), None)
                     if request_path is None:
                         raise RuntimeError("Audited cached audio has no matching durable job checkpoint") from exc
@@ -946,7 +999,7 @@ async def _generate_chatterbox(
                 save_coverage()
                 continue
             for attempt in range(MAX_INTEGRITY_ATTEMPTS):
-                request_path = directory / f"{stem}.request-{attempt}.json"
+                request_path = directory / f"{request_stem}.request-{attempt}.json"
                 payload = {
                     "text": synthesis_text, "language_id": language, "voice": voice,
                     "seed": (contract["seed"] + attempt) % (2 ** 32),
@@ -971,6 +1024,7 @@ async def _generate_chatterbox(
                 # attempt budget or changing the provider request identity.
                 acoustic_rechecking = bool(
                     str(checkpoint.get('rejected') or '').startswith((
+                        'Chatterbox initialism pronunciation mismatch:',
                         'Independent vocabulary audit rejected speech:',
                         'Chatterbox independent part audit:',
                         'Required complete-source phone sequence differs from the source',
@@ -1059,7 +1113,7 @@ async def _generate_chatterbox(
                 try:
                     if tts._file_sha256(staged) != job.get("audio_sha256"):
                         raise RuntimeError("Chatterbox download does not match the completed job audio hash")
-                    verification = directory / "verification" / stem
+                    verification = directory / "verification" / request_stem
                     _bind_verification(verification, {
                         'audio_sha256': job['audio_sha256'], 'job_id': job_id,
                         'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
@@ -1108,7 +1162,7 @@ async def _generate_chatterbox(
                             raise RuntimeError('Independent part auditor did not return confirmed acceptance')
                         integrity["independent_audit"] = audit
                 except tts.TtsIntegrityError as exc:
-                    rejected = directory / "verification" / stem
+                    rejected = directory / "verification" / request_stem
                     rejected.mkdir(parents=True, exist_ok=True)
                     marker = (f'rechecked-{attempt}-spelling-{OBSERVATION_SPELLING_VERSION}'
                               if rechecking else f'rejected-{attempt}')

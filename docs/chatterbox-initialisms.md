@@ -157,3 +157,27 @@ letter validation, unchanged factual text, URLs, expanded chunk/duration
 budgets, plan tampering, prompt invalidation and resume without another model
 call. This provider-input change requires the local backend to load the new
 code; it requires no remote TTS redeployment or settings migration.
+
+### Explicit punctuation repair for an exhausted part
+
+When all three durable jobs for one part fail initialism pronunciation because
+of a fused spoken boundary, a reviewed provider-only comma can be requested in
+`audio/tts_input_part_NNN.punctuation-repair.json`. This is an opt-in repair, not
+an automatic extension of the unchanged input's retry limit. Its version-1
+object contains `source_sha256`, `synthesis_sha256`, `insert_after` (a character
+index at an existing inter-word space), a nonempty `reason`, and
+`original_request_sha256` (the three original checkpoint file hashes in attempt
+order). No words, canonical script, voice, speed or verification gates change.
+
+The adapter verifies that each original request belongs to the unchanged input
+and is a confirmed pronunciation rejection. It refuses to replace accepted
+audio. A single immutable activation receipt binds the repair; changing the
+manifest after activation fails closed. Corrected requests use the separate
+`tts_input_part_NNN.punctuation-repair.request-N.json` namespace with the same
+three-attempt bound. Verification evidence is likewise separate. Transport or
+verification uncertainty resumes the same job; repeated runs cannot reset the
+repair budget. Existing audio for other parts keeps its original identity.
+
+Acoustic-reference upgrades also recheck persisted initialism pronunciation
+rejections, as these can originate in the complete-source phoneme fallback.
+Rechecking does not submit a new synthesis request or erase the old rejection.

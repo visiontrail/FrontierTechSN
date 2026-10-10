@@ -1570,6 +1570,7 @@ async def test_independent_audit_rejection_never_replenishes_retry_budget(setup_
 @pytest.mark.asyncio
 @pytest.mark.parametrize('outcome', ['passed', 'still_wrong', 'unavailable'])
 @pytest.mark.parametrize('rejection', [
+    'Chatterbox initialism pronunciation mismatch: ambiguous boundary',
     'Independent vocabulary audit rejected speech: unsupported word',
     'Required complete-source phone sequence differs from the source',
     'Word-hint audio differs from its complete source phone sequence',
@@ -2391,3 +2392,90 @@ async def test_policy20_cited_body_word_cue_is_bound_at_http_and_cache_boundary(
     await run()
     assert len(server.jobs)==1 and (directory/'tts_input_part_001.request-0.json').read_bytes()==checkpoint
     assert script.read_text()==source
+
+
+def write_punctuation_repair(directory, source, synthesis, position):
+    repair = {'version': 1, 'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
+              'synthesis_sha256': hashlib.sha256(synthesis.encode()).hexdigest(),
+              'insert_after': position, 'reason': 'Separate a fused pronunciation boundary',
+              'original_request_sha256': [tts._file_sha256(directory / f'tts_input_part_001.request-{i}.json')
+                                          for i in range(chatterbox.MAX_INTEGRITY_ATTEMPTS)]}
+    path = directory / 'tts_input_part_001.punctuation-repair.json'
+    path.write_text(json.dumps(repair))
+    return path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('result', ['pass', 'reject', 'unavailable'])
+async def test_explicit_punctuation_repair_retains_original_jobs_and_bounded_budget(setup_client, monkeypatch, result):
+    server, script, directory, verifier, generate = setup_client
+    source = script.read_text()
+    verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: fused boundary')
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    originals = {p.name: p.read_bytes() for p in directory.glob('*.request-*.json')}
+    rejected = {str(p): p.read_bytes() for p in (directory / 'verification').rglob('*') if p.is_file()}
+    write_punctuation_repair(directory, source, source, len('The complete'))
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(
+        [{'text': word} for word in source.split()], {'passed': True})))
+    if result == 'pass':
+        verifier.side_effect = lambda *a, **kw: advisory_report()
+        await generate()
+        assert len(server.jobs) == 4
+        assert server.jobs['job-4']['request']['text'] == source.replace('complete ', 'complete, ', 1)
+        await generate()
+        assert len(server.jobs) == 4
+        metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+        assert metadata['identity']['text'] == source
+        assert metadata['identity']['punctuation_repair_sha256']
+    elif result == 'reject':
+        with pytest.raises(tts.TtsIntegrityError):
+            await generate()
+        assert len(server.jobs) == 6
+        with pytest.raises(tts.TtsIntegrityError, match='exhausted'):
+            await generate()
+        assert len(server.jobs) == 6
+    else:
+        verifier.side_effect = RuntimeError('Verifier unavailable')
+        with pytest.raises(RuntimeError, match='Verifier unavailable'):
+            await generate()
+        assert len(server.jobs) == 4
+        with pytest.raises(RuntimeError, match='Verifier unavailable'):
+            await generate()
+        assert len(server.jobs) == 4
+    for name, contents in originals.items():
+        assert (directory / name).read_bytes() == contents
+    for name, contents in rejected.items():
+        assert Path(name).read_bytes() == contents
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('defect', ['source', 'synthesis', 'position', 'budget', 'checkpoint', 'accepted', 'changed'])
+async def test_punctuation_repair_rejects_unsafe_inputs_before_submitting(setup_client, defect):
+    server, script, directory, verifier, generate = setup_client
+    source = script.read_text()
+    verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: fused boundary')
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    marker = write_punctuation_repair(directory, source, source, len('The complete'))
+    repair = json.loads(marker.read_text())
+    if defect in {'source', 'synthesis'}:
+        repair[f'{defect}_sha256'] = 'wrong'
+    elif defect == 'position':
+        repair['insert_after'] = 2  # Inside a word.
+    elif defect == 'budget':
+        repair['original_request_sha256'] = repair['original_request_sha256'][:2]
+    elif defect == 'checkpoint':
+        path = directory / 'tts_input_part_001.request-0.json'
+        row = json.loads(path.read_text())
+        row.pop('rejected')
+        path.write_text(json.dumps(row))
+    elif defect == 'accepted':
+        (directory / 'tts_input_part_001_generated.wav').write_bytes(pcm_wav())
+    else:
+        (directory / 'tts_input_part_001.punctuation-repair-applied.json').write_text(
+            json.dumps({'repair_sha256': 'different'}))
+    marker.write_text(json.dumps(repair))
+    with pytest.raises(RuntimeError, match='[Pp]unctuation repair|source-bound'):
+        await generate()
+    assert len(server.jobs) == 3
