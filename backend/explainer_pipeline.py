@@ -332,6 +332,31 @@ _IMAGE_REPAIR_PREFIX = (
 )
 
 
+def _image_repair_feedback(feedback: list[dict]) -> str:
+    # Reviewer evidence can name its private upload. Only send the actionable
+    # correction to a fresh generation conversation, which has no attachments.
+    corrections = [{"criterion": check["criterion"], "repair": re.sub(
+        r"(?:https?://\S+|[\w./-]+\.(?:png|jpe?g|webp))", "the illustration",
+        check["repair"], flags=re.IGNORECASE,
+    )} for check in feedback]
+    return ("Create a new standalone image from the complete scene description above. "
+            "No earlier image or attachment is available or needed; do not ask for an upload. "
+            "Apply these composition requirements to the new image:\n"
+            + json.dumps(corrections, ensure_ascii=False))
+
+
+def _image_input_failure(directory: Path, key: str, root: Path) -> dict | None:
+    receipt = _safe(directory / "input-failure.json", root)
+    if not receipt.exists():
+        return None
+    record = json.loads(receipt.read_text())
+    state = _safe(directory / "chatgpt-image-request.json", root)
+    if (record.get("input_hash") != key or record.get("code") != "CHATGPT_IMAGE_INPUT_MISSING"
+            or not state.is_file() or record.get("request_sha256") != _sha(state)):
+        raise RuntimeError("Image input failure binding differs; preserve the original request")
+    return record
+
+
 def _existing_image_candidates(stage: Path, prompt: str, root: Path) -> list[tuple[int, Path, str, str]]:
     """Keep generation attempts and submitted requests across review-only revisions."""
     candidates = {}
@@ -359,7 +384,7 @@ def _existing_image_candidates(stage: Path, prompt: str, root: Path) -> list[tup
         raise RuntimeError("Existing image attempt history has gaps; reconcile before generation")
     # Do not abandon an unknown outcome from an earlier attempt.
     for _, directory, _, key in list(sorted(candidates.values()))[:-1]:
-        if not _cached(directory, key, root):
+        if not _cached(directory, key, root) and not _image_input_failure(directory, key, root):
             raise RuntimeError("Earlier image attempt is incomplete; recover its original request first")
     return list(sorted(candidates.values()))
 
@@ -434,7 +459,7 @@ async def _image(scene: dict, style: dict, root: Path, log: Log = lambda _: None
     for attempt in range(first_attempt, MAX_IMAGE_ATTEMPTS + 1):
         request = prompt
         if feedback:
-            request += _IMAGE_REPAIR_PREFIX + json.dumps(feedback, ensure_ascii=False)
+            request += _IMAGE_REPAIR_PREFIX + _image_repair_feedback(feedback)
         candidate_key = _hash({"prompt": request, "attempt": attempt})
         candidate_stage = _safe(stage / f"attempt-{attempt:02d}-{candidate_key[:12]}", root)
         if existing and attempt == first_attempt:
@@ -448,9 +473,37 @@ async def _image(scene: dict, style: dict, root: Path, log: Log = lambda _: None
         if not record and (candidate_stage / "complete.json").exists():
             raise RuntimeError("Existing image candidate failed hash verification; preserve its evidence")
         if not record:
+            failure = _image_input_failure(candidate_stage, candidate_key, root)
+            if failure:
+                feedback = failure["feedback"]
+                continue
             log(f"{scene['id']}: generating illustration candidate {attempt}/{MAX_IMAGE_ATTEMPTS}")
             _write(candidate_stage / "prompt.txt", request, root)
-            raw, conversation = await _generate_still(request, candidate_stage)
+            try:
+                raw, conversation = await _generate_still(request, candidate_stage)
+            except Exception as exc:
+                # Only a confirmed, owned terminal missing-input response can
+                # consume a candidate. Timeouts and unknown outcomes still stop.
+                if "CHATGPT_IMAGE_INPUT_MISSING:" not in str(exc):
+                    raise
+                state_path = _safe(candidate_stage / "chatgpt-image-request.json", root)
+                state = json.loads(state_path.read_text())
+                if (state.get("prompt") != "Generate an image of: " + request
+                        or not re.fullmatch(r"https://chatgpt\.com/c/[\w-]+", state.get("conversationUrl", ""))):
+                    raise RuntimeError("Missing-input response is not bound to the owned image request") from exc
+                # A legacy pending candidate may contain raw review JSON. Keep
+                # that evidence unchanged and extract only its actionable repairs.
+                if not feedback and request.startswith(prompt + _IMAGE_REPAIR_PREFIX):
+                    suffix = request[len(prompt + _IMAGE_REPAIR_PREFIX):]
+                    if suffix.startswith("["):
+                        feedback = json.loads(suffix)
+                _json(candidate_stage / "input-failure.json", {
+                    "input_hash": candidate_key, "code": "CHATGPT_IMAGE_INPUT_MISSING",
+                    "request_sha256": _sha(state_path), "error": str(exc), "feedback": feedback,
+                }, root)
+                log(f"{scene['id']}: candidate {attempt}/{MAX_IMAGE_ATTEMPTS} requires unavailable input; "
+                    "terminal request retained, continuing within the same candidate budget")
+                continue
             _safe(raw, root)
             with Image.open(raw) as artwork:
                 if artwork.width < 256 or artwork.height < 144:

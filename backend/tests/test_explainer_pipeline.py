@@ -111,6 +111,74 @@ def test_image_logic_repair_retains_candidates_and_reuses_verified_result(tmp_pa
     asyncio.run(run())
 
 
+def test_repair_prompt_excludes_review_upload_references():
+    feedback = [{"criterion": "narrative_meaning", "verdict": "fail",
+                 "evidence": "image_01d0c2.jpg has anime figures",
+                 "repair": "Redraw image_01d0c2.jpg with dot eyes and charcoal limbs"}]
+    prompt = pipeline._image_repair_feedback(feedback)
+    assert "image_01d0c2.jpg" not in prompt
+    assert "anime figures" not in prompt
+    assert "dot eyes and charcoal limbs" in prompt
+    assert "No earlier image or attachment is available" in prompt
+
+
+@pytest.mark.parametrize("final_passes", [True, False])
+def test_terminal_missing_input_consumes_candidate_without_replaying_request(
+    tmp_path, providers, monkeypatch, final_passes,
+):
+    scene, style = _project()["scenes"][0], _project()["style"]
+    prompt = pipeline._image_prompt(scene, style)
+    key = pipeline._hash({"version": pipeline.CONTRACT_VERSION, "prompt": prompt,
+                          "review_version": pipeline.REVIEW_VERSION, "review": pipeline.review_prompt(scene, style)})
+    stage = pipeline._stage(tmp_path, scene["id"], "image", key)
+    (stage / "prompt.txt").write_text(prompt)
+    feedback = [{"criterion": "narrative_meaning", "verdict": "fail",
+                 "evidence": "image_01d0c2.jpg depicts anime figures",
+                 "repair": "Use dot eyes and charcoal limbs"}]
+    pending = prompt + pipeline._IMAGE_REPAIR_PREFIX + json.dumps(feedback)
+    originals = {}
+    for attempt, request in [(1, prompt), (2, pending)]:
+        candidate_key = pipeline._hash({"prompt": request, "attempt": attempt})
+        directory = stage / f"attempt-{attempt:02d}-{candidate_key[:12]}"
+        directory.mkdir()
+        (directory / "prompt.txt").write_text(request)
+        if attempt == 1:
+            image, _ = asyncio.run(providers.image(request, directory))
+            pipeline._complete(directory, candidate_key, [image], tmp_path)
+        else:
+            (directory / "chatgpt-image-request.json").write_text(json.dumps({
+                "prompt": "Generate an image of: " + request,
+                "conversationUrl": "https://chatgpt.com/c/original-owned-turn",
+            }))
+        originals.update({p: p.read_bytes() for p in directory.iterdir() if p.is_file()})
+    calls = []
+
+    async def generate(request, directory):
+        calls.append(request)
+        if request == pending:
+            raise RuntimeError("CHATGPT_IMAGE_INPUT_MISSING: Please upload the earlier image so I can recompose it")
+        assert "image_01d0c2.jpg" not in request
+        assert "dot eyes and charcoal limbs" in request
+        return await providers.image(request, directory)
+
+    monkeypatch.setattr(pipeline, "_generate_still", generate)
+    providers.review_failures = 0 if final_passes else 100
+    for _ in range(2):
+        if final_passes:
+            assert asyncio.run(pipeline._image(scene, style, tmp_path))[0].is_file()
+        else:
+            with pytest.raises(RuntimeError, match="after 3 image candidates"):
+                asyncio.run(pipeline._image(scene, style, tmp_path))
+    assert len(calls) == 2
+    assert len(list(stage.glob("attempt-*"))) == 3
+    assert all(p.read_bytes() == content for p, content in originals.items())
+    receipt = next(stage.glob("attempt-02-*/input-failure.json"))
+    state = receipt.parent / "chatgpt-image-request.json"
+    state.write_text('{}')
+    with pytest.raises(RuntimeError, match="binding differs"):
+        pipeline._existing_image_candidates(stage, prompt, tmp_path)
+
+
 def test_rejected_illustration_never_reaches_scene_render_and_retries_are_bounded(tmp_path, providers):
     async def run():
         providers.review_failures = 100

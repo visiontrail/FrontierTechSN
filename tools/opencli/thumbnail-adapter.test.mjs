@@ -266,6 +266,20 @@ const ownedFailure = [
   { Role: 'Assistant', Text: imageFailure },
 ]
 
+test('missing reference upload is a terminal owned response, never a fresh submission', async () => {
+  const missing = { Role: 'Assistant', Text: 'Please upload the earlier image (image_01d0c2.jpg) so I can recompose it, replacing the detailed figures.' }
+  const { run, state } = waiter(fixedWait, { messages: () => [ownedFailure[0], missing] })
+  await assert.rejects(run(420, savedUrl, { prompt: 'exact image prompt' }), /CHATGPT_IMAGE_INPUT_MISSING/)
+  assert.equal(state.clock, 6000)
+  assert.equal(state.progress.at(-1).stage, 'image_input_missing')
+  assert.equal(state.navigations.length, 0)
+  for (const messages of [[{ Role: 'User', Text: 'other prompt' }, missing],
+    [missing, ownedFailure[0]], [ownedFailure[0], { ...missing, Text: 'The earlier response said: ' + missing.Text }]]) {
+    const other = waiter(fixedWait, { messages: () => messages })
+    assert.deepEqual(Array.from(await other.run(12, savedUrl, { prompt: 'exact image prompt' })), [])
+  }
+})
+
 test('completed image error ends the owned wait after two stable idle readings', async () => {
   const { run, state } = waiter(fixedWait, { messages: () => ownedFailure })
   await assert.rejects(run(420, savedUrl, { prompt: 'exact image prompt' }),

@@ -91,7 +91,8 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
                     && chatGPTPromptMatches(messages[userIndex].Text, options.prompt)
                     && latest?.Role === 'Assistant') {
                     const text = String(latest.Text || '').trim();
-                    if (/^I wasn['’]t able to generate the image due to an error on my side\.$/.test(text)) {
+                    if (/^I wasn['’]t able to generate the image due to an error on my side\.$/.test(text)
+                        || /^Please upload the (?:earlier|original|reference) image\b[\s\S]*\bso I can (?:recompose|edit|redraw)\b/i.test(text)) {
                         terminalText = text;
                     }
                 }
@@ -99,9 +100,10 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
             failureCount = terminalText && terminalText === failureText ? failureCount + 1 : (terminalText ? 1 : 0);
             failureText = terminalText;
             if (failureCount >= 2) {
-                report('image_generation_failed');
+                const missingInput = /^Please upload /i.test(terminalText);
+                report(missingInput ? 'image_input_missing' : 'image_generation_failed');
                 throw new CommandExecutionError(
-                    `CHATGPT_IMAGE_GENERATION_FAILED: ${terminalText}`,
+                    `${missingInput ? 'CHATGPT_IMAGE_INPUT_MISSING' : 'CHATGPT_IMAGE_GENERATION_FAILED'}: ${terminalText}`,
                     `Inspect the original request at ${conversationUrl}; the image prompt was not replayed.`,
                 );
             }
