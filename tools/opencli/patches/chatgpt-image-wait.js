@@ -10,6 +10,7 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
     let stillRendering = false;
     let failureText = '';
     let failureCount = 0;
+    let nextDiagnosticAt = Date.now() + 60000;
     const isLocal = value => /^https:\/\/chatgpt\.com\/c\/local-chatgpt(?::|%3a)[0-9a-f-]{36}(?:[?#]|$)/i.test(value || '');
     const isPending = value => /^https:\/\/chatgpt\.com\/(?:new\/?)?(?:[?#]|$)/i.test(value || '');
     const report = stage => options.onProgress?.(stage, conversationUrl);
@@ -103,6 +104,46 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
                     `CHATGPT_IMAGE_GENERATION_FAILED: ${terminalText}`,
                     `Inspect the original request at ${conversationUrl}; the image prompt was not replayed.`,
                 );
+            }
+            // Observe missing output without navigating, replaying the request,
+            // or granting a placeholder permission to complete generation.
+            // Use the existing deadline; never add a browser read after timeout.
+            if (options.onDiagnostic && Date.now() >= nextDiagnosticAt && Date.now() < deadline) {
+                nextDiagnosticAt = Date.now() + 60000;
+                try {
+                    const diagnostic = unwrapEvaluateResult(await page.evaluate(`(() => {
+                        const images = Array.from(document.querySelectorAll('img')).filter(img =>
+                            /^Generated image \\d+$/i.test(img.getAttribute('alt') || '')
+                            && !img.closest('form, [contenteditable="true"], [data-message-author-role="user"], [data-turn="user"], [data-user-message-bubble]')
+                        );
+                        return {
+                            visibility: document.visibilityState,
+                            ready_state: document.readyState,
+                            generated_image_count: images.length,
+                            generated_images: images.slice(0, 20).map(img => {
+                                const rect = img.getBoundingClientRect();
+                                const src = img.currentSrc || img.src || '';
+                                return {
+                                    complete: !!img.complete,
+                                    natural_width: img.naturalWidth,
+                                    natural_height: img.naturalHeight,
+                                    layout_width: rect.width,
+                                    layout_height: rect.height,
+                                    source_kind: /^blob:/i.test(src) ? 'blob'
+                                        : /^https?:/i.test(src) ? 'http'
+                                        : /^data:/i.test(src) ? 'data' : src ? 'other' : 'missing',
+                                };
+                            }),
+                        };
+                    })()`));
+                    if (diagnostic && typeof diagnostic === 'object') {
+                        options.onDiagnostic({ ...diagnostic, still_rendering: stillRendering }, conversationUrl);
+                    }
+                } catch {
+                    // A failed observation must not destroy the owned request,
+                    // mask the original timeout, or leak raw bridge error data.
+                    options.onDiagnostic({ observation_failed: true }, conversationUrl);
+                }
             }
             continue;
         }

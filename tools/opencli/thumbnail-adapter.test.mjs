@@ -142,7 +142,11 @@ function waiter(source = fixedWait, options = {}) {
   const state = { clock: 0, reads: 0, navigations: [], progress: [], url: options.url || savedUrl }
   const page = {
     async sleep(seconds) { state.clock += seconds * 1000 },
-    async evaluate() { state.reads++; state.clock += options.bridgeMs || 0; return options.readUrl?.(state) ?? state.url },
+    async evaluate(script) {
+      state.reads++; state.clock += options.bridgeMs || 0
+      if (script !== 'window.location.href') return options.diagnostic?.(script, state)
+      return options.readUrl?.(state) ?? state.url
+    },
     async goto(url) { state.navigations.push(url); state.clock += 2000 },
   }
   const context = {
@@ -196,6 +200,64 @@ test('idle saved conversation is never periodically reloaded before a late image
   assert.deepEqual(Array.from(await run(30)), [imageUrl])
   assert.equal(state.navigations.length, 0)
   assert.equal(state.progress.at(-1).stage, 'images_detected')
+})
+
+test('missing-image observations distinguish unloaded and loaded resources without exposing URLs', async () => {
+  const observations = []
+  const { run, state } = waiter(fixedWait, {
+    diagnostic(script, state) {
+      const image = {
+        getAttribute: () => 'Generated image 1', closest: () => null,
+        complete: state.clock >= 120000, naturalWidth: state.clock >= 120000 ? 1920 : 0,
+        naturalHeight: state.clock >= 120000 ? 1080 : 0,
+        src: 'https://private.example/image?secret=do-not-log',
+        getBoundingClientRect: () => ({ width: 0, height: 0 }),
+      }
+      return vm.runInNewContext(script, { document: {
+        visibilityState: 'hidden', readyState: 'complete', querySelectorAll: () => [image],
+      } })
+    },
+  })
+  assert.deepEqual(Array.from(await run(130, savedUrl, {
+    prompt: 'exact image prompt', onDiagnostic: (data, url) => observations.push({ data, url }),
+  })), [])
+  assert.equal(observations.length, 2)
+  assert.equal(observations[0].data.generated_images[0].complete, false)
+  assert.equal(observations[0].data.generated_images[0].natural_width, 0)
+  assert.equal(observations[1].data.generated_images[0].natural_width, 1920)
+  assert.equal(observations[1].data.generated_images[0].layout_width, 0)
+  assert.equal(observations[1].data.generated_images[0].source_kind, 'http')
+  assert.equal(observations[1].url, savedUrl)
+  assert.ok(!JSON.stringify(observations).includes('private.example'))
+  assert.ok(!JSON.stringify(observations).includes('do-not-log'))
+  assert.equal(state.clock, 130000)
+  assert.equal(state.navigations.length, 0)
+})
+
+test('failed diagnostic cannot mask timeout or leak raw bridge errors', async () => {
+  const observations = []
+  const { run, state } = waiter(fixedWait, {
+    diagnostic() { throw new Error('secret bridge response') },
+  })
+  assert.deepEqual(Array.from(await run(65, savedUrl, {
+    onDiagnostic: data => observations.push(data),
+  })), [])
+  assert.equal(observations.length, 1)
+  assert.equal(observations[0].observation_failed, true)
+  assert.ok(!JSON.stringify(observations).includes('secret'))
+  assert.equal(state.progress.at(-1).stage, 'image_wait_timeout')
+  assert.equal(state.clock, 65000)
+})
+
+test('diagnostics do not read again at the deadline or while generation is active', async () => {
+  for (const options of [{}, { generating: () => true }]) {
+    let reads = 0
+    const { run } = waiter(fixedWait, { ...options, diagnostic() { reads++; return {} } })
+    const result = run(60, savedUrl, { onDiagnostic() {} })
+    if (options.generating) await assert.rejects(result, /No stable finished image/)
+    else assert.deepEqual(Array.from(await result), [])
+    assert.equal(reads, 0)
+  }
 })
 
 const imageFailure = "I wasn't able to generate the image due to an error on my side."
@@ -360,6 +422,7 @@ test('image command records submission, wait failure and canonical link without 
       assert.equal(timeout, 360); assert.equal(url, savedUrl)
       assert.equal(options.localConversationUrl, localUrl)
       assert.equal(options.prompt, sent[0])
+      options.onDiagnostic({ generated_image_count: 0 }, url)
       options.onProgress('image_wait_timeout', url)
       throw new AdapterError('Generation timed out')
     },
@@ -369,7 +432,7 @@ test('image command records submission, wait failure and canonical link without 
   assert.equal(sent.length, 1)
   assert.deepEqual(navigations, ['https://chatgpt.com/new'])
   assert.deepEqual(diagnostics.map(item => item.stage), [
-    'preparing', 'prompt_submitted', 'waiting', 'image_wait_timeout', 'image_wait_failed',
+    'preparing', 'prompt_submitted', 'waiting', 'image_wait_diagnostic', 'image_wait_timeout', 'image_wait_failed',
   ])
   assert.equal(diagnostics.at(-1).conversation_url, savedUrl)
   assert.ok(!JSON.stringify(diagnostics).includes('Private thumbnail prompt'))
@@ -449,7 +512,10 @@ test('image timeout checkpoint recovers the original prompt without a second sen
     async getVisibleMessages() { return [{ Role: 'User', Text: sends[0] }] },
     chatGPTPromptMatches: (a, b) => a === b,
     parseChatGPTConversationId: url => url.split('/c/')[1],
-    async waitForChatGPTImages() {
+    async waitForChatGPTImages(_page, _before, _timeout, url, options) {
+      const checkpoint = fs.readFileSync(stateFile, 'utf8')
+      options.onDiagnostic({ generated_image_count: 0 }, url)
+      assert.equal(fs.readFileSync(stateFile, 'utf8'), checkpoint)
       if (++waits === 1) throw new AdapterError('response timeout')
       return [imageUrl]
     },

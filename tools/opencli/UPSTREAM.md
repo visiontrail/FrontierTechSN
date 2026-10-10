@@ -141,6 +141,16 @@ allowance. Concise `[chatgpt/image]` JSON diagnostics record the stage and
 conversation URL on stderr without including prompt content. Image generation
 does not automatically resubmit after a timeout.
 
+While an idle image response has no accepted output, `image_wait_diagnostic`
+events sample the DOM at most once per minute within the same response budget.
+They record page visibility/readiness and up to 20 generated-image elements:
+load completion, intrinsic/layout dimensions and source scheme category. No
+image URLs, prompt text or raw bridge errors are included. These observations
+distinguish a missing image element, an unloaded resource and a loaded result
+that detection did not accept; they do not prove a provider or network cause.
+Diagnostic reads never navigate, submit, accept output or change the request
+checkpoint, and a failed read does not replace the original timeout.
+
 `node --test tools/opencli/thumbnail-adapter.test.mjs` applies the patch twice
 to a disposable adapter tree, checks deadline/route/error behavior with a
 simulated clock and page, and verifies installed adapter files are unchanged.

@@ -2218,6 +2218,19 @@ if (!chatgptImage.includes('const composerState = await ensureChatGPTComposer(pa
             }
             await clearChatGPTDraft(page);`)
 }
+if (!chatgptImage.includes("stage: 'image_wait_diagnostic'")) {
+  chatgptImage = replaceOnce(chatgptImage,
+    'onProgress(stage, url) { convUrl = url; report(stage, url); },',
+    `onProgress(stage, url) { convUrl = url; report(stage, url); },
+                onDiagnostic(observation, url) {
+                    // Diagnostic events must not overwrite the resumable stage.
+                    console.error('[chatgpt/image] ' + JSON.stringify({
+                        stage: 'image_wait_diagnostic', conversation_url: url, observation,
+                    }));
+                },`,
+    'ChatGPT missing image diagnostics preserve request checkpoints',
+  )
+}
 fs.writeFileSync(chatgptImagePath, chatgptImage)
 
 let ask = fs.readFileSync(askPath, 'utf8')
