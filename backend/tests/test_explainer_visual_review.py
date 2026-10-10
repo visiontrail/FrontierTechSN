@@ -128,6 +128,8 @@ def test_clipboard_review_separates_page_direction_from_surface_visibility():
     scene = {**SCENE, "visual_prompt": "Overhead view of a teacher holding a clipboard."}
     prompt = review.review_prompt(scene, {})
     assert "bottom edge is normally nearer the reader" in prompt
+    assert "does not require the holder to read its front" in prompt
+    assert "Do not invent a reading action for a blank, unused prop" in prompt
     assert "rotating that sheet 180 degrees would invert it" in prompt
     assert "Still reject a visibly backward surface" in prompt
     assert "use uncertain if the necessary geometry is unreadable" in prompt

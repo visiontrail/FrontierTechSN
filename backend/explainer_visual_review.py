@@ -38,7 +38,12 @@ def review_prompt(scene: dict, style: dict) -> str:
     clipboard_geometry = ""
     if re.search(r"\bclipboards?\b", scene["visual_prompt"], re.IGNORECASE):
         clipboard_geometry = (
-            "\n\nClipboard reading geometry: distinguish the sheet's front/back normal "
+            "\n\nClipboard reading geometry: first establish the depicted action. "
+            "Holding or carrying a clipboard against the body, or displaying it to "
+            "someone else, does not require the holder to read its front. Do not "
+            "invent a reading action for a blank, unused prop. Apply reading-direction "
+            "checks only when reading or using its contents is actually depicted or "
+            "required by the narration. Distinguish the sheet's front/back normal "
             "from its in-plane top/bottom direction. Locate the reader, the near edge, "
             "the far edge and the clip using visible pixels. For a sheet held in front "
             "of a reader looking down, its bottom edge is normally nearer the reader "
