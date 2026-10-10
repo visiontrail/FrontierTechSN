@@ -8,19 +8,51 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from difflib import SequenceMatcher
 
 from backend import config
 
 MODEL = 'mlx-community/whisper-small-mlx'
-AUDIT_VERSION = 1
+AUDIT_VERSION = 2
+
+
+def _repeated_source_phrases(text: str, words: list[dict]) -> list[dict]:
+    """Find extra source phrases, including ordinary words inside a chunk.
+
+    Requiring two words and disjoint acoustic intervals avoids treating an
+    overlapping duplicate decoder token as a second spoken utterance.
+    """
+    from backend.pipeline import tts
+
+    expected = tts._lexical_tokens(text)
+    observed, indexes = tts._transcript_tokens(words)
+    repeats = []
+    for tag, _a, _b, left, right in SequenceMatcher(
+            a=expected, b=observed, autojunk=False).get_opcodes():
+        phrase = observed[left:right]
+        if tag != 'insert' or len(phrase) < 2 or not tts._subsequence_starts(expected, phrase):
+            continue
+        start = words[indexes[left]].get('start')
+        end = words[indexes[right - 1]].get('end')
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or end <= start:
+            continue
+        for other in tts._subsequence_starts(observed, phrase):
+            if other == left:
+                continue
+            other_start = words[indexes[other]].get('start')
+            other_end = words[indexes[other + len(phrase) - 1]].get('end')
+            if (isinstance(other_start, (int, float)) and isinstance(other_end, (int, float))
+                    and other_end > other_start and (end <= other_start or other_end <= start)):
+                repeats.append({'words': phrase, 'start': start, 'end': end})
+                break
+    return repeats
 
 
 async def audit_part(wav: Path, text: str, edits: list[dict], directory: Path) -> dict:
-    from backend.pipeline import chatterbox, tts, tts_pronunciation
+    from backend.pipeline import chatterbox, tts
+    from backend.pipeline.tts_tail_guard import inspect_tail
 
-    scope = 'independent_tail_and_extra_initialism_check'
-    if not tts_pronunciation.candidates(text) and not chatterbox._symbol_initialisms(text):
-        return {'required': False, 'passed': True, 'scope': scope}
+    scope = 'all_parts_independent_speech_and_waveform_tail_check'
     identity = {
         'audio_sha256': tts._file_sha256(wav),
         'source_sha256': hashlib.sha256(text.encode()).hexdigest(),
@@ -85,15 +117,21 @@ async def audit_part(wav: Path, text: str, edits: list[dict], directory: Path) -
             text, [{'text': spelling['normalized_transcript']}]),
         'extra_initialisms': extra_initialisms,
         'identifier_mismatches': identifier_mismatches,
+        'waveform_tail': inspect_tail(wav, words),
+        'repeated_source_phrases': _repeated_source_phrases(text, words),
     }
     if tts._file_sha256(wav) != identity['audio_sha256']:
         raise RuntimeError('Original waveform changed during independent verification')
     report['passed'] = (report['tail']['passed'] and report['normalized_tail']['passed']
-                        and not extra_initialisms and not identifier_mismatches)
+                        and not extra_initialisms and not identifier_mismatches
+                        and not report['repeated_source_phrases']
+                        and report['waveform_tail']['passed'])
     chatterbox._write_json(target / 'audit.json', report)
     if not report['passed']:
         raise tts.TtsIntegrityError('Independent Chatterbox check found unrequested speech: ' +
                                   json.dumps({'tail': report['tail']['extra_words'],
                                               'extra_initialisms': extra_initialisms,
-                                              'identifier_mismatches': identifier_mismatches}))
+                                              'identifier_mismatches': identifier_mismatches,
+                                              'repeated_source_phrases': report['repeated_source_phrases'],
+                                              'waveform_tail': report['waveform_tail']}))
     return report

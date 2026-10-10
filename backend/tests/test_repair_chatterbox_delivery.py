@@ -151,7 +151,7 @@ def test_strict_candidate_auditor_rejects_extra_words_without_editing_audio(tmp_
     original_hash = tts._file_sha256(wav)
 
     def transcribe(command, **kwargs):
-        assert command[command.index("--model") + 1] == repair.STRICT_AUDIT_MODEL
+        assert command[command.index("--model") + 1] in {repair.STRICT_AUDIT_MODEL, 'mlx-community/whisper-small-mlx'}
         words = [{"text": word, "start": index * 0.1, "end": index * 0.1 + 0.09}
                  for index, word in enumerate(("First", "source", "sentence.", "Uh"))]
         repair.Path(command[5]).write_text(json.dumps(words))
@@ -211,7 +211,7 @@ def test_independent_exact_observation_is_bound_and_preserves_primary_warning(tm
     wav = candidate / "tts_input_part_001_generated.wav"
 
     def transcribe(command, **kwargs):
-        assert command[command.index("--model") + 1] == repair.STRICT_AUDIT_MODEL
+        assert command[command.index("--model") + 1] in {repair.STRICT_AUDIT_MODEL, 'mlx-community/whisper-small-mlx'}
         words = [{"text": word, "start": index * 0.1, "end": index * 0.1 + 0.09}
                  for index, word in enumerate(("Second", "source", "sentence."))]
         repair.Path(command[5]).write_text(json.dumps(words))

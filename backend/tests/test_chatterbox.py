@@ -848,6 +848,7 @@ async def test_service_failure_attempt_budget_survives_repeated_resume(setup_cli
 
 @pytest.mark.asyncio
 async def test_adapter_recovers_actual_service_decoder_rejection_without_model_loading(tmp_path, monkeypatch):
+    monkeypatch.setattr(chatterbox_independent, 'audit_part', AsyncMock(return_value={'passed': True}))
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "deploy" / "chatterbox"))
     from deploy.chatterbox import service
 

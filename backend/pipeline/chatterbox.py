@@ -51,6 +51,8 @@ def cache_contract() -> dict:
     upgrades must also invalidate callers that can skip this adapter entirely.
     """
     from backend.pipeline.tts_tail_cleanup import VERSION as tail_cleanup_version
+    from backend.pipeline.chatterbox_independent import AUDIT_VERSION
+    from backend.pipeline.tts_tail_guard import VERSION as tail_guard_version
 
     return {
         "url": config.CHATTERBOX_TTS_URL.rstrip("/"),
@@ -65,6 +67,8 @@ def cache_contract() -> dict:
         "trailing_speech_verifier_version": TRAILING_SPEECH_VERIFIER_VERSION,
         "symbol_initialism_policy_version": SYMBOL_INITIALISM_POLICY_VERSION,
         "tail_cleanup_version": tail_cleanup_version,
+        "independent_audit_version": AUDIT_VERSION,
+        "waveform_tail_guard_version": tail_guard_version,
         "shared_verifier_version": tts.POCKET_TTS_INTEGRITY_VERIFIER_VERSION,
         "synthesis_parameters": dict(SYNTHESIS_PARAMETERS),
         "pronunciation_policy": pronunciation.policy_contract(),
