@@ -2479,3 +2479,87 @@ async def test_punctuation_repair_rejects_unsafe_inputs_before_submitting(setup_
     with pytest.raises(RuntimeError, match='[Pp]unctuation repair|source-bound'):
         await generate()
     assert len(server.jobs) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('history', ['fresh', 'exhausted', 'pending', 'accepted'])
+async def test_repeated_letter_input_preserves_history_and_exact_checks(setup_client, monkeypatch, history):
+    server, script, directory, verifier, generate = setup_client
+    source = 'The BBC reports the result.'
+    script.write_text(source)
+    server.pronunciation_ai.side_effect = lambda *a, **kw: json.dumps({'decisions': [
+        {**tts_pronunciation.candidates(source)[0], 'action': 'spell',
+         'spoken': 'double bee see', 'reason': 'Spell the broadcaster initials.'}]})
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(
+        [{'text': word} for word in source.split()], {'passed': True})))
+    repair = chatterbox._letter_repetition_repair
+    originals = {}
+    if history != 'fresh':
+        monkeypatch.setattr(chatterbox, '_letter_repetition_repair', lambda d, s, i, e: (i, s))
+        if history == 'exhausted':
+            verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: doublebc')
+            with pytest.raises(tts.TtsIntegrityError):
+                await generate()
+        elif history == 'pending':
+            verifier.side_effect = RuntimeError('Verifier unavailable')
+            with pytest.raises(RuntimeError):
+                await generate()
+        else:
+            await generate()
+        originals = {p.name: p.read_bytes() for p in directory.glob('*.request-*.json')}
+        monkeypatch.setattr(chatterbox, '_letter_repetition_repair', repair)
+    verifier.side_effect = lambda *a, **kw: advisory_report()
+    await generate()
+    expected = 4 if history == 'exhausted' else 1
+    assert len(server.jobs) == expected
+    request = server.jobs[f'job-{expected}']['request']
+    assert request['text'] == ('The bee bee see reports the result.'
+                               if history in {'fresh', 'exhausted'} else
+                               'The double bee see reports the result.')
+    await generate()
+    assert len(server.jobs) == expected
+    if history != 'pending':
+        for name, content in originals.items():
+            assert (directory / name).read_bytes() == content
+    assert script.read_text() == source
+    metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+    assert metadata['identity']['text'] == source
+    assert metadata['integrity']['pronunciation']['passed'] is True
+    assert metadata['integrity']['independent_audit']['passed'] is True
+    if history in {'fresh', 'exhausted'}:
+        marker = directory / 'tts_input_part_001.letter-repetition-applied.json'
+        marker.write_text('{}')
+        with pytest.raises(RuntimeError, match='repair changed'):
+            await generate()
+        assert len(server.jobs) == expected
+
+
+@pytest.mark.parametrize('source, spoken, expected', [
+    ('BBC', 'double bee see', 'bee bee see'),
+    ('IEEE', 'eye triple ee', 'eye ee ee ee'),
+    ('WSJ', 'double you ess jay', 'double you ess jay'),
+])
+def test_repeated_letter_expansion_keeps_w_and_source(tmp_path, source, spoken, expected):
+    identity = {'text': source, 'synthesis_text': spoken}
+    edits = [{'source': source, 'start': 0, 'end': len(source), 'spoken': spoken}]
+    corrected, _ = chatterbox._letter_repetition_repair(tmp_path, 'part', identity, edits)
+    assert corrected['synthesis_text'] == expected
+    assert corrected['text'] == source
+
+
+@pytest.mark.asyncio
+async def test_repeated_letter_repair_cannot_reset_its_rejected_budget(setup_client, monkeypatch):
+    server, script, directory, verifier, generate = setup_client
+    source = 'BBC reports.'
+    script.write_text(source)
+    server.pronunciation_ai.side_effect = lambda *a, **kw: json.dumps({'decisions': [
+        {**tts_pronunciation.candidates(source)[0], 'action': 'spell',
+         'spoken': 'double bee see', 'reason': 'Letter names.'}]})
+    verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: wrong')
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    assert len(server.jobs) == 3
+    with pytest.raises(tts.TtsIntegrityError, match='exhausted'):
+        await generate()
+    assert len(server.jobs) == 3
+    assert len(list(directory.glob('*.letter-repetition.request-*.json'))) == 3

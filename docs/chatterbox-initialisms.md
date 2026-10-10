@@ -181,3 +181,19 @@ repair budget. Existing audio for other parts keeps its original identity.
 Acoustic-reference upgrades also recheck persisted initialism pronunciation
 rejections, as these can originate in the complete-source phoneme fallback.
 Rechecking does not submit a new synthesis request or erase the old rejection.
+
+### Literal repeated-letter hints
+
+The planner can express BBC as `double bee see`, but Chatterbox speaks the word
+`double` literally. Its exact-initialism verifier correctly rejects that audio.
+The provider adapter now expands repetition hints within validated initialism
+edits (`bee bee see`, `eye ee ee ee`), while keeping W's `double you`, ordinary
+words, the canonical script, and the frozen pronunciation plan intact.
+
+Fresh requests use the expanded input. Existing accepted audio and pending jobs
+retain their original identity. After exactly three confirmed pronunciation
+rejections, the same part may use one deterministic `letter-repetition` request
+namespace with the usual three-attempt limit and unchanged acceptance gates.
+The applied marker binds both identities and all original request file hashes;
+a changed marker or history fails closed. This does not reset or delete old
+requests and does not accept `doublebc` as BBC.

@@ -159,6 +159,72 @@ def _bind_verification(directory: Path, binding: dict) -> None:
     _write_json(marker, binding)
 
 
+def _letter_repetition_repair(directory: Path, stem: str, identity: dict,
+                              edits: list[dict]) -> tuple[dict, str]:
+    """Speak each repeated initial explicitly, retaining any owned old jobs.
+
+    The planner's 'double bee' is letter-equivalent but the voice reads it
+    literally. Frozen plans and accepted audio stay intact. Exhausted old
+    pronunciation jobs permit one deterministic corrected-input namespace.
+    """
+    expanded = []
+    for edit in edits:
+        spoken = edit['spoken']
+        if edit.get('kind') not in {None, 'initialism'}:
+            expanded.append(edit)
+            continue
+        try:
+            letters = pronunciation._spoken_letters(spoken)
+        except ValueError:
+            expanded.append(edit)
+            continue
+        if letters != edit['source'].replace('.', '').upper():
+            expanded.append(edit)
+            continue
+        # 'double you' is W, not a repetition instruction.
+        replacement = re.sub(
+            r'\b(double|triple)[ .-]+(?!you\b)([a-z]+)\b',
+            lambda m: ' '.join([m[2]] * (2 if m[1].lower() == 'double' else 3)),
+            spoken, flags=re.IGNORECASE,
+        )
+        if pronunciation._spoken_letters(replacement) != letters:
+            raise RuntimeError('Repeated-letter expansion changed source letters')
+        expanded.append({**edit, 'spoken': replacement})
+    source = identity['text']
+    before = _render_provider_span(source, 0, len(source), edits)
+    after = _render_provider_span(source, 0, len(source), expanded)
+    if before == after:
+        return identity, stem
+    if before != identity['synthesis_text']:
+        raise RuntimeError('Repeated-letter repair cannot combine with another provider text repair')
+    repaired = {**identity, 'synthesis_text': after, 'letter_repetition_version': 1}
+    marker = directory / f'{stem}.letter-repetition-applied.json'
+    originals = sorted(directory.glob(f'{stem}.request-*.json'))
+    binding = {'identity_sha256': _digest(identity), 'repaired_sha256': _digest(repaired),
+               'original_request_sha256': {p.name: tts._file_sha256(p) for p in originals}}
+    if marker.exists():
+        if _read_json(marker) != binding:
+            raise RuntimeError('Repeated-letter repair changed; preserving its jobs')
+    else:
+        if (directory / f'{stem}_generated.wav').exists():
+            return identity, stem
+        if originals:
+            if len(originals) != MAX_INTEGRITY_ATTEMPTS:
+                return identity, stem
+            for attempt in range(MAX_INTEGRITY_ATTEMPTS):
+                checkpoint = _read_request_checkpoint(directory / f'{stem}.request-{attempt}.json')
+                payload = {'text': before, 'language_id': identity['language'], 'voice': identity['voice'],
+                           'seed': (identity['seed'] + attempt) % (2 ** 32),
+                           **identity['synthesis_parameters']}
+                if (checkpoint.get('identity') != _digest({'identity': identity, 'payload': payload})
+                        or not checkpoint.get('job_id')
+                        or not str(checkpoint.get('rejected', '')).startswith(
+                            'Chatterbox initialism pronunciation mismatch:')):
+                    return identity, stem
+        _write_json(marker, binding)
+    return repaired, f'{stem}.letter-repetition'
+
+
 def _read_request_checkpoint(path: Path) -> dict:
     """An unreadable submitted-job identity must never become a new request."""
     try:
@@ -955,6 +1021,7 @@ async def _generate_chatterbox(
             if word_refs:
                 identity['word_hint_references'] = word_refs
             identity, request_stem = _punctuation_repair(directory, stem, identity)
+            identity, request_stem = _letter_repetition_repair(directory, request_stem, identity, chunk_edits)
             synthesis_text = identity['synthesis_text']
             if request_stem != stem:
                 (synthesis_directory / f'{request_stem}.txt').write_text(synthesis_text, encoding='utf-8')
