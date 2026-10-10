@@ -1482,7 +1482,8 @@ def test_letter_name_normalization_cannot_hide_loss_repetition_or_extra_syllable
 
 
 @pytest.mark.asyncio
-async def test_repaired_spelling_observation_rechecks_original_jobs_without_new_synthesis(setup_client, monkeypatch):
+@pytest.mark.parametrize('independent_rejection', [False, True])
+async def test_repaired_spelling_observation_rechecks_original_jobs_without_new_synthesis(setup_client, monkeypatch, independent_rejection):
     server, script, directory, _verifier, generate = setup_client
     source = 'The report mentions UX today.'
     observed = 'The report mentions you ex today.'
@@ -1501,6 +1502,8 @@ async def test_repaired_spelling_observation_rechecks_original_jobs_without_new_
     for path in directory.glob('tts_input_part_001.request-*.json'):
         record = json.loads(path.read_text())
         record.pop('rejection_observation_version')
+        if independent_rejection:
+            record['rejected'] = 'Independent Chatterbox check found unrequested speech: model spelling'
         path.write_text(json.dumps(record))
         checkpoints[path.name] = (record['job_id'], record['idempotency_key'])
     archived = directory / 'verification/tts_input_part_001/rejected-0/pronunciation_report.json'
@@ -1517,6 +1520,41 @@ async def test_repaired_spelling_observation_rechecks_original_jobs_without_new_
     accepted = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
     assert accepted['rejected']
     assert accepted['revalidated_after_rejection']['observation_spelling_version'] == chatterbox.OBSERVATION_SPELLING_VERSION
+
+
+@pytest.mark.parametrize('observed', [
+    'A second group got unrestricted access to a GPT for chatbot.',
+    'A second group got unrestricted access to a gee pee tee for chatbot.',
+])
+def test_model_four_homophone_is_bound_to_its_source_position(observed):
+    source = 'A second group got unrestricted access to a GPT-4 chatbot.'
+    report = chatterbox._pronunciation_report(source, [{'text': observed}])
+    assert report['passed']
+    assert report['source_bound_model_homophones'] == [
+        {'source': '4', 'observed': 'for', 'source_start': 9},
+    ]
+    assert report['transcript'] == observed
+    assert report['normalized_transcript'].endswith('gpt 4 chatbot')
+
+
+@pytest.mark.parametrize(('source', 'observed'), [
+    ('GPT-5 works.', 'GPT for works.'),
+    ('GPT-4 works.', 'GPT five works.'),
+    ('GPT-4 works.', 'GPT for for works.'),
+    ('GPT-4 works.', 'GPT works.'),
+    ('GPT-4 works.', 'GPT for works GPT for.'),
+    ('GPT-4o works.', 'GPT for works.'),
+    ('GPT-4 works.', 'GPT for four works.'),
+])
+def test_model_four_homophone_does_not_hide_wrong_missing_or_repeated_numbers(source, observed):
+    assert not chatterbox._pronunciation_report(source, [{'text': observed}])['passed']
+
+
+def test_model_homophone_does_not_normalize_ordinary_words():
+    source = 'GPT is for students in room 4.'
+    report = chatterbox._pronunciation_report(source, [{'text': source}])
+    assert report['source_bound_model_homophones'] == []
+    assert report['normalized_transcript'] == source.lower().rstrip('.')
 
 
 @pytest.mark.asyncio

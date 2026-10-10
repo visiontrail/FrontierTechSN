@@ -471,7 +471,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:\.\d+)*(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 11
+OBSERVATION_SPELLING_VERSION = 12
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -645,6 +645,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
     # Collapse exact split spellings without discarding any observed letters.
     replacements = {}
     model_repartitions = []
+    model_homophones = []
     for tag, start, end, left, right in SequenceMatcher(
         a=expected, b=observed, autojunk=False,
     ).get_opcodes():
@@ -673,7 +674,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             model_repartitions.append({'source_parts': expected[start:end],
                                        'observed_parts': observed[left:right], 'source_start': start})
             continue
-        cursor, aligned = left, []
+        cursor, aligned, homophones = left, [], []
         for index in range(start, end):
             if index not in verification_targets:
                 if cursor >= right:
@@ -681,7 +682,15 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
                 aligned.append(observed[cursor])
                 cursor += 1
                 continue
-            matched = _match_spoken_letters(observed, cursor, right, expected[index])
+            # "GPT-4" and the recognizer spelling "GPT for" have the
+            # same spoken numeral. Resolve only this aligned model-number
+            # position, never ordinary words, other digits, or extra tokens.
+            if (index in model_identifiers and expected[index] == '4'
+                    and cursor < right and observed[cursor] == 'for'):
+                homophones.append({'source': '4', 'observed': 'for', 'source_start': index})
+                matched = cursor + 1
+            else:
+                matched = _match_spoken_letters(observed, cursor, right, expected[index])
             if matched is None:
                 break
             cursor = matched
@@ -689,6 +698,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         else:
             if cursor == right:
                 replacements[left] = (right, aligned)
+                model_homophones.extend(homophones)
     collapsed, cursor = [], 0
     while cursor < len(observed):
         if cursor in replacements:
@@ -740,6 +750,7 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
             "transcript": tts._raw_transcript(words), "normalized_transcript": ' '.join(normalized),
             "observation_spelling_version": OBSERVATION_SPELLING_VERSION,
             "source_bound_model_repartitions": model_repartitions,
+            "source_bound_model_homophones": model_homophones,
             "differences": differences,
             "policy": "exact_initialism_occurrences"}
 
@@ -1084,6 +1095,7 @@ async def _generate_chatterbox(
                 rechecking = bool(
                     str(checkpoint.get('rejected') or '').startswith((
                         'Chatterbox initialism pronunciation mismatch:',
+                        'Independent Chatterbox check found unrequested speech:',
                         'Required complete-source phone sequence differs from the source',
                         'Word-hint audio differs from its complete source phone sequence',
                     ))

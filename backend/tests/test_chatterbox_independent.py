@@ -91,6 +91,10 @@ def test_interior_ordinary_phrase_repeats_need_distinct_acoustic_spans(text, ove
     ('GPT-6 is available.', 'GPT7 is available.', False),
     ('GPT-6 is available.', 'GPT seven is available.', False),
     ('GPT-6 is available.', 'GPT six is available.', True),
+    ('GPT-4 is available.', 'GPT for is available.', True),
+    ('GPT-4 is available.', 'GPT five is available.', False),
+    ('GPT-4 is available.', 'GPT for for is available.', False),
+    ('GPT-4 is available.', 'GPT for is available. GPT for.', False),
     ('The GPUs work.', 'The GP use work.', True),
 ])
 async def test_independent_check_distinguishes_repetition_and_model_change_from_formatting(
