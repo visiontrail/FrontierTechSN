@@ -147,6 +147,31 @@ def test_overhead_geometry_does_not_invalidate_unrelated_clipboard_scenes(descri
     assert "Clipboard reading geometry:" not in review.review_prompt(scene, {})
 
 
+def test_classroom_review_requires_traced_anatomy_without_relaxing_verdicts():
+    scene = {**SCENE, "visual_prompt":
+             "Students at their desks writing while a teacher checks their notebooks."}
+    prompt = review.review_prompt(scene, {})
+    assert "shoulder-to-sleeve-to-elbow-to-wrist-to-hand" in prompt
+    assert "Absent cast shadows" in prompt
+    assert "Still reject demonstrable extra limbs" in prompt
+    value = payload()
+    value["reviews"][0]["checks"][2].update(
+        verdict="fail", evidence="Three distinct connected arms are visible.",
+        repair="Remove the third arm.")
+    assert not review.validate_review(value, SCENE["id"])["passed"]
+
+
+@pytest.mark.parametrize("description", [
+    "Students at desks while a researcher stands at the front.",
+    "Students at spaced desks in an exam hall.",
+    "A teacher holding a notebook beside one student.",
+    "Students watching a teacher at a blackboard.",
+])
+def test_classroom_anatomy_preserves_other_review_contracts(description):
+    scene = {**SCENE, "visual_prompt": description}
+    assert "Multi-person desk anatomy:" not in review.review_prompt(scene, {})
+
+
 def test_rejection_with_omitted_pass_repairs_is_cached_without_fallback(tmp_path, monkeypatch):
     value = payload()
     for check in value["reviews"][0]["checks"]:

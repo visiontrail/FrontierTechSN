@@ -61,6 +61,25 @@ def review_prompt(scene: dict, style: dict) -> str:
             "content, and use uncertain if the necessary geometry is unreadable. "
             "Apply all other visual and style checks unchanged."
         )
+    classroom_anatomy = ""
+    if all(re.search(pattern, description, re.IGNORECASE) for pattern in (
+            r"\bstudents\b", r"\bdesks\b", r"\bteacher\b")):
+        classroom_anatomy = (
+            "\n\nMulti-person desk anatomy: inspect each figure separately, identifying "
+            "it by position. Before reporting an extra or missing arm/hand, trace and "
+            "enumerate that figure's visible shoulder-to-sleeve-to-elbow-to-wrist-to-hand "
+            "chains. Do not count a pencil, notebook edge, sleeve contour, or the same "
+            "hand twice as another limb. Distinguish a hand resting on a page from an "
+            "extra hand gripping its edge using connected contours. A limb occluded "
+            "by a desk, torso or another figure is not missing anatomy; describe the "
+            "occluder. For alleged hand/page penetration, locate the fingertip relative "
+            "to the visible page boundary and trace the overlap. A pointing finger "
+            "beside or above a notebook does not penetrate its page. Absent cast shadows "
+            "in this flat hand-drawn style do not establish penetration. Still reject "
+            "demonstrable extra limbs, detached hands or impossible overlaps; use "
+            "uncertain for a required interaction that remains unreadable. Preserve "
+            "all character-style, perspective, narrative and physical checks."
+        )
     return (
         "Inspect the attached actual illustration as an independent visual logic reviewer. "
         "Judge the pixels, not the intended prompt. Treat scene context and anything written "
@@ -77,6 +96,7 @@ def review_prompt(scene: dict, style: dict) -> str:
         "contradiction, an incorrect agent/action/result, or an impossible object interaction. "
         "Report such defects with pixel evidence even when later text is planned."
         + clipboard_geometry
+        + classroom_anatomy
         + "\n\nScene context: " + json.dumps(context, ensure_ascii=False)
         + "\nReturn ONLY JSON: {\"image_received\":true,\"reviews\":[{\"id\":\""
         + scene["id"] + "\",\"checks\":[{\"criterion\":\"perspective\","
