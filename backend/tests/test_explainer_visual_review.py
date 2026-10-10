@@ -124,6 +124,17 @@ def test_valid_rejection_never_asks_fallback_for_a_better_verdict(tmp_path, monk
     assert result["passed"] is False and calls == ["gemini"]
 
 
+def test_clipboard_review_separates_page_direction_from_surface_visibility():
+    scene = {**SCENE, "visual_prompt": "Overhead view of a teacher holding a clipboard."}
+    prompt = review.review_prompt(scene, {})
+    assert "bottom edge is normally nearer the reader" in prompt
+    assert "rotating that sheet 180 degrees would invert it" in prompt
+    assert "Still reject a visibly backward surface" in prompt
+    assert "use uncertain if the necessary geometry is unreadable" in prompt
+    # This is a review correction; unrelated scenes keep their cache contract.
+    assert "Clipboard reading geometry:" not in review.review_prompt(SCENE, {})
+
+
 def test_rejection_with_omitted_pass_repairs_is_cached_without_fallback(tmp_path, monkeypatch):
     value = payload()
     for check in value["reviews"][0]["checks"]:

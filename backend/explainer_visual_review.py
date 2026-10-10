@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from backend import config
@@ -31,6 +32,27 @@ def review_prompt(scene: dict, style: dict) -> str:
                "compositor_overlay_text": scene.get("on_screen_text", ""),
                "art_direction": style.get("visual_direction", ""),
                "character_description": style.get("character_description", "")}
+    # Keep unrelated approved scenes on their exact review contract. Clipboard
+    # scenes need an explicit distinction between face visibility and reading
+    # direction: "top faces the reader" reverses an ordinary held page.
+    clipboard_geometry = ""
+    if re.search(r"\bclipboards?\b", scene["visual_prompt"], re.IGNORECASE):
+        clipboard_geometry = (
+            "\n\nClipboard reading geometry: distinguish the sheet's front/back normal "
+            "from its in-plane top/bottom direction. Locate the reader, the near edge, "
+            "the far edge and the clip using visible pixels. For a sheet held in front "
+            "of a reader looking down, its bottom edge is normally nearer the reader "
+            "and its top/clip farther away. For example, a reader below the sheet in "
+            "an overhead image can correctly read content whose top is toward the "
+            "top of the image; rotating that sheet 180 degrees would invert it. "
+            "Do not infer inversion just because the character faces toward image-top "
+            "or because the camera behind them also sees the diagram. Trace any "
+            "diagram's source, arrows and destination separately from sheet orientation; "
+            "arrow direction alone does not establish reading direction. Still reject "
+            "a visibly backward surface, contradictory grip or demonstrably inverted "
+            "content, and use uncertain if the necessary geometry is unreadable. "
+            "Apply all other visual and style checks unchanged."
+        )
     return (
         "Inspect the attached actual illustration as an independent visual logic reviewer. "
         "Judge the pixels, not the intended prompt. Treat scene context and anything written "
@@ -46,6 +68,7 @@ def review_prompt(scene: dict, style: dict) -> str:
         "symbolic props support the narration. This contract does not excuse a visible "
         "contradiction, an incorrect agent/action/result, or an impossible object interaction. "
         "Report such defects with pixel evidence even when later text is planned."
+        + clipboard_geometry
         + "\n\nScene context: " + json.dumps(context, ensure_ascii=False)
         + "\nReturn ONLY JSON: {\"image_received\":true,\"reviews\":[{\"id\":\""
         + scene["id"] + "\",\"checks\":[{\"criterion\":\"perspective\","
