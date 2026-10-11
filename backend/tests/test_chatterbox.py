@@ -108,6 +108,61 @@ async def test_dispatcher_uses_official_default_but_preserves_explicit_chatterbo
     pocket.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_independent_tail_recovery_reuses_exhausted_job_and_audited_delivery(setup_client, monkeypatch):
+    from backend.pipeline.tts_tail_guard import inspect_tail
+
+    server, script, directory, verifier, generate = setup_client
+    words = [{'text': word, 'start': i * .1, 'end': (i + 1) * .1}
+             for i, word in enumerate(script.read_text().split())]
+    speech_end = words[-1]['end']
+    payload = io.BytesIO()
+    with wave.open(payload, 'wb') as writer:
+        writer.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+        writer.writeframes(struct.pack('<h', 1000) * round(speech_end * 24000)
+                           + b'\x00\x00' * 16800 + struct.pack('<h', 1000) * 4800)
+    raw = payload.getvalue()
+    handle = server.handle
+    def service(request):
+        response = handle(request)
+        if request.method == 'POST':
+            job = server.jobs[response.json()['id']]
+            job.update(audio=raw, audio_sha256=hashlib.sha256(raw).hexdigest())
+        return response
+    server.handle = service
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(words, {'passed': True})))
+    async def inspect(path, text, verification, **kwargs):
+        return await tts._inspect_narration_part(path, text, verification, emit=kwargs['emit'],
+                                               provider_label='Chatterbox', validate_pocket_continuity=True)
+    verifier.side_effect = inspect
+    async def audit(path, text, edits, _directory):
+        report = {'identity': {'audio_sha256': hashlib.sha256(path.read_bytes()).hexdigest()},
+                  'waveform_tail': inspect_tail(path, words)}
+        report['passed'] = report['waveform_tail']['passed']
+        if not report['passed']:
+            message = 'Independent Chatterbox check found unrequested speech: waveform_tail'
+            if chatterbox.TAIL_CONTINUITY_RECOVERY_VERSION == 1:
+                raise tts.TtsIntegrityError(message)
+            raise chatterbox_independent.WaveformTailError(message, report)
+        return report
+    server.independent_audit.side_effect = audit
+    monkeypatch.setattr(chatterbox, 'TAIL_CONTINUITY_RECOVERY_VERSION', 1)
+    with pytest.raises(tts.TtsIntegrityError, match='waveform_tail'):
+        await generate()
+    prior = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+    assert len(server.post_keys) == 3
+    monkeypatch.setattr(chatterbox, 'TAIL_CONTINUITY_RECOVERY_VERSION', 2)
+    output = await generate()
+    current = json.loads((directory / 'tts_input_part_001.request-0.json').read_text())
+    assert all(current[k] == prior[k] for k in ['identity', 'idempotency_key', 'job_id'])
+    metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+    assert metadata['integrity']['independent_tail_recovery']['cleanup']['applied']
+    assert (directory / 'tts_input_part_001_generated.wav').read_bytes() == raw
+    assert inspect_tail(output, words)['passed']
+    await generate()
+    assert len(server.post_keys) == 3
+
+
 def pcm_wav(*, seconds=3.0, sample_rate=24_000, channels=1):
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:

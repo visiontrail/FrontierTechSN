@@ -166,3 +166,60 @@ async def test_transcript_match_or_spelling_drift_cannot_hide_untranscribed_tail
     report = json.loads(next(directory.rglob('audit.json')).read_text())
     assert report['tail']['passed'] and not report['waveform_tail']['passed']
     assert wav.read_bytes() == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('defect', [None, 'extra', 'omitted', 'weak_primary', 'disabled', 'derivative_extra'])
+async def test_delivery_tail_requires_two_complete_transcripts_and_derivative_audit(audit_case, defect):
+    import hashlib
+    from backend.pipeline import chatterbox_tail
+
+    wav, _source, _edits, directory, observed, calls = audit_case
+    source = 'The release simply erased.'
+    observed.update(text=source, end=.8)
+    if defect == 'extra':
+        observed['text'] += ' And.'
+    if defect == 'omitted':
+        observed['text'] = 'The release erased.'
+    with wave.open(str(wav), 'wb') as writer:
+        writer.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+        writer.writeframes((3000).to_bytes(2, 'little') * 21600
+                           + b'\0\0' * 16800 + (4000).to_bytes(2, 'little') * 9600)
+    original = wav.read_bytes()
+    integrity = {
+        'accepted': True, 'expected_words': 4, 'transcript_words': 4,
+        'matched_exact_words': 4, 'exact_asr_word_coverage': 1.,
+        'transcript_word_ratio': 1., 'leading_anchor': True, 'trailing_anchor': True,
+        'exact_leading_anchor': True, 'exact_trailing_anchor': True,
+        'repeat_start_seconds': None, 'token_differences': [],
+        'speech_end_seconds': .9, 'transcription': {'passed': True},
+    }
+    if defect == 'weak_primary':
+        integrity['exact_asr_word_coverage'] = .7
+    async def audit(path, text, edits):
+        if path != wav and defect == 'derivative_extra':
+            observed['text'] = source + ' And.'
+        return await independent.audit_part(path, text, edits, directory)
+
+    async def run():
+        return await chatterbox_tail.audit_delivery_tail(
+            wav, source, [], integrity, audit, directory, enabled=defect != 'disabled')
+
+    if defect:
+        with pytest.raises(tts.TtsIntegrityError):
+            await run()
+        assert 'independent_tail_recovery' not in integrity
+    else:
+        report = await run()
+        assert report['passed'] and len(calls) == 2
+        assert integrity['independent_tail_recovery']['speech_end_seconds'] == .9
+        metadata = {'audio_sha256': hashlib.sha256(original).hexdigest(),
+                    'integrity': integrity, 'identity': {'text': source}}
+        output, rows = chatterbox_tail.prepare_delivery_parts([wav], [metadata])
+        assert rows[0]['audio_sha256'] == report['identity']['audio_sha256']
+        assert output[0] != wav and (await audit(output[0], source, []))['passed']
+        integrity['independent_tail_recovery']['cleanup']['output_audio_sha256'] = 'changed'
+        with pytest.raises(RuntimeError, match='independently audited tail'):
+            chatterbox_tail.prepare_delivery_parts([wav], [metadata])
+    assert wav.read_bytes() == original
+    assert not list(directory.glob('independent-tail-verification.wav'))

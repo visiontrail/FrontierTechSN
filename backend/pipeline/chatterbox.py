@@ -27,7 +27,7 @@ from backend.pipeline import tts, tts_pronunciation as pronunciation
 MODEL_ID = "chatterbox-multilingual"
 VERIFIER_VERSION = 3
 TRAILING_SPEECH_VERIFIER_VERSION = 3
-TAIL_CONTINUITY_RECOVERY_VERSION = 1
+TAIL_CONTINUITY_RECOVERY_VERSION = 2
 SYMBOL_INITIALISM_POLICY_VERSION = 1
 SYMBOL_INITIALISM_RE = re.compile(r"\b([A-Z])&([A-Z])\b")
 SYNTHESIS_LETTER_SEPARATOR_RE = re.compile(r"(?<=[A-Za-z])[-.]+(?=[A-Za-z])")
@@ -1119,7 +1119,11 @@ async def _generate_chatterbox(
             cached = _cached_part(path, identity, verify_text=verify_text)
             if cached and part_auditor is not None:
                 try:
-                    audit = await part_auditor(path, text, chunk_edits)
+                    from backend.pipeline.chatterbox_tail import audit_delivery_tail
+                    audit = await audit_delivery_tail(
+                        path, text, chunk_edits, cached['integrity'], part_auditor,
+                        directory / 'verification' / request_stem,
+                        enabled=bool(contract.get('tail_cleanup_version')))
                     if not isinstance(audit, dict) or audit.get('passed') is not True:
                         raise RuntimeError('Independent part auditor did not return confirmed acceptance')
                     cached['integrity'] = {**cached['integrity'], 'independent_audit': audit}
@@ -1194,7 +1198,10 @@ async def _generate_chatterbox(
                 )
                 tail_rechecking = bool(
                     contract.get('tail_cleanup_version') and verify_text
-                    and str(checkpoint.get('rejected') or '').startswith('Pocket TTS produced an internal')
+                    and str(checkpoint.get('rejected') or '').startswith((
+                        'Pocket TTS produced an internal',
+                        'Independent Chatterbox check found unrequested speech:',
+                    ))
                     and checkpoint.get('job_id')
                     and checkpoint.get('tail_continuity_recovery_version', 0) < TAIL_CONTINUITY_RECOVERY_VERSION
                 )
@@ -1316,7 +1323,10 @@ async def _generate_chatterbox(
                         integrity = {"method": "duration_only_preview", "verified": True,
                                      "internal_silence": tts._validate_pocket_internal_silence(staged)}
                     if part_auditor is not None:
-                        audit = await part_auditor(staged, text, chunk_edits)
+                        from backend.pipeline.chatterbox_tail import audit_delivery_tail
+                        audit = await audit_delivery_tail(
+                            staged, text, chunk_edits, integrity, part_auditor, verification,
+                            enabled=bool(contract.get('tail_cleanup_version')))
                         if not isinstance(audit, dict) or audit.get('passed') is not True:
                             raise RuntimeError('Independent part auditor did not return confirmed acceptance')
                         integrity["independent_audit"] = audit

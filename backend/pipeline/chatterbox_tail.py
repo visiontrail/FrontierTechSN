@@ -9,6 +9,43 @@ from pathlib import Path
 from backend.pipeline.tts_tail_cleanup import VERSION, clean_verified_tail
 
 
+async def audit_delivery_tail(source, text, edits, integrity, auditor, verification, *, enabled):
+    """Re-audit an evidenced delivery derivative without accepting its noisy source."""
+    from backend.pipeline.chatterbox_independent import WaveformTailError
+
+    try:
+        return await auditor(source, text, edits)
+    except WaveformTailError as error:
+        if not enabled:
+            raise
+        original = error.report
+        evidence = copy.deepcopy(integrity)
+        evidence['speech_end_seconds'] = max(
+            evidence.get('speech_end_seconds', 0), original['waveform_tail']['speech_end_seconds'])
+        verification.mkdir(parents=True, exist_ok=True)
+        output = verification / 'independent-tail-verification.wav'
+        output.unlink(missing_ok=True)
+        try:
+            proof = clean_verified_tail(
+                source, output, evidence,
+                expected_audio_sha256=original['identity']['audio_sha256'])
+            if not proof['applied']:
+                raise error
+            checked = await auditor(output, text, edits)
+            if checked.get('passed') is not True:
+                raise RuntimeError('Independent delivery tail audit did not pass')
+            if (checked['identity']['audio_sha256'] != proof['output_audio_sha256']
+                    or hashlib.sha256(source.read_bytes()).hexdigest() != proof['original_audio_sha256']):
+                raise RuntimeError('Independent tail verification audio changed')
+            integrity['independent_tail_recovery'] = {
+                'provider_audit': original, 'cleanup': proof,
+                'speech_end_seconds': evidence['speech_end_seconds'],
+            }
+            return checked
+        finally:
+            output.unlink(missing_ok=True)
+
+
 def verify_tail_continuity(source: Path, integrity: dict, words: list[dict],
                            verification: Path, *, expected_audio_sha256: str) -> dict:
     """Prove a delivery derivative passes continuity before accepting its source.
@@ -46,6 +83,10 @@ def prepare_delivery_parts(parts: list[Path], metadata_rows: list[dict]) -> tupl
         if hashlib.sha256(source.read_bytes()).hexdigest() != digest:
             raise RuntimeError("Tail-cleaned cache changed: provider waveform no longer matches its observation")
         integrity = metadata.get("integrity") or {}
+        independent_recovery = integrity.get('independent_tail_recovery')
+        cleanup_integrity = copy.deepcopy(integrity)
+        if independent_recovery:
+            cleanup_integrity['speech_end_seconds'] = independent_recovery['speech_end_seconds']
         # Include the observation: a newer transcription can move the safe edge.
         binding = hashlib.sha256(json.dumps(
             {"audio": digest, "integrity": integrity, "version": VERSION},
@@ -68,13 +109,16 @@ def prepare_delivery_parts(parts: list[Path], metadata_rows: list[dict]) -> tupl
             # An interrupted output without its report must not be trusted.
             if output.exists():
                 raise RuntimeError("Tail-cleaned audio has no committed provenance report")
-            report = clean_verified_tail(source, output, integrity, expected_audio_sha256=digest)
+            report = clean_verified_tail(source, output, cleanup_integrity, expected_audio_sha256=digest)
             if report["applied"]:
                 report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
         reports.append(report)
         if hashlib.sha256(source.read_bytes()).hexdigest() != digest:
             raise RuntimeError("Provider waveform changed during tail cleanup; refusing to join it")
         recovery = integrity.get("continuity_tail_recovery")
+        if independent_recovery and (not report['applied'] or report['output_audio_sha256'] !=
+                                     independent_recovery['cleanup']['output_audio_sha256']):
+            raise RuntimeError('Delivery differs from the independently audited tail')
         if recovery and (not report["applied"] or report["output_audio_sha256"] !=
                          recovery["cleanup"]["output_audio_sha256"]):
             raise RuntimeError("Delivery differs from the tail verified by the continuity gate")

@@ -11,9 +11,18 @@ import sys
 from difflib import SequenceMatcher
 
 from backend import config
+from backend.pipeline.tts import TtsIntegrityError
 
 MODEL = 'mlx-community/whisper-small-mlx'
 AUDIT_VERSION = 2
+
+
+class WaveformTailError(TtsIntegrityError):
+    """Complete independent speech matched, but separated tail sound remains."""
+
+    def __init__(self, message: str, report: dict):
+        super().__init__(message)
+        self.report = report
 
 
 def _repeated_source_phrases(text: str, words: list[dict]) -> list[dict]:
@@ -128,6 +137,12 @@ async def audit_part(wav: Path, text: str, edits: list[dict], directory: Path) -
                         and report['waveform_tail']['passed'])
     chatterbox._write_json(target / 'audit.json', report)
     if not report['passed']:
+        if (tts._lexical_tokens(text) == tts._lexical_tokens(report['raw_transcript'])
+                and report['tail']['passed'] and report['normalized_tail']['passed']
+                and not extra_initialisms and not identifier_mismatches
+                and not report['repeated_source_phrases'] and not report['waveform_tail']['passed']):
+            raise WaveformTailError(
+                'Independent Chatterbox check found unrequested speech: ' + json.dumps(report), report)
         raise tts.TtsIntegrityError('Independent Chatterbox check found unrequested speech: ' +
                                   json.dumps({'tail': report['tail']['extra_words'],
                                               'extra_initialisms': extra_initialisms,
