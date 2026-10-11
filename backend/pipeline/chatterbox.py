@@ -472,7 +472,7 @@ PRONUNCIATION_TOKEN_RE = re.compile(
     r"(?:[A-Za-z]\.)+[A-Za-z]\.?(?:['’][A-Za-z]+)?|[A-Za-z0-9]+(?:\.\d+)*(?:['’][A-Za-z0-9]+)?"
 )
 
-OBSERVATION_SPELLING_VERSION = 12
+OBSERVATION_SPELLING_VERSION = 13
 
 
 def _match_spoken_letters(tokens: list[str], start: int, end: int, target: str) -> int | None:
@@ -657,6 +657,19 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         # all observed letters must match, with none omitted or repeated.
         indices = range(start, end)
         if (all(index in targets or index in symbol_conjunctions for index in indices)
+                and "".join(observed[left:right]) == "".join(expected[start:end])):
+            replacements[left] = (right, expected[start:end])
+            continue
+        # DDR5 RDIMM can be decoded as DDR5RD IMM: the recognizer moved
+        # boundaries between one model token and its adjacent initialism.
+        # Require the complete model and only named-letter neighbors, with
+        # identical glyphs. Two numeric identifiers must never be merged.
+        models = [(a, b) for a, b, spelling in embedded_ranges
+                  if a < end and b > start and re.search(r'\d', spelling)]
+        if (len(models) == 1 and start <= models[0][0] < models[0][1] <= end
+                and any(index in targets and not models[0][0] <= index < models[0][1]
+                        and expected[index].isalpha() for index in indices)
+                and all(index in verification_targets for index in indices)
                 and "".join(observed[left:right]) == "".join(expected[start:end])):
             replacements[left] = (right, expected[start:end])
             continue

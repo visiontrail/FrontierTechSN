@@ -2668,3 +2668,30 @@ async def test_punctuation_after_repeated_letters_binds_corrected_jobs(setup_cli
     assert script.read_text() == source
     for name, content in originals.items():
         assert (directory / name).read_bytes() == content
+
+
+@pytest.mark.parametrize('observed', ['DDR5RDIMM', 'DDR5RD IMM', 'DD R5RD IMM', 'DDR 5 RDIMM'])
+def test_adjacent_model_and_initialism_preserve_exact_glyphs(observed):
+    source = 'The DDR5 RDIMM product launched.'
+    report = chatterbox._pronunciation_report(source, [{'text': f'The {observed} product launched.'}])
+    assert report['passed']
+    assert report['normalized_transcript'] == 'the ddr5 rdimm product launched'
+
+
+@pytest.mark.parametrize('source, observed', [
+    ('DDR5 RDIMM', 'DDR6RDIMM'),
+    ('DDR5 RDIMM', 'DDR05RDIMM'),
+    ('DDR5 RDIMM', 'DDR5RIMM'),
+    ('DDR5 RDIMM', 'DDR5RDDIMM'),
+    ('DDR5 RDIMM', 'DDR5RDIMM RDIMM'),
+    ('DDR5 RDIMM', 'DDR5 RDIMM DDR5'),
+    ('DDR5 RDIMM', 'DDR5 or DIMM'),
+    ('DDR5 and RDIMM', 'DDR5RDIMM'),
+    ('DDR5 B2', 'DDR5B2'),
+    ('ALDH3 B2', 'ALDH3B2'),
+    ('DDR5 modules', 'DDR5modules'),
+])
+def test_adjacent_model_repartition_rejects_changed_source_or_other_words(source, observed):
+    report = chatterbox._pronunciation_report(
+        f'The {source} product launched.', [{'text': f'The {observed} product launched.'}])
+    assert not report['passed']
