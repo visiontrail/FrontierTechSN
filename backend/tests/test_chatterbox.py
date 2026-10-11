@@ -2602,3 +2602,69 @@ async def test_repeated_letter_repair_cannot_reset_its_rejected_budget(setup_cli
         await generate()
     assert len(server.jobs) == 3
     assert len(list(directory.glob('*.letter-repetition.request-*.json'))) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('result', ['pass', 'reject', 'unavailable', 'accepted', 'changed'])
+async def test_punctuation_after_repeated_letters_binds_corrected_jobs(setup_client, monkeypatch, result):
+    server, script, directory, verifier, generate = setup_client
+    source = 'The DDR5 RDIMM product launched.'
+    script.write_text(source)
+    server.pronunciation_ai.side_effect = lambda *a, **kw: json.dumps({'decisions': [
+        {**row, 'action': 'spell',
+         'spoken': 'dee dee R' if row['source'] == 'DDR' else 'R dee eye double M',
+         'reason': 'Spell source memory initials.'}
+        for row in tts_pronunciation.candidates(source)]})
+    verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: fused boundary')
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    stem = 'tts_input_part_001.letter-repetition'
+    originals = {p.name: p.read_bytes() for p in directory.glob('*.request-*.json')}
+    assert len(originals) == 3
+    synthesis = 'The dee dee R 5 R dee eye M M product launched.'
+    assert server.jobs['job-1']['request']['text'] == synthesis
+    repair = {'version': 1, 'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
+              'synthesis_sha256': hashlib.sha256(synthesis.encode()).hexdigest(),
+              'insert_after': len('The dee dee R 5'), 'reason': 'Separate model number from module initials',
+              'original_request_sha256': [tts._file_sha256(directory / f'{stem}.request-{i}.json')
+                                          for i in range(chatterbox.MAX_INTEGRITY_ATTEMPTS)]}
+    (directory / f'{stem}.punctuation-repair.json').write_text(json.dumps(repair))
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(
+        [{'text': source}], {'passed': True})))
+    if result == 'accepted':
+        (directory / 'tts_input_part_001_generated.wav').write_bytes(pcm_wav())
+        with pytest.raises(RuntimeError, match='cannot replace existing accepted audio'):
+            await generate()
+        assert len(server.jobs) == 3
+    elif result == 'changed':
+        (directory / f'{stem}.request-0.json').write_text('{}')
+        with pytest.raises(RuntimeError):
+            await generate()
+        assert len(server.jobs) == 3
+        return
+    elif result == 'reject':
+        with pytest.raises(tts.TtsIntegrityError):
+            await generate()
+        with pytest.raises(tts.TtsIntegrityError, match='exhausted'):
+            await generate()
+        assert len(server.jobs) == 6
+    elif result == 'unavailable':
+        verifier.side_effect = RuntimeError('Verifier unavailable')
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match='Verifier unavailable'):
+                await generate()
+        assert len(server.jobs) == 4
+    else:
+        verifier.side_effect = lambda *a, **kw: advisory_report()
+        await generate()
+        await generate()
+        assert len(server.jobs) == 4
+        assert server.jobs['job-4']['request']['text'] == synthesis.replace('5 R', '5, R')
+        metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+        assert metadata['identity']['text'] == source
+        assert metadata['identity']['letter_repetition_version'] == 1
+        assert metadata['identity']['punctuation_repair_sha256']
+        assert metadata['integrity']['pronunciation']['passed']
+    assert script.read_text() == source
+    for name, content in originals.items():
+        assert (directory / name).read_bytes() == content

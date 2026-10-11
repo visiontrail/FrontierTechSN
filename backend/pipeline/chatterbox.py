@@ -93,7 +93,8 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
-def _punctuation_repair(directory: Path, stem: str, identity: dict) -> tuple[dict, str]:
+def _punctuation_repair(directory: Path, stem: str, identity: dict, *,
+                        audio_stem: str | None = None) -> tuple[dict, str]:
     """Apply one explicit, immutable comma repair after exhausted pronunciation jobs.
 
     The canonical text, voice, seeds and checks do not change. Original jobs
@@ -131,7 +132,7 @@ def _punctuation_repair(directory: Path, stem: str, identity: dict) -> tuple[dic
     applied = directory / f'{stem}.punctuation-repair-applied.json'
     if applied.exists() and _read_json(applied).get('repair_sha256') != repair_digest:
         raise RuntimeError('Punctuation repair changed after activation; preserving its jobs')
-    wav = directory / f'{stem}_generated.wav'
+    wav = directory / f'{audio_stem or stem}_generated.wav'
     if wav.exists() and _read_json(tts._part_metadata_path(wav)).get('identity', {}).get(
             'punctuation_repair_sha256') != repair_digest:
         raise RuntimeError('Punctuation repair cannot replace existing accepted audio')
@@ -1036,7 +1037,15 @@ async def _generate_chatterbox(
             if word_refs:
                 identity['word_hint_references'] = word_refs
             identity, request_stem = _punctuation_repair(directory, stem, identity)
+            prior_stem = request_stem
             identity, request_stem = _letter_repetition_repair(directory, request_stem, identity, chunk_edits)
+            if request_stem != prior_stem:
+                # A spelled-out repeated letter can still fuse with its
+                # neighboring model number. An explicit comma repair must
+                # bind the exhausted corrected requests, not the old input.
+                identity, request_stem = _punctuation_repair(
+                    directory, request_stem, identity, audio_stem=stem,
+                )
             synthesis_text = identity['synthesis_text']
             if request_stem != stem:
                 (synthesis_directory / f'{request_stem}.txt').write_text(synthesis_text, encoding='utf-8')
