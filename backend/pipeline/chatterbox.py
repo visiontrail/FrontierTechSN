@@ -667,6 +667,8 @@ def _pronunciation_report(text: str, words: list[dict], edits: list[dict] | None
         models = [(a, b) for a, b, spelling in embedded_ranges
                   if a < end and b > start and re.search(r'\d', spelling)]
         if (len(models) == 1 and start <= models[0][0] < models[0][1] <= end
+                and all(models[0][0] <= index < models[0][1]
+                        for index in indices if index in model_identifiers)
                 and any(index in targets and not models[0][0] <= index < models[0][1]
                         and expected[index].isalpha() for index in indices)
                 and all(index in verification_targets for index in indices)

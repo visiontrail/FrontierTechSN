@@ -2688,6 +2688,7 @@ def test_adjacent_model_and_initialism_preserve_exact_glyphs(observed):
     ('DDR5 RDIMM', 'DDR5 or DIMM'),
     ('DDR5 and RDIMM', 'DDR5RDIMM'),
     ('DDR5 B2', 'DDR5B2'),
+    ('DDR5 GPT 4', 'DDR5GPT4'),
     ('ALDH3 B2', 'ALDH3B2'),
     ('DDR5 modules', 'DDR5modules'),
 ])
