@@ -1,7 +1,8 @@
 export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, convUrl, options = {}) {
     // Poll count is not elapsed time: every bridge read can take seconds.
     // Keep the response budget bounded independently of setup and export.
-    const deadline = Date.now() + timeoutSeconds * 1000;
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutSeconds * 1000;
     const beforeSet = new Set(beforeUrls);
     let conversationUrl = convUrl;
     let localConversationUrl = options.localConversationUrl || '';
@@ -62,6 +63,20 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
         stillRendering = await isGenerating(page);
         if (Date.now() >= deadline) break;
         if (stillRendering) {
+            // A stalled provider can keep its Stop button forever. Record the
+            // state already read above, without extra browser reads, replay,
+            // or cancellation of a potentially healthy owned request.
+            if (options.onDiagnostic && Date.now() >= nextDiagnosticAt) {
+                nextDiagnosticAt = Date.now() + 60000;
+                try {
+                    options.onDiagnostic({
+                        still_rendering: true,
+                        elapsed_seconds: Math.floor((Date.now() - startedAt) / 1000),
+                    }, conversationUrl);
+                } catch {
+                    // Observability must not interrupt or replace generation.
+                }
+            }
             lastUrls = [];
             stableCount = 0;
             failureText = '';

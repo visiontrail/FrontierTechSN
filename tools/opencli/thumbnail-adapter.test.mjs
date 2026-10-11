@@ -260,6 +260,33 @@ test('diagnostics do not read again at the deadline or while generation is activ
   }
 })
 
+test('stuck generation reports elapsed state without reading images or replaying the turn', async () => {
+  const observations = []
+  const { run, state } = waiter(fixedWait, {
+    generating: () => true,
+    images() { assert.fail('Do not inspect images during generation') },
+    diagnostic() { assert.fail('Do not add browser reads during generation') },
+  })
+  await assert.rejects(run(130, savedUrl, {
+    onDiagnostic(data, url) { observations.push({ ...data, url }) },
+  }), /No stable finished image/)
+  assert.deepEqual(observations, [
+    { still_rendering: true, elapsed_seconds: 60, url: savedUrl },
+    { still_rendering: true, elapsed_seconds: 120, url: savedUrl },
+  ])
+  assert.equal(state.clock, 130000)
+  assert.equal(state.navigations.length, 0)
+})
+
+test('a failed generation diagnostic preserves the original timeout', async () => {
+  const { run, state } = waiter(fixedWait, { generating: () => true })
+  await assert.rejects(run(65, savedUrl, {
+    onDiagnostic() { throw new Error('observation unavailable') },
+  }), /No stable finished image/)
+  assert.equal(state.clock, 65000)
+  assert.equal(state.navigations.length, 0)
+})
+
 const imageFailure = "I wasn't able to generate the image due to an error on my side."
 const ownedFailure = [
   { Role: 'User', Text: 'exact image prompt' },
