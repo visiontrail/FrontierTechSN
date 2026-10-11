@@ -290,6 +290,7 @@ def _render_provider_span(text: str, start: int, end: int, edits: list[dict]) ->
 def _split_text(
     text: str, *, max_words: int, max_chars: int,
     pronunciation_edits: list[dict] | None = None,
+    legacy_short_clauses: bool = False,
 ) -> list[str]:
     """Preserve source tokens while budgeting the expanded provider input."""
     if max_words < 1 or max_chars < 20:
@@ -322,6 +323,14 @@ def _split_text(
                           if not re.search(r"\b(?:[A-Z]|Dr|Mr|Mrs|Ms|Prof|St|Inc|Ltd|vs)\.$", window[:m.start() + 1])]
             if not boundaries:
                 boundaries = [m.end() for m in re.finditer(r"[,;:]\s+", window)]
+                if not legacy_short_clauses:
+                    # A tiny introductory clause gives the model too little
+                    # context (e.g. "In plain terms,") and invites extra speech.
+                    # Keep complete short sentences; only skip weak clause cuts
+                    # when the bounded window can include more source words.
+                    boundaries = [end for end in boundaries
+                                  if len(window[:end].split()) >= 5
+                                  or len(window[:end].split()) == len(window.split())]
             cut = boundaries[-1] if boundaries else window.rfind(" ")
             if cut <= 0:
                 raise ValueError("A Chatterbox input token exceeds the character limit; refusing to truncate it")
@@ -332,6 +341,45 @@ def _split_text(
     if " ".join(chunks) != " ".join(text.split()):
         raise ValueError("Chatterbox splitting changed source text")
     return chunks
+
+
+def _context_chunk_layout(directory: Path, legacy: list[str], proposed: list[str]) -> tuple[list[str], list[str]]:
+    """Keep owned work frozen; repair exhausted short-clause jobs in new stems."""
+    def stems(chunks):
+        return [f'tts_input_part_{i:03d}' for i in range(1, len(chunks) + 1)]
+
+    if legacy == proposed:
+        return legacy, stems(legacy)
+    marker = directory / 'tts_context_chunk_layout.json'
+    binding = {'version': 1, 'legacy': legacy, 'chunks': proposed}
+    names = [stem if i < len(legacy) and legacy[i] == proposed[i]
+             else stem + '.context-v1' for i, stem in enumerate(stems(proposed))]
+    if marker.exists():
+        saved = _read_json(marker)
+        if any(saved.get(key) != value for key, value in binding.items()):
+            raise RuntimeError('Context chunk layout changed; preserving owned jobs')
+        for name, digest in saved['original_requests'].items():
+            if tts._file_sha256(directory / name) != digest:
+                raise RuntimeError('Context repair original request changed; preserving owned jobs')
+        return proposed, names
+    originals = {}
+    for i, old in enumerate(legacy):
+        if i < len(proposed) and old == proposed[i]:
+            continue
+        stem = stems(legacy)[i]
+        if (directory / f'{stem}_generated.wav').exists():
+            return legacy, stems(legacy)
+        requests = sorted(directory.glob(f'{stem}*.request-*.json'))
+        if requests:
+            # A pending, uncertain or partially exhausted request retains its
+            # source boundaries. Only proven tail failures allow this repair.
+            expected = [directory / f'{stem}.request-{n}.json' for n in range(MAX_INTEGRITY_ATTEMPTS)]
+            if requests != expected or any(not str(_read_request_checkpoint(p).get('rejected', '')).startswith(
+                    'Chatterbox unrequested trailing speech:') for p in requests):
+                return legacy, stems(legacy)
+            originals.update({p.name: tts._file_sha256(p) for p in requests})
+    _write_json(marker, {**binding, 'original_requests': originals})
+    return proposed, names
 
 
 async def _request(client: httpx.AsyncClient, method: str, url: str, *, emit, **kwargs):
@@ -991,6 +1039,10 @@ async def _generate_chatterbox(
         chunks = _split_text(cleaned, max_words=contract["chunk_words"],
                              max_chars=min(contract["max_chars"], int(capabilities["max_chars"])),
                              pronunciation_edits=pronunciation_plan["edits"])
+        legacy_chunks = _split_text(cleaned, max_words=contract['chunk_words'],
+                                    max_chars=min(contract['max_chars'], int(capabilities['max_chars'])),
+                                    pronunciation_edits=pronunciation_plan['edits'], legacy_short_clauses=True)
+        chunks, chunk_stems = _context_chunk_layout(directory, legacy_chunks, chunks)
         if selected_audit_parts is not None and any(part > len(chunks) for part in selected_audit_parts):
             raise ValueError('A private audit part index exceeds the frozen source chunk count')
         if selected_audit_parts is None:
@@ -1030,7 +1082,7 @@ async def _generate_chatterbox(
             chunk_edits = [{**edit, "start": edit["start"] - start, "end": edit["end"] - start}
                            for edit in pronunciation_plan["edits"]
                            if start <= edit["start"] and edit["end"] <= source_offset]
-            stem = f"tts_input_part_{index:03d}"
+            stem = chunk_stems[index - 1]
             (directory / f"{stem}.txt").write_text(text, encoding="utf-8")
             (synthesis_directory / f"{stem}.txt").write_text(synthesis_text, encoding="utf-8")
             path = directory / f"{stem}_generated.wav"

@@ -731,6 +731,28 @@ async def test_lost_submission_response_reuses_persisted_idempotency_key(setup_c
 
 
 @pytest.mark.asyncio
+async def test_context_chunk_generation_resumes_without_reposting(setup_client, monkeypatch):
+    server, script, directory, _verifier, generate = setup_client
+    script.write_text('In plain terms, each memory cell becomes smaller while the transistor '
+                      'stands upright and leaves more room for storage.')
+    monkeypatch.setattr(config, 'CHATTERBOX_TTS_CHUNK_WORDS', 12)
+    server.fail_poll = True
+    with pytest.raises(httpx.HTTPStatusError):
+        await generate()
+    checkpoint = directory / 'tts_input_part_001.context-v1.request-0.json'
+    owned = checkpoint.read_bytes()
+    assert server.jobs['job-1']['request']['text'].startswith('In plain terms, each memory cell')
+    server.fail_poll = False
+    assert (await generate()).is_file()
+    assert checkpoint.read_bytes() == owned
+    manifest = json.loads((directory / 'tts_manifest.json').read_text())
+    assert manifest['parts'][0]['output'] == 'tts_input_part_001.context-v1_generated.wav'
+    posts = len(server.post_keys)
+    assert (await generate()).is_file()
+    assert len(server.post_keys) == posts
+
+
+@pytest.mark.asyncio
 async def test_resume_follows_persisted_job_without_another_post(setup_client):
     server, _script, directory, _verifier, generate = setup_client
     server.fail_poll = True
