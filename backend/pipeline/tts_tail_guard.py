@@ -11,14 +11,17 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = 1
+VERSION = 2
 
 
 def inspect_tail(path: Path, words: list[dict]) -> dict:
     ends = [float(word["end"]) for word in words
             if isinstance(word.get("end"), (int, float))
-            and math.isfinite(word["end"]) and word["end"] > 0]
-    if not ends or len(ends) != len(words):
+            and math.isfinite(word["end"]) and word["end"] >= 0]
+    # Whisper can place an opening token at [0, 0]. Tail inspection only
+    # needs the last observed speech edge; retain all lexical observations
+    # and require a positive edge elsewhere instead of rejecting that token.
+    if not ends or len(ends) != len(words) or max(ends) <= 0:
         raise RuntimeError("Tail waveform observations unavailable; preserving the completed job")
     with wave.open(str(path), "rb") as reader:
         if reader.getsampwidth() != 2 or reader.getcomptype() != "NONE":

@@ -39,7 +39,27 @@ def test_natural_tails_and_source_speech_pass(tmp_path, segments, end):
     assert inspect_tail(waveform(tmp_path, segments), [{'end': end}])['passed']
 
 
-@pytest.mark.parametrize('words', [[], [{'text': 'no timing'}], [{'end': float('nan')}], [{'end': 9}]])
+@pytest.mark.parametrize('words', [
+    [], [{'text': 'no timing'}], [{'end': float('nan')}], [{'end': 9}],
+    [{'end': 0}], [{'end': 0}, {'end': 0}],
+    [{'end': -0.1}, {'end': 0.5}], [{'end': float('inf')}],
+    [{'end': 0}, {'text': 'missing final edge'}],
+])
 def test_unavailable_evidence_never_silently_accepts(tmp_path, words):
     with pytest.raises(RuntimeError, match='preserving the completed job'):
         inspect_tail(waveform(tmp_path, [(1, 0)]), words)
+
+
+@pytest.mark.parametrize('residual', [False, True])
+def test_zero_time_opening_token_keeps_tail_detection(tmp_path, residual):
+    segments = [(1, 3000), (.5, 0)]
+    if residual:
+        segments.append((.2, 4000))
+    path = waveform(tmp_path, segments)
+    before = path.read_bytes()
+    words = [{'text': 'If', 'start': 0.0, 'end': 0.0},
+             {'text': 'requested speech', 'start': 0.0, 'end': 1.0}]
+    report = inspect_tail(path, words)
+    assert report['passed'] is not residual
+    assert report['speech_end_seconds'] == 1.0
+    assert path.read_bytes() == before
