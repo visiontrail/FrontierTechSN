@@ -8,7 +8,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +76,7 @@ async def generate_title(
     source_title: str,
     summary: dict[str, Any] | None,
     script: str,
+    daily_rundown: dict | None = None,
     provider_id: int | None = None,
     ai_endpoint: str | None = None,
     ai_model: str | None = None,
@@ -114,6 +115,28 @@ async def generate_title(
         if not script.strip():
             raise RuntimeError("Title generation requires the final narration script")
         payload: dict[str, str] = {"final_audio_script": script}
+        suffix = ""
+        if daily_rundown:
+            # A title cannot select a secondary story it never receives. The
+            # exact reviewed lead is the only factual input for this branch.
+            lead = daily_rundown["stories"][0]
+            edition = date.fromisoformat(daily_rundown["edition_date"])
+            month = ("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split())[edition.month - 1]
+            suffix = f" | Daily Tech Brief · {month} {edition.day}"
+            payload = {"final_audio_script": lead["narration"],
+                       "cold_open": daily_rundown["opening"], "edition_date": edition.isoformat()}
+            system_prompt += (
+                "\nLOCKED MORNING DESK LEAD: The supplied narration is the approved "
+                "first story, already selected as this edition's publication lead. "
+                "Write the main headline only, about the cold open's core event. "
+                "Do not choose another story or an umbrella theme. Software appends "
+                f"the edition suffix {suffix!r}; leave at most {100 - len(suffix)} "
+                "characters for the headline. Do not add the suffix yourself."
+            )
+            manifest.update(lead_story_id=lead["story_id"],
+                            script_sha256=daily_rundown["script_sha256"],
+                            story_order=daily_rundown["story_order"])
+        manifest["prompt_sha256"] = hashlib.sha256(system_prompt.encode()).hexdigest()
         _log(log, "Title agent: starting an independent Agent SDK session")
         for attempt in range(3):
             result = await _chat(
@@ -133,6 +156,10 @@ async def generate_title(
             )
             try:
                 generated_title = clean_generated_title(result)
+                if suffix:
+                    generated_title = clean_generated_title(
+                        generated_title.split(" | Daily Tech Brief", 1)[0] + suffix
+                    )
                 break
             except RuntimeError as exc:
                 if attempt == 2:

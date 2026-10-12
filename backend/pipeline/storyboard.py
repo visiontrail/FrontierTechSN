@@ -629,6 +629,8 @@ def build_program_storyboard(
             "keywords": _keywords(text),
             "program_segment_kind": str(row.get("kind") or "news"),
         }
+        if row.get("story_id"):
+            scene["story_id"] = row["story_id"]
         if source_label and previous_source and source_label != previous_source:
             scene["semantic_boundary_before"] = {
                 "kind": "citation_source_change",

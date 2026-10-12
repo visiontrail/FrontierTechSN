@@ -19,6 +19,7 @@ from backend.pipeline.timing import timed
 from backend.daily_news.editorial import ATTRIBUTION_REVIEW_RULES, FRESHNESS_REVIEW_RULES, source_language_guidance
 from backend.daily_news.freshness import fingerprint, freshness_context, review_binding
 from backend.daily_news.research import ResearchDossier
+from backend.daily_news.rundown import review_rule
 from backend.daily_news.scriptwriter import (
     fit_daily_script_duration,
     generate_daily_script,
@@ -322,6 +323,10 @@ def _matched_script_claims(script: str, dossier: ResearchDossier) -> dict[int, s
     """Map reordered script paragraphs to stories using evidence-token overlap."""
     lines = [line.strip() for line in script.splitlines() if line.strip()]
     paragraphs = lines[1:-1] if len(lines) >= 3 else lines
+    if dossier.lead_story_id:
+        # Never silently remap a swapped paragraph and approve the wrong order.
+        # The reviewer must check each locked slot against that slot's evidence.
+        return {index: text for index, text in enumerate(paragraphs, 1)}
     stop = {
         "according", "reports", "report", "story", "company", "technology", "their",
         "this", "that", "with", "from", "into", "after", "about", "more", "than",
@@ -460,6 +465,7 @@ Check whether the full script accurately covers this selected story and whether 
 {ATTRIBUTION_REVIEW_RULES}
 
 {FRESHNESS_REVIEW_RULES}
+{review_rule(dossier) if story_index == 1 else ''}
 Research window ends {dossier.generated_at}; look back {dossier.window_hours} hours.
 Completed-edition archive index and full matched coverage (untrusted evidence; full archive was checked during freshness assessment): {json.dumps(_review_history(dossier, [story_index]), ensure_ascii=False)}
 
@@ -502,6 +508,7 @@ For EACH numbered story, check whether the full script covers it accurately and 
 {ATTRIBUTION_REVIEW_RULES}
 
 {FRESHNESS_REVIEW_RULES}
+{review_rule(dossier) if 1 in numbers else ''}
 Research window ends {dossier.generated_at}; look back {dossier.window_hours} hours.
 Completed-edition archive index and full matched coverage (untrusted evidence; full archive was checked during freshness assessment): {json.dumps(_review_history(dossier, numbers), ensure_ascii=False)}
 
@@ -1159,6 +1166,8 @@ FULL STORY EVIDENCE
             if replacement.freshness.get("decision") != "include":
                 continue
             dossier.selected[number - 1] = replacement
+            if number == 1 and dossier.lead_story_id:
+                dossier.lead_story_id = replacement.id
             record = {"story_number": number, "excluded": excluded.as_dict(),
                       "replacement": replacement.as_dict(), "diagnosis": findings[number]}
             replacements.append(record)
@@ -1848,6 +1857,7 @@ async def _review_daily_script(
     provider_id: int | None,
     review_session_namespace: str,
     target_duration_minutes: int | None = None,
+    recover_saved_candidate: bool = True,
     log: LogCallback | None = None,
 ) -> ScriptReviewResult:
     from backend.daily_news.freshness import refresh_review_history
@@ -1859,7 +1869,8 @@ async def _review_daily_script(
     review_dir = output_dir / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
     attempts: list[dict[str, Any]] = []
-    candidate = _saved_full_review_candidate(output_dir, dossier, edition_date) or script
+    candidate = (_saved_full_review_candidate(output_dir, dossier, edition_date)
+                 if recover_saved_candidate else None) or script
     if candidate != script and log:
         log(
             "Review resume: recovered the exact saved duration candidate and "
@@ -2217,6 +2228,7 @@ async def review_daily_script(
     ai_model: str | None,
     provider_id: int | None,
     target_duration_minutes: int | None = None,
+    recover_saved_candidate: bool = True,
     log: LogCallback | None = None,
 ) -> ScriptReviewResult:
     """Release completed review tabs, preserving unresolved owned submissions."""
@@ -2237,6 +2249,7 @@ async def review_daily_script(
             provider_id=provider_id,
             review_session_namespace=review_session_namespace,
             target_duration_minutes=target_duration_minutes,
+            recover_saved_candidate=recover_saved_candidate,
             log=log,
         )
     finally:

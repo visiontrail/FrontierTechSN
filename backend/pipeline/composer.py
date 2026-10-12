@@ -986,7 +986,7 @@ def _apply_manifest_program_alignment(
 
 def _enforce_program_opening_copy(plans: list[dict], storyboard: dict) -> None:
     """Keep the exact show identity/date visible on the music-led opener."""
-    if not plans or not storyboard.get("program_timeline"):
+    if not plans or not storyboard.get("program_timeline") or storyboard.get("daily_rundown"):
         return
     scenes = storyboard.get("scenes") or []
     if not scenes:
@@ -1146,6 +1146,9 @@ def _promote_render_candidate(
     # the previous task.video_path is still intact and the new version is an
     # auditable orphan that a retry may safely replace.
     os.replace(staged_report_path, output_dir / "av_sync_report.json")
+    from backend.daily_news.rundown import promote_chapters
+
+    promote_chapters(output_dir, video_sha256)
     return final_video_path
 
 
@@ -1544,7 +1547,8 @@ def _review_retry_fingerprint(directory: Path, request: dict, render: RenderSpec
     """Bind review-only recovery to the unchanged render inputs and settings."""
     paths = {Path(request[key]) for key in ("script_path", "audio_path", "background_music_path") if request.get(key)}
     for name in ("index.html", "storyboard.json", "visual_plan.json", "footage/manifest.json",
-                 "audio/paced_narration.wav", "audio/program_mix.wav"):
+                 "audio/paced_narration.wav", "audio/program_mix.wav",
+                 "rundown.json", "chapters.next.json"):
         paths.add(directory / name)
     for name in ("compositions", "assets", "news_images"):
         paths.update(path for path in (directory / name).rglob("*") if path.is_file())
@@ -1742,6 +1746,10 @@ async def compose_video(
     review_request = {key: value for key, value in locals().items() if key != "log"}
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
+    from backend.daily_news.rundown import read_rundown, bind_timeline
+
+    daily_rundown = read_rundown(output_dir_path, Path(script_path).read_text(encoding="utf-8"))
+    source_audio_sha256 = _sha256_path(Path(audio_path)) if daily_rundown else ""
     if footage_enabled and not footage.acquisition_is_complete(
         output_dir_path, footage.read_manifest(output_dir_path),
         Path(script_path).read_text(encoding="utf-8"),
@@ -1789,8 +1797,8 @@ async def compose_video(
     boundaries = _detect_silence_boundaries(audio_path, log)
     emit(f"Audio duration: {audio_duration:.1f}s; {len(boundaries)} silence boundaries detected")
 
-    if program_music_pacing_enabled:
-        if not background_music_path:
+    if program_music_pacing_enabled or daily_rundown:
+        if not background_music_path and not daily_rundown:
             raise RuntimeError("Program pacing requires an enabled background-music track")
         physical_segments: list[dict] = []
         for raw in Path(script_path).read_text(encoding="utf-8").splitlines():
@@ -1806,7 +1814,7 @@ async def compose_video(
                         "word_count": max(1, len(re.findall(r"\b[\w'-]+\b", text))),
                     }
                 )
-        if len(physical_segments) < 3:
+        if len(physical_segments) < (2 if daily_rundown else 3):
             raise RuntimeError(
                 "Daily program pacing requires separate physical lines for the opening, "
                 "at least one news segment, and the closing"
@@ -1819,7 +1827,7 @@ async def compose_video(
         if manifest_program_segments:
             aligned_segments = manifest_program_segments
         elif word_transcript:
-            aligned_segments, _ = sb.align_lines_to_transcript(
+            aligned_segments, segment_alignment = sb.align_lines_to_transcript(
                 physical_segments,
                 word_transcript,
                 audio_duration,
@@ -1828,7 +1836,11 @@ async def compose_video(
                     config.AV_SYNC_MAX_BOUNDARY_UNCERTAINTY_MS / 1000
                 ),
             )
+            if daily_rundown and not segment_alignment.get("passed"):
+                raise RuntimeError("Daily opening timing requires verified acoustic alignment")
         else:
+            if daily_rundown:
+                raise RuntimeError("Daily opening timing requires a verified TTS manifest or word transcript")
             aligned_segments = sb.assign_line_timing(
                 physical_segments,
                 audio_duration,
@@ -1838,11 +1850,16 @@ async def compose_video(
             audio_path,
             output_dir_path,
             aligned_segments,
-            intro_seconds=program_music_intro_seconds,
-            opening_gap_seconds=program_music_opening_gap_seconds,
-            story_gap_seconds=program_music_story_gap_seconds,
+            intro_seconds=0.0 if daily_rundown else program_music_intro_seconds,
+            opening_gap_seconds=0.0 if daily_rundown else program_music_opening_gap_seconds,
+            story_gap_seconds=(
+                program_music_story_gap_seconds if program_music_pacing_enabled else 0.0
+            ),
             log=emit,
         )
+        if daily_rundown:
+            bind_timeline(output_dir_path, daily_rundown, pacing_report,
+                          audio_sha256=source_audio_sha256)
         word_transcript = music.shift_word_transcript_for_pacing(
             word_transcript,
             pacing_report,
@@ -1874,7 +1891,7 @@ async def compose_video(
     board["alignment"]["transcription_attempts"] = transcription.get("attempts", 0)
     if transcription.get("failure_reasons"):
         board["alignment"]["transcription_failures"] = transcription["failure_reasons"]
-    if program_music_pacing_enabled and source_contract_verified:
+    if (program_music_pacing_enabled or daily_rundown) and source_contract_verified:
         _apply_manifest_program_alignment(
             board["alignment"],
             pacing_report,
@@ -1889,6 +1906,17 @@ async def compose_video(
                 summary=summary,
                 log=emit,
             )
+    if daily_rundown:
+        if not manifest_program_segments:
+            board = sb.build_program_storyboard(
+                pacing_report=pacing_report, title=title, alignment=segment_alignment,
+                summary=summary, log=emit,
+            )
+        board["daily_rundown"] = {
+            "lead_story_id": daily_rundown["lead_story_id"],
+            "story_order": daily_rundown["story_order"],
+            "script_sha256": daily_rundown["script_sha256"],
+        }
     sb.write_storyboard(output_dir_path, board)
     completeness_failures = _narration_completeness_failures(
         board["alignment"],
@@ -2201,18 +2229,17 @@ async def compose_video(
     # Cache only narration-driven direction. Branded bookends are configured
     # render stages, not scenes the visual planner should regenerate on retry.
     plans = scene_plans
-    intro_plan = intros.stage_intro(
-        output_dir_path,
-        board,
-        outro_style,
-        edition_date=edition_date,
-    )
-    intro_index = next(
-        index for index, plan in enumerate(scene_plans) if plan.get("id") == intro_plan["id"]
-    )
-    scene_plans[intro_index] = _retain_bookend_review_feedback(
-        intro_plan, scene_plans[intro_index]
-    )
+    intro_plan = None
+    if not daily_rundown:
+        intro_plan = intros.stage_intro(
+            output_dir_path, board, outro_style, edition_date=edition_date,
+        )
+        intro_index = next(
+            index for index, plan in enumerate(scene_plans) if plan.get("id") == intro_plan["id"]
+        )
+        scene_plans[intro_index] = _retain_bookend_review_feedback(
+            intro_plan, scene_plans[intro_index]
+        )
     outro_index = next(
         index for index, plan in enumerate(scene_plans) if plan.get("id") == outro_plan["id"]
     )
@@ -2221,12 +2248,15 @@ async def compose_video(
     )
     plans = scene_plans
     sb.write_storyboard(output_dir_path, board)
-    emit(
-        f"Intro: {intro_plan['intro_label']} bound to the "
-        f"{intro_plan['duration']:.2f}s spoken opening; "
-        f"HyperFrames variables inject {intro_plan['edition_weekday']}, "
-        f"{intro_plan['edition_date']}"
-    )
+    if intro_plan:
+        emit(
+            f"Intro: {intro_plan['intro_label']} bound to the "
+            f"{intro_plan['duration']:.2f}s spoken opening; "
+            f"HyperFrames variables inject {intro_plan['edition_weekday']}, "
+            f"{intro_plan['edition_date']}"
+        )
+    else:
+        emit("Morning Desk: lead-story visuals from frame zero; measured event/significance within 20s")
     emit(
         f"Outro: {outro_plan['outro_label']} bound to the "
         f"{outro_plan['duration']:.2f}s closing with an editable "

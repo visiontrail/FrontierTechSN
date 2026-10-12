@@ -119,6 +119,7 @@ class ResearchDossier:
     fetches: list[SourceFetch]
     history: list[dict] = field(default_factory=list)
     freshness_policy_version: int = 0
+    lead_story_id: str = ""
 
     @property
     def successful_source_count(self) -> int:
@@ -137,6 +138,7 @@ class ResearchDossier:
             "selected": [article.as_dict() for article in self.selected],
             "history": self.history,
             "freshness_policy_version": self.freshness_policy_version,
+            "lead_story_id": self.lead_story_id,
         }
 
 
@@ -900,6 +902,12 @@ async def run_research(
                 f"Research selection produced only {len(selected)} usable stories from {len(all_articles)} candidates"
             )
 
+    # Lock the publication lead before writing/review. Diversity still controls
+    # selection; promote the strongest selected news item without reshuffling
+    # the remaining stories or letting a later title call choose a new lead.
+    lead = max((a for a in selected if a.content_kind != "analysis"),
+               key=lambda a: a.score, default=selected[0])
+    selected = [lead, *(a for a in selected if a.id != lead.id)]
     dossier = ResearchDossier(
         edition_date=edition_date.isoformat(),
         generated_at=now.isoformat(),
@@ -909,6 +917,7 @@ async def run_research(
         fetches=fetches,
         history=history,
         freshness_policy_version=POLICY_VERSION,
+        lead_story_id=lead.id,
     )
     research_dir = output_dir / "research"
     research_dir.mkdir(parents=True, exist_ok=True)

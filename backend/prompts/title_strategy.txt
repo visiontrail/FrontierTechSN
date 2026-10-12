@@ -9,6 +9,9 @@ feature, not automatically the first paragraph or the most famous name. Put only
 ONE lead story in the headline; do not join unrelated stories with a semicolon,
 slash or a second headline. The daily-brief suffix communicates that other news
 is included. Do not turn a passing mention into the promise of a full explanation.
+For Morning Desk with a supplied locked lead, that selection is already final:
+title the first story's core event and preserve the supplied story order in all
+copy. Do not promote a later story or choose a new lead during upload-copy work.
 When there is no
 clear lead feature, use a specific umbrella topic supported by the major stories.
 

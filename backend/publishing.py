@@ -406,6 +406,36 @@ def _title(task: TaskResponse) -> str:
 
 
 def _description(task: TaskResponse, marker: str | None = None) -> str:
+    from backend.daily_news.rundown import read_rundown, read_chapters, chapter_text, split_lead
+
+    directory = _task_dir(task)
+    script = (Path(task.script_path).read_text(encoding="utf-8")
+              if (directory / "rundown.json").exists() and task.script_path else "")
+    rundown = read_rundown(directory, script)
+    if rundown:
+        # Auto-publication shares the same ordered, approved narration as the
+        # optional upload-copy editor. No independent headline/story selection.
+        lines = []
+        for story in rundown["stories"]:
+            try:
+                note, _ = split_lead(story["narration"])
+            except ValueError:
+                note = story["narration"]
+            lines.append(note)
+        chapters = chapter_text(
+            rundown, read_chapters(directory, rundown, task.audio_path, task.video_path), _title(task),
+        )
+        if chapters:
+            lines.append(chapters)
+        lines.append("Sources:\n" + "\n".join(
+            f"{s['source_name']}: {s['url']}" for s in rundown["stories"] if s.get("url")
+        ))
+        if marker:
+            lines.append(f"Test run: {marker}")
+        description = "\n\n".join(lines)
+        if len(description) > 4900:
+            raise ValueError("Daily description exceeds publication limit; shorten notes before publishing")
+        return description
     dossier = _task_dir(task) / "research" / "dossier.json"
     sources: list[str] = []
     if dossier.is_file():

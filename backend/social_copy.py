@@ -17,6 +17,7 @@ from backend import config, database as db
 from backend.models import TaskResponse, TaskStatus
 from backend.pipeline.digester import _chat, _resolve_provider
 from backend.title_strategy import YOUTUBE_TITLE_MAX_CHARS, with_title_strategy
+from backend.daily_news.rundown import read_rundown, read_chapters, chapter_text
 
 logger = logging.getLogger(__name__)
 HUMANIZER_REVISION = "9862685f575c65a8247f90369951df1b3416e3d6"
@@ -29,6 +30,19 @@ class CopyDraft(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     youtube_title: str = Field(min_length=1, max_length=YOUTUBE_TITLE_MAX_CHARS)
     youtube_show_notes: str = Field(min_length=1, max_length=5000)
+    x_paragraphs: list[str] = Field(min_length=1, max_length=3)
+
+
+class StoryNote(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    story_id: str
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class DailyCopyDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    youtube_title: str = Field(min_length=1, max_length=YOUTUBE_TITLE_MAX_CHARS)
+    youtube_story_notes: list[StoryNote] = Field(min_length=1)
     x_paragraphs: list[str] = Field(min_length=1, max_length=3)
 
 
@@ -52,7 +66,18 @@ def _inputs(task: TaskResponse) -> dict:
         for item in json.loads(dossier.read_text(encoding="utf-8")).get("selected", []):
             if isinstance(item, dict) and str(item.get("url", "")).startswith(("https://", "http://")):
                 references.append({key: item[key] for key in ("title", "url", "source_name") if key in item})
-    return {"final_narration": script, "source_references": references}
+    inputs = {"final_narration": script, "source_references": references}
+    rundown = read_rundown(_path(task).parent, script)
+    if rundown:
+        if not task.generated_title:
+            raise ValueError("Morning Desk requires its production title before writing upload copy")
+        inputs.update(
+            daily_rundown=rundown, publication_title=task.generated_title,
+            source_references=[{key: s[key] for key in ("story_id", "url", "source_name")}
+                               for s in rundown["stories"]],
+            chapters=read_chapters(_path(task).parent, rundown, task.audio_path, task.video_path),
+        )
+    return inputs
 
 
 def _fingerprint(inputs: dict) -> str:
@@ -87,7 +112,18 @@ def read_copy(task: TaskResponse) -> dict:
 
 def _validate(raw: str, inputs: dict) -> dict:
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-    draft = CopyDraft.model_validate_json(cleaned)
+    rundown = inputs.get("daily_rundown")
+    if rundown:
+        ordered = DailyCopyDraft.model_validate_json(cleaned)
+        if ordered.youtube_title != inputs["publication_title"]:
+            raise ValueError("Keep the exact supplied publication_title; the lead is already locked")
+        if [row.story_id for row in ordered.youtube_story_notes] != rundown["story_order"]:
+            raise ValueError("youtube_story_notes must cover every story once in the exact supplied story_order")
+        notes = "\n\n".join(row.text.strip() for row in ordered.youtube_story_notes)
+        draft = CopyDraft(youtube_title=ordered.youtube_title, youtube_show_notes=notes,
+                          x_paragraphs=ordered.x_paragraphs)
+    else:
+        draft = CopyDraft.model_validate_json(cleaned)
     title = draft.youtube_title.strip()
     notes = draft.youtube_show_notes.strip()
     if not title or not notes or "\n" in title or "\r" in title:
@@ -126,6 +162,17 @@ def _validate(raw: str, inputs: dict) -> dict:
         raise ValueError(feedback)
     if re.search(r"(?m)^\s*\d{1,2}:\d{2}\b", notes):
         raise ValueError("Do not invent chapter timestamps")
+    if rundown:
+        if extract_urls(notes):
+            raise ValueError("Keep story notes as prose; software appends sources in story order")
+        chapters = chapter_text(rundown, inputs.get("chapters", []), title)
+        if chapters:
+            notes += "\n\n" + chapters
+        notes += "\n\nSources:\n" + "\n".join(
+            f"{s['source_name']}: {s['url']}" for s in rundown["stories"] if s.get("url")
+        )
+        if len(notes) > 5000:
+            raise ValueError("Show Notes plus measured chapters and sources exceed 5000 characters; shorten story notes")
     return {"youtube_title": title, "youtube_show_notes": notes, "x_post": post,
             "x_weighted_length": parsed.weightedLength}
 
@@ -142,6 +189,17 @@ async def _generate(task: TaskResponse, previous: dict) -> None:
             (config.PROMPTS_DIR / "social_copy.txt").read_text(encoding="utf-8")
         )
         system += "\n\n<humanizer_skill>\n" + skill + "\n</humanizer_skill>"
+        if inputs.get("daily_rundown"):
+            system += """\nMORNING DESK LOCKED RUNDOWN overrides the generic output shape.
+Return {"youtube_title":"exact publication_title", "youtube_story_notes":[{"story_id":"...","text":"..."}], "x_paragraphs":["..."]}.
+Copy publication_title exactly; do not select or rewrite the lead. Write one short
+note per story in daily_rundown.story_order. Each note covers ONLY that story's
+supplied approved narration. The first note must explain the cold open's core
+event and significance, preserving its caveats. Other notes follow playback order.
+Do not add headings, greetings, timestamps or URLs to story notes: software appends
+measured chapters and ordered source links. X also opens with the locked lead;
+any secondary highlights follow story_order. Keep all prose natural and concise.
+"""
         endpoint, model, api_key = await _resolve_provider(
             task.config.provider_id, task.config.ai_endpoint, task.config.ai_model,
         )

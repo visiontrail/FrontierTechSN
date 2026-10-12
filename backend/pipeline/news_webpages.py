@@ -177,6 +177,8 @@ def select_overlay_assignments(
             continue
         matches: list[tuple[int, int, dict]] = []
         for scene_index, scene in enumerate(scenes):
+            if (storyboard.get("daily_rundown") or scene.get("story_id")) and scene.get("story_id") != article.get("id"):
+                continue
             scene_terms = _tokens(scene.get("text"))
             overlap = article_terms & scene_terms
             if len(overlap) < 2:

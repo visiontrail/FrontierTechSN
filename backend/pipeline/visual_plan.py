@@ -437,10 +437,18 @@ def _batch_prompt_payload(storyboard: dict, scenes: list[dict]) -> str:
                 "id": scene["id"],
                 "seconds": scene["duration"],
                 "narration": scene["text"],
+                **({"story_id": scene["story_id"]} if scene.get("story_id") else {}),
             }
             for scene in scenes
         ],
     }
+    if storyboard.get("daily_rundown"):
+        payload["daily_rundown"] = storyboard["daily_rundown"]
+        payload["opening_instruction"] = (
+            "The first scene is the locked lead story's event and significance. "
+            "Show that event immediately. No brand intro, date card, headline menu "
+            "or imagery from another story. Preserve scene and story order."
+        )
     feedback = storyboard.get("visual_review_feedback")
     if feedback:
         scene_ids = {scene["id"] for scene in scenes}

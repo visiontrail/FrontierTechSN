@@ -266,6 +266,10 @@ class CopyGenerationTests(unittest.IsolatedAsyncioTestCase):
         for failure in (None, ValueError("script unavailable")):
             with (
                 self.subTest(failure=failure),
+                patch.object(worker, "get_next_priority_morning_task", AsyncMock(return_value=None)),
+                patch.object(worker, "_run_explainer_with_priority_checks", AsyncMock(return_value=False)),
+                patch.object(worker.explainers, "priority_suspensions", return_value=[]),
+                patch.object(worker.explainers, "resume_after_morning_desk"),
                 patch.object(worker, "get_next_queued_task", AsyncMock(side_effect=[queued, asyncio.CancelledError()])),
                 patch.object(worker.explainers, "production_owner", return_value=None),
                 patch.object(worker, "get_task", AsyncMock(side_effect=[publishing, self.task])),

@@ -124,6 +124,11 @@ async def load_history(edition_date: date, task_id: str, *, now: datetime) -> li
             dossier = json.loads((directory / "research/dossier.json").read_text(encoding="utf-8"))
             script = Path(row["script_path"] or directory / "script.txt").read_text(encoding="utf-8")
             selected = dossier["selected"]
+            from backend.daily_news.rundown import read_rundown
+
+            rundown = read_rundown(directory, script)
+            if rundown and rundown["story_order"] != [a["id"] for a in selected]:
+                raise ValueError("completed rundown differs from the selected story order")
             if not selected or not script.strip() or dossier["edition_date"] != previous_date.isoformat():
                 raise ValueError("missing or mismatched edition evidence")
         except (OSError, ValueError, KeyError) as exc:
@@ -131,6 +136,9 @@ async def load_history(edition_date: date, task_id: str, *, now: datetime) -> li
         paragraphs = [line.strip() for line in script.splitlines() if line.strip()]
         for index, article in enumerate(selected):
             spoken = paragraphs[index + 1] if len(paragraphs) == len(selected) + 2 else script
+            if rundown:
+                spoken = next(story["narration"] for story in rundown["stories"]
+                              if story["story_id"] == article["id"])
             identity = article_identity(article["url"])
             key = fingerprint([previous_date.isoformat(), identity, _normalized(spoken)])[:24]
             history[key] = {
@@ -552,11 +560,20 @@ async def completion_guard(task):
                 try:
                     report = json.loads((path.parent.parent / "review/fact_check_report.json").read_text())
                     script = Path(task.script_path or path.parent.parent / "script.txt").read_text().strip()
+                    from backend.daily_news.rundown import read_rundown
+
+                    rundown = read_rundown(path.parent.parent, script)
+                    reviewed_hash = hashlib.sha256(script.encode()).hexdigest()
+                    if rundown:
+                        if (rundown["story_order"] != [a["id"] for a in raw["selected"]]
+                                or rundown["lead_story_id"] != raw.get("lead_story_id")):
+                            raise ValueError("Daily delivery order differs from its reviewed dossier")
+                        reviewed_hash = rundown["reviewed_script_sha256"]
                     approved = (
                         report.get("passed") is True
                         and report.get("freshness_review_key") == review_binding(raw)
                         and report.get("final_contract", {}).get("script_sha256")
-                        == hashlib.sha256(script.encode()).hexdigest()
+                        == reviewed_hash
                     )
                 except (OSError, ValueError, KeyError) as exc:
                     raise RuntimeError("News completion requires its current script and freshness review receipt") from exc

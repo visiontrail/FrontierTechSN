@@ -33,6 +33,7 @@ from backend.daily_news.research import (
 )
 from backend.daily_news.review import review_daily_script
 from backend.daily_news.scriptwriter import generate_daily_script, narration_duration_report
+from backend.daily_news.rundown import prepare_delivery, read_rundown, review_input_for_edit
 from backend.pipeline.extractors.base import ExtractedContent
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,7 @@ async def _generate_task_title(
         source_title=source_title,
         summary=summary,
         script=script,
+        daily_rundown=read_rundown(task_dir, script),
         provider_id=task.config.provider_id,
         ai_endpoint=task.config.ai_endpoint,
         ai_model=task.config.ai_model,
@@ -390,7 +392,7 @@ async def run_pipeline(task: TaskResponse, log: LogCallback | None = None):
             target_duration_minutes=task.config.target_duration_minutes,
             log=task_log,
         )
-        script = reviewed.script
+        script = prepare_delivery(reviewed.script, dossier, task_dir, task.config.news_language)
     else:
         script = await generate_script(
             summary,
@@ -483,6 +485,12 @@ async def run_regenerate(task: TaskResponse, log: LogCallback | None = None):
     script_path = task.script_path or str(task_dir / "script.txt")
     if not Path(script_path).exists():
         raise FileNotFoundError(f"No script to regenerate from at {script_path}")
+    if task.source_type == SourceType.NEWS_DAILY:
+        edited_draft = review_input_for_edit(task_dir, Path(script_path).read_text(encoding="utf-8"))
+        if edited_draft is not None:
+            task_log("Regenerate: reviewing edited rundown in its locked story order")
+            await run_daily_review_resume(task, log=log, script_override=edited_draft)
+            return
 
     summary_path = task_dir / "summary.json"
     summary = None
@@ -579,6 +587,7 @@ async def run_tts_resume(task: TaskResponse, log: LogCallback | None = None):
     script_path = task.script_path or str(task_dir / "script.txt")
     if not Path(script_path).is_file():
         raise FileNotFoundError(f"No script to resume TTS from at {script_path}")
+    read_rundown(task_dir, Path(script_path).read_text(encoding="utf-8"))
 
     task_log(f"TTS resume: Generating audio with {task.config.tts_model} from the saved script")
     await update_task(task.id, status=TaskStatus.TTS.value, error_message=None)
@@ -630,7 +639,9 @@ async def run_tts_resume(task: TaskResponse, log: LogCallback | None = None):
 
 
 @timed("review_resume", task_entry=True)
-async def run_daily_review_resume(task: TaskResponse, log: LogCallback | None = None):
+async def run_daily_review_resume(
+    task: TaskResponse, log: LogCallback | None = None, *, script_override: str | None = None,
+):
     """Resume a failed daily edition from its persisted dossier and draft.
 
     Research and the first yhroot script call are intentionally not repeated.
@@ -658,8 +669,17 @@ async def run_daily_review_resume(task: TaskResponse, log: LogCallback | None = 
         fetches=[SourceFetch(**item) for item in raw.get("fetches", [])],
         history=raw.get("history", []),
         freshness_policy_version=int(raw.get("freshness_policy_version", 0)),
+        lead_story_id=str(raw.get("lead_story_id") or ""),
     )
     edition_date = _daily_edition_date(task)
+    if script_override is not None:
+        # A prior duration candidate can otherwise supersede the user's edit
+        # on the next retry. Retain it as evidence outside the recovery slot.
+        prior_candidate = task_dir / "review" / "candidate-duration-cycle-1.txt"
+        if prior_candidate.is_file():
+            digest = hashlib.sha256(prior_candidate.read_bytes()).hexdigest()[:16]
+            prior_candidate.replace(prior_candidate.with_name(f"candidate-before-edit-{digest}.txt"))
+        draft_path.write_text(script_override, encoding="utf-8")
     script = draft_path.read_text(encoding="utf-8").strip()
     from backend.daily_news.freshness import refresh_review_history
 
@@ -683,10 +703,14 @@ async def run_daily_review_resume(task: TaskResponse, log: LogCallback | None = 
         ai_model=task.config.ai_model,
         provider_id=task.config.provider_id,
         target_duration_minutes=task.config.target_duration_minutes,
+        recover_saved_candidate=script_override is None,
         log=task_log,
     )
     script_path = task_dir / "script.txt"
-    script_path.write_text(reviewed.script, encoding="utf-8")
+    script_path.write_text(
+        prepare_delivery(reviewed.script, dossier, task_dir, task.config.news_language),
+        encoding="utf-8",
+    )
     await update_task(task.id, script_path=str(script_path))
     task.script_path = str(script_path)
     task_log(f"Review resume: approved script saved to {script_path}")
