@@ -158,6 +158,15 @@ This can run while another media task is active. Full adapter regressions for
 an undeployed patch should also run in a copied runtime, not after patching the
 installed package.
 
+The October 12 collage incident exposed another completed error response:
+“I couldn't generate the image in this attempt.” followed by explanatory prose.
+Recognize this response alongside the existing provider-error wording, only
+after two identical idle readings from the exact owned turn with no generated
+image or canvas preview. This avoids repeatedly waiting out the response budget
+on a known failure; it neither retries generation nor establishes why the
+provider failed. Optional collage failures continue through the existing
+asset replanning path, preserving their original request checkpoints.
+
 Thumbnail requests persist their prompt and `--state-file` checkpoint under
 `thumbnail/requests/<script-and-title-hash>/`. Repeating the same request reuses
 its checkpoint, and an already completed, valid local image returns without a

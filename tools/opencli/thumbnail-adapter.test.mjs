@@ -316,6 +316,32 @@ test('completed image error ends the owned wait after two stable idle readings',
   assert.equal(state.progress.at(-1).stage, 'image_generation_failed')
 })
 
+test('observed attempt failure with explanatory prose ends the owned wait', async () => {
+  const text = "I couldn't generate the image in this attempt. Your brief is clear and specifies an original 16:9 editorial collage, so no additional reference image should be necessary."
+  for (const variant of [text, text.replace("couldn't", 'couldn’t'), text + '\nImage generation failed\nTry again']) {
+    const messages = [ownedFailure[0], { Role: 'Assistant', Text: variant }]
+    const { run, state } = waiter(fixedWait, { messages: () => messages })
+    await assert.rejects(run(420, savedUrl, { prompt: 'exact image prompt' }), /CHATGPT_IMAGE_GENERATION_FAILED/)
+    assert.equal(state.clock, 6000)
+    assert.equal(state.navigations.length, 0)
+    assert.equal(state.progress.at(-1).stage, 'image_generation_failed')
+  }
+  for (const messages of [
+    [{ Role: 'User', Text: 'other prompt' }, { Role: 'Assistant', Text: text }],
+    [{ Role: 'Assistant', Text: text }, ownedFailure[0]],
+    [ownedFailure[0], { Role: 'Assistant', Text: 'The previous response said: ' + text }],
+  ]) {
+    const { run } = waiter(fixedWait, { messages: () => messages })
+    assert.deepEqual(Array.from(await run(12, savedUrl, { prompt: 'exact image prompt' })), [])
+  }
+  const { run } = waiter(fixedWait, {
+    messages: () => [ownedFailure[0], { Role: 'Assistant', Text: text }],
+    generating: state => state.clock < 9000,
+    images: state => state.clock >= 9000 ? [imageUrl] : [],
+  })
+  assert.deepEqual(Array.from(await run(30, savedUrl, { prompt: 'exact image prompt' })), [imageUrl])
+})
+
 test('reproduces full-deadline wait on the installed adapter for a completed provider error', async t => {
   const legacy = waitSource(originals.get('clis/chatgpt/utils.js').toString())
   if (legacy.includes('CHATGPT_IMAGE_GENERATION_FAILED')) return t.skip('Installed runtime already detects terminal errors')
