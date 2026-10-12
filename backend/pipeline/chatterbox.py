@@ -106,28 +106,50 @@ def _punctuation_repair(directory: Path, stem: str, identity: dict, *,
     repair = _read_json(marker)
     base = identity['synthesis_text']
     position = repair.get('insert_after')
-    if (repair.get('version') != 1
+    version = repair.get('version')
+    if (version not in (1, 2)
             or repair.get('source_sha256') != hashlib.sha256(identity['text'].encode()).hexdigest()
             or repair.get('synthesis_sha256') != hashlib.sha256(base.encode()).hexdigest()
             or type(position) is not int or not 0 < position < len(base)
-            or not base[position - 1].isalnum() or base[position] != ' '
+            or not base[position - 1].isalnum()
+            or base[position] not in (' -' if version == 2 else ' ')
+            or (base[position] == '-' and
+                (position + 1 >= len(base) or not base[position + 1].isalpha()))
             or not isinstance(repair.get('reason'), str) or not repair['reason'].strip()):
         raise RuntimeError('Invalid source-bound punctuation repair; preserving existing jobs')
     originals = repair.get('original_request_sha256')
     if not isinstance(originals, list) or len(originals) != MAX_INTEGRITY_ATTEMPTS:
         raise RuntimeError('Punctuation repair requires all exhausted original requests')
+    pronunciation_failure = False
     for attempt, digest in enumerate(originals):
         original = directory / f'{stem}.request-{attempt}.json'
         payload = {'text': base, 'language_id': identity['language'], 'voice': identity['voice'],
                    'seed': (identity['seed'] + attempt) % (2 ** 32),
                    **identity['synthesis_parameters']}
         checkpoint = _read_request_checkpoint(original)
+        rejection = str(checkpoint.get('rejected', ''))
+        pronunciation_rejected = rejection.startswith('Chatterbox initialism pronunciation mismatch:')
+        pronunciation_failure |= pronunciation_rejected
+        tail_only = False
+        prefix = 'Independent Chatterbox check found unrequested speech: '
+        if version == 2 and rejection.startswith(prefix):
+            try:
+                report = json.loads(rejection[len(prefix):])
+                tail_only = (isinstance(report, dict)
+                             and all(report.get(key) == [] for key in (
+                                 'tail', 'extra_initialisms', 'identifier_mismatches',
+                                 'repeated_source_phrases'))
+                             and isinstance(report.get('waveform_tail'), dict)
+                             and report['waveform_tail'].get('passed') is False)
+            except ValueError:
+                pass
         if (not original.is_file() or tts._file_sha256(original) != digest
                 or checkpoint.get('identity') != _digest({'identity': identity, 'payload': payload})
                 or not checkpoint.get('job_id')
-                or not str(checkpoint.get('rejected', '')).startswith(
-                    'Chatterbox initialism pronunciation mismatch:')):
+                or not (pronunciation_rejected or tail_only)):
             raise RuntimeError('Punctuation repair requires unchanged exhausted pronunciation jobs')
+    if not pronunciation_failure:
+        raise RuntimeError('Punctuation repair requires an observed pronunciation failure')
     repair_digest = _digest(repair)
     applied = directory / f'{stem}.punctuation-repair-applied.json'
     if applied.exists() and _read_json(applied).get('repair_sha256') != repair_digest:
@@ -138,7 +160,10 @@ def _punctuation_repair(directory: Path, stem: str, identity: dict, *,
         raise RuntimeError('Punctuation repair cannot replace existing accepted audio')
     if not applied.exists():
         _write_json(applied, {'repair_sha256': repair_digest})
-    repaired = {**identity, 'synthesis_text': base[:position] + ',' + base[position:],
+    # Version 2 can replace a letter separator with a pause. It never changes
+    # source words, accepts rejected audio, or resets the original job budget.
+    suffix = ' ' + base[position + 1:] if base[position] == '-' else base[position:]
+    repaired = {**identity, 'synthesis_text': base[:position] + ',' + suffix,
                 'punctuation_repair_sha256': repair_digest}
     return repaired, f'{stem}.punctuation-repair'
 

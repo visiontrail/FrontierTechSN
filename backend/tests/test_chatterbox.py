@@ -2598,6 +2598,51 @@ async def test_punctuation_repair_rejects_unsafe_inputs_before_submitting(setup_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('defect', [None, 'extra_speech', 'missing_evidence', 'malformed', 'tail_only'])
+async def test_hyphen_pause_repair_preserves_mixed_rejections(setup_client, monkeypatch, defect):
+    server, script, directory, verifier, generate = setup_client
+    source = script.read_text().replace('complete ', 'complete-', 1)
+    script.write_text(source)
+    report = {'tail': [], 'extra_initialisms': [], 'identifier_mismatches': [],
+              'repeated_source_phrases': [], 'waveform_tail': {'passed': False}}
+    if defect == 'extra_speech':
+        report['tail'] = ['unrequested']
+    elif defect == 'missing_evidence':
+        report.pop('identifier_mismatches')
+    tail_error = tts.TtsIntegrityError('Independent Chatterbox check found unrequested speech: '
+                                     + ('invalid' if defect == 'malformed' else json.dumps(report)))
+    initialism_error = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: fused boundary')
+    verifier.side_effect = ([tail_error] * 3 if defect == 'tail_only'
+                            else [initialism_error, initialism_error, tail_error])
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    originals = {p.name: p.read_bytes() for p in directory.glob('*.request-*.json')}
+    marker = write_punctuation_repair(directory, source, source, len('The complete'))
+    repair = json.loads(marker.read_text())
+    repair['version'] = 2
+    marker.write_text(json.dumps(repair))
+    if defect:
+        with pytest.raises(RuntimeError, match='Punctuation repair'):
+            await generate()
+        assert len(server.jobs) == 3
+    else:
+        monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(
+            [{'text': word} for word in source.split()], {'passed': True})))
+        verifier.side_effect = lambda *a, **kw: advisory_report()
+        await generate()
+        assert len(server.jobs) == 4
+        assert server.jobs['job-4']['request']['text'] == source.replace('complete-', 'complete, ', 1)
+        await generate()
+        assert len(server.jobs) == 4
+        assert script.read_text() == source
+        metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+        assert metadata['identity']['text'] == source
+        assert metadata['identity']['punctuation_repair_sha256']
+    for name, contents in originals.items():
+        assert (directory / name).read_bytes() == contents
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('history', ['fresh', 'exhausted', 'pending', 'accepted'])
 async def test_repeated_letter_input_preserves_history_and_exact_checks(setup_client, monkeypatch, history):
     server, script, directory, verifier, generate = setup_client
