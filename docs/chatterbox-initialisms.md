@@ -197,3 +197,20 @@ namespace with the usual three-attempt limit and unchanged acceptance gates.
 The applied marker binds both identities and all original request file hashes;
 a changed marker or history fails closed. This does not reset or delete old
 requests and does not accept `doublebc` as BBC.
+
+### HG-DAgger recovery (2026-10-12)
+
+Morning Desk `20261012-042251-af6108` exhausted part 16's three original
+requests. Its provider text ended in `aitch gee-DAgger`; observed transcripts
+included `itchgdagger`, `hgdagger`, and `each` in place of HG. The second
+transcript alone may reflect ASR token fusion rather than wrong speech; none
+passed the existing pronunciation contract, so the original audio stays rejected.
+
+The existing version-2 punctuation repair is applied only to this part, changing
+provider input to `aitch gee, DAgger`. The source remains `HG-DAgger`. The marker
+binds source/synthesis hashes and all three original request hashes; accepted
+parts 1–15, the pronunciation plan, voice, seeds, and normal integrity checks
+remain unchanged. The corrected input has the existing three-candidate limit.
+This is a targeted input repair, not evidence that general pronunciation or
+ASR reliability is fixed. Recovery requires a newly passing part and continued
+progress in the same task; final delivery requires the normal final checks.
