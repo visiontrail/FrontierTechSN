@@ -2523,15 +2523,19 @@ def write_punctuation_repair(directory, source, synthesis, position):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('result', ['pass', 'reject', 'unavailable'])
-async def test_explicit_punctuation_repair_retains_original_jobs_and_bounded_budget(setup_client, monkeypatch, result):
+@pytest.mark.parametrize('version', [1, 3])
+async def test_explicit_punctuation_repair_retains_original_jobs_and_bounded_budget(setup_client, monkeypatch, result, version):
     server, script, directory, verifier, generate = setup_client
     source = script.read_text()
-    verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: fused boundary')
+    verifier.side_effect = tts.TtsIntegrityError(
+        'Chatterbox unrequested trailing speech: ["hidden"]' if version == 3
+        else 'Chatterbox initialism pronunciation mismatch: fused boundary')
     with pytest.raises(tts.TtsIntegrityError):
         await generate()
     originals = {p.name: p.read_bytes() for p in directory.glob('*.request-*.json')}
     rejected = {str(p): p.read_bytes() for p in (directory / 'verification').rglob('*') if p.is_file()}
-    write_punctuation_repair(directory, source, source, len('The complete'))
+    marker = write_punctuation_repair(directory, source, source, len('The complete'))
+    marker.write_text(json.dumps({**json.loads(marker.read_text()), 'version': version}))
     monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(
         [{'text': word} for word in source.split()], {'passed': True})))
     if result == 'pass':
@@ -2567,14 +2571,17 @@ async def test_explicit_punctuation_repair_retains_original_jobs_and_bounded_bud
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('defect', ['source', 'synthesis', 'position', 'budget', 'checkpoint', 'accepted', 'changed'])
-async def test_punctuation_repair_rejects_unsafe_inputs_before_submitting(setup_client, defect):
+@pytest.mark.parametrize('version', [1, 3])
+async def test_punctuation_repair_rejects_unsafe_inputs_before_submitting(setup_client, defect, version):
     server, script, directory, verifier, generate = setup_client
     source = script.read_text()
-    verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: fused boundary')
+    verifier.side_effect = tts.TtsIntegrityError(
+        'Chatterbox unrequested trailing speech: ["hidden"]' if version == 3
+        else 'Chatterbox initialism pronunciation mismatch: fused boundary')
     with pytest.raises(tts.TtsIntegrityError):
         await generate()
     marker = write_punctuation_repair(directory, source, source, len('The complete'))
-    repair = json.loads(marker.read_text())
+    repair = {**json.loads(marker.read_text()), 'version': version}
     if defect in {'source', 'synthesis'}:
         repair[f'{defect}_sha256'] = 'wrong'
     elif defect == 'position':
@@ -2818,3 +2825,23 @@ def test_adjacent_model_repartition_rejects_changed_source_or_other_words(source
     report = chatterbox._pronunciation_report(
         f'The {source} product launched.', [{'text': f'The {observed} product launched.'}])
     assert not report['passed']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('rejection', [
+    'Chatterbox unrequested trailing speech: []',
+    'Chatterbox unrequested trailing speech: invalid',
+    'Chatterbox unrequested trailing speech: [null]',
+    'Chatterbox initialism pronunciation mismatch: fused boundary',
+    'Verifier unavailable',
+])
+async def test_trailing_speech_pause_requires_three_confirmed_tail_rejections(setup_client, rejection):
+    server, script, directory, verifier, generate = setup_client
+    verifier.side_effect = tts.TtsIntegrityError(rejection)
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    marker = write_punctuation_repair(directory, script.read_text(), script.read_text(), len('The complete'))
+    marker.write_text(json.dumps({**json.loads(marker.read_text()), 'version': 3}))
+    with pytest.raises(RuntimeError, match='Punctuation repair'):
+        await generate()
+    assert len(server.jobs) == 3

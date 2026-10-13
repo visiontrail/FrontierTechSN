@@ -95,7 +95,7 @@ def _read_json(path: Path) -> dict:
 
 def _punctuation_repair(directory: Path, stem: str, identity: dict, *,
                         audio_stem: str | None = None) -> tuple[dict, str]:
-    """Apply one explicit, immutable comma repair after exhausted pronunciation jobs.
+    """Apply one explicit, immutable comma repair after exhausted speech jobs.
 
     The canonical text, voice, seeds and checks do not change. Original jobs
     remain in their own namespace; a corrected input has its own bounded budget.
@@ -107,7 +107,7 @@ def _punctuation_repair(directory: Path, stem: str, identity: dict, *,
     base = identity['synthesis_text']
     position = repair.get('insert_after')
     version = repair.get('version')
-    if (version not in (1, 2)
+    if (version not in (1, 2, 3)
             or repair.get('source_sha256') != hashlib.sha256(identity['text'].encode()).hexdigest()
             or repair.get('synthesis_sha256') != hashlib.sha256(base.encode()).hexdigest()
             or type(position) is not int or not 0 < position < len(base)
@@ -130,6 +130,14 @@ def _punctuation_repair(directory: Path, stem: str, identity: dict, *,
         rejection = str(checkpoint.get('rejected', ''))
         pronunciation_rejected = rejection.startswith('Chatterbox initialism pronunciation mismatch:')
         pronunciation_failure |= pronunciation_rejected
+        trailing_rejected = False
+        if version == 3 and rejection.startswith('Chatterbox unrequested trailing speech: '):
+            try:
+                extra = json.loads(rejection.split(': ', 1)[1])
+                trailing_rejected = (isinstance(extra, list) and bool(extra)
+                                     and all(isinstance(word, str) and word.strip() for word in extra))
+            except ValueError:
+                pass
         tail_only = False
         prefix = 'Independent Chatterbox check found unrequested speech: '
         if version == 2 and rejection.startswith(prefix):
@@ -146,9 +154,9 @@ def _punctuation_repair(directory: Path, stem: str, identity: dict, *,
         if (not original.is_file() or tts._file_sha256(original) != digest
                 or checkpoint.get('identity') != _digest({'identity': identity, 'payload': payload})
                 or not checkpoint.get('job_id')
-                or not (pronunciation_rejected or tail_only)):
+                or not (trailing_rejected if version == 3 else pronunciation_rejected or tail_only)):
             raise RuntimeError('Punctuation repair requires unchanged exhausted pronunciation jobs')
-    if not pronunciation_failure:
+    if version != 3 and not pronunciation_failure:
         raise RuntimeError('Punctuation repair requires an observed pronunciation failure')
     repair_digest = _digest(repair)
     applied = directory / f'{stem}.punctuation-repair-applied.json'

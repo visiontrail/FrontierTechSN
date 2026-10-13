@@ -178,6 +178,21 @@ three-attempt bound. Verification evidence is likewise separate. Transport or
 verification uncertainty resumes the same job; repeated runs cannot reset the
 repair budget. Existing audio for other parts keeps its original identity.
 
+Version 3 supports a reviewed inter-word comma after all three original jobs
+were rejected specifically for nonempty unrequested trailing speech. It rejects
+mixed failure classes, malformed rejection evidence, pending jobs and accepted
+audio. This changes only provider prosody; every new sample must still pass the
+original speech and independent waveform checks. It is not an automatic retry
+or permission to trim extra words from a rejected sample.
+
+On 2026-10-13, Explainer scene 156 exhausted its original seeds on added tail
+words. The last sample repeated “hidden” after the complete sentence; both
+Whisper large-v3-turbo and an independent Whisper-small observation detected it
+at a separate acoustic interval. A version-3 repair inserts a comma after
+“method” in the provider input, retaining the complete canonical sentence and
+all original rejected requests. This is a bounded recovery of that input, not
+a demonstrated general cure for Chatterbox repetition.
+
 Acoustic-reference upgrades also recheck persisted initialism pronunciation
 rejections, as these can originate in the complete-source phoneme fallback.
 Rechecking does not submit a new synthesis request or erase the old rejection.
