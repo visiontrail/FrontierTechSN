@@ -297,6 +297,44 @@ async def test_daily_generation_receives_budget_before_first_draft(edition):
     assert json.loads((edition.root / "social_copy.json").read_text())["status"] == "ready"
 
 
+@pytest.mark.asyncio
+async def test_over_budget_daily_retry_targets_each_story_without_cutting_sources(edition):
+    inputs = daily_copy_input(edition)
+    inputs["daily_rundown"]["stories"][0]["url"] += "?q=" + "a" * 2200
+    invalid = copy_draft(inputs)
+    for row in invalid["youtube_story_notes"]:
+        row["text"] = "Long description. " * 60
+    task = TaskResponse(id="budget-repair", source_type="news_daily", status="complete",
+                        created_at="2026-10-13", updated_at="2026-10-13",
+                        config=TaskConfig(), output_dir=str(edition.root))
+    with (patch.object(social_copy, "_inputs", return_value=inputs),
+          patch.object(social_copy, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+          patch.object(social_copy, "_chat", AsyncMock(side_effect=[json.dumps(invalid), json.dumps(copy_draft(inputs))])) as chat,
+          patch.object(social_copy.db, "get_task", AsyncMock(return_value=task))):
+        await social_copy._generate(task, {})
+    assert chat.await_count == 2
+    edits = json.loads(chat.await_args.args[1])["story_note_edits"]
+    assert [row["story_id"] for row in edits] == inputs["daily_rundown"]["story_order"]
+    assert [row["approved_narration"] for row in edits] == [LEAD, SECOND, THIRD]
+    assert all(row["target_characters"] < row["current_characters"] for row in edits)
+    result = json.loads((edition.root / "social_copy.json").read_text())
+    assert result["status"] == "ready"
+    assert len(result["copy"]["youtube_show_notes"]) <= 5000
+    assert inputs["daily_rundown"]["stories"][0]["url"] in result["copy"]["youtube_show_notes"]
+
+
+@pytest.mark.parametrize("invalid", ["malformed", "missing", "reordered", "within_budget"])
+def test_daily_note_repair_does_not_mask_other_validation_errors(edition, invalid):
+    inputs = daily_copy_input(edition)
+    draft = copy_draft(inputs)
+    if invalid == "missing":
+        draft["youtube_story_notes"].pop()
+    elif invalid == "reordered":
+        draft["youtube_story_notes"].reverse()
+    raw = "bad json" if invalid == "malformed" else json.dumps(draft)
+    assert social_copy._daily_note_repair(raw, inputs) is None
+
+
 @pytest.mark.parametrize("change", ["title", "swap", "omit", "duplicate", "timestamp"])
 def test_upload_copy_rejects_new_lead_missing_swapped_or_invented_chapters(edition, change):
     inputs = daily_copy_input(edition)

@@ -99,10 +99,33 @@ def _daily_notes_budget(inputs: dict) -> dict:
     available = 5000 - reserved
     if available < count + separators:
         raise ValueError("Measured chapters and sources leave no room for every story note")
+    per_story = min(2000, (available - separators) // count)
     return {"description_max_characters": 5000, "reserved_characters": reserved,
             "joined_story_notes_max_characters": available,
             "story_separator_characters": separators,
-            "suggested_characters_per_story": min(2000, (available - separators) // count)}
+            "suggested_characters_per_story": per_story,
+            "target_characters_per_story": min(220, max(1, per_story * 7 // 10))}
+
+
+def _daily_note_repair(raw: str, inputs: dict) -> list[dict] | None:
+    """Make an over-budget retry an explicit edit of each approved story."""
+    try:
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+        draft = DailyCopyDraft.model_validate_json(cleaned)
+    except (ValueError, ValidationError):
+        return None
+    rundown = inputs["daily_rundown"]
+    if [row.story_id for row in draft.youtube_story_notes] != rundown["story_order"]:
+        return None
+    budget = _daily_notes_budget(inputs)
+    if len("\n\n".join(row.text.strip() for row in draft.youtube_story_notes)) <= budget["joined_story_notes_max_characters"]:
+        return None
+    stories = {story["story_id"]: story for story in rundown["stories"]}
+    return [{"story_id": row.story_id, "previous_text": row.text,
+             "current_characters": len(row.text.strip()),
+             "target_characters": budget["target_characters_per_story"],
+             "approved_narration": stories[row.story_id]["narration"]}
+            for row in draft.youtube_story_notes]
 
 
 def _write(path: Path, value: dict) -> None:
@@ -227,8 +250,13 @@ any secondary highlights follow story_order. Keep all prose natural and concise.
 Respect youtube_show_notes_budget: the joined story notes, including two newline
 characters between notes, must fit joined_story_notes_max_characters. Chapters
 and exact source links already consume reserved_characters; do not shorten or
-omit them. Aim below suggested_characters_per_story for each note while retaining
-the source attribution, uncertainty and key development.
+omit them. Override the generic 150–350 word guidance: write ONE compact sentence
+per story, aiming below target_characters_per_story (characters, NOT words).
+Retain source attribution, uncertainty and the key development. Do not recap all
+supporting details. The full narration remains in the video.
+If story_note_edits is supplied, substantially condense EACH previous_text to its
+target_characters using its approved_narration. Do not make only cosmetic edits.
+Keep every story, the locked title and valid X paragraphs; return the full JSON.
 """
         endpoint, model, api_key = await _resolve_provider(
             task.config.provider_id, task.config.ai_endpoint, task.config.ai_model,
@@ -242,6 +270,10 @@ the source attribution, uncertainty and key development.
             if feedback:
                 payload["validation_feedback"] = feedback
                 payload["previous_draft"] = previous_draft
+                if inputs.get("daily_rundown"):
+                    edits = _daily_note_repair(previous_draft, inputs)
+                    if edits:
+                        payload["story_note_edits"] = edits
             # Humanizer's draft/critique/rewrite pass needs reasoning headroom
             # even on providers that ignore disable_thinking. Let the shared
             # transport own timeouts and primary/backup retry policy.
