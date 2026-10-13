@@ -2523,7 +2523,7 @@ test('Gemini retries a no-op selector click with observed native coordinates', a
   ])
 })
 
-test('Gemini ask waits through delayed model-picker hydration', async () => {
+test('Gemini ask waits through model-picker hydration beyond the old 15-second window', async () => {
   const prompt = 'Reply with exactly READY'
   let pickerReads = 0
   let composerText = ''
@@ -2554,7 +2554,7 @@ test('Gemini ask waits through delayed model-picker hydration', async () => {
       if (script === 'window.location.href') return 'https://gemini.google.com/app'
       if (script.includes('Gemini model picker button was not found')) {
         pickerReads += 1
-        return pickerReads < 10
+        return pickerReads < 45
           ? { ok: false, reason: 'Gemini model picker button was not found' }
           : { ok: true }
       }
@@ -2595,8 +2595,34 @@ test('Gemini ask waits through delayed model-picker hydration', async () => {
     thinking: null,
   })
 
-  assert.equal(pickerReads, 10)
+  assert.equal(pickerReads, 45)
   assert.deepEqual(result, [{ response: '💬 READY' }])
+})
+
+test('Gemini ask stops after bounded missing-picker checks without submitting', async () => {
+  let pickerReads = 0
+  let waits = 0
+  const page = {
+    async evaluate(script) {
+      if (script.includes("return ['/app', '/app/']")) return true
+      if (script === 'window.location.href') return 'https://gemini.google.com/app'
+      if (script.includes('Gemini model picker button was not found')) {
+        pickerReads += 1
+        return { ok: false, reason: 'Gemini model picker button was not found' }
+      }
+      throw new Error(`Unexpected action before model verification: ${String(script).slice(0, 100)}`)
+    },
+    async wait(seconds) { assert.equal(seconds, 1); waits += 1 },
+    async goto() { assert.fail('Must not navigate to retry missing model picker') },
+    async fillText() { assert.fail('Must not fill a prompt without model verification') },
+    async click() { assert.fail('Must not submit without model verification') },
+  }
+  await assert.rejects(geminiAskCommand.func(page, {
+    prompt: 'Must not be submitted', model: '3.1-pro', timeout: 30,
+    new: 'false', thinking: null,
+  }), /Gemini model picker button was not found/)
+  assert.equal(pickerReads, 61)
+  assert.equal(waits, 60)
 })
 
 test('Gemini accepts an owned short reply already present at submission confirmation', async () => {

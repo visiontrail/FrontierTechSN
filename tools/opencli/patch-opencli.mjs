@@ -2251,6 +2251,9 @@ ask = replaceOnce(
   "        { name: 'thinking', required: false, help: 'Thinking level: standard or extended (omitted = leave unchanged)', default: null },\n        { name: 'file', required: false, help: 'Attach one local image before sending the prompt' },\n",
   'Gemini ask file option',
 )
+// Upgrade the earlier 15-second hydration window without navigating or sending
+// a prompt again. Gemini can show the composer before its model picker loads.
+ask = ask.replace('const pickerAttempts = 16;', 'const pickerAttempts = 61;')
 ask = replaceOnce(
   ask,
   `            const pickerRaw = await page.evaluate(\`
@@ -2268,7 +2271,7 @@ ask = replaceOnce(
                     pickerResult?.reason || 'Failed to open Gemini model picker for model discovery'
                 );
             }`,
-  `            const pickerAttempts = 16;
+  `            const pickerAttempts = 61;
             let pickerResult = null;
             for (let pickerAttempt = 0; pickerAttempt < pickerAttempts; pickerAttempt += 1) {
                 const pickerRaw = await page.evaluate(\`
