@@ -113,12 +113,58 @@ async def test_independent_check_distinguishes_repetition_and_model_change_from_
 async def test_decoder_unavailability_preserves_the_original_wave_and_never_passes(audit_case, monkeypatch):
     wav, source, edits, directory, _observed, _calls = audit_case
     original = wav.read_bytes()
+    attempts = []
     def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired('independent recognizer', 180)
+        attempts.append(kwargs['timeout'])
+        raise subprocess.TimeoutExpired('independent recognizer', kwargs['timeout'])
     monkeypatch.setattr(independent.subprocess, 'run', timeout)
     with pytest.raises(RuntimeError, match='preserving the completed job'):
         await independent.audit_part(wav, source, edits, directory)
     assert wav.read_bytes() == original and not list(directory.rglob('audit.json'))
+    assert attempts == [180, 360]
+    assert len(list(directory.rglob('decoder-failure-*.json'))) == 2
+
+
+@pytest.mark.asyncio
+async def test_decoder_timeout_retries_same_wave_and_rejects_stale_output(audit_case, monkeypatch):
+    wav, source, edits, directory, _observed, calls = audit_case
+    original = wav.read_bytes()
+    decode = independent.subprocess.run
+    attempts = []
+
+    def slow_once(command, **kwargs):
+        from pathlib import Path
+        transcript = Path(command[5])
+        attempts.append(kwargs['timeout'])
+        if len(attempts) == 1:
+            transcript.write_text('[{"text": "unfinished output"}]')
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'], stderr=b'model loading')
+        assert not transcript.exists()
+        return decode(command, **kwargs)
+
+    monkeypatch.setattr(independent.subprocess, 'run', slow_once)
+    assert (await independent.audit_part(wav, source, edits, directory))['passed']
+    assert attempts == [180, 360] and len(calls) == 1
+    assert wav.read_bytes() == original
+    diagnostic = json.loads(next(directory.rglob('decoder-failure-*.json')).read_text())
+    assert diagnostic['stderr'] == 'model loading'
+
+
+@pytest.mark.asyncio
+async def test_decoder_nonzero_exit_does_not_retry_or_accept_output(audit_case, monkeypatch):
+    wav, source, edits, directory, _observed, calls = audit_case
+    decode = independent.subprocess.run
+
+    def fail(command, **kwargs):
+        decode(command, **kwargs)
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(independent.subprocess, 'run', fail)
+    with pytest.raises(RuntimeError, match='preserving the completed job'):
+        await independent.audit_part(wav, source, edits, directory)
+    assert len(calls) == 1
+    assert not list(directory.rglob('identity.json'))
+    assert not list(directory.rglob('audit.json'))
 
 
 @pytest.mark.asyncio

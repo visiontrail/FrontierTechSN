@@ -3,11 +3,13 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from difflib import SequenceMatcher
 
 from backend import config
@@ -15,6 +17,45 @@ from backend.pipeline.tts import TtsIntegrityError
 
 MODEL = 'mlx-community/whisper-small-mlx'
 AUDIT_VERSION = 2
+logger = logging.getLogger(__name__)
+
+
+async def _transcribe_independently(wav: Path, transcript: Path, env: dict) -> None:
+    """Retry a slow local decoder without resubmitting the completed TTS job."""
+    command = [
+        sys.executable, '-m', 'backend.pipeline.av_sync', 'transcribe-mlx',
+        str(wav), str(transcript), '--model', MODEL, '--language', 'en',
+    ]
+    for attempt, timeout in enumerate((180, 360), start=1):
+        # A timed-out process may already have written output. Only accept
+        # output from an invocation that also exits successfully.
+        transcript.unlink(missing_ok=True)
+        started = time.monotonic()
+        try:
+            done = await asyncio.to_thread(
+                subprocess.run, command, cwd=config.PROJECT_ROOT, env=env,
+                capture_output=True, timeout=timeout,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            def output_text(value):
+                return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else value
+
+            diagnostic = {
+                'attempt': attempt, 'timeout_seconds': timeout,
+                'elapsed_seconds': time.monotonic() - started,
+                'error': str(error),
+                'stdout': output_text(getattr(error, 'stdout', None)),
+                'stderr': output_text(getattr(error, 'stderr', None)),
+            }
+            transcript.with_name(f'decoder-failure-{time.time_ns()}.json').write_text(
+                json.dumps(diagnostic, indent=2), encoding='utf-8')
+            if isinstance(error, subprocess.TimeoutExpired) and attempt == 1:
+                logger.warning('Independent recognizer timed out after %ss; retrying the same audio once', timeout)
+                continue
+            raise RuntimeError('Independent recognizer unavailable; preserving the completed job') from error
+        if done.returncode or not transcript.exists():
+            raise RuntimeError('Independent recognizer unavailable; preserving the completed job')
+        return
 
 
 class WaveformTailError(TtsIntegrityError):
@@ -76,15 +117,7 @@ async def audit_part(wav: Path, text: str, edits: list[dict], directory: Path) -
             or binding.get('transcript_sha256') != tts._file_sha256(transcript)):
         env = os.environ.copy()
         env['HF_HUB_OFFLINE'] = '1'
-        try:
-            done = await asyncio.to_thread(subprocess.run, [
-                sys.executable, '-m', 'backend.pipeline.av_sync', 'transcribe-mlx',
-                str(wav), str(transcript), '--model', MODEL, '--language', 'en',
-            ], cwd=config.PROJECT_ROOT, env=env, capture_output=True, timeout=180)
-        except (OSError, subprocess.SubprocessError) as error:
-            raise RuntimeError('Independent recognizer unavailable; preserving the completed job') from error
-        if done.returncode or not transcript.exists():
-            raise RuntimeError('Independent recognizer unavailable; preserving the completed job')
+        await _transcribe_independently(wav, transcript, env)
         chatterbox._write_json(marker, {
             'identity': identity, 'transcript_sha256': tts._file_sha256(transcript),
         })
