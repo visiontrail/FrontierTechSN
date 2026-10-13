@@ -250,6 +250,53 @@ def copy_draft(inputs):
     ], "x_paragraphs": ["Atlas reports lower chip power use in company tests. Independent results remain unavailable."]}
 
 
+@pytest.mark.parametrize("with_chapters", [False, True])
+def test_copy_budget_reserves_exact_sources_chapters_and_separators(edition, with_chapters):
+    inputs = daily_copy_input(edition)
+    inputs["daily_rundown"]["stories"][0]["url"] += "?source=rss#details"
+    if with_chapters:
+        inputs["chapters"] = [{"story_id": story_id, "start_seconds": index * 30}
+                              for index, story_id in enumerate(edition.data["story_order"])]
+    budget = social_copy._daily_notes_budget(inputs)
+    draft = copy_draft(inputs)
+    remaining = budget["joined_story_notes_max_characters"] - budget["story_separator_characters"]
+    for index, row in enumerate(draft["youtube_story_notes"]):
+        length = remaining // (len(draft["youtube_story_notes"]) - index)
+        row["text"] = "a" * length
+        remaining -= length
+    result = social_copy._validate(json.dumps(draft), inputs)
+    assert len(result["youtube_show_notes"]) == 5000
+    assert "?source=rss#details" in result["youtube_show_notes"]
+    assert ("00:00" in result["youtube_show_notes"]) == with_chapters
+    draft["youtube_story_notes"][0]["text"] += "a"
+    with pytest.raises(ValueError, match=f"maximum is {budget['joined_story_notes_max_characters']}"):
+        social_copy._validate(json.dumps(draft), inputs)
+
+
+def test_copy_budget_rejects_impossible_fixed_content(edition):
+    inputs = daily_copy_input(edition)
+    inputs["daily_rundown"]["stories"][0]["url"] += "?q=" + "a" * 5000
+    with pytest.raises(ValueError, match="leave no room"):
+        social_copy._daily_notes_budget(inputs)
+
+
+@pytest.mark.asyncio
+async def test_daily_generation_receives_budget_before_first_draft(edition):
+    inputs = daily_copy_input(edition)
+    task = TaskResponse(id="budget-test", source_type="news_daily", status="complete",
+                        created_at="2026-10-13", updated_at="2026-10-13",
+                        config=TaskConfig(), output_dir=str(edition.root))
+    with (patch.object(social_copy, "_inputs", return_value=inputs),
+          patch.object(social_copy, "_resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))),
+          patch.object(social_copy, "_chat", AsyncMock(return_value=json.dumps(copy_draft(inputs)))) as chat,
+          patch.object(social_copy.db, "get_task", AsyncMock(return_value=task))):
+        await social_copy._generate(task, {})
+    assert chat.await_count == 1
+    payload = json.loads(chat.await_args.args[1])
+    assert payload["youtube_show_notes_budget"] == social_copy._daily_notes_budget(inputs)
+    assert json.loads((edition.root / "social_copy.json").read_text())["status"] == "ready"
+
+
 @pytest.mark.parametrize("change", ["title", "swap", "omit", "duplicate", "timestamp"])
 def test_upload_copy_rejects_new_lead_missing_swapped_or_invented_chapters(edition, change):
     inputs = daily_copy_input(edition)

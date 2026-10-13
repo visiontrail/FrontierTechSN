@@ -84,6 +84,27 @@ def _fingerprint(inputs: dict) -> str:
     return hashlib.sha256(json.dumps(inputs, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def _daily_notes_suffix(inputs: dict) -> str:
+    rundown = inputs["daily_rundown"]
+    chapters = chapter_text(rundown, inputs.get("chapters", []), inputs["publication_title"])
+    return ("\n\n" + chapters if chapters else "") + "\n\nSources:\n" + "\n".join(
+        f"{story['source_name']}: {story['url']}" for story in rundown["stories"] if story.get("url")
+    )
+
+
+def _daily_notes_budget(inputs: dict) -> dict:
+    reserved = len(_daily_notes_suffix(inputs))
+    count = len(inputs["daily_rundown"]["story_order"])
+    separators = 2 * (count - 1)
+    available = 5000 - reserved
+    if available < count + separators:
+        raise ValueError("Measured chapters and sources leave no room for every story note")
+    return {"description_max_characters": 5000, "reserved_characters": reserved,
+            "joined_story_notes_max_characters": available,
+            "story_separator_characters": separators,
+            "suggested_characters_per_story": min(2000, (available - separators) // count)}
+
+
 def _write(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     staged = path.with_suffix(".tmp")
@@ -120,6 +141,14 @@ def _validate(raw: str, inputs: dict) -> dict:
         if [row.story_id for row in ordered.youtube_story_notes] != rundown["story_order"]:
             raise ValueError("youtube_story_notes must cover every story once in the exact supplied story_order")
         notes = "\n\n".join(row.text.strip() for row in ordered.youtube_story_notes)
+        budget = _daily_notes_budget(inputs)
+        if len(notes) > budget["joined_story_notes_max_characters"]:
+            raise ValueError(
+                f"Story notes use {len(notes)} characters; maximum is "
+                f"{budget['joined_story_notes_max_characters']} including blank-line separators. "
+                f"Measured chapters and exact sources reserve {budget['reserved_characters']} "
+                "of 5000 characters. Shorten prose while preserving every story and its caveats."
+            )
         draft = CopyDraft(youtube_title=ordered.youtube_title, youtube_show_notes=notes,
                           x_paragraphs=ordered.x_paragraphs)
     else:
@@ -165,12 +194,7 @@ def _validate(raw: str, inputs: dict) -> dict:
     if rundown:
         if extract_urls(notes):
             raise ValueError("Keep story notes as prose; software appends sources in story order")
-        chapters = chapter_text(rundown, inputs.get("chapters", []), title)
-        if chapters:
-            notes += "\n\n" + chapters
-        notes += "\n\nSources:\n" + "\n".join(
-            f"{s['source_name']}: {s['url']}" for s in rundown["stories"] if s.get("url")
-        )
+        notes += _daily_notes_suffix(inputs)
         if len(notes) > 5000:
             raise ValueError("Show Notes plus measured chapters and sources exceed 5000 characters; shorten story notes")
     return {"youtube_title": title, "youtube_show_notes": notes, "x_post": post,
@@ -190,6 +214,7 @@ async def _generate(task: TaskResponse, previous: dict) -> None:
         )
         system += "\n\n<humanizer_skill>\n" + skill + "\n</humanizer_skill>"
         if inputs.get("daily_rundown"):
+            notes_budget = _daily_notes_budget(inputs)
             system += """\nMORNING DESK LOCKED RUNDOWN overrides the generic output shape.
 Return {"youtube_title":"exact publication_title", "youtube_story_notes":[{"story_id":"...","text":"..."}], "x_paragraphs":["..."]}.
 Copy publication_title exactly; do not select or rewrite the lead. Write one short
@@ -199,6 +224,11 @@ event and significance, preserving its caveats. Other notes follow playback orde
 Do not add headings, greetings, timestamps or URLs to story notes: software appends
 measured chapters and ordered source links. X also opens with the locked lead;
 any secondary highlights follow story_order. Keep all prose natural and concise.
+Respect youtube_show_notes_budget: the joined story notes, including two newline
+characters between notes, must fit joined_story_notes_max_characters. Chapters
+and exact source links already consume reserved_characters; do not shorten or
+omit them. Aim below suggested_characters_per_story for each note while retaining
+the source attribution, uncertainty and key development.
 """
         endpoint, model, api_key = await _resolve_provider(
             task.config.provider_id, task.config.ai_endpoint, task.config.ai_model,
@@ -207,6 +237,8 @@ any secondary highlights follow story_order. Keep all prose natural and concise.
         previous_draft = None
         for attempt in range(3):
             payload = {**inputs}
+            if inputs.get("daily_rundown"):
+                payload["youtube_show_notes_budget"] = notes_budget
             if feedback:
                 payload["validation_feedback"] = feedback
                 payload["previous_draft"] = previous_draft
