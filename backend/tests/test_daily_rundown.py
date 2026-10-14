@@ -39,16 +39,45 @@ def edition(tmp_path):
                            data=rundown.read_rundown(tmp_path, script))
 
 
-def test_delivery_opens_with_event_and_significance_without_repeating_or_reordering(edition):
+def test_delivery_preserves_greeting_then_lead_without_repeating_or_reordering(edition):
     e = edition
     assert e.script.splitlines() == [
+        scriptwriter.morning_opening(EDITION),
         "Reuters reports Atlas released a smaller chip. It cuts power use in the company's tests.",
         "Independent results remain unavailable.", SECOND, THIRD, CLOSING,
     ]
-    assert "Good morning" not in e.script
+    assert e.script.count("Good morning") == 1
+    assert e.data["version"] == 2
+    assert e.data["segments"][0]["kind"] == "opening"
     assert e.data["story_order"] == [a.id for a in e.dossier.selected]
     assert [s["narration"] for s in e.data["stories"]] == [LEAD, SECOND, THIRD]
     assert e.data["reviewed_script_sha256"] == rundown.script_hash(e.reviewed)
+
+
+def test_greeting_cannot_be_dropped_even_with_recomputed_delivery_hash(edition):
+    e = edition
+    data = copy.deepcopy(e.data)
+    data["segments"].pop(0)
+    data["opening"] = data["segments"][0]["text"]
+    script = "\n".join(row["text"] for row in data["segments"])
+    data["script_sha256"] = rundown.script_hash(script)
+    rundown.write_json(e.root / "rundown.json", data)
+    with pytest.raises(ValueError, match="exact reviewed opening"):
+        rundown.read_rundown(e.root, script)
+
+
+def test_completed_v1_cold_open_remains_readable_without_migration(edition):
+    e = edition
+    data = copy.deepcopy(e.data)
+    data["version"] = 1
+    data["segments"].pop(0)
+    data["opening"] = data.pop("lead_opening")
+    script = "\n".join(row["text"] for row in data["segments"])
+    data["script_sha256"] = rundown.script_hash(script)
+    rundown.write_json(e.root / "rundown.json", data)
+    before = (e.root / "rundown.json").read_bytes()
+    assert rundown.read_rundown(e.root, script) == data
+    assert (e.root / "rundown.json").read_bytes() == before
 
 
 @pytest.mark.parametrize("text", [
@@ -179,13 +208,15 @@ async def test_review_resume_preserves_an_edit_instead_of_recovering_old_candida
 
 
 def timeline(e, end=15.0):
-    cursor = 0.0
+    cursor = 2.0
     rows = []
     for i, segment in enumerate(e.data["segments"]):
-        duration = end if i == 0 else 10.0
+        duration = end if i == 1 else 10.0
         rows.append({"text": segment["text"], "kind": "opening" if i == 0 else "news",
                      "program_start": cursor, "program_end": cursor + duration})
         cursor += duration
+        if i == 0:
+            cursor += 3.0
     return {"passed": True, "segments": rows, "paced_duration_seconds": cursor}
 
 
@@ -203,20 +234,22 @@ def test_chapters_and_visual_scenes_share_audio_order_and_only_publish_after_pro
     pacing = timeline(e)
     rundown.bind_timeline(e.root, e.data, pacing, audio_sha256=digest)
     board = storyboard.build_program_storyboard(pacing_report=pacing, title="Atlas", alignment={"passed": True})
-    board["daily_rundown"] = {"lead_story_id": "story-1", "story_order": e.data["story_order"]}
-    assert [s.get("story_id") for s in board["scenes"]] == ["story-1", "story-1", "story-2", "story-3", None]
-    assert board["scenes"][0]["program_segment_kind"] == "news"
+    board["daily_rundown"] = {"version": 2, "lead_story_id": "story-1", "story_order": e.data["story_order"]}
+    assert [s.get("story_id") for s in board["scenes"]] == [None, "story-1", "story-1", "story-2", "story-3", None]
+    assert board["scenes"][0]["program_segment_kind"] == "opening"
     assert board["scenes"][0]["start"] == 0
     payload = json.loads(visual_plan._batch_prompt_payload(board, board["scenes"]))
-    assert "No brand intro" in payload["opening_instruction"]
+    assert "approved ByteFront Espresso greeting" in payload["opening_instruction"]
     assert rundown.read_chapters(e.root, e.data, str(audio)) == []
     video_hash = "f" * 64
     video_path = str(e.root / f"video-{video_hash[:16]}.mp4")
     Path(video_path).write_bytes(b"video")
     rundown.promote_chapters(e.root, video_hash)
     chapters = rundown.read_chapters(e.root, e.data, str(audio), video_path)
-    assert [row["start_seconds"] for row in chapters] == [0, 25, 35]
-    assert rundown.chapter_text(e.data, chapters, "Atlas releases chip | Daily Tech Brief · Oct 12").startswith("00:00 Atlas releases chip")
+    assert [row["start_seconds"] for row in chapters] == [15, 40, 50]
+    assert rundown.chapter_text(e.data, chapters, "Atlas releases chip | Daily Tech Brief · Oct 12").startswith(
+        "00:00 ByteFront Espresso\n00:15 Atlas releases chip"
+    )
     previous = e.root / "video-previous.mp4"
     previous.write_bytes(b"prior video")
     with pytest.raises(ValueError, match="stale"):
@@ -365,7 +398,7 @@ def test_show_notes_and_auto_publication_both_lead_with_same_event(edition):
                         config=TaskConfig(), output_dir=str(e.root), script_path=str(e.root / "script.txt"),
                         generated_title=inputs["publication_title"])
     description = publishing._description(task)
-    assert description.startswith(e.data["opening"])
+    assert description.startswith(e.data["lead_opening"])
     assert description.index("Atlas") < description.index("Boreal") < description.index("Cedar")
     assert "00:00" not in description  # no invented timing before a final video
 
@@ -392,10 +425,11 @@ async def test_completion_accepts_only_the_exact_reviewed_split(edition, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_composer_enforces_cold_open_even_when_music_pacing_is_disabled(edition, monkeypatch):
+@pytest.mark.parametrize("pacing_enabled", [False, True])
+async def test_composer_preserves_opening_and_news_timing(edition, monkeypatch, pacing_enabled):
     e = edition
     audio = e.root / "audio.wav"
-    durations = [2, 1, 2, 2, 1]
+    durations = [2, 2, 1, 2, 2, 1]
     with wave.open(str(audio), "wb") as handle:
         handle.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
         handle.writeframes(b"\x00\x00" * (sum(durations) * 8000))
@@ -419,9 +453,13 @@ async def test_composer_enforces_cold_open_even_when_music_pacing_is_disabled(ed
     with pytest.raises(Planned):
         await composer.compose_video(script_path=str(e.root / "script.txt"), audio_path=str(audio),
                                      output_dir=str(e.root), title="Atlas", tts_model="orpheus-en",
-                                     program_music_pacing_enabled=False)
+                                     program_music_pacing_enabled=pacing_enabled)
     assert captured["daily_rundown"]["lead_story_id"] == "story-1"
     assert captured["scenes"][0]["text"] == e.data["opening"]
-    assert captured["scenes"][0]["program_segment_kind"] == "news"
+    assert captured["scenes"][0]["program_segment_kind"] == "opening"
+    assert [s["id"] for s in captured["scenes"]] == ["scene-intro", "scene-01", "scene-02", "scene-03", "scene-04", "scene-05"]
     assert captured["scenes"][0]["start"] == 0
-    assert captured["scenes"][1]["start"] == 2  # no inserted greeting/music gap
+    lead_start = 7 if pacing_enabled else 2
+    assert captured["scenes"][1]["start"] == lead_start
+    assert captured["scenes"][2]["start"] == lead_start + 2  # no gap inside the lead story
+    assert captured["scenes"][3]["start"] == lead_start + 3 + (1.5 if pacing_enabled else 0)

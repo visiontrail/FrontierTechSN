@@ -1846,12 +1846,18 @@ async def compose_video(
                 audio_duration,
                 boundaries,
             )
+        if daily_rundown:
+            for segment, row in zip(aligned_segments, daily_rundown["segments"]):
+                segment.update(kind=row["kind"], story_id=row["story_id"])
+        program_opening_enabled = program_music_pacing_enabled and (
+            not daily_rundown or daily_rundown["version"] == 2
+        )
         paced_audio, pacing_report = await music.create_paced_narration(
             audio_path,
             output_dir_path,
             aligned_segments,
-            intro_seconds=0.0 if daily_rundown else program_music_intro_seconds,
-            opening_gap_seconds=0.0 if daily_rundown else program_music_opening_gap_seconds,
+            intro_seconds=program_music_intro_seconds if program_opening_enabled else 0.0,
+            opening_gap_seconds=program_music_opening_gap_seconds if program_opening_enabled else 0.0,
             story_gap_seconds=(
                 program_music_story_gap_seconds if program_music_pacing_enabled else 0.0
             ),
@@ -1912,7 +1918,13 @@ async def compose_video(
                 pacing_report=pacing_report, title=title, alignment=segment_alignment,
                 summary=summary, log=emit,
             )
+        if daily_rundown["version"] == 2:
+            # Keep existing news scene identities when restoring the greeting
+            # to a previously rendered cold-open edition.
+            for index, scene in enumerate(board["scenes"]):
+                scene["id"] = intros.INTRO_SCENE_ID if index == 0 else f"scene-{index:02d}"
         board["daily_rundown"] = {
+            "version": daily_rundown["version"],
             "lead_story_id": daily_rundown["lead_story_id"],
             "story_order": daily_rundown["story_order"],
             "script_sha256": daily_rundown["script_sha256"],
@@ -2230,7 +2242,7 @@ async def compose_video(
     # render stages, not scenes the visual planner should regenerate on retry.
     plans = scene_plans
     intro_plan = None
-    if not daily_rundown:
+    if not daily_rundown or daily_rundown["version"] == 2:
         intro_plan = intros.stage_intro(
             output_dir_path, board, outro_style, edition_date=edition_date,
         )

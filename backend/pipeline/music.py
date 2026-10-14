@@ -611,7 +611,7 @@ async def create_paced_narration(
         )
         concat_labels.append(f"[{label}]")
         segment_duration = source_end - source_cursor
-        kind = (
+        kind = segment.get("kind") or (
             "opening"
             if index == 0
             else "closing" if index == len(aligned_segments) - 1 else "news"
@@ -631,10 +631,17 @@ async def create_paced_narration(
 
         gap_duration = 0.0
         gap_kind = ""
-        if index == 0 and len(aligned_segments) > 1:
+        same_story_continues = (
+            index + 1 < len(aligned_segments)
+            and segment.get("story_id")
+            and segment["story_id"] == aligned_segments[index + 1].get("story_id")
+        )
+        if same_story_continues:
+            pass
+        elif kind == "opening" and len(aligned_segments) > 1:
             gap_duration = opening_gap
             gap_kind = "after_opening"
-        elif 0 < index < len(aligned_segments) - 1:
+        elif kind == "news" and index < len(aligned_segments) - 1:
             gap_duration = story_gap
             gap_kind = "after_news"
         if gap_duration:
