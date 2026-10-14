@@ -2955,3 +2955,61 @@ def test_initialism_repair_rejects_invalid_or_unowned_inputs(tmp_path, defect):
     with pytest.raises(RuntimeError):
         chatterbox._initialism_repair(tmp_path, stem, identity, [edit], audio_stem=stem)
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == originals
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['pass', 'reject', 'unavailable'])
+async def test_initialism_alternative_retains_first_repair_and_both_budgets(setup_client, monkeypatch, outcome):
+    server, script, directory, verifier, generate = setup_client
+    source = 'The AI platform launched.'
+    script.write_text(source)
+    server.pronunciation_ai.side_effect = lambda *a, **kw: json.dumps({'decisions': [
+        {**tts_pronunciation.candidates(source)[0], 'action': 'spell',
+         'spoken': 'eigh eye', 'reason': 'Spell letters.'}]})
+    verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: wrong')
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    stem = 'tts_input_part_001'
+    repair = {'version': 1, 'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
+              'synthesis_sha256': hashlib.sha256(b'The eigh eye platform launched.').hexdigest(),
+              'source_start': 4, 'source_end': 6, 'spoken': 'A. I.', 'pause_before': True,
+              'reason': 'Observed wrong speech',
+              'original_request_sha256': [tts._file_sha256(directory / f'{stem}.request-{i}.json')
+                                          for i in range(3)]}
+    (directory / f'{stem}.initialism-repair.json').write_text(json.dumps(repair))
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    stem += '.initialism-repair'
+    alternative = {**repair, 'synthesis_sha256': hashlib.sha256(b'The, A. I. platform launched.').hexdigest(),
+                   'spoken': 'ay-eye', 'pause_before': False,
+                   'original_request_sha256': [tts._file_sha256(directory / f'{stem}.request-{i}.json')
+                                               for i in range(3)]}
+    (directory / f'{stem}.initialism-alternative.json').write_text(json.dumps(alternative))
+    originals = {str(p): p.read_bytes() for p in directory.rglob('*') if p.is_file()}
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(
+        [{'text': source}], {'passed': True})))
+    if outcome == 'pass':
+        verifier.side_effect = lambda *a, **kw: advisory_report()
+        await generate()
+        await generate()
+        assert len(server.jobs) == 7
+        data = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+        assert data['synthesis_request']['text'] == 'The, ay-eye platform launched.'
+        assert data['identity']['initialism_repair_sha256'] == chatterbox._digest(repair)
+        assert data['identity']['initialism_alternative_sha256'] == chatterbox._digest(alternative)
+        assert data['integrity']['pronunciation']['passed']
+        assert data['integrity']['independent_audit']['passed']
+    elif outcome == 'unavailable':
+        verifier.side_effect = RuntimeError('Recognizer unavailable')
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match='Recognizer unavailable'):
+                await generate()
+        assert len(server.jobs) == 7
+    else:
+        with pytest.raises(tts.TtsIntegrityError):
+            await generate()
+        with pytest.raises(tts.TtsIntegrityError, match='exhausted'):
+            await generate()
+        assert len(server.jobs) == 9
+    for path, contents in originals.items():
+        assert Path(path).read_bytes() == contents

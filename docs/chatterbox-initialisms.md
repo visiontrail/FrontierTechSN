@@ -114,6 +114,12 @@ cannot reset either budget, change the activated repair, replace accepted audio,
 or skip pronunciation and independent audio checks. This is an explicit recovery
 input, not a guarantee that an alternative spelling will be pronounced correctly.
 
+If that spelling also exhausts all three pronunciation candidates, one final
+`<request-stem>.initialism-alternative.json` may select another letter-equivalent
+spelling under the same contract. It binds the first spelling's rejected jobs
+and retains its activation hash and any preceding comma. There are exactly two
+explicit spelling stages, each with three candidates; no recursive repair chain.
+
 ## Real AI validation, 2026-10-02
 
 Evidence is under `outputs/chatterbox-ai-pronunciation-20261002/`. Calls used

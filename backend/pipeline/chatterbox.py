@@ -198,14 +198,17 @@ def _bind_verification(directory: Path, binding: dict) -> None:
 
 
 def _initialism_repair(directory: Path, stem: str, identity: dict,
-                       edits: list[dict], *, audio_stem: str) -> tuple[dict, str]:
+                       edits: list[dict], *, audio_stem: str,
+                       repair_kind: str = 'initialism-repair') -> tuple[dict, str]:
     """Allow one explicit letter-equivalent input after exhausted pronunciation jobs.
 
     A frozen plan may still produce wrong speech after a pause repair. Bind an
     alternate spelling to the exact source occurrence and rejected requests;
     never rewrite ordinary words, accept rejected audio, or replenish a budget.
     """
-    marker = directory / f'{stem}.initialism-repair.json'
+    if repair_kind not in {'initialism-repair', 'initialism-alternative'}:
+        raise ValueError('Unsupported initialism recovery stage')
+    marker = directory / f'{stem}.{repair_kind}.json'
     if not marker.exists():
         return identity, stem
     repair = _read_json(marker)
@@ -217,6 +220,7 @@ def _initialism_repair(directory: Path, stem: str, identity: dict,
                    and edit['end'] == repair['source_end']
                    and edit.get('kind') in (None, 'initialism')), None)
     if (repair.get('version') != 1 or target is None
+            or (repair_kind == 'initialism-alternative' and not identity.get('initialism_repair_sha256'))
             or repair.get('source_sha256') != hashlib.sha256(source.encode()).hexdigest()
             or repair.get('synthesis_sha256') != hashlib.sha256(base.encode()).hexdigest()
             or type(repair.get('pause_before')) is not bool
@@ -227,6 +231,11 @@ def _initialism_repair(directory: Path, stem: str, identity: dict,
     letters = target['source'].replace('.', '').upper()
     prefix = _render_provider_span(source, 0, target['start'], edits)
     suffix = _render_provider_span(source, target['end'], len(source), edits)
+    # A second, explicitly bound spelling may retain the first repair's pause.
+    # There are exactly two spelling stages, not an open-ended repair chain.
+    if (repair_kind == 'initialism-alternative' and identity.get('initialism_repair_sha256')
+            and prefix.endswith(' ') and base.startswith(prefix.rstrip() + ', ')):
+        prefix = prefix.rstrip() + ', '
     end = len(base) - len(suffix)
     if (source[target['start']:target['end']] != target['source']
             or (target['start'] > 0 and source[target['start'] - 1].isalnum())
@@ -264,17 +273,17 @@ def _initialism_repair(directory: Path, stem: str, identity: dict,
                     'Chatterbox initialism pronunciation mismatch:')):
             raise RuntimeError('Initialism repair requires unchanged exhausted pronunciation jobs')
     digest = _digest(repair)
-    applied = directory / f'{stem}.initialism-repair-applied.json'
+    hash_field = repair_kind.replace('-', '_') + '_sha256'
+    applied = directory / f'{stem}.{repair_kind}-applied.json'
     if applied.exists() and _read_json(applied).get('repair_sha256') != digest:
         raise RuntimeError('Initialism repair changed after activation; preserving its jobs')
     wav = directory / f'{audio_stem}_generated.wav'
     if wav.exists() and _read_json(tts._part_metadata_path(wav)).get('identity', {}).get(
-            'initialism_repair_sha256') != digest:
+            hash_field) != digest:
         raise RuntimeError('Initialism repair cannot replace existing accepted audio')
     if not applied.exists():
         _write_json(applied, {'repair_sha256': digest})
-    return {**identity, 'synthesis_text': synthesis,
-            'initialism_repair_sha256': digest}, f'{stem}.initialism-repair'
+    return {**identity, 'synthesis_text': synthesis, hash_field: digest}, f'{stem}.{repair_kind}'
 
 
 def _letter_repetition_repair(directory: Path, stem: str, identity: dict,
@@ -1226,9 +1235,15 @@ async def _generate_chatterbox(
                 identity, request_stem = _punctuation_repair(
                     directory, request_stem, identity, audio_stem=stem,
                 )
+            prior_stem = request_stem
             identity, request_stem = _initialism_repair(
                 directory, request_stem, identity, chunk_edits, audio_stem=stem,
             )
+            if request_stem != prior_stem:
+                identity, request_stem = _initialism_repair(
+                    directory, request_stem, identity, chunk_edits, audio_stem=stem,
+                    repair_kind='initialism-alternative',
+                )
             synthesis_text = identity['synthesis_text']
             if request_stem != stem:
                 (synthesis_directory / f'{request_stem}.txt').write_text(synthesis_text, encoding='utf-8')
