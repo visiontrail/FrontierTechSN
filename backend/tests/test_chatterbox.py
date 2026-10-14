@@ -2845,3 +2845,113 @@ async def test_trailing_speech_pause_requires_three_confirmed_tail_rejections(se
     with pytest.raises(RuntimeError, match='Punctuation repair'):
         await generate()
     assert len(server.jobs) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('after_pause', [False, True])
+@pytest.mark.parametrize('outcome', ['pass', 'reject', 'unavailable', 'independent_reject'])
+async def test_explicit_initialism_repair_preserves_jobs_and_checks(
+        setup_client, monkeypatch, after_pause, outcome):
+    server, script, directory, verifier, generate = setup_client
+    source = 'The AI platform launched.'
+    script.write_text(source)
+    server.pronunciation_ai.side_effect = lambda *a, **kw: json.dumps({'decisions': [
+        {**tts_pronunciation.candidates(source)[0], 'action': 'spell',
+         'spoken': 'eigh eye', 'reason': 'Spell the source letters.'}]})
+    verifier.side_effect = tts.TtsIntegrityError('Chatterbox initialism pronunciation mismatch: wrong letters')
+    with pytest.raises(tts.TtsIntegrityError):
+        await generate()
+    stem, synthesis = 'tts_input_part_001', 'The eigh eye platform launched.'
+    if after_pause:
+        write_punctuation_repair(directory, source, synthesis, len('The eigh'))
+        with pytest.raises(tts.TtsIntegrityError):
+            await generate()
+        stem += '.punctuation-repair'
+        synthesis = 'The eigh, eye platform launched.'
+    original_jobs = len(server.jobs)
+    originals = {str(p): p.read_bytes() for p in directory.rglob('*') if p.is_file()}
+    repair = {'version': 1, 'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
+              'synthesis_sha256': hashlib.sha256(synthesis.encode()).hexdigest(),
+              'source_start': 4, 'source_end': 6, 'spoken': 'A. I.', 'pause_before': True,
+              'reason': 'Separate mispronounced letters from surrounding speech.',
+              'original_request_sha256': [tts._file_sha256(directory / f'{stem}.request-{i}.json')
+                                          for i in range(3)]}
+    marker = directory / f'{stem}.initialism-repair.json'
+    marker.write_text(json.dumps(repair))
+    monkeypatch.setattr(av_sync, 'ensure_word_transcript', AsyncMock(return_value=(
+        [{'text': source}], {'passed': True})))
+    if outcome == 'pass':
+        verifier.side_effect = lambda *a, **kw: advisory_report()
+        await generate()
+        await generate()
+        assert len(server.jobs) == original_jobs + 1
+        metadata = json.loads((directory / 'tts_input_part_001_generated.json').read_text())
+        assert metadata['identity']['text'] == source
+        assert metadata['synthesis_request']['text'] == 'The, A. I. platform launched.'
+        assert metadata['identity']['initialism_repair_sha256']
+        assert metadata['integrity']['pronunciation']['passed']
+        assert metadata['integrity']['independent_audit']['passed']
+        marker.write_text(json.dumps({**repair, 'reason': 'Changed after activation'}))
+        with pytest.raises(RuntimeError, match='changed after activation'):
+            await generate()
+    elif outcome == 'unavailable':
+        verifier.side_effect = RuntimeError('Recognizer unavailable')
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match='Recognizer unavailable'):
+                await generate()
+        assert len(server.jobs) == original_jobs + 1
+    else:
+        if outcome == 'independent_reject':
+            verifier.side_effect = lambda *a, **kw: advisory_report()
+            server.independent_audit.side_effect = tts.TtsIntegrityError('independent extra speech')
+        with pytest.raises(tts.TtsIntegrityError):
+            await generate()
+        with pytest.raises(tts.TtsIntegrityError, match='exhausted'):
+            await generate()
+        assert len(server.jobs) == original_jobs + 3
+    assert script.read_text() == source
+    for name, contents in originals.items():
+        assert Path(name).read_bytes() == contents
+
+
+@pytest.mark.parametrize('defect', [
+    'source', 'synthesis', 'letters', 'span', 'words', 'pending', 'rejection',
+    'identity', 'hash', 'budget', 'accepted', 'unchanged', 'limit', 'word_hint',
+])
+def test_initialism_repair_rejects_invalid_or_unowned_inputs(tmp_path, defect):
+    source, synthesis, stem = 'The AI platform launched.', 'The eigh eye platform launched.', 'part'
+    edit = {'start': 4, 'end': 6, 'source': 'AI', 'spoken': 'eigh eye'}
+    identity = {'text': source, 'synthesis_text': synthesis, 'language': 'en', 'voice': 'jane',
+                'seed': 42, 'synthesis_parameters': dict(chatterbox.SYNTHESIS_PARAMETERS)}
+    for attempt in range(3):
+        payload = {'text': synthesis, 'language_id': 'en', 'voice': 'jane', 'seed': 42 + attempt,
+                   **chatterbox.SYNTHESIS_PARAMETERS}
+        checkpoint = {'identity': chatterbox._digest({'identity': identity, 'payload': payload}),
+                      'idempotency_key': str(attempt), 'job_id': str(attempt),
+                      'rejected': 'Chatterbox initialism pronunciation mismatch: observed wrong letters'}
+        if attempt == 0:
+            if defect == 'pending': checkpoint.pop('rejected')
+            if defect == 'rejection': checkpoint['rejected'] = 'Recognizer unavailable'
+            if defect == 'identity': checkpoint['identity'] = 'other-input'
+        (tmp_path / f'{stem}.request-{attempt}.json').write_text(json.dumps(checkpoint))
+    repair = {'version': 1, 'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
+              'synthesis_sha256': hashlib.sha256(synthesis.encode()).hexdigest(),
+              'source_start': 4, 'source_end': 6, 'spoken': 'A. I.', 'pause_before': True,
+              'reason': 'Observed pronunciation failure',
+              'original_request_sha256': [tts._file_sha256(tmp_path / f'{stem}.request-{i}.json')
+                                          for i in range(3)]}
+    if defect in {'source', 'synthesis'}: repair[defect + '_sha256'] = 'wrong'
+    if defect == 'letters': repair['spoken'] = 'A. G. I.'
+    if defect == 'span': repair['source_start'] = 0
+    if defect == 'words': identity['synthesis_text'] = synthesis.replace('platform', 'product')
+    if defect == 'hash': repair['original_request_sha256'][0] = 'wrong'
+    if defect == 'budget': repair['original_request_sha256'].pop()
+    if defect == 'accepted': (tmp_path / f'{stem}_generated.wav').write_bytes(pcm_wav())
+    if defect == 'unchanged': repair.update(spoken='eigh eye', pause_before=False)
+    if defect == 'limit': repair['spoken'] = 'A' + ' ' * 400 + 'I'
+    if defect == 'word_hint': edit['kind'] = 'word'
+    (tmp_path / f'{stem}.initialism-repair.json').write_text(json.dumps(repair))
+    originals = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    with pytest.raises(RuntimeError):
+        chatterbox._initialism_repair(tmp_path, stem, identity, [edit], audio_stem=stem)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == originals

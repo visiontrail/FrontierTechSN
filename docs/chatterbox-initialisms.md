@@ -91,6 +91,29 @@ The transformation applies only to Chatterbox's English synthesis request:
   rejection files remain archived. Physical failures are not cleared by this
   observation repair.
 
+### Explicit recovery after exhausted pronunciation candidates
+
+A failed task can opt into one alternative spelling for a standalone initialism
+using `audio/<request-stem>.initialism-repair.json`. This also works after an
+existing punctuation repair; use that repair's request stem. The marker contains
+`version: 1`, the canonical chunk's `source_sha256`, the current provider input's
+`synthesis_sha256`, chunk-relative `source_start` and `source_end`, replacement
+`spoken` letter names, a boolean `pause_before`, a nonempty `reason`, and the
+ordered `original_request_sha256` hashes of all three rejected checkpoints.
+
+The adapter requires three completed, identity-matched pronunciation rejections
+and an existing planned initialism at that exact source span. Replacement letter
+names must preserve every source letter in order. Surrounding words, canonical
+script, frozen plan, voice, seeds and verification gates stay unchanged. The
+optional comma precedes a standalone word boundary. Brand fragments and word
+hints are excluded, and normal chunk limits still apply.
+
+The new input gets its own three-candidate budget and immutable activation hash.
+Original checkpoints and rejected audio remain intact. Repeated resume calls
+cannot reset either budget, change the activated repair, replace accepted audio,
+or skip pronunciation and independent audio checks. This is an explicit recovery
+input, not a guarantee that an alternative spelling will be pronounced correctly.
+
 ## Real AI validation, 2026-10-02
 
 Evidence is under `outputs/chatterbox-ai-pronunciation-20261002/`. Calls used

@@ -197,6 +197,86 @@ def _bind_verification(directory: Path, binding: dict) -> None:
     _write_json(marker, binding)
 
 
+def _initialism_repair(directory: Path, stem: str, identity: dict,
+                       edits: list[dict], *, audio_stem: str) -> tuple[dict, str]:
+    """Allow one explicit letter-equivalent input after exhausted pronunciation jobs.
+
+    A frozen plan may still produce wrong speech after a pause repair. Bind an
+    alternate spelling to the exact source occurrence and rejected requests;
+    never rewrite ordinary words, accept rejected audio, or replenish a budget.
+    """
+    marker = directory / f'{stem}.initialism-repair.json'
+    if not marker.exists():
+        return identity, stem
+    repair = _read_json(marker)
+    source, base = identity['text'], identity['synthesis_text']
+    target = next((edit for edit in edits
+                   if type(repair.get('source_start')) is int
+                   and type(repair.get('source_end')) is int
+                   and edit['start'] == repair['source_start']
+                   and edit['end'] == repair['source_end']
+                   and edit.get('kind') in (None, 'initialism')), None)
+    if (repair.get('version') != 1 or target is None
+            or repair.get('source_sha256') != hashlib.sha256(source.encode()).hexdigest()
+            or repair.get('synthesis_sha256') != hashlib.sha256(base.encode()).hexdigest()
+            or type(repair.get('pause_before')) is not bool
+            or not isinstance(repair.get('reason'), str) or not repair['reason'].strip()
+            or not isinstance(repair.get('spoken'), str)
+            or repair['spoken'] != repair['spoken'].strip()):
+        raise RuntimeError('Invalid source-bound initialism repair; preserving existing jobs')
+    letters = target['source'].replace('.', '').upper()
+    prefix = _render_provider_span(source, 0, target['start'], edits)
+    suffix = _render_provider_span(source, target['end'], len(source), edits)
+    end = len(base) - len(suffix)
+    if (source[target['start']:target['end']] != target['source']
+            or (target['start'] > 0 and source[target['start'] - 1].isalnum())
+            or (target['end'] < len(source) and source[target['end']].isalnum())
+            or not base.startswith(prefix) or not base.endswith(suffix)
+            or end <= len(prefix)):
+        raise RuntimeError('Initialism repair must preserve all surrounding source words')
+    try:
+        if (pronunciation._spoken_letters(base[len(prefix):end].replace(',', ' ')) != letters
+                or pronunciation._spoken_letters(repair['spoken']) != letters):
+            raise ValueError('Changed source letters')
+    except ValueError as exc:
+        raise RuntimeError('Initialism repair must retain every source letter') from exc
+    if repair['pause_before']:
+        if not prefix.endswith(' ') or not prefix.rstrip()[-1:].isalnum():
+            raise RuntimeError('Initialism repair pause must follow a source word boundary')
+        prefix = prefix.rstrip() + ', '
+    synthesis = prefix + repair['spoken'] + suffix
+    if (synthesis == base or len(synthesis) > config.CHATTERBOX_TTS_MAX_CHARS
+            or _synthesis_word_count(synthesis) > config.CHATTERBOX_TTS_CHUNK_WORDS):
+        raise RuntimeError('Initialism repair must change input within existing chunk limits')
+    originals = repair.get('original_request_sha256')
+    if not isinstance(originals, list) or len(originals) != MAX_INTEGRITY_ATTEMPTS:
+        raise RuntimeError('Initialism repair requires all exhausted pronunciation requests')
+    for attempt, digest in enumerate(originals):
+        path = directory / f'{stem}.request-{attempt}.json'
+        checkpoint = _read_request_checkpoint(path)
+        payload = {'text': base, 'language_id': identity['language'], 'voice': identity['voice'],
+                   'seed': (identity['seed'] + attempt) % (2 ** 32),
+                   **identity['synthesis_parameters']}
+        if (not path.is_file() or tts._file_sha256(path) != digest
+                or checkpoint.get('identity') != _digest({'identity': identity, 'payload': payload})
+                or not checkpoint.get('job_id')
+                or not str(checkpoint.get('rejected', '')).startswith(
+                    'Chatterbox initialism pronunciation mismatch:')):
+            raise RuntimeError('Initialism repair requires unchanged exhausted pronunciation jobs')
+    digest = _digest(repair)
+    applied = directory / f'{stem}.initialism-repair-applied.json'
+    if applied.exists() and _read_json(applied).get('repair_sha256') != digest:
+        raise RuntimeError('Initialism repair changed after activation; preserving its jobs')
+    wav = directory / f'{audio_stem}_generated.wav'
+    if wav.exists() and _read_json(tts._part_metadata_path(wav)).get('identity', {}).get(
+            'initialism_repair_sha256') != digest:
+        raise RuntimeError('Initialism repair cannot replace existing accepted audio')
+    if not applied.exists():
+        _write_json(applied, {'repair_sha256': digest})
+    return {**identity, 'synthesis_text': synthesis,
+            'initialism_repair_sha256': digest}, f'{stem}.initialism-repair'
+
+
 def _letter_repetition_repair(directory: Path, stem: str, identity: dict,
                               edits: list[dict]) -> tuple[dict, str]:
     """Speak each repeated initial explicitly, retaining any owned old jobs.
@@ -1146,6 +1226,9 @@ async def _generate_chatterbox(
                 identity, request_stem = _punctuation_repair(
                     directory, request_stem, identity, audio_stem=stem,
                 )
+            identity, request_stem = _initialism_repair(
+                directory, request_stem, identity, chunk_edits, audio_stem=stem,
+            )
             synthesis_text = identity['synthesis_text']
             if request_stem != stem:
                 (synthesis_directory / f'{request_stem}.txt').write_text(synthesis_text, encoding='utf-8')
