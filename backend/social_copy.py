@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from twitter_text import extract_urls, parse_tweet
+from twitter_text import extract_urls, extract_urls_with_indices, parse_tweet
 
 from backend import config, database as db
 from backend.models import TaskResponse, TaskStatus
@@ -154,6 +154,17 @@ def read_copy(task: TaskResponse) -> dict:
     return result
 
 
+def _note_url_tokens(text: str) -> set[str]:
+    tokens = set()
+    for item in extract_urls_with_indices(text):
+        token = item["url"]
+        # The extractor stops bare hosts before a query/fragment/port. Include
+        # those suffixes so a grounded name cannot authorize a new link.
+        suffix = re.match(r"[:/?#@]\S+", text[item["indices"][1]:])
+        tokens.add(token + (suffix.group() if suffix else ""))
+    return tokens
+
+
 def _validate(raw: str, inputs: dict) -> dict:
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
     rundown = inputs.get("daily_rundown")
@@ -215,8 +226,25 @@ def _validate(raw: str, inputs: dict) -> dict:
     if re.search(r"(?m)^\s*\d{1,2}:\d{2}\b", notes):
         raise ValueError("Do not invent chapter timestamps")
     if rundown:
-        if extract_urls(notes):
-            raise ValueError("Keep story notes as prose; software appends sources in story order")
+        stories = {story["story_id"]: story for story in rundown["stories"]}
+        note_links = {}
+        for row in ordered.youtube_story_notes:
+            # URL extraction also recognizes domain-shaped company names (Z.ai).
+            # Preserve only exact bare tokens from THIS story's approved prose;
+            # explicit links, paths and names from other stories still fail.
+            grounded_names = {
+                token for token in _note_url_tokens(stories[row.story_id]["narration"])
+                if not re.search(r"[:/?#@]", token)
+            }
+            links = sorted(_note_url_tokens(row.text) - grounded_names)
+            if links:
+                note_links[row.story_id] = links
+        if note_links:
+            raise ValueError(
+                "Keep story notes as prose; software appends sources in story order. "
+                f"Remove these links from the identified story notes: {json.dumps(note_links, ensure_ascii=False)}. "
+                "An exact bare company name from that story's approved narration may remain."
+            )
         notes += _daily_notes_suffix(inputs)
         if len(notes) > 5000:
             raise ValueError("Show Notes plus measured chapters and sources exceed 5000 characters; shorten story notes")
@@ -245,7 +273,9 @@ note per story in daily_rundown.story_order. Each note covers ONLY that story's
 supplied approved narration. The first note must explain the cold open's core
 event and significance, preserving its caveats. Other notes follow playback order.
 Do not add headings, greetings, timestamps or URLs to story notes: software appends
-measured chapters and ordered source links. X also opens with the locked lead;
+measured chapters and ordered source links. Preserve domain-shaped company names
+such as Z.ai only when that exact bare name occurs in the same story's approved
+narration; do not turn a name into a website link. X also opens with the locked lead;
 any secondary highlights follow story_order. Keep all prose natural and concise.
 Respect youtube_show_notes_budget: the joined story notes, including two newline
 characters between notes, must fit joined_story_notes_max_characters. Chapters

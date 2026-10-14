@@ -285,6 +285,34 @@ def copy_draft(inputs):
     ], "x_paragraphs": ["Atlas reports lower chip power use in company tests. Independent results remain unavailable."]}
 
 
+def test_daily_copy_preserves_domain_shaped_name_from_same_story(edition):
+    inputs = daily_copy_input(edition)
+    narration = "Z.ai released an open model, according to the report."
+    inputs["final_narration"] += " " + narration
+    inputs["daily_rundown"]["stories"][0]["narration"] = narration
+    draft = copy_draft(inputs)
+    draft["youtube_story_notes"][0]["text"] = narration
+    result = social_copy._validate(json.dumps(draft), inputs)
+    assert result["youtube_show_notes"].startswith(narration)
+    assert result["youtube_show_notes"].count("https://example.org/1") == 1
+
+
+@pytest.mark.parametrize("token", ["https://Z.ai", "Z.ai/report", "Z.ai?q=report", "Z.ai#report", "Z.ai"])
+def test_daily_copy_still_rejects_links_and_names_from_other_stories(edition, token):
+    inputs = daily_copy_input(edition)
+    inputs["final_narration"] += " Z.ai released a model."
+    inputs["daily_rundown"]["stories"][0]["narration"] += " Z.ai released a model."
+    # Even an otherwise approved source link must not enter prose notes.
+    inputs["source_references"] = [*inputs["source_references"], {"url": token}]
+    draft = copy_draft(inputs)
+    row = draft["youtube_story_notes"][1 if token == "Z.ai" else 0]
+    row["text"] += " " + token
+    with pytest.raises(ValueError, match="Keep story notes as prose") as rejected:
+        social_copy._validate(json.dumps(draft), inputs)
+    assert row["story_id"] in str(rejected.value)
+    assert token in str(rejected.value)
+
+
 @pytest.mark.parametrize("with_chapters", [False, True])
 def test_copy_budget_reserves_exact_sources_chapters_and_separators(edition, with_chapters):
     inputs = daily_copy_input(edition)
