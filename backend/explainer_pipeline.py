@@ -591,9 +591,65 @@ async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Pa
                             playback_policy="play_once_fit_longer_or_hold_shorter")
 
 
+async def _verified_speech_edge(scene: dict, path: Path, audio: dict, root: Path) -> dict | None:
+    """Reuse a passed speech audit only after binding it to this exact WAV."""
+    source_sha = hashlib.sha256(scene["narration"].encode()).hexdigest()
+    path_sha = _sha(path)
+
+    def accepted(report: dict, expected_audio_sha: str) -> bool:
+        identity = report.get("identity") or {}
+        tail = report.get("waveform_tail") or {}
+        return (report.get("passed") is True and tail.get("passed") is True
+                and identity.get("audio_sha256") == expected_audio_sha
+                and identity.get("source_sha256") == source_sha
+                and isinstance(tail.get("speech_end_seconds"), (int, float)))
+
+    reused = _safe(path.parent / "reuse-audit.json", root)
+    if reused.is_file() and audio.get("files", {}).get("reuse-audit.json") == _sha(reused):
+        report = json.loads(reused.read_text())
+        if accepted(report, path_sha):
+            return {"speech_end_seconds": report["waveform_tail"]["speech_end_seconds"],
+                    "audit_path": str(reused.relative_to(root)), "audit_sha256": _sha(reused),
+                    "audio_sha256": path_sha, "binding": "exact_narration_waveform"}
+    manifest_path = _safe(path.parent / "provider" / "tts_manifest.json", root)
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("chunk_count") != 1 or manifest.get("source_text_sha256") != source_sha:
+        return None
+    raw = _safe(manifest_path.parent / str(manifest.get("output", "")), root)
+    raw_sha = manifest.get("output_audio_sha256")
+    if not raw.is_file() or _sha(raw) != raw_sha:
+        return None
+    for proof in sorted((manifest_path.parent / "independent-production").rglob("audit.json")):
+        _safe(proof, root)
+        report = json.loads(proof.read_text())
+        if not accepted(report, raw_sha):
+            continue
+        # Reproduce precisely the existing resample/pad operation. Matching
+        # duration alone cannot establish that an audit belongs to this audio.
+        pcm = await _command([
+            "ffmpeg", "-v", "error", "-i", str(raw), "-af",
+            f"aresample={SAMPLE_RATE},apad,atrim=end_sample={audio['frames'] * (SAMPLE_RATE // FPS)}",
+            "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le", "-f", "s16le", "-",
+        ])
+        import wave
+        with wave.open(str(path), "rb") as source:
+            if pcm != source.readframes(source.getnframes()):
+                return None
+        return {"speech_end_seconds": report["waveform_tail"]["speech_end_seconds"],
+                "audit_path": str(proof.relative_to(root)), "audit_sha256": _sha(proof),
+                "audio_sha256": path_sha, "provider_audio_sha256": raw_sha,
+                "binding": "sample_identical_resample_and_padding"}
+    return None
+
+
 async def _paced_audio(scene: dict, path: Path, audio: dict, root: Path, *,
                        chapter_end: bool, closing_hold: float) -> tuple[Path, dict]:
-    plan = await asyncio.to_thread(pacing_plan, path, chapter_end=chapter_end, closing_hold=closing_hold)
+    proof = await _verified_speech_edge(scene, path, audio, root)
+    plan = await asyncio.to_thread(pacing_plan, path, chapter_end=chapter_end, closing_hold=closing_hold,
+                                  verified_speech_end=proof["speech_end_seconds"] if proof else None)
+    plan["speech_edge_evidence"] = proof
     plan["narration_duration_seconds"] = min(
         plan["narration_duration_seconds"],
         audio["narration_duration_seconds"] - plan["removed_leading_seconds"],

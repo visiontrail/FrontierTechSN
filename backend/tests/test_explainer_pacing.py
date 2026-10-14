@@ -54,3 +54,16 @@ def test_short_edges_are_not_lengthened_and_silence_is_rejected(tmp_path):
     write_wave(source, [0] * SAMPLE_RATE)
     with pytest.raises(ValueError, match="silent"):
         pacing_plan(source)
+
+
+def test_verified_word_edge_protects_quiet_speech_but_removes_low_level_tail(tmp_path):
+    source = tmp_path / "source.wav"
+    write_wave(source, [500] * SAMPLE_RATE + [60] * SAMPLE_RATE + [80] * (2 * SAMPLE_RATE))
+    conservative = pacing_plan(source)
+    guarded = pacing_plan(source, verified_speech_end=2)
+    assert conservative["removed_trailing_seconds"] == 0
+    assert guarded["end_sample"] == round(2.34 * SAMPLE_RATE)
+    assert guarded["end_sample"] > 2 * SAMPLE_RATE
+    # Sound above the near-silence threshold after the same word edge must stay.
+    write_wave(source, [500] * SAMPLE_RATE + [60] * SAMPLE_RATE + [800] * SAMPLE_RATE + [0] * SAMPLE_RATE)
+    assert pacing_plan(source, verified_speech_end=2)["end_sample"] == round(3.22 * SAMPLE_RATE)

@@ -119,6 +119,38 @@ def test_gemini_mode_cannot_silently_render_zero_videos(tmp_path, providers):
     assert providers.audio_calls == providers.image_calls == providers.motion_calls == []
 
 
+def test_speech_edge_requires_source_text_audio_and_pcm_binding(tmp_path, providers):
+    async def run():
+        import hashlib
+        project = _project()
+        scene = project["scenes"][0]
+        path, record = await pipeline._audio(scene, project, tmp_path, lambda _: None)
+        raw = path.parent / "provider/generated.wav"
+        manifest = raw.with_name("tts_manifest.json")
+        source_sha = hashlib.sha256(scene["narration"].encode()).hexdigest()
+        manifest.write_text(json.dumps({"chunk_count": 1, "source_text_sha256": source_sha,
+                                        "output": raw.name, "output_audio_sha256": pipeline._sha(raw)}))
+        proof = raw.parent / "independent-production/test/audit.json"
+        proof.parent.mkdir(parents=True)
+        audit = {"passed": True, "identity": {"source_sha256": source_sha, "audio_sha256": pipeline._sha(raw)},
+                 "waveform_tail": {"passed": True, "speech_end_seconds": 0.17}}
+        proof.write_text(json.dumps(audit))
+        edge = await pipeline._verified_speech_edge(scene, path, record, tmp_path)
+        assert edge["binding"] == "sample_identical_resample_and_padding"
+        assert edge["speech_end_seconds"] == 0.17
+        assert await pipeline._verified_speech_edge({**scene, "narration": "Another text"}, path, record, tmp_path) is None
+        original = path.read_bytes()
+        with wave.open(str(path), "wb") as changed:
+            changed.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+            changed.writeframes(b"\0\0" * 9600)
+        assert await pipeline._verified_speech_edge(scene, path, record, tmp_path) is None
+        path.write_bytes(original)
+        audit["passed"] = False
+        proof.write_text(json.dumps(audit))
+        assert await pipeline._verified_speech_edge(scene, path, record, tmp_path) is None
+    asyncio.run(run())
+
+
 def test_closing_hold_fades_after_speech_and_reuses_original_media(tmp_path, providers):
     async def run():
         project = _project()
