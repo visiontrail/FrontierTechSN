@@ -103,8 +103,8 @@ export default function TaskDetail() {
 
   const hasScript = !!task?.script_path
   const { data: scriptText } = useQuery({
-    queryKey: ['script', id],
-    queryFn: () => fetchScript(id!),
+    queryKey: ['script', id, task?.updated_at],
+    queryFn: () => fetchScript(id!, task?.updated_at),
     enabled: !!id && hasScript,
   })
 
@@ -214,12 +214,12 @@ export default function TaskDetail() {
           </span>
           <div className="detail-quick-actions">
             {task.script_path && (
-              <a href={scriptUrl(task.id)} target="_blank" rel="noopener">
+              <a href={scriptUrl(task.id, task.updated_at)} target="_blank" rel="noopener">
                 <button className="btn-ghost" type="button">Script</button>
               </a>
             )}
             {task.audio_path && (
-              <a href={audioUrl(task.id)} target="_blank" rel="noopener">
+              <a href={audioUrl(task.id, task.updated_at)} target="_blank" rel="noopener">
                 <button className="btn-ghost" type="button">Audio</button>
               </a>
             )}
@@ -442,7 +442,7 @@ export default function TaskDetail() {
           {task.audio_path && task.status !== 'complete' && (
             <section className="detail-panel">
               <h3>Audio Preview</h3>
-              <audio controls src={audioUrl(task.id)} />
+              <audio controls src={audioUrl(task.id, task.updated_at)} />
               {(awaitingReview || retryingFailedRender) && (
                 <>
                   <p className="detail-hint">

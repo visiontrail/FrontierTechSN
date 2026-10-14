@@ -730,8 +730,8 @@ export function accountRunImageUrl(id: string): string {
   return `${BASE}/api/account-operations/runs/${encodeURIComponent(id)}/image`;
 }
 
-export async function fetchScript(taskId: string): Promise<string> {
-  const res = await fetch(scriptUrl(taskId));
+export async function fetchScript(taskId: string, revision?: string): Promise<string> {
+  const res = await fetch(scriptUrl(taskId, revision));
   if (!res.ok) throw new Error(await res.text());
   return res.text();
 }
@@ -789,16 +789,16 @@ export function videoUrl(taskId: string, artifact: VideoArtifactState): string {
   return `${BASE}/api/tasks/${taskId}/video?artifact=${artifact}`;
 }
 
-export function audioUrl(taskId: string): string {
-  return `${BASE}/api/tasks/${taskId}/audio`;
+export function audioUrl(taskId: string, revision?: string): string {
+  return `${BASE}/api/tasks/${taskId}/audio${revision ? `?v=${encodeURIComponent(revision)}` : ''}`;
 }
 
 export function subtitlesUrl(taskId: string, artifact: VideoArtifactState): string {
   return `${BASE}/api/tasks/${taskId}/subtitles?artifact=${artifact}`;
 }
 
-export function scriptUrl(taskId: string): string {
-  return `${BASE}/api/tasks/${taskId}/script`;
+export function scriptUrl(taskId: string, revision?: string): string {
+  return `${BASE}/api/tasks/${taskId}/script${revision ? `?v=${encodeURIComponent(revision)}` : ''}`;
 }
 
 export function thumbnailUrl(taskId: string): string {
