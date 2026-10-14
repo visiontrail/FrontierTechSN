@@ -266,6 +266,8 @@ async def test_title_can_only_use_the_locked_lead_and_preserves_edition_date(edi
     assert chat.await_count == 2
     payload = json.loads(chat.await_args.args[1])
     assert payload["final_audio_script"] == LEAD
+    assert payload["cold_open"] == e.data["lead_opening"]
+    assert "Good morning" not in payload["cold_open"]
     assert "Boreal" not in payload["final_audio_script"]
     assert artifact.title == "Atlas reports lower-power chip | Daily Tech Brief · Oct 12"
 

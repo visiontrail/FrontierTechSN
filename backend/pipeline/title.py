@@ -124,7 +124,8 @@ async def generate_title(
             month = ("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split())[edition.month - 1]
             suffix = f" | Daily Tech Brief · {month} {edition.day}"
             payload = {"final_audio_script": lead["narration"],
-                       "cold_open": daily_rundown["opening"], "edition_date": edition.isoformat()}
+                       "cold_open": daily_rundown.get("lead_opening", daily_rundown["opening"]),
+                       "edition_date": edition.isoformat()}
             system_prompt += (
                 "\nLOCKED MORNING DESK LEAD: The supplied narration is the approved "
                 "first story, already selected as this edition's publication lead. "
