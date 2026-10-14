@@ -19,6 +19,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 from backend import config
+from backend.explainer_pacing import pacing_plan, write_paced_audio
 from backend.explainer_visual_review import (
     MAX_IMAGE_ATTEMPTS,
     REVIEW_VERSION,
@@ -590,6 +591,31 @@ async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Pa
                             playback_policy="play_once_fit_longer_or_hold_shorter")
 
 
+async def _paced_audio(scene: dict, path: Path, audio: dict, root: Path, *,
+                       chapter_end: bool, closing_hold: float) -> tuple[Path, dict]:
+    plan = await asyncio.to_thread(pacing_plan, path, chapter_end=chapter_end, closing_hold=closing_hold)
+    plan["narration_duration_seconds"] = min(
+        plan["narration_duration_seconds"],
+        audio["narration_duration_seconds"] - plan["removed_leading_seconds"],
+    )
+    plan["speech_end_seconds"] = min(plan["speech_end_seconds"], plan["narration_duration_seconds"])
+    key = _hash({"source_sha256": _sha(path), "source_audio_hash": audio["input_hash"], "pacing": plan})
+    stage = _stage(root, scene["id"], "paced-audio", key)
+    cached = _cached(stage, key, root)
+    if cached:
+        return stage / "narration.wav", cached
+    temporary = stage / "narration.partial.wav"
+    await asyncio.to_thread(write_paced_audio, path, temporary, plan)
+    await _verify(temporary, duration=plan["duration_seconds"], video=False, audio=True)
+    final = stage / "narration.wav"
+    temporary.replace(final)
+    return final, _complete(stage, key, [final], root,
+                           source_path=str(path.relative_to(root)), source_sha256=_sha(path),
+                           source_audio_hash=audio["input_hash"], pacing=plan,
+                           narration_duration_seconds=plan["narration_duration_seconds"],
+                           duration_seconds=plan["duration_seconds"], frames=plan["frames"])
+
+
 async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | None,
                         audio: dict, root: Path) -> tuple[Path, dict]:
     style = project.get("style") or {}
@@ -606,6 +632,10 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
                  "background": style.get("background_color", "#F4EBDD"),
                  "ink": style.get("ink_color", "#302A25"),
                  "accent": style.get("accent_color", "#C56545")}
+    closing_hold = (audio.get("pacing") or {}).get("closing_hold_seconds", 0)
+    fade_seconds = min(0.8, closing_hold)
+    if fade_seconds:
+        render_inputs["closing_fade_seconds"] = fade_seconds
     if watermark_repair:
         render_inputs["watermark_repair"] = watermark_repair
     key = _hash(render_inputs)
@@ -644,8 +674,11 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
         if style.get("motion_mode", "none") == "subtle":
             base += (f",zoompan=z='1+0.018*on/{max(1, audio['frames'] - 1)}':"
                      f"x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s={WIDTH}x{HEIGHT}:fps={FPS}")
+    finish = "format=yuv420p"
+    if fade_seconds:
+        finish += f",fade=t=out:st={audio['duration_seconds'] - fade_seconds:.9f}:d={fade_seconds}:color={color}"
     args += ["-loop", "1", "-framerate", str(FPS), "-i", str(stage / "overlay.png"),
-             "-filter_complex", f"[0:v]{base}[base];[base][1:v]overlay=0:0:shortest=1,format=yuv420p[v]",
+             "-filter_complex", f"[0:v]{base}[base];[base][1:v]overlay=0:0:shortest=1,{finish}[v]",
              "-map", "[v]", "-an", "-frames:v", str(audio["frames"]), "-r", str(FPS),
              "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-threads", "4",
              "-movflags", "+faststart", str(stage / "clip.partial.mp4")]
@@ -679,6 +712,10 @@ def _validate(project: dict, root: Path) -> list[dict]:
             raise ValueError(f"Invalid style color: {name}")
     if style.get("motion_mode", "none") not in ("none", "subtle", "gemini"):
         raise ValueError("Unsupported motion mode")
+    if style.get("motion_mode") == "gemini":
+        every = max(0, int(style.get("motion_every_n_scenes", 0)))
+        if not any(s.get("motion") or (every and (i + 1) % every == 0) for i, s in enumerate(scenes)):
+            raise ValueError("Gemini animation is enabled but no scenes are selected; select a motion scene or set an interval")
     return scenes
 
 
@@ -714,7 +751,13 @@ async def render_project(project: dict, project_dir: Path,
         for index, scene in enumerate(scenes):
             prefix = f"Scene {index + 1}/{len(scenes)}"
             progress("generating_audio", f"{prefix}: generating or reusing exact narration")
-            audio_path, audio = await _audio(scene, project, root, log)
+            source_audio_path, source_audio = await _audio(scene, project, root, log)
+            last_scene = index == len(scenes) - 1
+            chapter_end = last_scene or scene.get("chapter", "") != scenes[index + 1].get("chapter", "")
+            audio_path, audio = await _paced_audio(
+                scene, source_audio_path, source_audio, root, chapter_end=chapter_end,
+                closing_hold=float(style.get("closing_hold_seconds", 2.4)) if last_scene else 0,
+            )
             completed += 1
             progress("generating_images", f"{prefix}: generating or reusing ChatGPT illustration")
             image_path, illustration = await _image(scene, style, root, log)
@@ -737,6 +780,8 @@ async def render_project(project: dict, project_dir: Path,
                     "start_seconds": current_frame / FPS, "duration_seconds": audio["duration_seconds"],
                     "narration_duration_seconds": audio["narration_duration_seconds"],
                     "audio_path": relative(audio_path), "image_path": relative(image_path),
+                    "source_audio_path": relative(source_audio_path), "source_audio_sha256": _sha(source_audio_path),
+                    "pacing": audio["pacing"],
                     "motion_path": relative(motion_path) if motion_path else None, "clip_path": relative(clip),
                     "audio_sha256": _sha(audio_path), "clip_sha256": _sha(clip),
                     "audio_hash": audio["input_hash"], "image_hash": illustration["input_hash"],
@@ -754,13 +799,16 @@ async def render_project(project: dict, project_dir: Path,
         duration = current_frame / FPS
         timeline = {"version": CONTRACT_VERSION, "fps": FPS, "duration_seconds": duration,
                     "total_frames": current_frame, "caption_alignment": "scene_narration",
+                    "pacing_policy": "sample_preserving_edge_trim_with_closing_hold",
+                    "gemini_scene_count": sum(bool(item["motion_path"]) for item in artifacts),
                     "playback_policy": "play_once_fit_longer_or_hold_shorter", "scenes": artifacts}
         _json(root / "timeline.json", timeline, root)
         captions = []
         for index, item in enumerate(artifacts, 1):
-            start = item["start_seconds"]
+            start = item["start_seconds"] + item["pacing"]["speech_start_seconds"]
+            end = item["start_seconds"] + item["pacing"]["speech_end_seconds"]
             text = re.sub(r"\s+", " ", item["narration"]).strip()
-            captions.append(f"{index}\n{_srt_time(start)} --> {_srt_time(start + item['narration_duration_seconds'])}\n{text}\n")
+            captions.append(f"{index}\n{_srt_time(start)} --> {_srt_time(end)}\n{text}\n")
         _write(root / "captions.srt", "\n".join(captions), root)
         delivery_key = _hash({"version": CONTRACT_VERSION, "timeline": timeline})
         delivery = _safe(root / "renders" / delivery_key[:24], root)

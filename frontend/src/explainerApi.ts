@@ -10,6 +10,7 @@ export interface ExplainerStyle {
   gemini_watermark_region: { x: number; y: number; width: number; height: number }
   motion_every_n_scenes: number
   seconds_per_scene: number
+  closing_hold_seconds?: number
 }
 
 export interface ExplainerScene {
@@ -19,6 +20,7 @@ export interface ExplainerScene {
   visual_prompt: string
   on_screen_text: string
   motion: boolean
+  ending_role?: '' | 'callback' | 'action' | 'takeaway'
 }
 
 export interface ExplainerForm {

@@ -22,7 +22,7 @@ def project_input(**changes):
 
 def scene(**changes):
     return {"id": "scene-001", "chapter": "Opening", "narration": "Try remembering before looking at the answer.",
-            "visual_prompt": "A line character closes a book and considers a question.", "on_screen_text": "Recall", "motion": False, **changes}
+            "visual_prompt": "A line character closes a book and considers a question.", "on_screen_text": "Recall", "motion": False, "ending_role": "", **changes}
 
 
 class ExplainerStoreTests(unittest.TestCase):
@@ -38,6 +38,8 @@ class ExplainerStoreTests(unittest.TestCase):
         with patch.object(config, "TTS_DEFAULT_MODEL", "vibevoice-0.5b"), patch.object(config, "TTS_DEFAULT_VOICE_1", "Carter"):
             defaults = studio.defaults()
         self.assertEqual((defaults["tts_model"], defaults["voice"]), ("pocket-tts-en", "alba"))
+        self.assertEqual(defaults["style"]["motion_mode"], "gemini")
+        self.assertEqual(defaults["style"]["closing_hold_seconds"], 2.4)
         chatterbox = next(model for model in defaults["tts_models"] if model["id"] == "chatterbox-multilingual")
         self.assertEqual(chatterbox["default_voice"], "space-en-f1")
         self.assertEqual(chatterbox["voices"][0], "space-en-f1")
@@ -357,11 +359,15 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_writing_repairs_invalid_shape_and_reuses_completed_chapter(self):
         project = studio.create_project(project_input(target_minutes=1))
         rows = [scene(id=f"scene-{i + 1:03d}", narration="Close the book and recall the idea before checking your answer.", motion="false") for i in range(12)]
+        for row, role in zip(rows[-3:], ("callback", "action", "takeaway")):
+            row.update(ending_role=role, narration="Return to the problem you started with. Close the book and explain the method before you check your answer.")
+        rows[-2]["motion"] = True
         responses = ["not json", json.dumps({"chapters": [{"title": "Recall", "brief": "A concrete learning situation"}]}), json.dumps({"scenes": rows})]
         with patch("backend.pipeline.digester._resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))), patch("backend.pipeline.digester._chat", AsyncMock(side_effect=responses)) as chat:
             scenes = await studio.write_script(project, studio.project_dir(project["id"]), lambda message: None)
             self.assertEqual(len(scenes), 12)
-            self.assertTrue(all(s["motion"] is False for s in scenes))
+            self.assertTrue(all(s["motion"] is False for s in scenes[:-3]))
+            self.assertTrue(scenes[-2]["motion"])
             self.assertEqual(chat.await_count, 3)
             reused = await studio.write_script(project, studio.project_dir(project["id"]), lambda message: None)
             self.assertEqual(scenes, reused)
@@ -376,6 +382,21 @@ class ExplainerAsyncTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "language"):
             studio.start(realtime["id"], "render")
         self.assertEqual(studio.tts_language("vibevoice-1.5b"), "multilingual")
+
+    async def test_writer_repairs_an_abrupt_ending_before_accepting_script(self):
+        project = studio.create_project(project_input(target_minutes=1))
+        rows = [scene(id=f"scene-{i + 1:03d}", narration="Close the book and recall the idea before checking your answer.") for i in range(12)]
+        repaired = [dict(row) for row in rows]
+        for row, role in zip(repaired[-3:], ("callback", "action", "takeaway")):
+            row.update(ending_role=role, narration="Return to the problem you started with. Close the book and explain the method before you check your answer.")
+        repaired[-2]["motion"] = True
+        responses = [json.dumps({"chapters": [{"title": "Recall", "brief": "Practice recalling"}]}),
+                     json.dumps({"scenes": rows}), json.dumps({"scenes": repaired})]
+        with patch("backend.pipeline.digester._resolve_provider", AsyncMock(return_value=("endpoint", "model", "key"))), patch("backend.pipeline.digester._chat", AsyncMock(side_effect=responses)) as chat:
+            result = await studio.write_script(project, studio.project_dir(project["id"]), lambda _: None)
+        self.assertEqual(chat.await_count, 3)
+        self.assertIn("three distinct scenes", chat.call_args.args[1])
+        self.assertEqual([s["ending_role"] for s in result[-3:]], ["callback", "action", "takeaway"])
 
     async def test_full_video_reservation_survives_script_only_repair(self):
         project = studio.create_project(project_input())

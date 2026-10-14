@@ -41,11 +41,12 @@ class Style(BaseModel):
     character_description: str = Field(default="An original round-headed, slender line character with two dot eyes, a small expressive mouth, simple charcoal limbs and a muted terracotta shirt. Keep proportions and outfit consistent across scenes.", min_length=8, max_length=3000)
     visual_direction: str = Field(default="Warm textured paper, imperfect hand-drawn charcoal outlines, restrained terracotta, slate blue and olive accents, generous negative space. One concrete visual metaphor per scene, a few meaningful props, thoughtful and approachable. No photorealism, no glossy 3D, no channel logos or copied characters.", min_length=8, max_length=4000)
     writing_tone: str = Field(default="Clear, curious, evidence-aware and practical. Start from a recognizable situation, explain the mechanism with concrete examples, distinguish observation from inference, avoid inflated promises and generic motivational filler.", min_length=8, max_length=3000)
-    motion_mode: Literal["none", "subtle", "gemini"] = "none"
+    motion_mode: Literal["none", "subtle", "gemini"] = "gemini"
     gemini_watermark_removal: bool = True
     gemini_watermark_region: WatermarkRegion = Field(default_factory=WatermarkRegion)
     motion_every_n_scenes: int = Field(default=0, ge=0, le=100)
     seconds_per_scene: int = Field(default=4, ge=2, le=45)
+    closing_hold_seconds: float = Field(default=2.4, ge=0, le=6)
 
 
 class Scene(BaseModel):
@@ -56,6 +57,7 @@ class Scene(BaseModel):
     visual_prompt: str = Field(min_length=3, max_length=4000)
     on_screen_text: str = Field(default="", max_length=160)
     motion: bool = False
+    ending_role: Literal["", "callback", "action", "takeaway"] = ""
 
 
 class Defaults(BaseModel):
@@ -283,6 +285,7 @@ async def write_script(project: dict, directory: Path, log) -> list[dict]:
     visual_rules = visual_logic_rules()
     cache_inputs = {key: project[key] for key in ("title", "research", "language", "target_minutes", "style")}
     cache_inputs["visual_logic_rules"] = visual_rules
+    cache_inputs["ending_contract"] = 1
     cache_key = hashlib.sha256(json.dumps(cache_inputs, sort_keys=True,
         ensure_ascii=False).encode()).hexdigest()[:24]
     directory = directory / "writing" / cache_key
@@ -330,7 +333,9 @@ async def write_script(project: dict, directory: Path, log) -> list[dict]:
         outline = await request(
             f'Create exactly {chapter_count} chapters. JSON: {{"chapters":[{{"title":"...","brief":"..."}}]}}. '
             'Begin with a recognizable situation and a clear question, develop mechanisms and examples, '
-            'and finish with a concrete takeaway that returns to the opening. Avoid repetitive summaries.',
+            'and reserve the final 25-40 seconds for a resolved ending: return to the opening situation, '
+            'demonstrate one action the viewer can try, then state the criterion for success. '
+            'Avoid repetitive summaries, a last-second new claim, or a generic subscribe sign-off.',
             outline_validate, "Explainer outline")
         _write(outline_file, outline)
 
@@ -348,7 +353,8 @@ async def write_script(project: dict, directory: Path, log) -> list[dict]:
                     raise ValueError("Each scene must be a JSON object")
                 scenes.append(Scene(id=f"scene-{number + 1:03d}", chapter=chapter["title"],
                     narration=row.get("narration", ""), visual_prompt=row.get("visual_prompt", ""),
-                    on_screen_text=row.get("on_screen_text", ""), motion=row.get("motion", False)).model_dump())
+                    on_screen_text=row.get("on_screen_text", ""), motion=row.get("motion", False),
+                    ending_role=row.get("ending_role", "")).model_dump())
             narration = " ".join(scene["narration"] for scene in scenes)
             count = _word_count(narration, language)
             if count < target_per_chapter * 0.65 or count > target_per_chapter * 1.5:
@@ -359,6 +365,14 @@ async def write_script(project: dict, directory: Path, log) -> list[dict]:
                 raise ValueError("Narration must be Mandarin Chinese")
             if any(_word_count(scene["narration"], language) > max(scene_words * 3, 100) for scene in scenes):
                 raise ValueError("A scene is too long; split into sentence-sized visual beats")
+            if index == chapter_count - 1:
+                if [s["ending_role"] for s in scenes[-3:]] != ["callback", "action", "takeaway"]:
+                    raise ValueError("End with three distinct scenes tagged callback, action, takeaway in that order")
+                ending_words = _word_count(" ".join(s["narration"] for s in scenes[-3:]), language)
+                if ending_words < (70 if language == "zh" else 45):
+                    raise ValueError("The ending is rushed: give its final three scenes at least 45 English words or 70 Chinese characters")
+                if project["style"]["motion_mode"] == "gemini" and not any(s["motion"] for s in [*all_scenes, *scenes]):
+                    raise ValueError("Select at least one explanatory action for Gemini motion; an all-still script cannot fulfill Gemini mode")
             return {"scenes": scenes}
 
         chapter_file = directory / f"chapter-{index + 1:02d}.json"
@@ -373,7 +387,7 @@ async def write_script(project: dict, directory: Path, log) -> list[dict]:
                 f"Target {target_per_chapter} {'Chinese characters' if language == 'zh' else 'spoken words'}, "
                 f"split into scenes of about {scene_words} words/characters, complete sentences per scene. "
                 "JSON: {\"scenes\":[{\"narration\":\"exact spoken text\",\"visual_prompt\":\"concrete illustrated scene\","
-                "\"on_screen_text\":\"optional 1-5 word label\",\"motion\":false}]}. "
+                "\"on_screen_text\":\"optional 1-5 word label\",\"motion\":false,\"ending_role\":\"\"}]}. "
                 "Every visual must illustrate that scene's exact narration, with characters, actions and props. "
                 "Keep physical props and digital interfaces in a coherent setting: hands may use a keyboard, "
                 "trackpad or touchscreen, but cannot reach inside a display to grasp a physical mechanism. "
@@ -388,7 +402,16 @@ async def write_script(project: dict, directory: Path, log) -> list[dict]:
                 "Do not add a crowded paper handoff when the narration only describes equal conditions; "
                 "if a handoff is essential, show one giver and one recipient with consistent paper orientation. "
                 "Do not include speaker labels, stage directions or citations in speech. Use motion=true only "
-                "where an action is needed to explain the mechanism. Keep on-screen text in narration language. "
+                "where an action is needed to explain the mechanism. Select a few meaningful actions across "
+                "the story for Gemini animation; static charts and numerical claims should remain still. "
+                "Keep on-screen text in narration language. "
+                + ("For this FINAL chapter, the last three scenes must have ending_role callback, action, "
+                   "takeaway respectively. Give them 45-85 English words or 70-140 Chinese characters in total, "
+                   "even if these scenes are longer than ordinary beats. Resolve the opening example, give "
+                   "one specific next action, then leave a concise criterion the viewer can use. Introduce "
+                   "no new evidence at the end. Use a stable final composition with a short final label. "
+                   if index == chapter_count - 1 else "")
+                +
                 "Previous narration tail for continuity (do not repeat): "
                 + " ".join(s["narration"] for s in all_scenes)[-1800:]
             )

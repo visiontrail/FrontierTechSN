@@ -24,7 +24,7 @@ def _project():
         "style": {"background_color": "#F4EBDD", "ink_color": "#302A25", "accent_color": "#C56545",
                   "character_description": "round-headed original line character",
                   "visual_direction": "simple clear ink drawings", "motion_mode": "none",
-                  "motion_every_n_scenes": 0},
+                  "motion_every_n_scenes": 0, "closing_hold_seconds": 0},
         "scenes": [
             {"id": "scene-001", "narration": "A decision begins here.", "visual_prompt": "A figure considers a door.", "on_screen_text": "A decision"},
             {"id": "scene-002", "narration": "Then we take one step.", "visual_prompt": "The same figure steps forward.", "motion": False},
@@ -108,6 +108,38 @@ def test_image_logic_repair_retains_candidates_and_reuses_verified_result(tmp_pa
         assert (tmp_path / record["visual_review_path"]).is_file()
         assert await pipeline._image(scene, style, tmp_path) == (final, record)
         assert len(providers.image_calls) == len(providers.review_calls) == 2
+    asyncio.run(run())
+
+
+def test_gemini_mode_cannot_silently_render_zero_videos(tmp_path, providers):
+    project = _project()
+    project["style"]["motion_mode"] = "gemini"
+    with pytest.raises(ValueError, match="no scenes are selected"):
+        asyncio.run(pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None))
+    assert providers.audio_calls == providers.image_calls == providers.motion_calls == []
+
+
+def test_closing_hold_fades_after_speech_and_reuses_original_media(tmp_path, providers):
+    async def run():
+        project = _project()
+        original = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        project["style"]["closing_hold_seconds"] = 2.4
+        closed = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        assert closed["duration_seconds"] == pytest.approx(original["duration_seconds"] + 2.4)
+        assert len(providers.audio_calls) == len(providers.image_calls) == 2
+        before, final = original["scene_artifacts"][-1], closed["scene_artifacts"][-1]
+        assert before["source_audio_sha256"] == final["source_audio_sha256"]
+        assert before["image_path"] == final["image_path"]
+        assert final["pacing"]["closing_hold_seconds"] == 2.4
+        assert final["narration_duration_seconds"] == pytest.approx(0.217)
+        with wave.open(str(tmp_path / final["audio_path"]), "rb") as audio:
+            audio.setpos(round(0.3 * 48000))
+            assert set(audio.readframes(audio.getnframes())) == {0}
+        pixels = await pipeline._command([
+            "ffmpeg", "-v", "error", "-sseof", "-0.05", "-i", str(tmp_path / final["clip_path"]),
+            "-vf", "scale=1:1", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+        ])
+        assert all(abs(actual - expected) < 12 for actual, expected in zip(pixels[:3], (244, 235, 221)))
     asyncio.run(run())
 
 
@@ -565,7 +597,7 @@ def test_dialogue_tts_labels_are_provider_metadata_only(tmp_path, providers):
         )
         artifact = result["scene_artifacts"][0]
         assert artifact["narration"] == project["scenes"][0]["narration"]
-        assert (tmp_path / artifact["audio_path"]).with_name("script.txt").read_text() == artifact["narration"]
+        assert (tmp_path / artifact["source_audio_path"]).with_name("script.txt").read_text() == artifact["narration"]
         assert "Speaker 1:" not in (tmp_path / "captions.srt").read_text()
         await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
         assert len(providers.audio_calls) == 1

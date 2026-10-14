@@ -98,7 +98,10 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
   }
 
   function patchScene(index: number, values: Partial<ExplainerScene>) {
-    if (form) patch('scenes', form.scenes.map((scene, i) => i === index ? { ...scene, ...values } : scene))
+    if (form) edit({ ...form,
+      style: values.motion === true ? { ...form.style, motion_mode: 'gemini' } : form.style,
+      scenes: form.scenes.map((scene, i) => i === index ? { ...scene, ...values } : scene),
+    })
   }
 
   function rememberSaved(saved: ExplainerProject) {
@@ -348,7 +351,8 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
                 <div><label htmlFor="explainer-motion">Motion style</label><select id="explainer-motion" value={form.style.motion_mode} onChange={(e) => patchStyle('motion_mode', e.target.value as ExplainerStyle['motion_mode'])}><option value="none">Still illustrations</option><option value="subtle">Gentle pan & zoom</option><option value="gemini">Gemini animation</option></select></div>
                 <div><label htmlFor="explainer-spacing">Animate every N scenes (0 = manual)</label><input id="explainer-spacing" type="number" min={0} max={100} value={form.style.motion_every_n_scenes} onChange={(e) => patchStyle('motion_every_n_scenes', Number(e.target.value))} /></div>
                 <div><label htmlFor="explainer-seconds">Target seconds per scene</label><input id="explainer-seconds" type="number" min={2} max={45} value={form.style.seconds_per_scene} onChange={(e) => patchStyle('seconds_per_scene', Number(e.target.value))} /></div>
-              </div><p className="explainer-field-help">Target seconds guide script segmentation. Each scene lasts until its narration ends. You can select individual scenes for Gemini animation in the storyboard.</p>
+              </div><p className="explainer-field-help">Target seconds guide script segmentation. Extra silence at narration boundaries is trimmed. Selecting an animated scene enables Gemini animation.</p>
+                <div><label htmlFor="explainer-closing-hold">Final hold after narration (seconds)</label><input id="explainer-closing-hold" type="number" min={0} max={6} step={0.2} value={form.style.closing_hold_seconds ?? 2.4} onChange={(e) => patchStyle('closing_hold_seconds', Number(e.target.value))} /></div>
                 {form.style.motion_mode === 'gemini' && <div>
                   <label className="explainer-check"><input type="checkbox" checked={form.style.gemini_watermark_removal ?? true} onChange={(e) => patchStyle('gemini_watermark_removal', e.target.checked)} /><span>Remove visible Gemini watermark locally</span></label>
                   <p className="explainer-field-help">Repairs the corner using surrounding pixels before adding titles and captions. Original downloads are kept. Render again to apply this to an existing video.</p>
@@ -372,6 +376,9 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
               <p className="explainer-field-help">Open any queued, running or completed video in Tasks to review its storyboard and production details.</p>
               <div className="explainer-storyboard-export"><button type="button" disabled={form.scenes.length === 0} onClick={downloadScript}>Export narration ↓</button></div>
               <div className="explainer-script-summary"><span>{form.scenes.length} scenes</span><span>{count.toLocaleString('en-US')} {form.language === 'zh' ? 'characters' : 'words'}</span><span>Estimated narration: {estimate.toFixed(1)} min</span><span>Target: {form.target_minutes} min</span></div>
+              <p className="explainer-field-help">{form.style.motion_mode === 'gemini'
+                ? `${form.scenes.filter((scene, index) => scene.motion || (form.style.motion_every_n_scenes > 0 && (index + 1) % form.style.motion_every_n_scenes === 0)).length} scenes selected for Gemini video.`
+                : `Gemini video is off. ${form.scenes.filter((scene) => scene.motion).length} marked animation scenes will render as illustrations with the current motion style.`}</p>
               <p className="explainer-render-estimate">{form.scenes.length > 0 && imageInterval ? `${form.scenes.length} images. With the current ${Math.round(imageInterval / 60)}-minute request interval, generating all images from scratch adds at least about ${imageWaitHours.toFixed(1)} hours of waiting, plus generation and rendering time. Reusing existing assets can shorten this.` : 'The current image request interval applies. Increase scene duration to reduce the number of images.'}</p>
               {form.scenes.length === 0 && <div className="explainer-empty-story"><span>“</span><h3>{running || queued ? 'Your storyboard will appear here.' : 'Start with a question worth explaining.'}</h3><p>{running || queued ? 'Scenes become available after the script has been generated.' : 'Add your research and generate a script, or add your first scene manually.'}</p></div>}
               <fieldset disabled={locked} className="explainer-fieldset">
