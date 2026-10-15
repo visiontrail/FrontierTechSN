@@ -2534,6 +2534,8 @@ const videoEntry = {
     { name: 'last', type: 'str', required: false, help: 'Optional local last-frame image; omit for a single reference frame' },
     { name: 'resume', type: 'str', required: false, help: 'Existing Gemini conversation URL to finish or download' },
     { name: 'aspect', type: 'str', default: '16:9', required: false, help: 'Final aspect ratio', choices: ['16:9', '9:16'] },
+    { name: 'entry', type: 'str', default: 'videos', required: false, help: 'Video tool or ordinary Pro chat acquisition', choices: ['videos', 'chat'] },
+    { name: 'model', type: 'str', default: '3.1-pro', required: false, help: 'Canonical model for ordinary chat entry' },
     { name: 'output', type: 'str', required: true, help: 'Local MP4 output path' },
     { name: 'timeout', type: 'int', default: 1800, required: false, help: 'Total generation and download timeout in seconds' },
     { name: 'stall-timeout', type: 'int', default: 600, required: false, help: 'Maximum seconds without response progress' },

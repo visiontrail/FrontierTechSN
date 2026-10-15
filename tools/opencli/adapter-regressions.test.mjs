@@ -40,6 +40,15 @@ import {
   videoCommand,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
 
+test('Installed Gemini video CLI exposes ordinary chat acquisition arguments', () => {
+  const help = execFileSync(process.execPath, [
+    fileURLToPath(new URL('./node_modules/@jackwener/opencli/dist/src/main.js', import.meta.url)),
+    'gemini', 'video', '--help',
+  ], { encoding: 'utf8' })
+  assert.match(help, /--entry/)
+  assert.match(help, /--model/)
+})
+
 test('Ordinary chat video entry waits for hydrated empty chat controls', async () => {
   const samples = [{ ready: false }, { ready: true }, { ready: true }]
   let reads = 0
