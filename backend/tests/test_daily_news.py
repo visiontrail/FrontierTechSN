@@ -1380,7 +1380,8 @@ def test_retired_manual_and_content_planning_apis_are_not_exposed():
     assert "post" not in paths["/api/tasks"]
 
 
-def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
+@pytest.mark.parametrize("trigger", ["schedule", "hourly_check", "manual"])
+def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path, trigger):
     queued = TaskResponse(
         id="daily-queued-001",
         created_at="2026-08-19T00:00:00+00:00",
@@ -1417,7 +1418,7 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
             create_daily_task(
                 settings,
                 edition_date=date(2026, 8, 19),
-                trigger="schedule",
+                trigger=trigger,
             )
         )
 
@@ -1427,6 +1428,7 @@ def test_daily_task_snapshots_the_visible_automation_recipe(tmp_path: Path):
     assert task_config.voice_1 == "tara"
     assert task_config.opening_remarks == "It is Wednesday, August 19, 2026. Your ByteFront Espresso is ready."
     assert task_config.closing_remarks == "That is the signal. Meet me here tomorrow."
+    assert task_config.collage_broll_enabled is False
     assert task_config.collage_broll_count is None
     assert task_config.news_images_enabled is True
     assert task_config.news_image_count is None
@@ -2906,6 +2908,8 @@ def test_run_now_api_ignores_legacy_duration_and_queues_automatic_length(tmp_pat
         assert response.status_code == 200
         assert response.json()["config"]["target_duration_minutes"] is None
         assert response.json()["config"]["publish_test_mode"] is test_mode
+        assert response.json()["config"]["collage_broll_enabled"] is False
+        assert response.json()["config"]["opening_style"] == "editorial_motion"
         assert "target_duration_minutes" not in client.get("/api/daily-news").json()["settings"]
 
 

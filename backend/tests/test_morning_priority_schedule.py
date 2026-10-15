@@ -54,6 +54,8 @@ def test_schedule_and_hourly_admission_share_one_daily_edition(isolated_desk):
         )
         assert scheduled.task.id == hourly.task.id
         assert sum(result.created for result in (scheduled, hourly)) == 1
+        assert scheduled.task.config.collage_broll_enabled is False
+        assert hourly.task.config.collage_broll_enabled is False
         assert len(await database.list_tasks()) == 1
 
     asyncio.run(scenario())
@@ -79,6 +81,9 @@ def test_database_edition_prevents_duplicates_after_receipt_loss(
         assert result.task.id == existing.id
         assert result.created is False
         assert result.reason == "edition_exists"
+        assert existing.config.collage_broll_enabled is True
+        assert result.task.config == existing.config
+        assert (await database.get_task(existing.id)).config == existing.config
         assert len(await database.list_tasks()) == 1
 
     asyncio.run(scenario())
@@ -170,6 +175,9 @@ def test_unfinished_morning_is_reused_before_admitting_another_day(isolated_desk
         assert result.created is False
         assert result.reason == "morning_in_progress"
         assert result.task.id == existing.id
+        assert existing.config.collage_broll_enabled is True
+        assert result.task.config == existing.config
+        assert (await database.get_task(existing.id)).config == existing.config
         assert len(await database.list_tasks()) == 1
 
     asyncio.run(scenario())

@@ -1,6 +1,6 @@
 # FrontierTechSN
 
-FrontierTechSN automatically produces a daily video podcast about frontier technology. It gathers stories from sources in two languages and balances the selection for each edition. The pipeline writes a broadcast script, sends it for independent review, synthesizes narration, and generates matching Paper-Collage B-roll and music. It then renders and validates the video and, when publishing is enabled, distributes it through accounts signed into the local browser.
+FrontierTechSN automatically produces a daily video podcast about frontier technology. It gathers stories from sources in two languages and balances the selection for each edition. The pipeline writes a broadcast script, sends it for independent review, synthesizes narration, and assembles news imagery, optional public footage, and music. It then renders and validates the video and, when publishing is enabled, distributes it through accounts signed into the local browser.
 
 The project uses a media pipeline derived from Video-Promotional. Runtime data, credentials, browser identities, generated episodes, and publication receipts stay local and are ignored by Git.
 
@@ -29,7 +29,7 @@ Each daily run follows these steps and stops if a required check fails:
 4. Use yhroot AI to generate the script from the evidence dossier alone.
 5. Submit every material claim to Gemini Web through project-local OpenCLI. Each story group gets up to two Gemini attempts. If the review fails, times out, or returns a malformed response, start a fresh ChatGPT conversation at the configured non-Pro reasoning level. Correct and re-review the script when findings block approval.
 6. Synthesize speech with WAV integrity checks and advisory ASR transcript comparisons.
-7. Generate four Paper-Collage B-roll clips by default. Stop if the number of placed clips differs from the requested count.
+7. Acquire news imagery and, when enabled, public footage. New Morning Desk editions disable Paper-Collage generation.
 8. Generate instrumental music with Gemini Create Music, using deterministic local music as a fallback. Duck it to `-25 dB` under narration, side-chain it against speech, and match the program mix to the required duration.
 9. Render with HyperFrames and run final A/V validation.
 10. When publishing is enabled, use the accounts currently signed into the browser. Discover and record account identities and exact URLs at runtime rather than hard-coding them.
@@ -47,6 +47,8 @@ Gemini generation requests (prompts, images, and new videos) use a random start-
 Choose the ChatGPT interval from 10 to 30 minutes under **Admin → System → Footage Sources** with `OPENCLI_WEB_REQUEST_INTERVAL_SECONDS`; this setting does not override Gemini's 60–120 second random interval. The same panel configures the Gemini primary model, ChatGPT fallback level, and review timeout for each provider.
 
 ### Paper-Collage acquisition
+
+Paper-Collage is disabled for all new Morning Desk editions, including scheduled, hourly, manual, and test runs. Existing tasks retain their saved configuration and assets for ongoing production, retries, and recovery. The acquisition behavior below applies to those existing tasks. Source changes take effect when the service next loads the updated code; do not restart active production to apply this change.
 
 Each Paper-Collage clip targets the length of its narration scene, up to Gemini's configured limit for one generation (eight seconds by default). Public Footage and Paper-Collage can share a news story. A collage stays with its assigned story even when footage already occupies the scene. Change the duration limit under **Admin → System → Paper-collage B-roll** with `COLLAGE_GEMINI_MAX_SECONDS`.
 
@@ -233,7 +235,7 @@ The **Morning Desk** page configures:
 - daily execution time and IANA timezone;
 - language, story count, and research window;
 - automatic report length based on each story's evidence and complexity, with no fixed minute or word quota (including test runs); saved legacy duration settings are retired automatically;
-- TTS voice/model, Paper-Collage clip count, and the separate public-footage clip budget;
+- TTS voice/model and the public-footage switch; news imagery remains enabled, and AI chooses the media quantity;
 - Gemini or deterministic local music;
 - automatic distribution targets and YouTube visibility.
 

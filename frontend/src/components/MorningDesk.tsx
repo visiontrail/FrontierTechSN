@@ -463,10 +463,6 @@ export default function MorningDesk() {
 
           <article className="morning-config-panel morning-config-panel--visual">
             <header><span>04</span><div><strong>Visual recipe</strong><small>AI chooses the natural mix for each edition</small></div></header>
-            <div className="morning-visual-row">
-              <div className="morning-visual-copy"><b>Paper-Collage</b><small>AI-selected visual metaphors · quantity follows the story</small></div>
-              <span className="morning-visual-auto">AI directed</span>
-            </div>
             <div className="morning-visual-row is-enabled">
               <div className="morning-visual-copy"><b>News imagery</b><small>AI-selected grounded logos and event stills · inline + full screen</small></div>
               <span className="morning-visual-auto">AI directed</span>

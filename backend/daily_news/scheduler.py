@@ -241,14 +241,15 @@ async def _create_daily_task(
         video_template="swiss",
         video_orientation="landscape",
         # The selected system preset owns the spoken opening and closing.
-        # Paper-Collage remains B-roll for news segments only.
         opening_style="editorial_motion",
         footage_enabled=settings.public_footage_enabled,
         # The desk exposes one Public Footage switch, so an enabled run must
         # use the hybrid scout. Wikimedia remains the rights-first source and
         # YouTube fills otherwise-empty slots with explicit review blockers.
         footage_provider="hybrid",
-        collage_broll_enabled=True,
+        # Disable collage only for new editions; existing task snapshots retain
+        # their original media recipe through rendering, retries, and recovery.
+        collage_broll_enabled=False,
         news_images_enabled=True,
         thumbnail_enabled=True,
         auto_render=True,
