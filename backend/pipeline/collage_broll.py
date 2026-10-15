@@ -1404,9 +1404,9 @@ async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir:
         if first_attempt:
             first_attempt = False
             if state.get("request_id") != request_id or state.get("status") in {"failed", "quota_exhausted"}:
-                if state.get("status") == "quota_exhausted":
+                if state.get("status") in {"failed", "quota_exhausted"}:
                     digest = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()[:24]
-                    _write_json(video_dir / "history" / f"quota-{digest}.json", state)
+                    _write_json(video_dir / "history" / f"{state['status']}-{digest}.json", state)
                 state = {"request_id": request_id, "status": "new"}
                 _write_json(checkpoint, state)
             elif state.get("status") in ("stalled", "timeout", "uncertain", "saved"):

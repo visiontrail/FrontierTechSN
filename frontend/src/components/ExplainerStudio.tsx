@@ -305,7 +305,7 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
             {progress && progress.total > 0 && <small>{progress.completed} / {progress.total}</small>}
             {project.error && <p className="explainer-small-error">{project.error}</p>}
             {waitingProvider && project.provider_wait && <p className="explainer-provider-wait">
-              {project.provider_wait.reason === 'quota_exhausted' ? 'Gemini reported its video limit.' : 'Gemini’s video tool is temporarily unavailable.'}
+              {project.provider_wait.reason === 'quota_exhausted' ? 'Gemini reported its video limit.' : project.provider_wait.reason === 'generation_failed' ? 'Gemini ended the video request with an error. This does not confirm a quota limit.' : 'Gemini’s video tool is temporarily unavailable.'}
               {' '}Your completed clips are saved. Automatic retry: <strong>{new Date(project.provider_wait.retry_at).toLocaleString()}</strong>.
               {' '}Other productions can continue while this episode waits.
             </p>}

@@ -18,8 +18,10 @@ def availability_reason(error: Exception) -> str | None:
         return "quota_exhausted"
     if "GEMINI_VIDEO_UNAVAILABLE" in message:
         return "video_unavailable"
-    # Navigation, missing controls, generic generation failures and uncertain
-    # submissions are not evidence of quota exhaustion. Keep their recovery path.
+    if "GEMINI_VIDEO_GENERATION_FAILED" in message:
+        return "generation_failed"
+    # Navigation, missing controls and uncertain submissions are not terminal
+    # video failures. Keep their reconciliation path; never replay unknown work.
     return None
 
 

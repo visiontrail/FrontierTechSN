@@ -41,7 +41,8 @@ def test_manual_and_interval_motion_budget_preflight(isolated):
 def test_only_availability_evidence_defers():
     assert availability_reason(RuntimeError("GEMINI_VIDEO_QUOTA_EXHAUSTED: limit")) == "quota_exhausted"
     assert availability_reason(RuntimeError("GEMINI_VIDEO_UNAVAILABLE: disabled")) == "video_unavailable"
-    for code in ("GENERATION_FAILED", "SUBMISSION_UNCERTAIN", "GENERATION_TIMEOUT", "COMPOSER_NOT_READY"):
+    assert availability_reason(RuntimeError("GEMINI_VIDEO_GENERATION_FAILED: explicit terminal reply")) == "generation_failed"
+    for code in ("SUBMISSION_UNCERTAIN", "GENERATION_TIMEOUT", "COMPOSER_NOT_READY"):
         assert availability_reason(RuntimeError("GEMINI_VIDEO_" + code)) is None
 
 

@@ -51,7 +51,7 @@ export interface ExplainerProject extends ExplainerForm {
   updated_at: string
   error: string | null
   production?: { operation: 'script' | 'render' | 'full' | null; started_at: string } | null
-  provider_wait?: { provider: string; reason: 'quota_exhausted' | 'video_unavailable'; scene_id: string; retry_at: string; timezone: string } | null
+  provider_wait?: { provider: string; reason: 'quota_exhausted' | 'video_unavailable' | 'generation_failed'; scene_id: string; retry_at: string; timezone: string } | null
   cancellation_reason?: 'user' | 'service_interruption' | 'maintenance' | null
   queue?: { operation: 'script' | 'render' | 'full'; enqueued_at: string; position: number | null } | null
   logs: string[]

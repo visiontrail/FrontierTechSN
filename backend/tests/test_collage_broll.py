@@ -1894,5 +1894,5 @@ def test_quota_retry_archives_terminal_reply_before_new_acquisition(tmp_path, mo
         return OpenCLIResult(tuple(args), 0, '[{"link":"https://gemini.google.com/app/new456"}]', '')
     monkeypatch.setattr(collage_broll, "run_opencli", run)
     asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
-    archived = list((checkpoint.parent / "history").glob("quota-*.json"))
+    archived = list((checkpoint.parent / "history").glob("quota_exhausted-*.json"))
     assert len(archived) == 1 and json.loads(archived[0].read_text()) == previous
