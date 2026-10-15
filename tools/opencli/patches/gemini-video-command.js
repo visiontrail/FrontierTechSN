@@ -760,12 +760,16 @@ export function createVideoSubmission(prompt) {
 
 export async function recoverVideoConversation(page, checkpoint, save = () => {}, {
     listConversations = getGeminiConversationList, readTurns = getGeminiVisibleTurns,
+    now = Date.now, hydrationTimeoutMs = 30000,
 } = {}) {
     // A title or common prompt prefix cannot establish ownership. Only a new
     // sidebar conversation containing the exact submitted user turn qualifies.
     if (!Array.isArray(checkpoint.historyBefore) || checkpoint.historyBefore.length === 0
         || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(String(checkpoint.submissionNonce || ''))
         || !String(checkpoint.prompt || '').includes(`Request reference: ${checkpoint.submissionNonce}.`)) return '';
+    const recoveryDeadline = Math.min(now() + 60000,
+        checkpoint.deadline || Infinity, checkpoint.totalDeadline || Infinity);
+    if (now() >= recoveryDeadline) return '';
     const before = new Set(checkpoint.historyBefore);
     const rows = await listConversations(page);
     const candidates = [...new Set(rows.map(row => row.Url).filter(url => conversationUrl(url) && !before.has(url)))];
@@ -777,24 +781,43 @@ export async function recoverVideoConversation(page, checkpoint, save = () => {}
     let unreadable = 0;
     for (const url of candidates) {
         try {
-            await page.goto(url, { waitUntil: 'load', settleMs: 2500 });
-            if (String(unwrap(await page.evaluate('window.location.href'))) !== url) {
+            if (now() >= recoveryDeadline) {
                 unreadable += 1;
                 continue;
             }
-            const turns = await readTurns(page);
-            const userTurns = turns.filter(turn => String(turn.Role).toLowerCase() === 'user' && normalizePrompt(turn.Text));
+            await page.goto(url, { waitUntil: 'load', settleMs: 2500 });
+            // Navigation can finish before saved chat turns hydrate. Require
+            // two stable nonempty reads, within this request's original budget.
+            const hydrationDeadline = Math.min(now() + hydrationTimeoutMs, recoveryDeadline);
+            let userTurns = [];
+            let previous = '';
+            let stable = false;
+            for (let sample = 0; sample <= Math.ceil(hydrationTimeoutMs / 1000)
+                && now() < hydrationDeadline; sample += 1) {
+                const currentUrl = String(unwrap(await page.evaluate('window.location.href')));
+                const turns = currentUrl === url ? await readTurns(page) : [];
+                userTurns = turns.filter(turn => String(turn.Role).toLowerCase() === 'user' && normalizePrompt(turn.Text));
+                const signature = JSON.stringify(userTurns.map(turn => normalizePrompt(turn.Text)));
+                if (userTurns.length && signature === previous && now() < hydrationDeadline) {
+                    stable = true;
+                    break;
+                }
+                previous = signature;
+                const remaining = hydrationDeadline - now();
+                if (remaining <= 0) break;
+                await page.wait(Math.min(1000, remaining) / 1000);
+            }
             // Multiple user turns can contain another video's output before
             // our prompt. Without response-bound media scoping they are not
             // safe recovery candidates, even when one turn matches exactly.
-            if (userTurns.length !== 1) unreadable += 1;
+            if (!stable || userTurns.length !== 1) unreadable += 1;
             else if (normalizePrompt(userTurns[0].Text) === normalizePrompt(checkpoint.prompt)) matches.push(url);
         } catch {
             unreadable += 1;
         }
     }
     checkpoint.historyRecovery = { candidates: candidates.length, matches: matches.length, unreadable };
-    if (matches.length === 1 && unreadable === 0) {
+    if (matches.length === 1 && unreadable === 0 && now() < recoveryDeadline) {
         checkpoint.url = matches[0];
         checkpoint.urlVerifiedByPrompt = true;
         checkpoint.before = [];
@@ -890,7 +913,7 @@ export async function waitForVideo(page, before, timeoutSeconds, {
             && now() - (checkpoint.historyCheckedAt || 0) >= recoveryInterval) {
             checkpoint.historyCheckedAt = now();
             save();
-            if (await recoverConversation(page, checkpoint, save)) {
+            if (await recoverConversation(page, checkpoint, save, { now })) {
                 baseline.clear();
                 continue;
             }

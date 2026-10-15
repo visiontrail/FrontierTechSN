@@ -153,8 +153,9 @@ test('Gemini history recovery identifies the exact new user prompt among concurr
   const checkpoint = { ...submission, historyBefore: [old], deadline: 1234, totalDeadline: 5678 }
   let current = 'https://gemini.google.com/videos'
   const navigations = []
-  const page = { async evaluate() { return current }, async goto(url) { current = url; navigations.push(url) } }
+  const page = { async evaluate() { return current }, async goto(url) { current = url; navigations.push(url) }, async wait() {} }
   const url = await recoverVideoConversation(page, checkpoint, () => {}, {
+    now: () => 0,
     async listConversations() { return [{ Url: old }, { Url: concurrent }, { Url: owned }] },
     async readTurns() { return [{ Role: 'User', Text: current === owned ? prompt.replace('\n', '  ') : concurrentPrompt }] },
   })
@@ -167,6 +168,54 @@ test('Gemini history recovery identifies the exact new user prompt among concurr
   assert.equal(checkpoint.totalDeadline, 5678)
 })
 
+test('Gemini history recovery waits for stable hydrated turns without adopting a partial prompt', async () => {
+  const owned = 'https://gemini.google.com/app/owned123'
+  const checkpoint = { ...createVideoSubmission('Animate one gesture.'), historyBefore: ['https://gemini.google.com/app/old123'], deadline: 10000, totalDeadline: 12000 }
+  let current = 'https://gemini.google.com/videos'
+  let clock = 0
+  let reads = 0
+  const page = {
+    async evaluate() { return current }, async goto(url) { current = url },
+    async wait(seconds) { clock += seconds * 1000 },
+  }
+  const url = await recoverVideoConversation(page, checkpoint, () => {}, {
+    now: () => clock,
+    async listConversations() { return [{ Url: owned }] },
+    async readTurns() {
+      reads++
+      return reads === 1 ? [] : [{ Role: 'User', Text: reads === 2 ? 'Animate one' : checkpoint.prompt }]
+    },
+  })
+  assert.equal(url, owned)
+  assert.equal(reads, 4)
+  assert.equal(clock, 3000)
+  assert.equal(checkpoint.deadline, 10000)
+  assert.equal(checkpoint.totalDeadline, 12000)
+})
+
+test('Gemini history hydration expires within the original budget and cannot claim an unreadable sibling', async () => {
+  const urls = ['https://gemini.google.com/app/owned123', 'https://gemini.google.com/app/other123']
+  const checkpoint = { ...createVideoSubmission('Animate one gesture.'), historyBefore: ['https://gemini.google.com/app/old123'], deadline: 2500, totalDeadline: 4000 }
+  let current = 'https://gemini.google.com/videos'
+  let clock = 0
+  const page = {
+    async evaluate() { return current }, async goto(url) { current = url },
+    async wait(seconds) { clock += seconds * 1000 },
+  }
+  const url = await recoverVideoConversation(page, checkpoint, () => {}, {
+    now: () => clock,
+    async listConversations() { return urls.map(Url => ({ Url })) },
+    async readTurns() { return current === urls[0] ? [{ Role: 'User', Text: checkpoint.prompt }] : [] },
+  })
+  assert.equal(url, '')
+  assert.equal(checkpoint.url, undefined)
+  assert.equal(current, 'https://gemini.google.com/videos')
+  assert.equal(clock, 2500)
+  assert.deepEqual(checkpoint.historyRecovery, { candidates: 2, matches: 1, unreadable: 1 })
+  assert.equal(checkpoint.deadline, 2500)
+  assert.equal(checkpoint.totalDeadline, 4000)
+})
+
 for (const scenario of ['no-baseline', 'empty-baseline', 'legacy-no-nonce', 'prefix-only', 'no-match', 'ambiguous', 'unreadable', 'unhydrated', 'system-only', 'multiple-user-turns']) {
 test(`Gemini history recovery refuses uncertain task ownership: ${scenario}`, async () => {
   const submission = createVideoSubmission('A shared prompt beginning. The original scene has a specific ending.')
@@ -176,7 +225,7 @@ test(`Gemini history recovery refuses uncertain task ownership: ${scenario}`, as
   const urls = ['https://gemini.google.com/app/abc123', 'https://gemini.google.com/app/def456']
   let current = 'https://gemini.google.com/videos'
   let listed = false
-  const page = { async evaluate() { return current }, async goto(url) { current = url } }
+  const page = { async evaluate() { return current }, async goto(url) { current = url }, async wait() {} }
   const recovery = () => recoverVideoConversation(page, checkpoint, () => {}, {
     async listConversations() { listed = true; return urls.map(Url => ({ Url, Title: prompt })) },
     async readTurns() {
