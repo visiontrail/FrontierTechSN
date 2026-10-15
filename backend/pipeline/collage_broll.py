@@ -1024,7 +1024,7 @@ async def _retry_opencli_in_session(
             if any(code in str(exc) for code in (
                 "GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT",
                 "GEMINI_VIDEO_SUBMISSION_UNCERTAIN", "GEMINI_VIDEO_GENERATION_FAILED",
-                "GEMINI_VIDEO_COMPOSER_NOT_READY",
+                "GEMINI_VIDEO_COMPOSER_NOT_READY", "GEMINI_VIDEO_UNAVAILABLE", "GEMINI_VIDEO_QUOTA_EXHAUSTED",
                 "CHATGPT_IMAGE_TURN_PENDING", "CHATGPT_IMAGE_GENERATION_FAILED",
                 "CHATGPT_IMAGE_INPUT_MISSING",
             )):
@@ -1403,7 +1403,10 @@ async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir:
         state = state or {}
         if first_attempt:
             first_attempt = False
-            if state.get("request_id") != request_id or state.get("status") == "failed":
+            if state.get("request_id") != request_id or state.get("status") in {"failed", "quota_exhausted"}:
+                if state.get("status") == "quota_exhausted":
+                    digest = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()[:24]
+                    _write_json(video_dir / "history" / f"quota-{digest}.json", state)
                 state = {"request_id": request_id, "status": "new"}
                 _write_json(checkpoint, state)
             elif state.get("status") in ("stalled", "timeout", "uncertain", "saved"):

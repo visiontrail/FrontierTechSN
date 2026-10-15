@@ -16,7 +16,7 @@ import './ExplainerStudio.css'
 const STATUS: Record<ExplainerStatus, string> = {
   draft: 'Draft', queued: 'Queued', writing_script: 'Writing script', script_ready: 'Script ready', generating_audio: 'Generating audio',
   generating_images: 'Generating images', generating_motion: 'Generating motion', rendering: 'Rendering video', completed: 'Completed',
-  failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted',
+  failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted', waiting_provider: 'Waiting for Gemini',
 }
 
 type Draft = { form: ExplainerForm; revision?: number }
@@ -71,7 +71,8 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
   } : null)
   const running = isExplainerRunning(project?.status)
   const queued = project?.status === 'queued'
-  const locked = running || queued || !!pending || (!!id && !project)
+  const waitingProvider = project?.status === 'waiting_provider'
+  const locked = running || queued || waitingProvider || !!pending || (!!id && !project)
   const dirty = override !== null
 
   useEffect(() => {
@@ -245,8 +246,8 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
 
   return <div className="explainer-studio">
     <header className="explainer-header">
-      <div><p className="explainer-eyebrow">{taskDetail ? 'TASKS / EXPLAINER' : 'RESEARCH → STORY → VIDEO'}</p><h1>{taskDetail ? project?.title || 'Explainer task' : 'Explainer Studio'}</h1>
-        <p className="explainer-intro">{taskDetail ? 'Production progress, narration, visuals and finished video.' : 'Turn your research into a video. Follow production and find finished videos in Tasks.'}</p></div>
+      <div><p className="explainer-eyebrow">{taskDetail ? 'TASKS / BYTE BY BYTE' : 'BYTEFRONT / BYTE BY BYTE'}</p><h1>{taskDetail ? project?.title || 'Explainer task' : 'Explainer Studio'}</h1>
+        <p className="explainer-intro">{taskDetail ? 'Byte By Byte · Ideas explained, one step at a time.' : 'Turn your research into a video. Follow production and find finished videos in Tasks.'}</p></div>
       <div className="explainer-header-actions">
         <Link className="explainer-button" to="/">{taskDetail ? '← Back to Tasks' : 'View Tasks ↗'}</Link>
         <button type="button" className="explainer-button explainer-new" disabled={!!pending || (!id && dirty && !form?.title.trim())} onClick={() => {
@@ -288,6 +289,13 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
             <button type="button" onClick={() => void act('save')} disabled={locked || (!!project && !dirty) || !form.title.trim()}>{pending === 'save' ? 'Saving…' : taskDetail ? 'Save changes' : 'Save topic plan'}</button>
           </div>
 
+          {taskDetail && project?.artifacts.thumbnail_url && <section className="explainer-cover" aria-label="Episode thumbnail">
+            <a href={project.artifacts.thumbnail_url} target="_blank" rel="noreferrer"><img src={project.artifacts.thumbnail_url} alt={`Byte By Byte episode cover: ${project.title}`} /></a>
+            <div><p className="explainer-eyebrow">BYTEFRONT / BYTE BY BYTE</p><h2>Episode thumbnail</h2>
+              <p>A little closer to understanding.</p>
+              <a className="explainer-button" href={project.artifacts.thumbnail_url} download>Download thumbnail ↓</a></div>
+          </section>}
+
           {taskDetail && project && (running || queued || project.production || project.error || ['cancelled', 'interrupted'].includes(project.status)) && <section className="explainer-progress-panel" aria-label="Production progress">
             <div className="explainer-section-heading"><div><p className="explainer-eyebrow">PRODUCTION</p><h2>{STATUS[project.status]}</h2></div>
               {(running || queued || project.production) && <button type="button" disabled={!!pending} onClick={() => void act(queued ? 'dequeue' : 'cancel')}>{pending === 'dequeue' ? 'Removing…' : pending === 'cancel' ? 'Cancelling…' : queued ? 'Remove from queue' : project.production && !running ? 'Cancel and release slot' : 'Cancel run'}</button>}</div>
@@ -296,14 +304,19 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
             {running && <progress max={100} value={percentage} aria-label="Video generation progress" />}
             {progress && progress.total > 0 && <small>{progress.completed} / {progress.total}</small>}
             {project.error && <p className="explainer-small-error">{project.error}</p>}
-            {project.production && !running && <p className="explainer-muted">Your production slot is reserved through repairs. Resume this project to continue before other waiting videos, or cancel to release the slot.</p>}
-            {!running && !queued && <p className="explainer-muted">Edit the research or settings, then add the topic to the queue again.</p>}
+            {waitingProvider && project.provider_wait && <p className="explainer-provider-wait">
+              {project.provider_wait.reason === 'quota_exhausted' ? 'Gemini reported its video limit.' : 'Gemini’s video tool is temporarily unavailable.'}
+              {' '}Your completed clips are saved. Automatic retry: <strong>{new Date(project.provider_wait.retry_at).toLocaleString()}</strong>.
+              {' '}Other productions can continue while this episode waits.
+            </p>}
+            {project.production && !running && !waitingProvider && <p className="explainer-muted">Your production slot is reserved through repairs. Resume this project to continue before other waiting videos, or cancel to release the slot.</p>}
+            {!running && !queued && !waitingProvider && <p className="explainer-muted">Edit the research or settings, then add the topic to the queue again.</p>}
           </section>}
 
           {taskDetail && project?.artifacts.video_url && <section className="explainer-result">
             <div className="explainer-section-heading"><div><p className="explainer-eyebrow">THE FINISHED STORY</p><h2>Your explainer video</h2></div>
               {project.artifacts.duration_seconds != null && <span>{durationLabel(project.artifacts.duration_seconds)}</span>}</div>
-            <video key={project.artifacts.video_url} src={project.artifacts.video_url} controls preload="metadata" aria-label="Explainer video preview" />
+            <video key={project.artifacts.video_url} src={project.artifacts.video_url} poster={project.artifacts.thumbnail_url} controls preload="metadata" aria-label="Explainer video preview" />
             <div className="explainer-output-links"><a className="explainer-button is-primary" href={project.artifacts.video_url} download>Download video ↓</a>
               {project.artifacts.audio_url && <a className="explainer-button" href={project.artifacts.audio_url} download>Download narration</a>}
               {project.artifacts.timeline_url && <a className="explainer-button" href={project.artifacts.timeline_url} target="_blank" rel="noreferrer">View timeline ↗</a>}</div>
@@ -351,7 +364,7 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
                 <div><label htmlFor="explainer-motion">Motion style</label><select id="explainer-motion" value={form.style.motion_mode} onChange={(e) => patchStyle('motion_mode', e.target.value as ExplainerStyle['motion_mode'])}><option value="none">Still illustrations</option><option value="subtle">Gentle pan & zoom</option><option value="gemini">Gemini animation</option></select></div>
                 <div><label htmlFor="explainer-spacing">Animate every N scenes (0 = manual)</label><input id="explainer-spacing" type="number" min={0} max={100} value={form.style.motion_every_n_scenes} onChange={(e) => patchStyle('motion_every_n_scenes', Number(e.target.value))} /></div>
                 <div><label htmlFor="explainer-seconds">Target seconds per scene</label><input id="explainer-seconds" type="number" min={2} max={45} value={form.style.seconds_per_scene} onChange={(e) => patchStyle('seconds_per_scene', Number(e.target.value))} /></div>
-              </div><p className="explainer-field-help">Target seconds guide script segmentation. Extra silence at narration boundaries is trimmed. Selecting an animated scene enables Gemini animation.</p>
+              </div><p className="explainer-field-help">Target seconds guide script segmentation. Extra silence at narration boundaries is trimmed. Selecting an animated scene enables Gemini animation. Each episode allows up to 20 Gemini clips. When the video tool reaches its limit, production saves its progress and retries the next day.</p>
                 <div><label htmlFor="explainer-closing-hold">Final hold after narration (seconds)</label><input id="explainer-closing-hold" type="number" min={0} max={6} step={0.2} value={form.style.closing_hold_seconds ?? 2.4} onChange={(e) => patchStyle('closing_hold_seconds', Number(e.target.value))} /></div>
                 {form.style.motion_mode === 'gemini' && <div>
                   <label className="explainer-check"><input type="checkbox" checked={form.style.gemini_watermark_removal ?? true} onChange={(e) => patchStyle('gemini_watermark_removal', e.target.checked)} /><span>Remove visible Gemini watermark locally</span></label>
@@ -377,7 +390,7 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
               <div className="explainer-storyboard-export"><button type="button" disabled={form.scenes.length === 0} onClick={downloadScript}>Export narration ↓</button></div>
               <div className="explainer-script-summary"><span>{form.scenes.length} scenes</span><span>{count.toLocaleString('en-US')} {form.language === 'zh' ? 'characters' : 'words'}</span><span>Estimated narration: {estimate.toFixed(1)} min</span><span>Target: {form.target_minutes} min</span></div>
               <p className="explainer-field-help">{form.style.motion_mode === 'gemini'
-                ? `${form.scenes.filter((scene, index) => scene.motion || (form.style.motion_every_n_scenes > 0 && (index + 1) % form.style.motion_every_n_scenes === 0)).length} scenes selected for Gemini video.`
+                ? `${form.scenes.filter((scene, index) => scene.motion || (form.style.motion_every_n_scenes > 0 && (index + 1) % form.style.motion_every_n_scenes === 0)).length} / 20 Gemini clips selected. Static scenes do not count toward this limit.`
                 : `Gemini video is off. ${form.scenes.filter((scene) => scene.motion).length} marked animation scenes will render as illustrations with the current motion style.`}</p>
               <p className="explainer-render-estimate">{form.scenes.length > 0 && imageInterval ? `${form.scenes.length} images. With the current ${Math.round(imageInterval / 60)}-minute request interval, generating all images from scratch adds at least about ${imageWaitHours.toFixed(1)} hours of waiting, plus generation and rendering time. Reusing existing assets can shorten this.` : 'The current image request interval applies. Increase scene duration to reduce the number of images.'}</p>
               {form.scenes.length === 0 && <div className="explainer-empty-story"><span>“</span><h3>{running || queued ? 'Your storyboard will appear here.' : 'Start with a question worth explaining.'}</h3><p>{running || queued ? 'Scenes become available after the script has been generated.' : 'Add your research and generate a script, or add your first scene manually.'}</p></div>}

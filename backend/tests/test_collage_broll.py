@@ -823,7 +823,7 @@ def test_accepted_video_retry_preserves_request_or_refuses_duplicate_submission(
         assert json.loads(path.read_text()) == checkpoint
 
 
-@pytest.mark.parametrize("code", ["GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT", "GEMINI_VIDEO_GENERATION_FAILED"])
+@pytest.mark.parametrize("code", ["GEMINI_VIDEO_GENERATION_STALLED", "GEMINI_VIDEO_GENERATION_TIMEOUT", "GEMINI_VIDEO_GENERATION_FAILED", "GEMINI_VIDEO_UNAVAILABLE", "GEMINI_VIDEO_QUOTA_EXHAUSTED"])
 def test_video_terminal_generation_does_not_start_ten_more_generations(monkeypatch, code):
     run = AsyncMock(side_effect=collage_broll.OpenCLIError(code))
     monkeypatch.setattr(collage_broll, "run_opencli", run)
@@ -1875,3 +1875,24 @@ def test_candidate_scenes_exclude_spoken_program_bookends():
     assert [
         scene["id"] for scene in collage_broll._candidate_scenes(storyboard)
     ] == ["scene-02", "scene-03"]
+
+
+def test_quota_retry_archives_terminal_reply_before_new_acquisition(tmp_path, monkeypatch):
+    first = tmp_path / "reference.png"
+    first.write_bytes(b"reference image")
+    request_id = collage_broll._video_request_id("animate", first, None, LANDSCAPE)
+    checkpoint = tmp_path / "video" / "generation-state.json"
+    checkpoint.parent.mkdir()
+    previous = {"request_id": request_id, "status": "quota_exhausted",
+                "url": "https://gemini.google.com/app/abc123", "error": "Video limit reached", "deadline": 12345}
+    checkpoint.write_text(json.dumps(previous))
+    async def run(args, **kwargs):
+        assert "--resume" not in args
+        assert json.loads(checkpoint.read_text()) == {"request_id": request_id, "status": "new"}
+        Path(args[args.index("--output") + 1]).write_bytes(b"x" * 2048)
+        from backend.pipeline.opencli import OpenCLIResult
+        return OpenCLIResult(tuple(args), 0, '[{"link":"https://gemini.google.com/app/new456"}]', '')
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    asyncio.run(collage_broll._generate_video("animate", first, None, tmp_path, LANDSCAPE))
+    archived = list((checkpoint.parent / "history").glob("quota-*.json"))
+    assert len(archived) == 1 and json.loads(archived[0].read_text()) == previous

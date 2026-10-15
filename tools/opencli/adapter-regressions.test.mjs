@@ -28,6 +28,7 @@ import { pickModelPickerScript, readMenuModelsScript } from './node_modules/@jac
 import {
   openVideoPage,
   waitForVideoComposer,
+  isVideoQuotaMessage,
   uploadFrame,
   uploadFrames,
   submittedVideoPrompt,
@@ -73,7 +74,7 @@ function videoComposerPage(states) {
     async evaluate(script) {
       const state = states[Math.min(index++, states.length - 1)]
       const observed = vm.runInNewContext(script, {
-        document: { querySelector(selector) {
+        document: { querySelectorAll() { return [] }, querySelector(selector) {
           const key = selector.includes('Deselect Videos') ? 'videoMode'
             : selector.includes('File upload') ? 'upload'
               : selector.includes('Aspect ratio') ? 'aspect' : 'composer'
@@ -3916,3 +3917,20 @@ test(`Gemini attachment recovers an empty menu after ignored native clicks: expa
   assert.equal(page.actions.filter(([action]) => action === 'setFileInput').length, 1)
 })
 }
+
+test('Gemini quota evidence is distinct from ordinary generation and navigation failures', () => {
+  for (const message of ["You've reached your video generation limit. Try again tomorrow.",
+    'You have used up your daily limit', '已达到视频生成上限，请明天再试。']) {
+    assert.equal(isVideoQuotaMessage(message), true, message)
+  }
+  for (const message of ['Sorry, something went wrong. Please try your request again.',
+    'Video is generating', 'Upload a video', 'Navigation rejected']) {
+    assert.equal(isVideoQuotaMessage(message), false, message)
+  }
+})
+
+test('Gemini persistently disabled video entry defers without uploading', async () => {
+  const page = videoComposerPage([{ videoMode: 'inherited-disabled', upload: 'inherited-disabled', aspect: 'inherited-disabled', composer: false }])
+  await assert.rejects(waitForVideoComposer(page, { timeoutMs: 1000 }), /GEMINI_VIDEO_UNAVAILABLE/)
+  assert.deepEqual(page.observations, [false, false])
+})

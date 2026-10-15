@@ -145,3 +145,15 @@ npm run build
 动态请求曾在 Gemini `/videos` 页停留于“正在生成”，本地 600 秒无进度检查退出。重新打开与完整提示词匹配的历史对话后，确认原请求已经产出视频；补回已核验的对话链接后续传成功，没有提交替代生成。它证明了素材生成和恢复后的完整链路；这次人工发现历史链接不能算作修复后自动历史发现机制的实际验收，后者另由回归测试验证。
 
 验收记录、播放状态与截图位于忽略目录 `outputs/explainer-validation/`。本次实测范围是英文写作和短样片，没有生成完整 15 分钟节目，也没有完成中文声音或多镜头角色一致性的实际验收。
+
+## Byte By Byte series contract
+
+Explainers belong to **Bytefront / Byte By Byte**. Every rendered episode generates a 16:9 cover before its first scene, using the Morning Desk navy/cyan/copper identity with warm paper and line characters. Cover inputs are bound to the title and narration; the prompt, provider checkpoint and image hash are cached with the project. The Task page shows and downloads the cover, including while motion generation is waiting. Covers never substitute for final video completion.
+
+The opening places the series identity over the first 2.2 seconds of the existing hook; it adds no silent pre-roll. The final scene includes the same identity, following the script's callback, practical action and takeaway beats. These overlays are local composition and consume no Gemini generation requests. Source images, narration and existing Gemini footage retain their content-addressed caches.
+
+At most **20 Gemini clips** may be selected in an episode, counting the union of explicit motion flags and the automatic interval. Static narration/illustration scenes do not count. API validation and render preflight enforce the same cap; the writer allocates that budget across chapters. An oversized legacy plan remains readable but must be reduced before production; no selected clip is silently dropped.
+
+When Gemini explicitly reports a video/usage limit, or its Videos controls remain disabled through the bounded readiness check, the original task enters `waiting_provider`. Disabled controls are recorded as `video_unavailable`, not a proven daily quota. No fixed 3/day or 5/day entitlement is assumed. The same production claim, operation, assets and provider checkpoints remain on disk, while its worker slot is yielded to other work. A shared persisted provider backoff prevents other Explainers from immediately retrying the unavailable tool.
+
+The shared worker requeues the same production once due, even after a service restart. The default retry is the same local clock time on the following calendar day, using `AI_PRIMARY_RATE_LIMIT_TIMEZONE` (default Asia/Singapore); this gives rolling allowances a full day. A second waiting project reuses that deadline rather than extending it. The Task page displays the retry time. The service must be running to dispatch; if it restarts after the deadline it resumes at its next idle worker cycle. Explicit cancellation or maintenance pause disables that project's automatic recovery. Ordinary generation errors, missing UI controls, login/navigation failures and uncertain submissions retain their existing error/reconciliation paths. Only an explicit terminal quota reply permits a fresh acquisition on next-day resume; unknown submitted requests retain original ownership and deadlines.

@@ -90,6 +90,11 @@ class Providers:
 @pytest.fixture
 def providers(monkeypatch):
     fixture = Providers()
+    from backend import explainers
+    monkeypatch.setattr(explainers, "pending_gemini_wait", lambda: None)
+    async def thumbnail(*args):
+        return {"thumbnail_path": "cover.png"}
+    monkeypatch.setattr(pipeline, "_thumbnail", thumbnail)
     monkeypatch.setattr(pipeline, "generate_tts", fixture.audio)
     monkeypatch.setattr(pipeline, "_generate_still", fixture.image)
     monkeypatch.setattr(pipeline, "_generate_video", fixture.motion)

@@ -26,6 +26,11 @@ export async function openVideoPage(page, url) {
     }
 }
 
+export function isVideoQuotaMessage(text) {
+    const value = String(text || '').replace(/\s+/g, ' ').trim();
+    return /(?:reached|exceeded|used up|out of|no more).{0,70}(?:video|generation|usage|daily|quota|limit)|(?:video|generation|usage|daily).{0,70}(?:limit reached|limit exceeded|quota exhausted|try again tomorrow)|(?:视频|影片).{0,30}(?:上限|限额|额度|用尽)|(?:已达到|已用完).{0,30}(?:生成|额度|限额)/i.test(value);
+}
+
 export async function waitForVideoComposer(page, { timeoutMs = 90000 } = {}) {
     // The /videos skeleton exposes a working file picker before Gemini has
     // activated Videos. Uploading then can leave an invisible duplicate-file
@@ -51,13 +56,23 @@ export async function waitForVideoComposer(page, { timeoutMs = 90000 } = {}) {
           const upload = usable('button[aria-label="File upload"]');
           const aspect = usable('button[aria-label^="Aspect ratio"]');
           const composer = usable('[contenteditable="true"][role="textbox"], textarea[aria-label="Enter a prompt for Gemini"]');
-          return { videoMode, upload, aspect, composer,
+          const videoButton = document.querySelector('button[aria-label="Deselect Videos"]');
+          const disabledVideo = !!videoButton && (videoButton.matches(':disabled') || videoButton.getAttribute('aria-disabled') === 'true');
+          const notice = [...document.querySelectorAll('[role="alert"], [role="status"], .gds-callout')]
+            .filter(node => node.getBoundingClientRect().width > 0).map(node => node.innerText || '').join(' ').slice(0, 2000);
+          return { videoMode, upload, aspect, composer, disabledVideo, notice,
             ready: videoMode && upload && aspect && composer };
         })()`));
+        if (isVideoQuotaMessage(state?.notice)) {
+            throw new CommandExecutionError('GEMINI_VIDEO_QUOTA_EXHAUSTED: ' + state.notice);
+        }
         stable = state?.ready === true ? stable + 1 : 0;
         if (stable >= 2) return state;
         if (attempt + 1 >= attempts || Date.now() >= deadline) break;
         await page.wait(Math.max(0, Math.min(1, (deadline - Date.now()) / 1000)));
+    }
+    if (state?.disabledVideo === true && !state.composer) {
+        throw new CommandExecutionError('GEMINI_VIDEO_UNAVAILABLE: Videos remains disabled after the bounded readiness check: ' + JSON.stringify(state));
     }
     throw new CommandExecutionError(
         'GEMINI_VIDEO_COMPOSER_NOT_READY: active Videos tool and upload controls did not stabilize: '
@@ -895,6 +910,9 @@ export async function waitForVideo(page, before, timeoutSeconds, {
         const responseText = String(state?.text || '').replace(/\s+/g, ' ').trim();
         // Match entire observed failure replies, not dialogue quoted in a
         // still-progressing response. These are terminal, not stalled jobs.
+        if (isVideoQuotaMessage(responseText)) {
+            throw new CommandExecutionError('GEMINI_VIDEO_QUOTA_EXHAUSTED: ' + responseText.slice(-1000));
+        }
         const normalizedReply = responseText.replace(/^Gemini said\s+/i, '').replace(/’/g, "'").toLowerCase();
         const terminalFailure = [
             "i'm having a hard time fulfilling your request. can i help you with something else instead?",
@@ -1151,6 +1169,7 @@ export const videoCommand = cli({
                 ['GEMINI_VIDEO_GENERATION_STALLED', 'stalled'],
                 ['GEMINI_VIDEO_GENERATION_TIMEOUT', 'timeout'],
                 ['GEMINI_VIDEO_GENERATION_FAILED', 'failed'],
+                ['GEMINI_VIDEO_QUOTA_EXHAUSTED', 'quota_exhausted'],
                 ['GEMINI_VIDEO_SUBMISSION_UNCERTAIN', 'uncertain'],
             ]) {
                 if (message.includes(code)) Object.assign(checkpoint, { status, error: message });

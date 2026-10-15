@@ -15,7 +15,7 @@ const STATUS_LABELS: Record<string, string> = {
   sourcing: 'Sourcing Footage', music: 'Generating Music', publishing: 'Publishing',
   draft: 'Draft', writing_script: 'Writing Script', script_ready: 'Script Ready',
   generating_audio: 'Generating Audio', generating_images: 'Generating Images',
-  generating_motion: 'Generating Motion', rendering: 'Rendering', cancelled: 'Cancelled', interrupted: 'Interrupted',
+  waiting_provider: 'Waiting for Gemini', generating_motion: 'Generating Motion', rendering: 'Rendering', cancelled: 'Cancelled', interrupted: 'Interrupted',
 }
 
 interface ProductionRow {
@@ -59,9 +59,9 @@ function explainerRow(project: ExplainerProject): ProductionRow {
     key: `explainer:${project.id}`, path: `/tasks/explainers/${project.id}`,
     title: project.title || 'Untitled explainer',
     subtitle: project.scenes.length ? `${project.scenes.length} storyboard scenes` : 'Research to video',
-    glyph: 'EX', sourceType: 'explainer', format: 'Explainer',
+    glyph: 'EX', sourceType: 'explainer', format: 'Byte By Byte',
     status: project.status === 'completed' ? 'complete' : project.status,
-    progress: project.progress, origin: 'Explainer Studio',
+    progress: project.progress, origin: 'Byte By Byte',
     originLabel: project.language === 'zh' ? 'Chinese narration' : 'English narration',
     duration: project.artifacts.duration_seconds ?? null, targetMinutes: project.target_minutes,
     queuePosition: project.queue?.position, createdAt: project.created_at,
@@ -100,7 +100,7 @@ export default function TaskList() {
   const isLoading = news.isLoading || explainers.isLoading
   const hasError = news.isError || explainers.isError
   const counts = tasks.reduce((result, task) => {
-    if (task.status === 'scheduled') result.scheduled += 1
+    if (['scheduled', 'waiting_provider'].includes(task.status)) result.scheduled += 1
     else if (task.status === 'complete') result.complete += 1
     else if (['failed', 'cancelled', 'interrupted', 'script_ready', 'draft'].includes(task.status)) result.attention += 1
     else result.active += 1

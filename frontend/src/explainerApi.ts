@@ -36,7 +36,7 @@ export interface ExplainerForm {
 }
 
 export type ExplainerStatus = 'draft' | 'queued' | 'writing_script' | 'script_ready' | 'generating_audio'
-  | 'generating_images' | 'generating_motion' | 'rendering' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  | 'generating_images' | 'generating_motion' | 'rendering' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'waiting_provider'
 
 export interface ExplainerSceneArtifact {
   id: string
@@ -51,11 +51,13 @@ export interface ExplainerProject extends ExplainerForm {
   updated_at: string
   error: string | null
   production?: { operation: 'script' | 'render' | 'full' | null; started_at: string } | null
+  provider_wait?: { provider: string; reason: 'quota_exhausted' | 'video_unavailable'; scene_id: string; retry_at: string; timezone: string } | null
   cancellation_reason?: 'user' | 'service_interruption' | 'maintenance' | null
   queue?: { operation: 'script' | 'render' | 'full'; enqueued_at: string; position: number | null } | null
   logs: string[]
   progress: { completed: number; total: number; message: string }
   artifacts: {
+    thumbnail_url?: string
     video_url?: string
     audio_url?: string
     timeline_url?: string

@@ -19,6 +19,8 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 from backend import config
+from backend.explainer_series import BRAND_VERSION, SERIES_NAME, motion_indices, validate_motion_budget, thumbnail_prompt
+from backend.explainer_availability import GeminiVideoDeferred, availability_reason
 from backend.explainer_pacing import pacing_plan, write_paced_audio
 from backend.explainer_visual_review import (
     MAX_IMAGE_ATTEMPTS,
@@ -239,7 +241,7 @@ def _overlay(scene: dict, project: dict, path: Path) -> None:
         # Illustration prompts reserve the lower quarter. Use that space for
         # closing beats when captions do not need it, keeping faces unobscured.
         top = (HEIGHT - 90 - len(lines) * 65
-               if scene.get("ending_role") and not project.get("captions_enabled", False) else 56)
+               if (scene.get("ending_role") or scene.get("_brand_role")) and not project.get("captions_enabled", False) else 188 if scene.get("_brand_role") else 56)
         draw.rounded_rectangle((left, top, right, top + 34 + len(lines) * 65), radius=18,
                                fill=style.get("background_color", "#F4EBDD"))
         draw.line((left + 24, top + 9, right - 24, top + 9), fill=style.get("accent_color", "#C56545"), width=5)
@@ -564,6 +566,41 @@ async def _image(scene: dict, style: dict, root: Path, log: Log = lambda _: None
                        "rejected images retained, scene not rendered")
 
 
+def _brand_overlay(path: Path, role: str) -> None:
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    left = WIDTH - 710 if role == "outro" else 64
+    draw.rounded_rectangle((left, 40, left + 646, 168), radius=12, fill=(10, 31, 48, 242))
+    draw.line((left + 24, 62, left + 24, 144), fill="#C78C54", width=5)
+    draw.text((left + 48, 56), "BYTEFRONT", font=_font(22, "en"), fill="#C78C54")
+    draw.text((left + 44, 84), SERIES_NAME, font=_font(54, "en"), fill="#F4EBDD")
+    overlay.save(path)
+
+
+async def _thumbnail(project: dict, root: Path, log: Log) -> dict:
+    prompt = thumbnail_prompt(project)
+    key = _hash({"brand_version": BRAND_VERSION, "prompt": prompt})
+    stage = _stage(root, "series", "thumbnail", key)
+    async with owned_media_session(stage, "chatgpt", recover_only=True):
+        pass
+    record = _cached(stage, key, root)
+    if not record:
+        _write(stage / "prompt.txt", prompt, root)
+        source, conversation = await _generate_still(prompt, stage)
+        _safe(source, root)
+        with Image.open(source) as artwork:
+            artwork.load()
+            if artwork.width < 1000 or abs(artwork.width / artwork.height - 16 / 9) > 0.08:
+                raise ValueError("Byte By Byte thumbnail must be a large landscape 16:9 image")
+            artwork.convert("RGB").save(stage / "thumbnail.png")
+        record = _complete(stage, key, [stage / "thumbnail.png", stage / "prompt.txt"], root,
+                           provider="chatgpt_web_opencli", conversation_url=conversation)
+        log("Byte By Byte episode thumbnail is ready")
+    return {"thumbnail_path": str((stage / "thumbnail.png").relative_to(root)),
+            "thumbnail_sha256": record["files"]["thumbnail.png"],
+            "thumbnail_prompt_path": str((stage / "prompt.txt").relative_to(root))}
+
+
 async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Path, dict]:
     prompt = _motion_prompt(scene, style)
     key = _hash({"version": CONTRACT_VERSION, "prompt": prompt, "image": _sha(image)})
@@ -582,7 +619,17 @@ async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Pa
         canvas = Image.new("RGB", (1280, 720), color)
         canvas.paste(artwork, ((1280 - artwork.width) // 2, (720 - artwork.height) // 2))
         canvas.save(keyframe, quality=92)
-    raw, conversation = await _generate_video(prompt, keyframe, None, stage, LANDSCAPE)
+    from backend.explainers import pending_gemini_wait
+    wait = pending_gemini_wait()
+    if wait:
+        raise GeminiVideoDeferred(wait["reason"], wait["evidence"], scene["id"])
+    try:
+        raw, conversation = await _generate_video(prompt, keyframe, None, stage, LANDSCAPE)
+    except Exception as exc:
+        reason = availability_reason(exc)
+        if reason:
+            raise GeminiVideoDeferred(reason, str(exc), scene["id"]) from exc
+        raise
     _safe(raw, root)
     measured = _duration(await _probe(raw), "video")
     await _command(["ffmpeg", "-v", "error", "-xerror", "-i", str(raw), "-an", "-f", "null", "-"], timeout=120)
@@ -694,6 +741,8 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
                  "accent": style.get("accent_color", "#C56545")}
     if scene.get("ending_role") and not project.get("captions_enabled", False):
         render_inputs["closing_title_position"] = "lower_safe_area"
+    if scene.get("_brand_role"):
+        render_inputs["series_brand"] = {"version": BRAND_VERSION, "role": scene["_brand_role"]}
     closing_hold = (audio.get("pacing") or {}).get("closing_hold_seconds", 0)
     fade_seconds = min(0.8, closing_hold)
     if fade_seconds:
@@ -706,6 +755,8 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     if cached:
         return stage / "clip.mp4", cached
     _overlay(scene, project, stage / "overlay.png")
+    if scene.get("_brand_role"):
+        _brand_overlay(stage / "brand.png", scene["_brand_role"])
     color = style.get("background_color", "#F4EBDD").replace("#", "0x")
     base = f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color={color},setsar=1"
     if watermark_repair:
@@ -739,8 +790,15 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     finish = "format=yuv420p"
     if fade_seconds:
         finish += f",fade=t=out:st={audio['duration_seconds'] - fade_seconds:.9f}:d={fade_seconds}:color={color}"
-    args += ["-loop", "1", "-framerate", str(FPS), "-i", str(stage / "overlay.png"),
-             "-filter_complex", f"[0:v]{base}[base];[base][1:v]overlay=0:0:shortest=1,{finish}[v]",
+    args += ["-loop", "1", "-framerate", str(FPS), "-i", str(stage / "overlay.png")]
+    filters = f"[0:v]{base}[base];[base][1:v]overlay=0:0:shortest=1[text]"
+    if scene.get("_brand_role"):
+        args += ["-loop", "1", "-framerate", str(FPS), "-i", str(stage / "brand.png")]
+        enable = ":enable='lt(t,2.2)'" if scene["_brand_role"] == "intro" else ""
+        filters += f";[text][2:v]overlay=0:0:shortest=1{enable}[branded];[branded]{finish}[v]"
+    else:
+        filters += f";[text]{finish}[v]"
+    args += ["-filter_complex", filters,
              "-map", "[v]", "-an", "-frames:v", str(audio["frames"]), "-r", str(FPS),
              "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-threads", "4",
              "-movflags", "+faststart", str(stage / "clip.partial.mp4")]
@@ -774,6 +832,7 @@ def _validate(project: dict, root: Path) -> list[dict]:
             raise ValueError(f"Invalid style color: {name}")
     if style.get("motion_mode", "none") not in ("none", "subtle", "gemini"):
         raise ValueError("Unsupported motion mode")
+    validate_motion_budget(scenes, style)
     if style.get("motion_mode") == "gemini":
         every = max(0, int(style.get("motion_every_n_scenes", 0)))
         if not any(s.get("motion") or (every and (i + 1) % every == 0) for i, s in enumerate(scenes)):
@@ -787,7 +846,7 @@ async def render_project(project: dict, project_dir: Path,
     scenes = _validate(project, root)
     root.mkdir(parents=True, exist_ok=True)
     style = project.get("style") or {}
-    total = len(scenes) * 4 + 1
+    total = len(scenes) * 4 + 2
     completed = 0
     artifacts: list[dict] = []
     current_frame = 0
@@ -810,7 +869,13 @@ async def render_project(project: dict, project_dir: Path,
             if site in ("chatgpt", "gemini"):
                 async with owned_media_session(journal.parent, site, recover_only=True):
                     pass
-        for index, scene in enumerate(scenes):
+        progress("generating_images", "Generating or reusing the Byte By Byte episode thumbnail")
+        thumbnail = await _thumbnail(project, root, log)
+        update({"artifacts": thumbnail})
+        completed += 1
+        selected_motion = set(motion_indices(scenes, style))
+        for index, saved_scene in enumerate(scenes):
+            scene = {**saved_scene, "_brand_role": "intro" if index == 0 else "outro" if index == len(scenes) - 1 else ""}
             prefix = f"Scene {index + 1}/{len(scenes)}"
             progress("generating_audio", f"{prefix}: generating or reusing exact narration")
             source_audio_path, source_audio = await _audio(scene, project, root, log)
@@ -825,9 +890,7 @@ async def render_project(project: dict, project_dir: Path,
             image_path, illustration = await _image(scene, style, root, log)
             completed += 1
             motion_path, motion = None, None
-            every = max(0, int(style.get("motion_every_n_scenes", 4)))
-            selected = bool(scene.get("motion")) or (every > 0 and (index + 1) % every == 0)
-            if style.get("motion_mode") == "gemini" and selected:
+            if index in selected_motion:
                 progress("generating_motion", f"{prefix}: generating or reusing Gemini motion")
                 motion_path, motion = await _motion(scene, style, image_path, root)
             completed += 1
@@ -895,13 +958,16 @@ async def render_project(project: dict, project_dir: Path,
             (delivery / "video.partial.mp4").replace(delivery / "video.mp4")
             _complete(delivery, delivery_key, [delivery / "video.mp4", delivery / "narration.wav"], root,
                       duration_seconds=duration, verified_full_decode=True)
-        result = {"video_path": relative(delivery / "video.mp4"), "audio_path": relative(delivery / "narration.wav"),
+        result = {**thumbnail, "series_name": SERIES_NAME, "video_path": relative(delivery / "video.mp4"), "audio_path": relative(delivery / "narration.wav"),
                   "timeline_path": "timeline.json", "captions_path": "captions.srt", "manifest_path": "manifest.json",
                   "duration_seconds": duration, "scene_artifacts": artifacts}
         completed = total
         save_manifest("completed")
         update({"progress": {"completed": completed, "total": total, "message": "Video and narration verified"}})
         return result
+    except GeminiVideoDeferred as exc:
+        save_manifest("waiting_provider", str(exc))
+        raise
     except asyncio.CancelledError:
         save_manifest("cancelled")
         raise
