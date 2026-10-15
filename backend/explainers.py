@@ -481,12 +481,19 @@ def defer_for_gemini(project_id: str, operation: str, error: GeminiVideoDeferred
         project = read_project(project_id)
         stamp = now()
         existing = pending_gemini_wait()
+        previous = project.get("provider_wait") or project.get("last_provider_wait") or {}
+        failures = (int(previous.get("consecutive_failures", 0)) + 1
+                    if previous.get("scene_id") == error.scene_id and previous.get("reason") == error.reason else 1)
         wait = {"provider": "gemini_video", "reason": error.reason, "scene_id": error.scene_id,
-                "operation": operation, "paused_at": stamp, "retry_at": existing["retry_at"] if existing else next_retry_at(stamp),
+                "operation": operation, "paused_at": stamp,
+                "retry_at": existing["retry_at"] if existing else next_retry_at(stamp, error.reason, evidence=str(error), failures=failures),
+                "retry_policy_version": 2, "consecutive_failures": failures,
                 "timezone": config.AI_PRIMARY_RATE_LIMIT_TIMEZONE, "evidence": str(error)[-2000:]}
-        _write(root_dir() / "gemini-video-availability.json", wait)
+        # A terminal scene error does not establish an account-wide outage.
+        if error.reason != "generation_failed":
+            _write(root_dir() / "gemini-video-availability.json", wait)
         progress = dict(project.get("progress") or {})
-        progress["message"] = "Gemini video unavailable; progress saved. Automatic retry on the next day."
+        progress["message"] = "Gemini video unavailable; progress saved. A retry is scheduled, or retry now when availability changes."
         result = patch_project(project_id, {"status": "waiting_provider", "provider_wait": wait,
                                "error": None, "queue": None, "progress": progress})
         append_log(project_id, f"Gemini deferred ({error.reason}) until {wait['retry_at']}; original production retained")
@@ -499,7 +506,34 @@ def pending_gemini_wait() -> dict | None:
     if not path.exists():
         return None
     wait = json.loads(path.read_text())
+    if wait.get("reason") == "generation_failed":
+        return None
     return wait if datetime.fromisoformat(wait["retry_at"]) > datetime.fromisoformat(now()) else None
+
+
+def retry_provider(project_id: str) -> dict:
+    """Queue one user-requested retry without discarding production identity."""
+    with _lock:
+        project = read_project(project_id)
+        wait = project.get("provider_wait")
+        if project_id in _jobs or project["status"] != "waiting_provider" or not wait:
+            raise ConflictError("This production is not waiting for Gemini")
+        if (not project.get("production") or project.get("cancellation_reason") or project.get("priority_pause")
+                or wait.get("operation") not in {"render", "full"}):
+            raise ConflictError("This production cannot resume while cancelled or paused")
+        ProjectInput.model_validate({key: project[key] for key in ProjectInput.model_fields})
+        stamp = now()
+        # Expire the shared cooldown, but keep other projects' scheduled waits.
+        # Unknown submitted requests never enter waiting_provider in the first place.
+        shared = pending_gemini_wait()
+        if shared:
+            _write(root_dir() / "gemini-video-availability.json", {**shared, "retry_at": stamp,
+                   "manual_retry_requested_at": stamp})
+        patch_project(project_id, {"provider_wait": {**wait, "retry_at": stamp,
+                      "scheduled_retry_at": wait["retry_at"], "manual_retry_requested_at": stamp}})
+        resume_provider_waits()
+        append_log(project_id, "Manual Gemini retry requested; original production and completed clips retained")
+        return read_project(project_id)
 
 
 def resume_provider_waits() -> list[str]:
@@ -521,7 +555,7 @@ def resume_provider_waits() -> list[str]:
                      "sequence": production.get("sequence", 0),
                      "previous": {"status": "interrupted", "error": None, "progress": project.get("progress")}}
             progress = dict(project.get("progress") or {})
-            progress["message"] = "Next-day Gemini retry is ready; resuming the original production"
+            progress["message"] = "Gemini retry is ready; resuming the original production"
             patch_project(project["id"], {"status": "queued", "queue": queue, "provider_wait": None,
                           "last_provider_wait": wait, "progress": progress})
             resumed.append(project["id"])
@@ -692,7 +726,7 @@ async def queue_state() -> dict:
     elif items:
         message = "Waiting for the shared worker. Queued Explainers run before waiting Morning Desk tasks."
     elif waiting:
-        message = "Gemini video is unavailable. Saved productions resume automatically the next day; other tasks can run."
+        message = "Gemini video is unavailable. Saved productions retry at their scheduled time, or you can retry now; other tasks can run."
     else:
         message = "Add topic plans to generate videos one at a time."
     reservation_project = owner or next(iter(suspended), None)

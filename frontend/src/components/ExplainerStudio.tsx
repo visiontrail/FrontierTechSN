@@ -128,7 +128,7 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
     return saved
   }
 
-  async function act(action: 'save' | 'save-next' | 'script' | 'render' | 'queue' | 'dequeue' | 'cancel' | 'defaults') {
+  async function act(action: 'save' | 'save-next' | 'script' | 'render' | 'queue' | 'dequeue' | 'cancel' | 'defaults' | 'retry-provider') {
     setError(null)
     setNotice(null)
     setPending(action)
@@ -143,12 +143,12 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
         await saveExplainerDefaults({ language, target_minutes, tts_model, voice, captions_enabled, style })
         await queryClient.invalidateQueries({ queryKey: ['explainer-defaults'] })
         setNotice('Style, language and voice settings saved as defaults for new projects.')
-      } else if ((action === 'cancel' || action === 'dequeue') && id) {
+      } else if ((action === 'cancel' || action === 'dequeue' || action === 'retry-provider') && id) {
         const cancelled = await runExplainer(id, action)
         queryClient.setQueryData(['explainer', id], cancelled)
         void queryClient.invalidateQueries({ queryKey: ['explainers'] })
         void queryClient.invalidateQueries({ queryKey: ['explainer-queue'] })
-        setNotice(action === 'dequeue' ? 'Removed from the queue. Your topic and research are saved.' : 'Cancellation requested. Finishing the current step.')
+        setNotice(action === 'retry-provider' ? 'Gemini retry queued. Your completed clips are retained.' : action === 'dequeue' ? 'Removed from the queue. Your topic and research are saved.' : 'Cancellation requested. Finishing the current step.')
       } else {
         savingCurrent = true
         const saved = await saveCurrent()
@@ -166,7 +166,7 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
       setConflict(savingCurrent && cause instanceof ExplainerApiError && cause.status === 409)
     } finally {
       setPending(null)
-      if (['queue', 'script', 'render', 'dequeue', 'cancel'].includes(action)) {
+      if (['queue', 'script', 'render', 'dequeue', 'cancel', 'retry-provider'].includes(action)) {
         void queryClient.invalidateQueries({ queryKey: ['explainers'] })
         void queryClient.invalidateQueries({ queryKey: ['explainer-queue'] })
         if (savedId) void queryClient.invalidateQueries({ queryKey: ['explainer', savedId] })
@@ -309,6 +309,7 @@ export default function ExplainerStudio({ taskDetail = false }: { taskDetail?: b
               {' '}Your completed clips are saved. Automatic retry: <strong>{new Date(project.provider_wait.retry_at).toLocaleString()}</strong>.
               {' '}Other productions can continue while this episode waits.
             </p>}
+            {waitingProvider && <button type="button" disabled={!!pending} onClick={() => void act('retry-provider')}>{pending === 'retry-provider' ? 'Queuing retry…' : 'Retry Gemini now'}</button>}
             {project.production && !running && !waitingProvider && <p className="explainer-muted">Your production slot is reserved through repairs. Resume this project to continue before other waiting videos, or cancel to release the slot.</p>}
             {!running && !queued && !waitingProvider && <p className="explainer-muted">Edit the research or settings, then add the topic to the queue again.</p>}
           </section>}

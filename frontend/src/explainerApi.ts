@@ -116,7 +116,7 @@ export const saveExplainerDefaults = (values: ExplainerDefaultValues) => request
 export const fetchExplainer = (id: string) => request<ExplainerProject>(`/${encodeURIComponent(id)}`)
 export const createExplainer = (form: ExplainerForm) => request<ExplainerProject>('', 'POST', form)
 export const saveExplainer = (id: string, form: ExplainerForm, revision: number) => request<ExplainerProject>(`/${encodeURIComponent(id)}`, 'PUT', { ...form, revision })
-export const runExplainer = (id: string, action: 'script' | 'render' | 'queue' | 'dequeue' | 'cancel') => request<ExplainerProject>(`/${encodeURIComponent(id)}/${action}`, 'POST')
+export const runExplainer = (id: string, action: 'script' | 'render' | 'queue' | 'dequeue' | 'cancel' | 'retry-provider') => request<ExplainerProject>(`/${encodeURIComponent(id)}/${action}`, 'POST')
 
 export const isExplainerRunning = (status?: ExplainerStatus) => !!status && [
   'writing_script', 'generating_audio', 'generating_images', 'generating_motion', 'rendering',

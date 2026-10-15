@@ -74,6 +74,11 @@ async def remove_from_queue(project_id: str):
     return studio.public_project(_call(studio.remove_from_queue, project_id))
 
 
+@router.post("/{project_id}/retry-provider", status_code=202)
+async def retry_provider(project_id: str):
+    return studio.public_project(_call(studio.retry_provider, project_id))
+
+
 @router.post("/{project_id}/cancel")
 async def cancel(project_id: str):
     _call(studio.read_project, project_id)

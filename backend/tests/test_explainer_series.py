@@ -46,8 +46,16 @@ def test_only_availability_evidence_defers():
         assert availability_reason(RuntimeError("GEMINI_VIDEO_" + code)) is None
 
 
-def test_next_day_is_timezone_aware_and_gives_rolling_limit_a_day(isolated):
-    assert next_retry_at("2026-10-15T15:55:00+00:00") == "2026-10-16T15:55:00+00:00"
+def test_retry_timing_uses_evidence_instead_of_a_fixed_day(isolated):
+    stamp = "2026-10-15T16:40:00+00:00"
+    assert next_retry_at(stamp, "generation_failed") == "2026-10-15T16:55:00+00:00"
+    assert next_retry_at(stamp, "generation_failed", failures=2) == "2026-10-15T17:10:00+00:00"
+    assert next_retry_at(stamp, "generation_failed", failures=99) == "2026-10-15T17:40:00+00:00"
+    assert next_retry_at(stamp, "video_unavailable") == "2026-10-15T17:10:00+00:00"
+    assert next_retry_at(stamp, evidence="Resets at 3:54 AM") == "2026-10-15T19:55:00+00:00"
+    assert next_retry_at(stamp, evidence="Try again in 20 minutes") == "2026-10-15T17:01:00+00:00"
+    assert next_retry_at(stamp) == "2026-10-15T21:40:00+00:00"
+    assert next_retry_at("2026-10-15T15:40:00+00:00", evidence="Daily video limit") == "2026-10-15T16:05:00+00:00"
 
 
 def test_persistent_wait_yields_worker_and_resumes_once_without_extending_other_waits(isolated, monkeypatch):
@@ -60,7 +68,7 @@ def test_persistent_wait_yields_worker_and_resumes_once_without_extending_other_
     monkeypatch.setattr(studio, "now", lambda: "2026-10-15T15:55:00+00:00")
     saved = studio.defer_for_gemini(first["id"], "render", GeminiVideoDeferred("quota_exhausted", "observed limit", "scene-000"))
     deadline = saved["provider_wait"]["retry_at"]
-    monkeypatch.setattr(studio, "now", lambda: "2026-10-15T16:10:00+00:00")
+    monkeypatch.setattr(studio, "now", lambda: "2026-10-15T15:58:00+00:00")
     later = studio.defer_for_gemini(second["id"], "render", GeminiVideoDeferred("quota_exhausted", "same limit"))
     assert later["provider_wait"]["retry_at"] == deadline
     studio.recover_interrupted()
@@ -101,6 +109,65 @@ def test_worker_catches_deferred_motion_without_marking_task_failed(isolated, mo
     assert saved["production"]["operation"] == "render"
     assert saved["provider_wait"]["scene_id"] == "scene-000"
     assert studio.production_owner() is None
+
+
+def test_scene_failure_does_not_block_other_projects_and_backs_off(isolated, monkeypatch):
+    project = studio.create_project(project_input())
+    claim = {"operation": "render", "started_at": "2026-10-14T03:00:00+00:00", "sequence": 7}
+    studio.patch_project(project["id"], {"production": claim})
+    monkeypatch.setattr(studio, "now", lambda: "2026-10-15T16:40:00+00:00")
+    first = studio.defer_for_gemini(project["id"], "render", GeminiVideoDeferred("generation_failed", "ordinary error", "scene-000"))
+    assert first["provider_wait"]["retry_at"] == "2026-10-15T16:55:00+00:00"
+    assert studio.pending_gemini_wait() is None
+    studio.retry_provider(project["id"])
+    second = studio.defer_for_gemini(project["id"], "render", GeminiVideoDeferred("generation_failed", "ordinary error", "scene-000"))
+    assert second["provider_wait"]["retry_at"] == "2026-10-15T17:10:00+00:00"
+    assert second["provider_wait"]["consecutive_failures"] == 2
+    # Legacy generic failures must not preserve a stale account-wide 24h gate.
+    studio._write(studio.root_dir() / "gemini-video-availability.json", {**first["provider_wait"], "retry_at": "2030-01-01T00:00:00+00:00"})
+    assert studio.pending_gemini_wait() is None
+
+
+def test_manual_retry_preserves_original_work_and_does_not_wake_other_waits(isolated, monkeypatch):
+    monkeypatch.setattr(studio, "now", lambda: "2026-10-15T16:40:00+00:00")
+    first, second = [studio.create_project(project_input()) for _ in range(2)]
+    claim = {"operation": "render", "started_at": "2026-10-14T03:00:00+00:00", "sequence": 7}
+    for project in (first, second):
+        studio.patch_project(project["id"], {"production": claim, "scene_artifacts": [{"motion_path": "accepted.mp4"}]})
+        studio.defer_for_gemini(project["id"], "render", GeminiVideoDeferred("quota_exhausted", "usage limit"))
+    original = studio.read_project(first["id"])
+    retried = studio.retry_provider(first["id"])
+    assert retried["status"] == "queued" and retried["production"] == claim
+    assert retried["scene_artifacts"] == original["scene_artifacts"]
+    assert retried["last_provider_wait"]["scheduled_retry_at"] == original["provider_wait"]["retry_at"]
+    assert studio.read_project(second["id"])["status"] == "waiting_provider"
+    assert studio.pending_gemini_wait() is None
+    with pytest.raises(studio.ConflictError):
+        studio.retry_provider(first["id"])
+    studio.patch_project(second["id"], {"cancellation_reason": "user"})
+    with pytest.raises(studio.ConflictError):
+        studio.retry_provider(second["id"])
+
+
+def test_manual_retry_api_queues_once_and_reports_conflict(isolated, monkeypatch):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from backend.routers.explainers import router
+    monkeypatch.setattr(studio, "now", lambda: "2026-10-15T16:40:00+00:00")
+    project = studio.create_project(project_input())
+    claim = {"operation": "render", "started_at": "2026-10-14T03:00:00+00:00", "sequence": 7}
+    studio.patch_project(project["id"], {"production": claim})
+    studio.defer_for_gemini(project["id"], "render", GeminiVideoDeferred("generation_failed", "ordinary error"))
+    app = FastAPI()
+    app.include_router(router)
+    async def run():
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(f"/api/explainers/{project['id']}/retry-provider")
+            assert response.status_code == 202
+            assert response.json()["status"] == "queued"
+            assert response.json()["production"] == claim
+            assert (await client.post(f"/api/explainers/{project['id']}/retry-provider")).status_code == 409
+    asyncio.run(run())
 
 
 def test_thumbnail_reused_and_invalidated_by_episode_content(isolated, monkeypatch):
