@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
-import { getGeminiConversationList, getGeminiVisibleTurns, sendGeminiMessage } from './utils.js';
+import { attachGeminiFile, getGeminiConversationList, getGeminiVisibleTurns, selectGeminiModel, sendGeminiMessage } from './utils.js';
 
 const GEMINI_DOMAIN = 'gemini.google.com';
 const GEMINI_VIDEOS_URL = 'https://gemini.google.com/videos';
@@ -29,6 +29,36 @@ export async function openVideoPage(page, url) {
 export function isVideoQuotaMessage(text) {
     const value = String(text || '').replace(/\s+/g, ' ').trim();
     return /(?:reached|exceeded|used up|out of|no more).{0,70}(?:video|generation|usage|daily|quota|limit)|(?:video|generation|usage|daily).{0,70}(?:limit reached|limit exceeded|quota exhausted|try again tomorrow)|(?:视频|影片).{0,30}(?:上限|限额|额度|用尽)|(?:已达到|已用完).{0,30}(?:生成|额度|限额)/i.test(value);
+}
+
+export async function waitForChatVideoComposer(page, { timeoutMs = 90000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    let stable = 0;
+    for (let attempt = 0; attempt <= Math.ceil(timeoutMs / 1000); attempt += 1) {
+        const state = unwrap(await page.evaluate(`(() => {
+          const usable = selector => {
+            const node = document.querySelector(selector);
+            return !!node && !node.disabled && node.getAttribute('aria-disabled') !== 'true'
+              && node.getBoundingClientRect().width > 0;
+          };
+          return {
+            chatVideoComposer: true,
+            ready: usable('[contenteditable="true"][role="textbox"], textarea[aria-label="Enter a prompt for Gemini"]')
+              && usable('button[aria-label="Upload & tools"]')
+              && usable('button[aria-label^="Open mode picker"]'),
+            videoMode: !!document.querySelector('button[aria-label="Deselect Videos"]'),
+            hasConversation: !!document.querySelector('user-query, model-response'),
+          };
+        })()`));
+        if (state?.hasConversation || state?.videoMode) {
+            throw new CommandExecutionError('GEMINI_VIDEO_COMPOSER_NOT_READY: expected an empty ordinary chat');
+        }
+        stable = state?.ready === true ? stable + 1 : 0;
+        if (stable >= 2) return state;
+        if (Date.now() >= deadline) break;
+        await page.wait(1);
+    }
+    throw new CommandExecutionError('GEMINI_VIDEO_COMPOSER_NOT_READY: ordinary chat controls did not stabilize');
 }
 
 export async function waitForVideoComposer(page, { timeoutMs = 90000 } = {}) {
@@ -1065,6 +1095,8 @@ export const videoCommand = cli({
         { name: 'last', help: 'Optional local last-frame image; omit for a single reference frame' },
         { name: 'resume', help: 'Existing gemini.google.com/app conversation URL to finish or download' },
         { name: 'aspect', default: '16:9', choices: ['16:9', '9:16'], help: 'Final aspect ratio' },
+        { name: 'entry', default: 'videos', choices: ['videos', 'chat'], help: 'Video tool or ordinary Pro chat acquisition' },
+        { name: 'model', default: '3.1-pro', help: 'Canonical model for ordinary chat entry' },
         { name: 'output', required: true, help: 'Local MP4 output path' },
         { name: 'timeout', type: 'int', default: 1800, help: 'Total generation and download timeout in seconds' },
         { name: 'stall-timeout', type: 'int', default: 600, help: 'Maximum seconds without response progress' },
@@ -1084,6 +1116,9 @@ export const videoCommand = cli({
         const output = resolveOutput(kwargs.output);
         const aspect = String(kwargs.aspect || '16:9');
         if (!['16:9', '9:16'].includes(aspect)) throw new ArgumentError('--aspect must be 16:9 or 9:16');
+        const entry = String(kwargs.entry || 'videos');
+        if (!['videos', 'chat'].includes(entry)) throw new ArgumentError('--entry must be videos or chat');
+        if (!resume && entry === 'chat' && last) throw new ArgumentError('Ordinary chat video supports one reference image');
         const timeout = Number(kwargs.timeout || 1800);
         if (!Number.isInteger(timeout) || timeout < 60) throw new ArgumentError('--timeout must be at least 60 seconds');
         const stallTimeoutSeconds = Number(kwargs['stall-timeout'] || 600);
@@ -1105,7 +1140,7 @@ export const videoCommand = cli({
         if (resume && stateFile && (previous.request_id !== requestId || previous.url !== resume)) {
             throw new ArgumentError('Resume conversation does not match its owned generation checkpoint');
         }
-        const checkpoint = resume ? previous : { request_id: requestId, status: 'new' };
+        const checkpoint = resume ? previous : { request_id: requestId, status: 'new', entry };
         const save = () => {
             if (!stateFile) return;
             checkStatePaths();
@@ -1123,14 +1158,18 @@ export const videoCommand = cli({
                 || (checkpoint.status !== 'downloading' && Date.now() >= checkpoint.deadline)) {
                 throw new CommandExecutionError('GEMINI_VIDEO_GENERATION_TIMEOUT: original generation deadline has elapsed');
             }
-            await openVideoPage(page, resume || GEMINI_VIDEOS_URL);
+            await openVideoPage(page, resume || (entry === 'chat' ? 'https://gemini.google.com/app' : GEMINI_VIDEOS_URL));
             if (!resume) {
-                await clickLabel(page, ['create with omni']);
-                await page.wait(1.5);
-                await waitForVideoComposer(page, {
-                    timeoutMs: Math.min(90000, Math.max(0, checkpoint.deadline - Date.now())),
-                });
-                await selectAspectRatio(page, aspect);
+                const readiness = { timeoutMs: Math.min(90000, Math.max(0, checkpoint.deadline - Date.now())) };
+                if (entry === 'chat') {
+                    await waitForChatVideoComposer(page, readiness);
+                    await selectGeminiModel(page, String(kwargs.model || '3.1-pro'));
+                } else {
+                    await clickLabel(page, ['create with omni']);
+                    await page.wait(1.5);
+                    await waitForVideoComposer(page, readiness);
+                    await selectAspectRatio(page, aspect);
+                }
                 checkpoint.before = await visibleVideoUrls(page);
                 Object.assign(checkpoint, createVideoSubmission(prompt));
                 // History is best-effort, but an unavailable snapshot never
@@ -1138,7 +1177,8 @@ export const videoCommand = cli({
                 checkpoint.historyBefore = await getGeminiConversationList(page)
                     .then(rows => rows.map(row => row.Url).filter(conversationUrl))
                     .then(urls => urls.length ? urls : null).catch(() => null);
-                await uploadFrames(page, last ? [first, last] : [first]);
+                if (entry === 'chat') await attachGeminiFile(page, first);
+                else await uploadFrames(page, last ? [first, last] : [first]);
                 // Persist before the send: a killed command must not resubmit
                 // blindly when the provider may already have accepted it.
                 checkpoint.status = 'submitting';

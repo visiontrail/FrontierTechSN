@@ -661,7 +661,7 @@ async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Pa
         raise GeminiVideoDeferred(wait["reason"], wait["evidence"], scene["id"])
     generation_prompt, generation_prompt_path = _motion_acquisition_prompt(stage, scene, prompt, root)
     try:
-        raw, conversation = await _generate_video(generation_prompt, keyframe, None, stage, LANDSCAPE)
+        raw, conversation = await _generate_video(generation_prompt, keyframe, None, stage, LANDSCAPE, entry="chat")
     except Exception as exc:
         reason = availability_reason(exc)
         if reason:

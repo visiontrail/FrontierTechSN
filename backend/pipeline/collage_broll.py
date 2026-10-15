@@ -1350,7 +1350,9 @@ async def _render_local_still(spec: dict[str, Any], item_dir: Path, frame: Frame
     return output
 
 
-async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir: Path, frame: FrameSpec) -> tuple[Path, str]:
+async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir: Path, frame: FrameSpec, *, entry: str = "videos") -> tuple[Path, str]:
+    if entry not in {"videos", "chat"} or (entry == "chat" and last is not None):
+        raise ValueError("Gemini video entry must be videos, or chat with a single reference")
     video_dir = item_dir / "video"
     video_dir.mkdir(parents=True, exist_ok=True)
     raw = video_dir / "gemini-web-original.mp4"
@@ -1383,6 +1385,8 @@ async def _generate_video(prompt: str, first: Path, last: Path | None, item_dir:
         "--first", str(first.resolve()),
         *(["--last", str(last.resolve())] if last is not None else []),
         "--aspect", frame.aspect_ratio,
+        "--entry", entry,
+        *(["--model", config.OPENCLI_GEMINI_MODEL] if entry == "chat" else []),
         "--output", str(raw.resolve()),
         "--timeout", str(timeout),
         "--stall-timeout", str(config.COLLAGE_GEMINI_STALL_TIMEOUT),

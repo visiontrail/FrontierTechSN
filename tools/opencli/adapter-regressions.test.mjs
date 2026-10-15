@@ -28,6 +28,7 @@ import { pickModelPickerScript, readMenuModelsScript } from './node_modules/@jac
 import {
   openVideoPage,
   waitForVideoComposer,
+  waitForChatVideoComposer,
   isVideoQuotaMessage,
   uploadFrame,
   uploadFrames,
@@ -38,6 +39,49 @@ import {
   downloadVideo,
   videoCommand,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+test('Ordinary chat video entry waits for hydrated empty chat controls', async () => {
+  const samples = [{ ready: false }, { ready: true }, { ready: true }]
+  let reads = 0
+  await waitForChatVideoComposer({
+    async evaluate(script) {
+      assert.match(script, /chatVideoComposer/)
+      return samples[reads++]
+    }, async wait() {},
+  }, { timeoutMs: 5000 })
+  assert.equal(reads, 3)
+})
+
+for (const state of [{ hasConversation: true }, { videoMode: true }, { ready: false }]) {
+  test(`Ordinary chat video entry rejects nonfresh or unready controls ${JSON.stringify(state)}`, async () => {
+    await assert.rejects(waitForChatVideoComposer({
+      async evaluate() { return state }, async wait() {},
+    }, { timeoutMs: 0 }), /GEMINI_VIDEO_COMPOSER_NOT_READY/)
+  })
+}
+
+test('Ordinary chat video command selects the model before uploading or submitting', async (t) => {
+  const [first] = videoFrameFixture(t)
+  const stateFile = path.join(path.dirname(first), 'generation-state.json')
+  let reads = 0
+  await assert.rejects(videoCommand.func({
+    async goto(url) { assert.equal(url, 'https://gemini.google.com/app') },
+    async wait() {},
+    async evaluate(script) {
+      if (script.includes('chatVideoComposer')) { reads++; return { ready: true } }
+      if (script.includes('window.location.hostname')) return true
+      // Model selection must run before touching the attachment or prompt.
+      assert.match(script, /picker|Picker/)
+      throw new Error('stop at model selection')
+    },
+  }, { prompt: 'Generate a video', first, entry: 'chat', output: first + '.mp4',
+    'state-file': stateFile, 'request-id': 'c'.repeat(64) }), /stop at model selection/)
+  assert.equal(reads, 2)
+  const checkpoint = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+  assert.equal(checkpoint.entry, 'chat')
+  assert.equal(checkpoint.status, 'new')
+  assert.equal(checkpoint.submissionNonce, undefined)
+})
 
 test('Gemini video retries a cold-window navigation on the same owned page', async () => {
   const actions = []

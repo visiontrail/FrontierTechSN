@@ -74,7 +74,8 @@ class Providers:
         image.save(target)
         return target, "https://chatgpt.com/c/test"
 
-    async def motion(self, prompt, first, last, stage, frame):
+    async def motion(self, prompt, first, last, stage, frame, *, entry):
+        assert entry == "chat"
         self.motion_calls.append(prompt)
         assert first.is_file() and last is None
         if self.motion_failure:
@@ -616,7 +617,8 @@ def test_changed_narration_invalidates_only_its_scene(tmp_path, providers):
 
 
 def test_watermark_repair_pixels_retry_and_cache_preserve_provider_media(tmp_path, providers, monkeypatch):
-    async def marked_motion(_prompt, _first, _last, stage, _frame):
+    async def marked_motion(_prompt, _first, _last, stage, _frame, *, entry):
+        assert entry == "chat"
         providers.motion_calls.append(_prompt)
         target = stage / "provider.mp4"
         await pipeline._command([
@@ -706,7 +708,8 @@ def test_dialogue_tts_labels_are_provider_metadata_only(tmp_path, providers):
 
 
 def test_long_motion_fits_complete_visual_to_unchanged_audio(tmp_path, providers, monkeypatch):
-    async def long_motion(_prompt, _first, _last, stage, _frame):
+    async def long_motion(_prompt, _first, _last, stage, _frame, *, entry):
+        assert entry == "chat"
         target = stage / "provider.mp4"
         # A distinct ending proves the full action reaches the final scene.
         await pipeline._command([

@@ -722,8 +722,8 @@ def test_opencli_collage_operation_retries_until_success(monkeypatch):
 
 
 @pytest.mark.parametrize("with_url", [True, False])
-@pytest.mark.parametrize("with_last", [True, False])
-def test_video_transport_retry_resumes_owned_request_or_stops_uncertain_submission(tmp_path, monkeypatch, with_url, with_last):
+@pytest.mark.parametrize("with_last,entry", [(True, "videos"), (False, "videos"), (False, "chat")])
+def test_video_transport_retry_resumes_owned_request_or_stops_uncertain_submission(tmp_path, monkeypatch, with_url, with_last, entry):
     first, last = tmp_path / "first.png", tmp_path / "last.png"
     first.write_bytes(b"first")
     last.write_bytes(b"last")
@@ -733,6 +733,8 @@ def test_video_transport_retry_resumes_owned_request_or_stops_uncertain_submissi
     async def run(args, **kwargs):
         calls.append((args, kwargs))
         assert ("--last" in args) is with_last
+        assert args[args.index("--entry") + 1] == entry
+        assert ("--model" in args) is (entry == "chat")
         checkpoint = Path(args[args.index("--state-file") + 1])
         if len(calls) == 1:
             state = json.loads(checkpoint.read_text())
@@ -750,13 +752,13 @@ def test_video_transport_retry_resumes_owned_request_or_stops_uncertain_submissi
     monkeypatch.setattr(collage_broll, "run_opencli", run)
     monkeypatch.setattr(collage_broll.asyncio, "sleep", AsyncMock())
     if with_url:
-        raw, url = asyncio.run(collage_broll._generate_video("animate", first, last_frame, tmp_path, LANDSCAPE))
+        raw, url = asyncio.run(collage_broll._generate_video("animate", first, last_frame, tmp_path, LANDSCAPE, entry=entry))
         assert raw.stat().st_size == 2048
         assert url.endswith("abc123")
         assert len(calls) == 2
     else:
         with pytest.raises(collage_broll.OpenCLIError, match="SUBMISSION_UNCERTAIN"):
-            asyncio.run(collage_broll._generate_video("animate", first, last_frame, tmp_path, LANDSCAPE))
+            asyncio.run(collage_broll._generate_video("animate", first, last_frame, tmp_path, LANDSCAPE, entry=entry))
         assert len(calls) == 1
     assert all(call[1]["site_session_namespace"].startswith("ftsn-media-") for call in calls)
     opencli_session.close_opencli_site_sessions.assert_awaited_once()
