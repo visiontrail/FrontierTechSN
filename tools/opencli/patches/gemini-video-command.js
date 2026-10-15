@@ -40,7 +40,7 @@ export async function waitForVideoComposer(page, { timeoutMs = 90000 } = {}) {
         state = unwrap(await page.evaluate(`(() => {
           const usable = selector => {
             const node = document.querySelector(selector);
-            if (!node || !node.isConnected || node.disabled
+            if (!node || !node.isConnected || node.disabled || node.matches?.(':disabled')
                 || node.getAttribute('aria-disabled') === 'true') return false;
             const rect = node.getBoundingClientRect();
             const style = getComputedStyle(node);

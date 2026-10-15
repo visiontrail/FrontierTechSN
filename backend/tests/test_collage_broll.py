@@ -832,6 +832,19 @@ def test_video_terminal_generation_does_not_start_ten_more_generations(monkeypat
     assert run.await_count == 1
 
 
+def test_disabled_video_composer_does_not_restart_its_exhausted_setup_wait(monkeypatch):
+    run = AsyncMock(side_effect=collage_broll.OpenCLIError("GEMINI_VIDEO_COMPOSER_NOT_READY"))
+    sleep = AsyncMock()
+    monkeypatch.setattr(collage_broll, "run_opencli", run)
+    monkeypatch.setattr(collage_broll.asyncio, "sleep", sleep)
+    with pytest.raises(collage_broll.OpenCLIError, match="GEMINI_VIDEO_COMPOSER_NOT_READY"):
+        asyncio.run(collage_broll._retry_opencli_in_session(
+            ["gemini", "video", "prompt"], timeout=1800, label="video",
+        ))
+    assert run.await_count == 1
+    sleep.assert_not_awaited()
+
+
 def test_image_terminal_failure_does_not_repeat_original_turn_wait(monkeypatch):
     run = AsyncMock(side_effect=collage_broll.OpenCLIError(
         "CHATGPT_IMAGE_GENERATION_FAILED: I wasn't able to generate the image due to an error on my side."

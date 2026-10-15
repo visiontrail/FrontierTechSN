@@ -77,6 +77,7 @@ function videoComposerPage(states) {
           if (!state[key]) return null
           return {
             isConnected: true, disabled: state[key] === 'disabled',
+            matches: selector => selector === ':disabled' && state[key] === 'inherited-disabled',
             getAttribute: () => null,
             getBoundingClientRect: () => ({ width: state[key] === 'hidden' ? 0 : 100, height: 40 }),
           }
@@ -101,7 +102,7 @@ test('Gemini video waits beyond a usable skeleton for a stable active Videos com
 
 test('Gemini video refuses missing or unusable controls within its original setup budget', async () => {
   for (const control of ['videoMode', 'upload', 'aspect', 'composer']) {
-    for (const condition of [false, 'hidden', 'disabled']) {
+    for (const condition of [false, 'hidden', 'disabled', 'inherited-disabled']) {
       const page = videoComposerPage([{
         videoMode: true, upload: true, aspect: true, composer: true, [control]: condition,
       }])
