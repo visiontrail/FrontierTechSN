@@ -24,6 +24,7 @@ import {
 } from './node_modules/@jackwener/opencli/clis/gemini/utils.js'
 import {
   openVideoPage,
+  waitForVideoComposer,
   uploadFrame,
   uploadFrames,
   submittedVideoPrompt,
@@ -57,6 +58,56 @@ test('Gemini video bounds navigation retries and propagates other failures', asy
       async wait() {},
     }, 'https://gemini.google.com/videos'), error => error.message === message)
     assert.equal(calls, expectedCalls)
+  }
+})
+
+function videoComposerPage(states) {
+  const observations = []
+  let index = 0
+  const page = {
+    observations,
+    async wait() {},
+    async evaluate(script) {
+      const state = states[Math.min(index++, states.length - 1)]
+      const observed = vm.runInNewContext(script, {
+        document: { querySelector(selector) {
+          const key = selector.includes('Deselect Videos') ? 'videoMode'
+            : selector.includes('File upload') ? 'upload'
+              : selector.includes('Aspect ratio') ? 'aspect' : 'composer'
+          if (!state[key]) return null
+          return {
+            isConnected: true, disabled: state[key] === 'disabled',
+            getAttribute: () => null,
+            getBoundingClientRect: () => ({ width: state[key] === 'hidden' ? 0 : 100, height: 40 }),
+          }
+        } },
+        getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+      })
+      observations.push(observed.ready)
+      return observed
+    },
+  }
+  return page
+}
+
+test('Gemini video waits beyond a usable skeleton for a stable active Videos composer', async () => {
+  const ready = { videoMode: true, upload: true, aspect: true, composer: true }
+  const page = videoComposerPage([
+    { ...ready, videoMode: false }, ready, { ...ready, upload: false }, ready, ready,
+  ])
+  await waitForVideoComposer(page, { timeoutMs: 6000 })
+  assert.deepEqual(page.observations, [false, true, false, true, true])
+})
+
+test('Gemini video refuses missing or unusable controls within its original setup budget', async () => {
+  for (const control of ['videoMode', 'upload', 'aspect', 'composer']) {
+    for (const condition of [false, 'hidden', 'disabled']) {
+      const page = videoComposerPage([{
+        videoMode: true, upload: true, aspect: true, composer: true, [control]: condition,
+      }])
+      await assert.rejects(waitForVideoComposer(page, { timeoutMs: 1000 }), /GEMINI_VIDEO_COMPOSER_NOT_READY/)
+      assert.deepEqual(page.observations, [false, false])
+    }
   }
 })
 
@@ -2348,6 +2399,7 @@ test(`Gemini video command supports an optional final frame: ${withLast}`, async
   page.goto = async url => assert.equal(url, 'https://gemini.google.com/videos')
   page.evaluate = async script => {
     if (script.includes('const labels =')) return { ok: false }
+    if (script.includes('const videoMode = usable')) return { ready: true }
     if (script.includes('const button = document.querySelector(\'button[aria-label^="Aspect ratio"]\')')) {
       return { label: 'Aspect ratio Landscape (16:9)', expanded: 'false' }
     }
@@ -2371,6 +2423,32 @@ test(`Gemini video command supports an optional final frame: ${withLast}`, async
   assert.ok(checkpoint.prompt.includes(checkpoint.submissionNonce))
 })
 }
+
+test('Gemini video never uploads or submits from an unactivated skeleton composer', async (t) => {
+  const [first] = videoFrameFixture(t)
+  const stateFile = path.join(path.dirname(first), 'generation-state.json')
+  let reads = 0
+  const page = {
+    async goto() {}, async wait() {},
+    async evaluate(script) {
+      if (script.includes('const labels =')) return { ok: false }
+      assert.ok(script.includes('const videoMode = usable'), 'No upload or prompt operation is allowed')
+      reads++
+      return { videoMode: false, upload: true, aspect: true, composer: true, ready: false }
+    },
+    async click() { assert.fail('Skeleton controls must not be clicked') },
+    async setFileInput() { assert.fail('Skeleton must not receive a file') },
+  }
+  await assert.rejects(videoCommand.func(page, {
+    prompt: 'Animate this original illustration', first, output: path.join(path.dirname(first), 'video.mp4'),
+    'state-file': stateFile, 'request-id': 'a'.repeat(64),
+  }), /GEMINI_VIDEO_COMPOSER_NOT_READY/)
+  assert.equal(reads, 91)
+  const checkpoint = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+  assert.equal(checkpoint.status, 'new')
+  assert.equal(checkpoint.submissionNonce, undefined)
+  assert.equal(checkpoint.url, undefined)
+})
 
 test('Gemini optional final frame still validates an explicitly supplied missing file', async (t) => {
   const [first] = videoFrameFixture(t, ['reference.png'])

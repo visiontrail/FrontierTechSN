@@ -26,6 +26,45 @@ export async function openVideoPage(page, url) {
     }
 }
 
+export async function waitForVideoComposer(page, { timeoutMs = 90000 } = {}) {
+    // The /videos skeleton exposes a working file picker before Gemini has
+    // activated Videos. Uploading then can leave an invisible duplicate-file
+    // entry when the real composer replaces it. Require the active tool as
+    // well as usable controls before touching any local file.
+    const budget = Math.max(0, Number(timeoutMs) || 0);
+    const deadline = Date.now() + budget;
+    const attempts = Math.ceil(budget / 1000) + 1;
+    let stable = 0;
+    let state = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        state = unwrap(await page.evaluate(`(() => {
+          const usable = selector => {
+            const node = document.querySelector(selector);
+            if (!node || !node.isConnected || node.disabled
+                || node.getAttribute('aria-disabled') === 'true') return false;
+            const rect = node.getBoundingClientRect();
+            const style = getComputedStyle(node);
+            return rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const videoMode = usable('button[aria-label="Deselect Videos"]');
+          const upload = usable('button[aria-label="File upload"]');
+          const aspect = usable('button[aria-label^="Aspect ratio"]');
+          const composer = usable('[contenteditable="true"][role="textbox"], textarea[aria-label="Enter a prompt for Gemini"]');
+          return { videoMode, upload, aspect, composer,
+            ready: videoMode && upload && aspect && composer };
+        })()`));
+        stable = state?.ready === true ? stable + 1 : 0;
+        if (stable >= 2) return state;
+        if (attempt + 1 >= attempts || Date.now() >= deadline) break;
+        await page.wait(Math.max(0, Math.min(1, (deadline - Date.now()) / 1000)));
+    }
+    throw new CommandExecutionError(
+        'GEMINI_VIDEO_COMPOSER_NOT_READY: active Videos tool and upload controls did not stabilize: '
+        + JSON.stringify(state)
+    );
+}
+
 function unwrap(value) {
     if (value && typeof value === 'object' && !Array.isArray(value) && 'session' in value) {
         return 'data' in value ? value.data : value;
@@ -1047,6 +1086,9 @@ export const videoCommand = cli({
             if (!resume) {
                 await clickLabel(page, ['create with omni']);
                 await page.wait(1.5);
+                await waitForVideoComposer(page, {
+                    timeoutMs: Math.min(90000, Math.max(0, checkpoint.deadline - Date.now())),
+                });
                 await selectAspectRatio(page, aspect);
                 checkpoint.before = await visibleVideoUrls(page);
                 Object.assign(checkpoint, createVideoSubmission(prompt));
