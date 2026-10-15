@@ -154,7 +154,17 @@ def test_speech_edge_requires_source_text_audio_and_pcm_binding(tmp_path, provid
 def test_closing_hold_fades_after_speech_and_reuses_original_media(tmp_path, providers):
     async def run():
         project = _project()
+        project["captions_enabled"] = False
+        project["scenes"][-1]["on_screen_text"] = "Try unaided"
         original = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        project["scenes"][-1]["ending_role"] = "takeaway"
+        relayout = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        before, moved = original["scene_artifacts"][-1], relayout["scene_artifacts"][-1]
+        assert before["audio_path"] == moved["audio_path"]
+        assert before["image_path"] == moved["image_path"]
+        assert before["clip_path"] != moved["clip_path"]
+        overlay = Image.open((tmp_path / moved["clip_path"]).parent / "overlay.png")
+        assert overlay.getbbox()[1] >= 780
         project["style"]["closing_hold_seconds"] = 2.4
         closed = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
         assert closed["duration_seconds"] == pytest.approx(original["duration_seconds"] + 2.4)

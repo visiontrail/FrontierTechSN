@@ -236,11 +236,15 @@ def _overlay(scene: dict, project: dict, path: Path) -> None:
             raise ValueError("On-screen text is too long; shorten it to three lines")
         width = max(font.getlength(line) for line in lines) + 64
         left, right = (WIDTH - width) / 2, (WIDTH + width) / 2
-        draw.rounded_rectangle((left, 56, right, 90 + len(lines) * 65), radius=18,
+        # Illustration prompts reserve the lower quarter. Use that space for
+        # closing beats when captions do not need it, keeping faces unobscured.
+        top = (HEIGHT - 90 - len(lines) * 65
+               if scene.get("ending_role") and not project.get("captions_enabled", False) else 56)
+        draw.rounded_rectangle((left, top, right, top + 34 + len(lines) * 65), radius=18,
                                fill=style.get("background_color", "#F4EBDD"))
-        draw.line((left + 24, 65, right - 24, 65), fill=style.get("accent_color", "#C56545"), width=5)
+        draw.line((left + 24, top + 9, right - 24, top + 9), fill=style.get("accent_color", "#C56545"), width=5)
         for index, line in enumerate(lines):
-            draw.text((WIDTH / 2, 86 + index * 65), line, font=font, anchor="mt",
+            draw.text((WIDTH / 2, top + 30 + index * 65), line, font=font, anchor="mt",
                       fill=style.get("ink_color", "#302A25"))
     if project.get("captions_enabled", False):
         lines: list[str] = []
@@ -688,6 +692,8 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
                  "background": style.get("background_color", "#F4EBDD"),
                  "ink": style.get("ink_color", "#302A25"),
                  "accent": style.get("accent_color", "#C56545")}
+    if scene.get("ending_role") and not project.get("captions_enabled", False):
+        render_inputs["closing_title_position"] = "lower_safe_area"
     closing_hold = (audio.get("pacing") or {}).get("closing_hold_seconds", 0)
     fade_seconds = min(0.8, closing_hold)
     if fade_seconds:
