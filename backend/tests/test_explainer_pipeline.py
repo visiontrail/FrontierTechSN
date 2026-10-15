@@ -178,6 +178,11 @@ def test_closing_hold_fades_after_speech_and_reuses_original_media(tmp_path, pro
         assert before["source_audio_sha256"] == final["source_audio_sha256"]
         assert before["image_path"] == final["image_path"]
         assert final["pacing"]["closing_hold_seconds"] == 2.4
+        for relative in (final["clip_path"], closed["video_path"]):
+            probe = await pipeline._probe(tmp_path / relative)
+            stream = next(s for s in probe["streams"] if s["codec_type"] == "video")
+            assert stream["pix_fmt"] == "yuv420p"
+            assert stream["profile"] != "High 4:4:4 Predictive"
         assert final["narration_duration_seconds"] == pytest.approx(0.217)
         with wave.open(str(tmp_path / final["audio_path"]), "rb") as audio:
             audio.setpos(round(0.3 * 48000))

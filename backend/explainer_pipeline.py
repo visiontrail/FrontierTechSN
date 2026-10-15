@@ -149,6 +149,8 @@ async def _verify(path: Path, *, duration: float, video: bool, audio: bool) -> d
             raise RuntimeError(f"Rendered {kind} does not cover the full narration timeline")
     if video:
         stream = next(s for s in probe["streams"] if s.get("codec_type") == "video")
+        if stream.get("codec_name") != "h264" or stream.get("pix_fmt") != "yuv420p":
+            raise RuntimeError("Explainer video must use browser-compatible H.264 yuv420p")
         if (stream.get("width"), stream.get("height")) != (WIDTH, HEIGHT):
             raise RuntimeError("Explainer render dimensions do not match the delivery canvas")
     await _command([
@@ -731,7 +733,7 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     if motion and style.get("gemini_watermark_removal", True):
         stream = next(s for s in motion_probe["streams"] if s.get("codec_type") == "video")
         watermark_repair = repair_plan(stream["width"], stream["height"], style.get("gemini_watermark_region"))
-    render_inputs = {"version": CONTRACT_VERSION, "image": _sha(image), "motion": _sha(motion) if motion else None,
+    render_inputs = {"version": CONTRACT_VERSION, "video_encode_version": 2, "image": _sha(image), "motion": _sha(motion) if motion else None,
                  "motion_playback_version": 2 if motion else 1,
                  "frames": audio["frames"], "mode": style.get("motion_mode", "none"),
                  "captions": project.get("captions_enabled", False), "text": scene["narration"],
@@ -747,6 +749,7 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     fade_seconds = min(0.8, closing_hold)
     if fade_seconds:
         render_inputs["closing_fade_seconds"] = fade_seconds
+        render_inputs["closing_pixel_format_version"] = 2
     if watermark_repair:
         render_inputs["watermark_repair"] = watermark_repair
     key = _hash(render_inputs)
@@ -790,6 +793,7 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     finish = "format=yuv420p"
     if fade_seconds:
         finish += f",fade=t=out:st={audio['duration_seconds'] - fade_seconds:.9f}:d={fade_seconds}:color={color}"
+    finish += ",scale=in_range=auto:out_range=tv,format=yuv420p"
     args += ["-loop", "1", "-framerate", str(FPS), "-i", str(stage / "overlay.png")]
     filters = f"[0:v]{base}[base];[base][1:v]overlay=0:0:shortest=1[text]"
     if scene.get("_brand_role"):
@@ -800,7 +804,7 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
         filters += f";[text]{finish}[v]"
     args += ["-filter_complex", filters,
              "-map", "[v]", "-an", "-frames:v", str(audio["frames"]), "-r", str(FPS),
-             "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-threads", "4",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-color_range", "tv", "-preset", "fast", "-crf", "20", "-threads", "4",
              "-movflags", "+faststart", str(stage / "clip.partial.mp4")]
     await _command(args, timeout=max(180, audio["duration_seconds"] * 30))
     await _verify(stage / "clip.partial.mp4", duration=audio["duration_seconds"], video=True, audio=False)
@@ -935,7 +939,7 @@ async def render_project(project: dict, project_dir: Path,
             text = re.sub(r"\s+", " ", item["narration"]).strip()
             captions.append(f"{index}\n{_srt_time(start)} --> {_srt_time(end)}\n{text}\n")
         _write(root / "captions.srt", "\n".join(captions), root)
-        delivery_key = _hash({"version": CONTRACT_VERSION, "timeline": timeline})
+        delivery_key = _hash({"version": CONTRACT_VERSION, "timeline": timeline, "delivery_encode_version": 2})
         delivery = _safe(root / "renders" / delivery_key[:24], root)
         delivery.mkdir(parents=True, exist_ok=True)
         cached = _cached(delivery, delivery_key, root)
@@ -951,13 +955,16 @@ async def render_project(project: dict, project_dir: Path,
             await _verify(delivery / "narration.partial.wav", duration=duration, video=False, audio=True)
             (delivery / "narration.partial.wav").replace(delivery / "narration.wav")
             await _command(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", "video.txt",
-                            "-i", "narration.wav", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
-                            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "video.partial.mp4"],
+                            "-i", "narration.wav", "-map", "0:v:0", "-map", "1:a:0",
+                            "-vf", "scale=in_range=auto:out_range=tv,format=yuv420p",
+                            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-color_range", "tv", "-r", str(FPS),
+                            "-preset", "fast", "-crf", "20", "-threads", "4", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "video.partial.mp4"],
                            cwd=delivery, timeout=max(180, duration * 8))
             await _verify(delivery / "video.partial.mp4", duration=duration, video=True, audio=True)
             (delivery / "video.partial.mp4").replace(delivery / "video.mp4")
             _complete(delivery, delivery_key, [delivery / "video.mp4", delivery / "narration.wav"], root,
-                      duration_seconds=duration, verified_full_decode=True)
+                      duration_seconds=duration, verified_full_decode=True, delivery_encode_version=2,
+                      pixel_format="yuv420p")
         result = {**thumbnail, "series_name": SERIES_NAME, "video_path": relative(delivery / "video.mp4"), "audio_path": relative(delivery / "narration.wav"),
                   "timeline_path": "timeline.json", "captions_path": "captions.srt", "manifest_path": "manifest.json",
                   "duration_seconds": duration, "scene_artifacts": artifacts}
