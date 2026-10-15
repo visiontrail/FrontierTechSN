@@ -527,6 +527,50 @@ def test_independent_guard_upgrade_rechecks_original_audio_without_synthesis(
     assert all(p.read_bytes() == content for p, content in originals.items())
 
 
+@pytest.mark.parametrize("status", ["submitting", "submitted", "downloading", "stalled", "timeout", "uncertain", "saved", "unexpected"])
+@pytest.mark.parametrize("has_acquisition_prompt", [False, True])
+def test_motion_prompt_upgrade_preserves_unresolved_request(tmp_path, status, has_acquisition_prompt):
+    stage = tmp_path / "motion"
+    (stage / "video").mkdir(parents=True)
+    checkpoint = stage / "video" / "generation-state.json"
+    checkpoint.write_text(json.dumps({"status": status, "request_id": "original-request"}))
+    original_state = checkpoint.read_bytes()
+    canonical = "Original canonical request"
+    original = "Already submitted acquisition" if has_acquisition_prompt else canonical
+    if has_acquisition_prompt:
+        (stage / "generation-prompt.txt").write_text(original)
+    prompt, path = pipeline._motion_acquisition_prompt(stage, _project()["scenes"][0], canonical, tmp_path)
+    assert prompt == path.read_text() == original
+    assert checkpoint.read_bytes() == original_state
+
+
+@pytest.mark.parametrize("status", [None, "new", "failed", "quota_exhausted"])
+def test_motion_prompt_upgrade_only_for_safe_new_acquisition(tmp_path, status):
+    stage = tmp_path / "motion"
+    (stage / "video").mkdir(parents=True)
+    if status:
+        (stage / "video" / "generation-state.json").write_text(json.dumps({"status": status}))
+    (stage / "generation-prompt.txt").write_text("Previous long acquisition prompt")
+    scene = _project()["scenes"][0]
+    scene["visual_prompt"] = "Static composition with no movement"
+    prompt, path = pipeline._motion_acquisition_prompt(stage, scene, "Canonical intent", tmp_path)
+    assert prompt.startswith("Generate a silent 10-second")
+    assert scene["narration"] in prompt
+    assert "Static composition" not in prompt
+    assert path.read_text() == prompt
+    assert next((stage / "video" / "history").glob("generation-prompt-*.txt")).read_text() == "Previous long acquisition prompt"
+
+
+@pytest.mark.parametrize("content", ["invalid", "[]", "{}"])
+def test_motion_prompt_upgrade_rejects_unknown_checkpoint(tmp_path, content):
+    stage = tmp_path / "motion"
+    (stage / "video").mkdir(parents=True)
+    (stage / "video" / "generation-state.json").write_text(content)
+    with pytest.raises(RuntimeError, match="submission outcome is unknown"):
+        pipeline._motion_acquisition_prompt(stage, _project()["scenes"][0], "Canonical", tmp_path)
+    assert not (stage / "generation-prompt.txt").exists()
+
+
 def test_gemini_failure_is_visible_and_retry_preserves_audio_artwork(tmp_path, providers):
     async def run():
         project = _project()
@@ -545,7 +589,12 @@ def test_gemini_failure_is_visible_and_retry_preserves_audio_artwork(tmp_path, p
         result = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
         assert len(providers.audio_calls) == len(providers.image_calls) == 1
         assert len(providers.motion_calls) == 2
+        assert providers.motion_calls[-1].startswith("Generate a silent 10-second")
         assert result["scene_artifacts"][0]["motion_path"]
+        motion_stage = (tmp_path / result["scene_artifacts"][0]["motion_path"]).parent
+        assert "generation-prompt.txt" in json.loads((motion_stage / "complete.json").read_text())["files"]
+        await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        assert len(providers.motion_calls) == 2
         assert result["duration_seconds"] == 0.2
         timeline = json.loads((tmp_path / "timeline.json").read_text())
         assert timeline["playback_policy"] == "play_once_fit_longer_or_hold_shorter"

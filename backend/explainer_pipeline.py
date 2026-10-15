@@ -180,11 +180,45 @@ def _image_prompt(scene: dict, style: dict) -> str:
 
 
 def _motion_prompt(scene: dict, style: dict) -> str:
+    # Canonical intent also locates existing accepted footage. Keep this stable
+    # when improving the provider-facing acquisition instructions below.
     return f"""Animate the supplied original line illustration as a short 16:9 explainer shot.
 Use this single reference frame to preserve the character identity, palette, proportions, background and line weight. Begin with this composition. Add a single gentle expressive gesture, blink or prop movement that supports this narration: {scene['narration']}
 Visual meaning: {scene['visual_prompt']}
 Art direction: {style.get('visual_direction', '')}
 Keep the camera steady and movement subtle. Show a short, complete action with a clear settled endpoint; avoid a long buildup. Do not create a montage or new scene. No typography, subtitles, logos or audio. Play the action once, settle naturally, and hold the final pose. Never restart the action or loop."""
+
+
+def _motion_generation_prompt(scene: dict) -> str:
+    return f"""Generate a silent 10-second landscape 16:9 video from the uploaded picture now.
+Keep the camera fixed. Animate one small gesture or prop movement that supports this idea: {scene['narration']}
+Use only the people and objects already pictured. Preserve their structure, meaning, positions, drawing style and colors. Make the action once, then settle and hold. No scene changes, looping, added text, speech or music."""
+
+
+def _motion_acquisition_prompt(stage: Path, scene: dict, canonical: str, root: Path) -> tuple[str, Path]:
+    checkpoint = _safe(stage / "video" / "generation-state.json", root)
+    path = _safe(stage / "generation-prompt.txt", root)
+    state = None
+    if checkpoint.exists():
+        try:
+            state = json.loads(checkpoint.read_text())
+            if not isinstance(state, dict) or not state.get("status"):
+                raise ValueError("missing state")
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Gemini generation checkpoint is unreadable; submission outcome is unknown") from exc
+    previous = path.read_text() if path.exists() else canonical
+    # An interrupted/submitted (including saved-but-not-imported) request must
+    # retain its exact prompt/request ID. Only known terminal failures can change
+    # acquisition strategy; _generate_video archives their checkpoint on retry.
+    if state and state["status"] not in {"new", "failed", "quota_exhausted"}:
+        prompt = previous
+    else:
+        prompt = _motion_generation_prompt(scene)
+        if path.exists() and previous != prompt:
+            digest = hashlib.sha256(previous.encode()).hexdigest()[:24]
+            _write(stage / "video" / "history" / f"generation-prompt-{digest}.txt", previous, root)
+    _write(path, prompt, root)
+    return prompt, path
 
 
 def _font(size: int, language: str) -> ImageFont.FreeTypeFont:
@@ -625,8 +659,9 @@ async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Pa
     wait = pending_gemini_wait()
     if wait:
         raise GeminiVideoDeferred(wait["reason"], wait["evidence"], scene["id"])
+    generation_prompt, generation_prompt_path = _motion_acquisition_prompt(stage, scene, prompt, root)
     try:
-        raw, conversation = await _generate_video(prompt, keyframe, None, stage, LANDSCAPE)
+        raw, conversation = await _generate_video(generation_prompt, keyframe, None, stage, LANDSCAPE)
     except Exception as exc:
         reason = availability_reason(exc)
         if reason:
@@ -638,7 +673,7 @@ async def _motion(scene: dict, style: dict, image: Path, root: Path) -> tuple[Pa
     final = stage / "motion.mp4"
     shutil.copyfile(raw, stage / "motion.partial.mp4")
     (stage / "motion.partial.mp4").replace(final)
-    return final, _complete(stage, key, [final, stage / "prompt.txt", keyframe], root,
+    return final, _complete(stage, key, [final, stage / "prompt.txt", generation_prompt_path, keyframe], root,
                             provider="gemini_web_opencli", conversation_url=conversation,
                             source_duration_seconds=measured,
                             playback_policy="play_once_fit_longer_or_hold_shorter")
