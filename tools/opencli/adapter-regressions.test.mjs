@@ -30,6 +30,8 @@ import {
   waitForVideoComposer,
   waitForChatVideoComposer,
   isVideoQuotaMessage,
+  parseVideoUsage,
+  readVideoUsage,
   uploadFrame,
   uploadFrames,
   submittedVideoPrompt,
@@ -3973,7 +3975,8 @@ test(`Gemini attachment recovers an empty menu after ignored native clicks: expa
 
 test('Gemini quota evidence is distinct from ordinary generation and navigation failures', () => {
   for (const message of ["You've reached your video generation limit. Try again tomorrow.",
-    'You have used up your daily limit', '已达到视频生成上限，请明天再试。']) {
+    'You have used up your daily limit', '已达到视频生成上限，请明天再试。',
+    'I can create more videos as soon as your limit resets. Check your usage in Settings.']) {
     assert.equal(isVideoQuotaMessage(message), true, message)
   }
   for (const message of ['Sorry, something went wrong. Please try your request again.',
@@ -3981,6 +3984,49 @@ test('Gemini quota evidence is distinct from ordinary generation and navigation 
     assert.equal(isVideoQuotaMessage(message), false, message)
   }
 })
+
+test('Gemini usage parsing binds the current window, never the weekly reset', async () => {
+  const text = 'Current usage Information 89% used Resets at 3:54 AM Weekly limit Resets Oct 19 at 2:54 PM 23% used'
+  assert.deepEqual(parseVideoUsage(text), { current_percent: 89, reset_label: 'Resets at 3:54 AM' })
+  assert.equal(parseVideoUsage('Current usage Loading Weekly limit Resets at 2:54 PM 23% used'), null)
+  assert.equal(parseVideoUsage('Current usage 101% used Resets at 3:54 AM'), null)
+  let reads = 0
+  const usage = await readVideoUsage({
+    async goto(url) { assert.equal(url, 'https://gemini.google.com/usage') },
+    async wait() {},
+    async evaluate(script) {
+      assert.equal(script, 'document.body.innerText')
+      return reads++ ? text : 'Loading'
+    },
+  })
+  assert.equal(usage.current_percent, 89)
+  assert.equal(usage.source, 'https://gemini.google.com/usage')
+})
+
+for (const usageFails of [false, true]) {
+  test(`Gemini quota reply preserves request ownership with optional usage read: failure=${usageFails}`, async () => {
+    const checkpoint = { url: 'https://gemini.google.com/app/owned123', request_id: 'original-request' }
+    const page = {
+      async wait() {},
+      async goto(url) {
+        assert.equal(url, 'https://gemini.google.com/usage')
+        assert.equal(checkpoint.status, 'quota_exhausted')
+        if (usageFails) throw new Error('Usage page unavailable')
+      },
+      async evaluate(script) {
+        if (script === 'document.body.innerText') return 'Current usage 89% used Resets at 3:54 AM Weekly limit'
+        return { videos: [], url: checkpoint.url, text: 'Gemini said I can create more videos as soon as your limit resets. Check your usage in Settings.' }
+      },
+    }
+    await assert.rejects(waitForVideo(page, [], 60, { checkpoint }), error => {
+      assert.match(error.message, /GEMINI_VIDEO_QUOTA_EXHAUSTED/)
+      assert.equal(error.message.includes('Resets at 3:54 AM'), !usageFails)
+      return true
+    })
+    assert.equal(checkpoint.request_id, 'original-request')
+    assert.equal(checkpoint.url, 'https://gemini.google.com/app/owned123')
+  })
+}
 
 test('Gemini persistently disabled video entry defers without uploading', async () => {
   const page = videoComposerPage([{ videoMode: 'inherited-disabled', upload: 'inherited-disabled', aspect: 'inherited-disabled', composer: false }])

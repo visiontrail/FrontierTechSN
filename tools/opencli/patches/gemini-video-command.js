@@ -28,7 +28,28 @@ export async function openVideoPage(page, url) {
 
 export function isVideoQuotaMessage(text) {
     const value = String(text || '').replace(/\s+/g, ' ').trim();
-    return /(?:reached|exceeded|used up|out of|no more).{0,70}(?:video|generation|usage|daily|quota|limit)|(?:video|generation|usage|daily).{0,70}(?:limit reached|limit exceeded|quota exhausted|try again tomorrow)|(?:视频|影片).{0,30}(?:上限|限额|额度|用尽)|(?:已达到|已用完).{0,30}(?:生成|额度|限额)/i.test(value);
+    return /(?:reached|exceeded|used up|out of|no more).{0,70}(?:video|generation|usage|daily|quota|limit)|(?:video|generation|usage|daily).{0,70}(?:limit reached|limit exceeded|quota exhausted|try again tomorrow)|(?:can create|can generate) more videos?.{0,80}(?:limit|quota) resets?|(?:视频|影片).{0,30}(?:上限|限额|额度|用尽)|(?:已达到|已用完).{0,30}(?:生成|额度|限额)/i.test(value);
+}
+
+export function parseVideoUsage(text) {
+    const value = String(text || '').replace(/\s+/g, ' ').trim();
+    const start = value.indexOf('Current usage');
+    if (start < 0) return null;
+    const current = value.slice(start).split('Weekly limit')[0].slice(0, 500);
+    const clock = current.match(/Resets\s+at\s+(\d{1,2}:\d{2}\s*(?:AM|PM)?)/i);
+    const percent = current.match(/(\d{1,3})%\s*used/i);
+    if (!clock || !percent || Number(percent[1]) > 100) return null;
+    return { current_percent: Number(percent[1]), reset_label: `Resets at ${clock[1].trim()}` };
+}
+
+export async function readVideoUsage(page) {
+    await openVideoPage(page, 'https://gemini.google.com/usage');
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+        const usage = parseVideoUsage(unwrap(await page.evaluate('document.body.innerText')));
+        if (usage) return { ...usage, observed_at: new Date().toISOString(), source: 'https://gemini.google.com/usage' };
+        await page.wait(1);
+    }
+    return null;
 }
 
 export async function waitForChatVideoComposer(page, { timeoutMs = 90000 } = {}) {
@@ -941,7 +962,15 @@ export async function waitForVideo(page, before, timeoutSeconds, {
         // Match entire observed failure replies, not dialogue quoted in a
         // still-progressing response. These are terminal, not stalled jobs.
         if (isVideoQuotaMessage(responseText)) {
-            throw new CommandExecutionError('GEMINI_VIDEO_QUOTA_EXHAUSTED: ' + responseText.slice(-1000));
+            // The response can direct us to Settings without giving a reset
+            // time. Persist the owned conversation before visiting read-only
+            // usage; a failed usage read never hides the original quota reply.
+            Object.assign(checkpoint, { status: 'quota_exhausted', quotaEvidence: responseText.slice(-1000) });
+            save();
+            const usage = await readVideoUsage(page).catch(() => null);
+            if (usage) { checkpoint.usage = usage; save(); }
+            const reset = usage ? ` Account current usage ${usage.current_percent}%; ${usage.reset_label}.` : '';
+            throw new CommandExecutionError('GEMINI_VIDEO_QUOTA_EXHAUSTED: ' + responseText.slice(-1000) + reset);
         }
         const normalizedReply = responseText.replace(/^Gemini said\s+/i, '').replace(/’/g, "'").toLowerCase();
         const terminalFailure = [
