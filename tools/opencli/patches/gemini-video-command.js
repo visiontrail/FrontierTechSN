@@ -11,6 +11,21 @@ const GEMINI_VIDEOS_URL = 'https://gemini.google.com/videos';
 const VIDEO_UPLOAD_CAPABILITY_CODE = 'OPENCLI_CAPABILITY_UNAVAILABLE:GEMINI_VIDEO_LOCAL_FILE_UPLOAD';
 const VIDEO_INPUT_HYDRATION_STUCK_CODE = 'OPENCLI_CAPABILITY_DEGRADED:GEMINI_VIDEO_UPLOAD_INPUT_HYDRATION_STUCK';
 
+export async function openVideoPage(page, url) {
+    // A newly registered Ego window can reject its first navigation. Retry
+    // only that startup race on the same owned page, before any submission.
+    // Recreating the session in the outer retry loop repeats the race.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+            await page.goto(url, { waitUntil: 'load', settleMs: 8000 });
+            return;
+        } catch (error) {
+            if (!/Navigation rejected/i.test(String(error?.message || error)) || attempt === 2) throw error;
+            await page.wait(1);
+        }
+    }
+}
+
 function unwrap(value) {
     if (value && typeof value === 'object' && !Array.isArray(value) && 'session' in value) {
         return 'data' in value ? value.data : value;
@@ -1028,7 +1043,7 @@ export const videoCommand = cli({
                 || (checkpoint.status !== 'downloading' && Date.now() >= checkpoint.deadline)) {
                 throw new CommandExecutionError('GEMINI_VIDEO_GENERATION_TIMEOUT: original generation deadline has elapsed');
             }
-            await page.goto(resume || GEMINI_VIDEOS_URL, { waitUntil: 'load', settleMs: 8000 });
+            await openVideoPage(page, resume || GEMINI_VIDEOS_URL);
             if (!resume) {
                 await clickLabel(page, ['create with omni']);
                 await page.wait(1.5);

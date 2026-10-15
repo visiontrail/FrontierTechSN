@@ -23,6 +23,7 @@ import {
   getGeminiVisibleTurns,
 } from './node_modules/@jackwener/opencli/clis/gemini/utils.js'
 import {
+  openVideoPage,
   uploadFrame,
   uploadFrames,
   submittedVideoPrompt,
@@ -32,6 +33,32 @@ import {
   downloadVideo,
   videoCommand,
 } from './node_modules/@jackwener/opencli/clis/gemini/video.js'
+
+test('Gemini video retries a cold-window navigation on the same owned page', async () => {
+  const actions = []
+  const url = 'https://gemini.google.com/app/owned123'
+  let calls = 0
+  const page = {
+    async goto(target) {
+      actions.push(['goto', target])
+      if (++calls === 1) throw new Error('Navigation rejected.')
+    },
+    async wait(seconds) { actions.push(['wait', seconds]) },
+  }
+  await openVideoPage(page, url)
+  assert.deepEqual(actions, [['goto', url], ['wait', 1], ['goto', url]])
+})
+
+test('Gemini video bounds navigation retries and propagates other failures', async () => {
+  for (const [message, expectedCalls] of [['Navigation rejected.', 3], ['Access denied', 1]]) {
+    let calls = 0
+    await assert.rejects(openVideoPage({
+      async goto() { calls++; throw new Error(message) },
+      async wait() {},
+    }, 'https://gemini.google.com/videos'), error => error.message === message)
+    assert.equal(calls, expectedCalls)
+  }
+})
 
 function videoTransferPage(payload, { failChunk = 0, httpStatus = 200 } = {}) {
   let chunks = 0
