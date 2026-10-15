@@ -21,7 +21,10 @@ import {
   waitForGeminiResponse,
   requireGeminiGeneratedReply,
   getGeminiVisibleTurns,
+  selectGeminiModel,
+  getCurrentGeminiModel,
 } from './node_modules/@jackwener/opencli/clis/gemini/utils.js'
+import { pickModelPickerScript, readMenuModelsScript } from './node_modules/@jackwener/opencli/clis/gemini/models.js'
 import {
   openVideoPage,
   waitForVideoComposer,
@@ -961,6 +964,7 @@ test('reapplying browser patches keeps every adapter byte-identical and recovery
   const utilsPath = path.join(root, packagePath, 'clis/gemini/utils.js')
   const currentUtils = fs.readFileSync(utilsPath, 'utf8')
   const legacyUtils = currentUtils
+    .replaceAll('        /mode[\\\\s-]*picker/i,\n', '')
     .replace("\n        || normalized === 'sorry, something went wrong. please try your request again.'", '')
     .replace(`\n        || normalized === "i'm having a hard time fulfilling your request. can i help you with something else instead?"`, '')
   assert.notEqual(legacyUtils, currentUtils)
@@ -2676,6 +2680,89 @@ test('Gemini retries a no-op selector click with observed native coordinates', a
     ],
     ['nativeClick', 123, 456],
   ])
+})
+
+function geminiModePickerPage({ hidden = false, selectedLabel = '3.1 Pro', decoy = false } = {}) {
+  const actions = []
+  let expanded = false
+  let current = 'Argon'
+  class Element {
+    constructor(text, label, action, hidden = false) {
+      this.textContent = text
+      this.label = label
+      this.action = action
+      this.hidden = hidden
+    }
+    closest() { return null }
+    getAttribute(name) { return name === 'aria-label' ? this.label : null }
+    getBoundingClientRect() { return { width: 100, height: 40, top: 0, left: 0 } }
+    click() { this.action?.() }
+  }
+  const picker = new Element('Argon', 'Open mode picker, currently Argon', () => {
+    actions.push('open')
+    expanded = true
+  }, hidden)
+  const rows = ['3.5 Flash-Lite Fastest answers', '3.8 Flash All-around help', '3.1 Pro Advanced reasoning'].map(text => new Element(text, '', () => {
+    actions.push(text)
+    current = selectedLabel
+    picker.textContent = current
+    picker.label = 'Open mode picker, currently ' + current
+    expanded = false
+  }))
+  const context = vm.createContext({
+    HTMLElement: Element, Element,
+    window: { location: { href: 'https://gemini.google.com/app' }, getComputedStyle: () => ({ opacity: '1' }) },
+    document: {
+      body: { click() { expanded = false } },
+      querySelectorAll(selector) {
+        if (selector === 'button, [role="button"]') {
+          return decoy ? [new Element('3.8 Flash', ''), picker] : [picker]
+        }
+        if (selector === '[role="menu"] [role="menuitem"]') return expanded ? rows : []
+        return []
+      },
+    },
+  })
+  return {
+    actions, picker,
+    async evaluate(script) { return vm.runInContext(script, context) },
+    async wait() {},
+    async goto() { assert.fail('Model selection must not navigate') },
+  }
+}
+
+test('Gemini discovers, selects and reads back Pro from the current Argon mode picker', async () => {
+  const page = geminiModePickerPage()
+  await page.evaluate(`(() => { ${pickModelPickerScript()} findModelPicker().click(); })()`)
+  const models = await page.evaluate(readMenuModelsScript())
+  assert.ok(models.some(row => row.model === '3.1-pro'))
+  await page.evaluate('document.body.click()')
+  await selectGeminiModel(page, '3.1-pro')
+  assert.equal(await getCurrentGeminiModel(page), '3.1-pro')
+  assert.deepEqual(page.actions, ['open', 'open', '3.1 Pro Advanced reasoning'])
+})
+
+test('Gemini mode-picker recovery rejects a hidden control or wrong selected model', async () => {
+  const hidden = geminiModePickerPage({ hidden: true })
+  await assert.rejects(selectGeminiModel(hidden, '3.1-pro'), /Model picker not found/)
+  assert.deepEqual(hidden.actions, [])
+  for (const selectedLabel of ['3.8 Flash', '3.8 Pro', 'Argon', '']) {
+    const wrong = geminiModePickerPage({ selectedLabel })
+    await assert.rejects(selectGeminiModel(wrong, '3.1-pro'), /expected "3.1-pro"|did not expose selected model/)
+  }
+})
+
+test('Gemini verifies a short Pro label after selecting the exact versioned menu item', async () => {
+  const page = geminiModePickerPage({ selectedLabel: 'Pro' })
+  await selectGeminiModel(page, '3.1-pro')
+  assert.deepEqual(page.actions, ['open', '3.1 Pro Advanced reasoning'])
+})
+
+test('Gemini reads the mode picker before an unrelated version-labelled button', async () => {
+  const page = geminiModePickerPage({ decoy: true })
+  page.picker.textContent = ''
+  page.picker.label = 'Open mode picker, currently 3.1 Pro'
+  assert.equal(await getCurrentGeminiModel(page), '3.1-pro')
 })
 
 test('Gemini ask waits through model-picker hydration beyond the old 15-second window', async () => {

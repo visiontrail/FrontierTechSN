@@ -35,6 +35,12 @@ The release's Browser Bridge is `1.0.24`, matching the installed Ego Lite bridge
 
 No global OpenCLI npm package or global Claude Code skill is required.
 
+Gemini's `Open mode picker, currently Argon` label is recognized in discovery,
+model selection, and selected-model read-back. All three paths must agree:
+patching discovery alone still fails before selecting the requested `3.1-pro`.
+The regression fixture executes the browser scripts through that transition
+and verifies that hidden controls and a mismatched selection remain failures.
+
 ## v1.8.8 synchronization verification (2026-09-10)
 
 - A clean `npm ci --no-audit --no-fund` in `tools/opencli` installs the pinned

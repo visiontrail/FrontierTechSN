@@ -856,12 +856,23 @@ utils = replaceOnce(
             || (expectedVariant === 'flash-lite' && selectedVariantValue === 'lite');`,
   'Gemini short model label envelope',
 )
+// Upgrade the old permissive read-back and repair template-string escaping:
+// an absent/contradictory label must never confirm the requested model.
+utils = utils.replace(
+  '        if (selectedVariantValue && !shortLabelMatches) {',
+  '        if (!shortLabelMatches) {',
+)
 utils = replaceOnce(
   utils,
   '        if (!shortLabelMatches) {',
-  '        if (selectedVariantValue && !shortLabelMatches) {',
-  'Gemini canonical read-back availability',
+  '        if (selectedModelId || !shortLabelMatches) {',
+  'Gemini canonical or short model read-back must agree',
 )
+utils = utils.replaceAll(String.raw`/currently\s+/i`, String.raw`/currently\\s+/i`)
+utils = utils.replaceAll(String.raw`/^(?:gemini\s+)?(?:flash-lite|flash|pro|lite|ultra|nano)$/i`,
+  String.raw`/^(?:gemini\\s+)?(?:flash-lite|flash|pro|lite|ultra|nano)$/i`)
+utils = utils.replaceAll(String.raw`/\b(flash-lite|flash|pro|lite|ultra|nano)\b/`,
+  String.raw`/\\b(flash-lite|flash|pro|lite|ultra|nano)\\b/`)
 utils = replaceOnce(
   utils,
   'const GEMINI_RESPONSE_NOISE_PATTERNS = [',
@@ -939,6 +950,20 @@ utils = replaceWithinFunction(
             }`,
   'Gemini stable owned provider errors do not wait on a stuck stop button',
 )
+// Discovery, selection and read-back embed separate picker implementations.
+// Patch every path: the current default can be Argon, whose short label does
+// not match the legacy variant/version fallbacks.
+for (const [start, end] of [
+  ['function openModelPickerForThinkingScript() {', 'function clickThinkingToggleInMenuScript() {'],
+  ['function getCurrentGeminiModelScript() {', 'export async function getCurrentGeminiModel(page) {'],
+]) {
+  utils = replaceWithinFunction(
+    utils, start, end,
+    '        /model[\\\\s-]*selector/i,',
+    '        /mode[\\\\s-]*picker/i,\n        /model[\\\\s-]*selector/i,',
+    'Gemini mode picker selection and read-back label',
+  )
+}
 fs.writeFileSync(utilsPath, utils)
 
 let models = fs.readFileSync(modelsPath, 'utf8')
