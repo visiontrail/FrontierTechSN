@@ -1972,6 +1972,13 @@ async def generate_collage_broll(
                     still, chatgpt_url = await _generate_still(still_prompt, item_dir)
                     item["still_provider"] = "chatgpt_web_via_opencli"
                 except Exception as exc:  # noqa: BLE001 - local renderer preserves requested count
+                    # A completed refusal/error cannot become a pending turn
+                    # just because its durable request checkpoint still exists.
+                    # Retain that evidence and let the shot editor use other assets.
+                    if any(code in str(exc) for code in (
+                        "CHATGPT_IMAGE_GENERATION_FAILED", "CHATGPT_IMAGE_INPUT_MISSING",
+                    )):
+                        raise
                     if (item_dir / "chatgpt-image-request.json").exists():
                         raise OpenCLIError(
                             f"CHATGPT_IMAGE_TURN_PENDING: preserve and recover the existing still request: {exc}"

@@ -1761,14 +1761,19 @@ def test_generate_can_use_local_still_but_not_local_motion(tmp_path: Path):
     }
 
 
-def test_pending_chatgpt_image_preserves_checkpoint_without_local_fallback(tmp_path: Path):
+@pytest.mark.parametrize("error_code", [
+    "CHATGPT_IMAGE_TURN_PENDING",
+    "CHATGPT_IMAGE_GENERATION_FAILED",
+    "CHATGPT_IMAGE_INPUT_MISSING",
+])
+def test_chatgpt_image_error_preserves_checkpoint_and_terminal_state_without_fallback(tmp_path: Path, error_code):
     specs = [collage_broll._fallback_spec(_board(1)["scenes"][0], 0)]
     checkpoint = tmp_path / "collage_broll" / "01-scene-01" / "chatgpt-image-request.json"
 
     async def pending(_prompt, item_dir):
         assert item_dir == checkpoint.parent
         checkpoint.write_text('{"stage":"submitting"}')
-        raise collage_broll.OpenCLIError("CHATGPT_IMAGE_TURN_PENDING")
+        raise collage_broll.OpenCLIError(error_code)
 
     with (
         patch.object(collage_broll, "plan_specs", AsyncMock(return_value=specs)),
@@ -1780,7 +1785,9 @@ def test_pending_chatgpt_image_preserves_checkpoint_without_local_fallback(tmp_p
         ))
     fallback.assert_not_awaited()
     assert manifest["ready_count"] == 0
-    assert "CHATGPT_IMAGE_TURN_PENDING" in manifest["items"][0]["error"]
+    assert error_code in manifest["items"][0]["error"]
+    if error_code != "CHATGPT_IMAGE_TURN_PENDING":
+        assert "CHATGPT_IMAGE_TURN_PENDING" not in manifest["items"][0]["error"]
     assert checkpoint.is_file()
 
 

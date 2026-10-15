@@ -342,6 +342,36 @@ test('observed attempt failure with explanatory prose ends the owned wait', asyn
   assert.deepEqual(Array.from(await run(30, savedUrl, { prompt: 'exact image prompt' })), [imageUrl])
 })
 
+test('completed guardrail refusal ends only its own idle image turn', async () => {
+  const refusal = "We’re so sorry, but the image we created may violate our guardrails around violence. If you think we got it wrong, please retry or edit your prompt."
+  for (const text of [refusal, refusal.replace('We’re', "We're")]) {
+    const messages = [ownedFailure[0], { Role: 'Assistant', Text: text }]
+    const { run, state } = waiter(fixedWait, { messages: () => messages })
+    await assert.rejects(run(420, savedUrl, { prompt: 'exact image prompt' }), /CHATGPT_IMAGE_GENERATION_FAILED/)
+    assert.equal(state.clock, 6000)
+    assert.equal(state.progress.at(-1).stage, 'image_generation_failed')
+    assert.equal(state.navigations.length, 0)
+  }
+  const response = { Role: 'Assistant', Text: refusal }
+  for (const options of [
+    { messages: () => [{ Role: 'User', Text: 'different prompt' }, response] },
+    { messages: () => [response, ownedFailure[0]] },
+    { messages: () => [ownedFailure[0], { ...response, Text: 'The earlier response said: ' + refusal }] },
+    { messages: () => [ownedFailure[0], response], generating: () => true },
+    { messages: () => [ownedFailure[0], response], images: () => ['data:image/png;base64,preview'] },
+  ]) {
+    const { run, state } = waiter(fixedWait, options)
+    try { await run(12, savedUrl, { prompt: 'exact image prompt' }) }
+    catch (error) { assert.doesNotMatch(error.message, /CHATGPT_IMAGE_GENERATION_FAILED/) }
+    assert.equal(state.progress.at(-1).stage, 'image_wait_timeout')
+  }
+  const { run } = waiter(fixedWait, {
+    messages: () => [ownedFailure[0], response],
+    images: state => state.clock >= 6000 ? [imageUrl] : [],
+  })
+  assert.deepEqual(Array.from(await run(30, savedUrl, { prompt: 'exact image prompt' })), [imageUrl])
+})
+
 test('reproduces full-deadline wait on the installed adapter for a completed provider error', async t => {
   const legacy = waitSource(originals.get('clis/chatgpt/utils.js').toString())
   if (legacy.includes('CHATGPT_IMAGE_GENERATION_FAILED')) return t.skip('Installed runtime already detects terminal errors')

@@ -108,6 +108,7 @@ export async function waitForChatGPTImages(page, beforeUrls, timeoutSeconds, con
                     const text = String(latest.Text || '').trim();
                     if (/^I wasn['’]t able to generate the image due to an error on my side\.$/.test(text)
                         || /^I couldn['’]t generate the image in this attempt\.(?:\s|$)/.test(text)
+                        || /^We['’]re so sorry, but the image we created may violate our guardrails around [^.]+\.(?:\s|$)/i.test(text)
                         || /^Please upload the (?:earlier|original|reference) image\b[\s\S]*\bso I can (?:recompose|edit|redraw)\b/i.test(text)) {
                         terminalText = text;
                     }
