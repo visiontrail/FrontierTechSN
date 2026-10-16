@@ -1,13 +1,82 @@
-# ByteFront Espresso YouTube banner
+# Bytefront Studio YouTube branding
 
-## Deliverables
+## Published configuration — October 16, 2026
+
+Channel: [Bytefront Studio](https://www.youtube.com/@BytefrontStudio). The display name is `Bytefront Studio`; the handle remains `@BytefrontStudio`.
+
+The channel presents Byte by Byte as the main explainer series and retains Espresso for news briefings. This update covers channel branding, playlists and homepage layout only. No video was uploaded or published.
+
+### Current banner
+
+- Upload file: `outputs/channel-branding-20261016/bytefront-studio-banner.jpg`
+- Export: 2560 × 1440 pixels, 910,860 bytes.
+- SHA-256: `a43f71a524994def813ef614473617e133b33d1755c38800faa13d47470745a2`
+- Created with the built-in `image_gen` tool and the existing `data/outros/bytefront-logo-transparent.png` as a brand reference. The generated artwork was 1672 × 941 pixels; `sips` resized and exported the final JPEG. It is not a native 2560 pixel generation.
+- Art direction: ink navy, cobalt circuitry and B monogram, warm paper textures, restrained terracotta accents. Keep the complete brand lockup, tagline and both series labels in the central area visible on all devices.
+- YouTube's upload crop preview and the live desktop channel header were visually checked. The new banner is published.
+
+Exact copy:
+
+```text
+BYTEFRONT STUDIO
+Understand technology. See what changes.
+Byte by Byte · Visual explainers
+Bytefront Espresso · Tech news
+```
+
+### Channel description
+
+```text
+Bytefront Studio explores technology—and how it changes the way we work, learn, and live.
+
+Byte by Byte — visual explainers that unpack one question at a time, through research, stories, and practical examples.
+
+Bytefront Espresso — concise briefings on AI, chips, robotics, and the business behind them.
+
+Subscribe for clear explanations and a considered view of what matters.
+```
+
+### Playlists and homepage
+
+Home is enabled. The following sections were published and read back after reloading YouTube Studio:
+
+1. Single playlist: `Byte by Byte | Visual Explainers` — public, 0 videos, ID `PLIaUJHRYBc_I`.
+2. Single playlist: `Bytefront Espresso | Tech News Briefings` — public, 22 existing videos preserved, ID `PLZP1y70pG1Uc`.
+3. Popular videos — 22 videos available.
+
+Both playlists use `Date published (newest)`. No trailer or returning-subscriber spotlight was assigned because Byte by Byte has no published episode yet. The private Reference playlist was not modified or featured.
+
+Byte by Byte playlist description:
+
+```text
+Visual explainers from Bytefront Studio. One question at a time, explored through research, stories, and practical examples—about technology and how it changes the way we work, learn, and live.
+```
+
+Espresso playlist description:
+
+```text
+Concise briefings from Bytefront Studio on AI, chips, robotics, and the business behind them. Catch up on the stories that matter, with clear context and sources.
+```
+
+### Verification
+
+- The public channel displays the new name, banner and complete description.
+- The public Playlists page displays Espresso's updated title and its 22 videos. The empty Byte by Byte playlist is present in Studio but is not listed on the public channel's Playlists page.
+- Studio reload confirms the published homepage order. After a short propagation delay, the public Home page displays Espresso followed by Popular videos. The empty Byte by Byte section is hidden publicly while its first position remains saved in Studio.
+- Evidence screenshots: `outputs/channel-branding-20261016/channel-home-published.jpg` and `outputs/channel-branding-20261016/studio-layout-published.jpg`. Generated media and screenshots remain in ignored `outputs/`.
+
+## Historical banner — September 20, 2026
+
+The following records the previous Espresso-focused banner and its original generation prompts. It is superseded by the published Studio banner above.
+
+### Historical deliverables
 
 - Upload artwork: `outputs/youtube-branding/bytefront-espresso-banner-v1-2560x1440.png`
 - Central crop preview: `outputs/youtube-branding/bytefront-espresso-banner-v1-mobile-preview.png`
 
 Generated media stays in ignored `outputs/`. The full banner is the upload file; the crop is for inspection only.
 
-## Design and copy
+### Historical design and copy
 
 The banner uses an ink navy background, cobalt circuitry and the existing B monogram, with a warm copper arc on the right. The reference is `data/outros/bytefront-logo-transparent.png`. The wordmark and supporting copy share the center of the image so they survive narrow device crops.
 
@@ -19,7 +88,7 @@ Your morning brief on tech.
 AI, chips, robotics and the business behind them.
 ```
 
-## Export and verification
+### Historical export and verification
 
 - Final PNG: 2560 × 1440 pixels, 4,109,998 bytes.
 - Preview: centered 1544 × 423 pixel crop.
@@ -29,7 +98,7 @@ AI, chips, robotics and the business behind them.
 
 YouTube's [channel branding guidance](https://support.google.com/youtube/answer/10456525?co=GENIE.Platform%3DAndroid&hl=en), checked September 20, 2026, recommends 2560 × 1440 pixels, requires at least 2048 × 1152 pixels, and limits the image to 6 MB. Its 1235 × 338 safe area at the minimum canvas scales to approximately 1544 × 423 at the recommended canvas.
 
-## Generation method
+### Historical generation method
 
 Created with the built-in `image_gen` tool, using the existing logo as a brand reference. No API or CLI generation fallback was used. Export resizing and the inspection crop used `sips`.
 
