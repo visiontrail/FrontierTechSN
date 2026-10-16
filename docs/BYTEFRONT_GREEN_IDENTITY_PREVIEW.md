@@ -16,8 +16,12 @@ See [the channel branding record](YOUTUBE_CHANNEL_BANNER.md) for upload hashes a
 
 All generated assets remain in ignored `outputs/channel-branding-20261016/green-v1/`:
 
+At the user's request, the original green banner preview and the full-canvas generated PNG were also copied from Codex's image output directory into this project directory. Both copies were verified byte-for-byte against their sources. Final artwork, cover samples, generation prompts and publication screenshots are retained together locally.
+
 | File | Actual dimensions | Role |
 | --- | --- | --- |
+| `channel-banner-preview.png` | 2172 × 724 | Original reviewed horizontal green banner preview |
+| `channel-banner-generated.png` | 1672 × 941 | Full-canvas generated PNG before upload-size export |
 | `channel-banner-upload.jpg` | 2560 × 1440 | Published green channel banner, extended from the reviewed horizontal preview for YouTube's all-device crop |
 | `channel-banner-upload-prompt.txt` | Text | Exact image-generation prompt for adapting the banner canvas |
 | `avatar.png` | 1254 × 1254 | Forest-green B monogram on warm ivory; generous circular-crop clearance |
