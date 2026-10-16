@@ -50,7 +50,7 @@ class ThumbnailPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(spec)
         self.assertEqual(spec.file, "thumbnail.txt")
         content = prompts_registry.read_content(spec)
-        self.assertIn("Concrete Event", content)
+        self.assertIn("Core Composition Principles", content)
         self.assertIn("BRAND / PRODUCT FIDELITY", content)
         self.assertIn("Cursor the AI", content)
         self.assertIn("coding product is not a mouse-pointer arrow", content)

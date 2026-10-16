@@ -84,6 +84,36 @@ The backend accepts only valid image-signature files inside that task's thumbnai
 image paths, the primary image, ChatGPT conversation link, timestamps, and any error. A provider,
 bridge, or web failure is logged and recorded but does not discard a valid script or block TTS/video.
 
+### Espresso style snapshots and rollback
+
+The active style is `backend/prompts/thumbnail.txt`. It retains clear story-essential
+official brand marks and optional human faces: include a relevant person when the
+story benefits from one, without forcing a face into every cover. Keep channel branding
+small, simplify decoration, and preserve attribution and uncertainty in readable copy.
+
+Two exact prompt snapshots are retained in Git under `backend/prompts/archive/`:
+
+- `thumbnail-espresso-20261016-original.txt`: the style before the October 16 redesign,
+  from commit `41811402788d71414e9c192aa2c0eaa1d3da1ad6`.
+- `thumbnail-espresso-20261016-editorial-v1.txt`: the first restrained editorial revision,
+  before strengthening brand marks and clarifying optional faces, from `b56514e`.
+
+`thumbnail-espresso-20261016-snapshots.json` records source commits and SHA-256 hashes.
+These are inactive backups; the generator reads only the active `thumbnail.txt`.
+If performance review leads to choosing the original style again, restore just that
+prompt from the repository root:
+
+```bash
+cp backend/prompts/archive/thumbnail-espresso-20261016-original.txt backend/prompts/thumbnail.txt
+```
+
+Review the diff and commit the selected rollback according to repository rules.
+The next new art-direction request reads it without a service restart. Existing accepted
+covers and saved in-progress image requests retain their assets and prompts; selecting a
+style does not regenerate or replace an already published cover. The first editorial
+snapshot can be selected with the same command using its filename instead. These
+snapshots restore the cover style only, without reverting title policies or other changes.
+
 ## Manifest and failure semantics
 
 Every retained clip has a canonical source link, creator, provider, source duration, exact trim,

@@ -4,21 +4,24 @@ Apply this editorial direction, including for Bytefront Espresso news briefings:
 
 Style: Clear editorial technology thumbnail, landscape 16:9, one concrete news event, restrained deep navy with cream and one muted accent. Use natural photographic or illustrative treatment appropriate to the actual subject. Strong hierarchy and mobile legibility take priority over spectacle.
 
+Espresso identity: Preserve recognizable company/product logos as strong visual anchors. Human faces are optional, never mandatory. When a face helps communicate the actual story, prefer including a relevant person alongside one or two story-essential brand marks. Otherwise use the brand/product or meaningful action as the focal subject. Do not default to a text poster with a generic chip merely to make the layout minimal.
+
 Core Composition Principles:
 
 1. Subject Dominance: The story's actual subject and one meaningful action or prop should occupy most of the frame. Make the subject identifiable before the viewer reads small labels.
 2. Clear Contrast: Separate the subject from a simple background using crisp silhouettes and restrained color contrast. Avoid neon glow, lightning, lens flares and dramatic lighting effects added merely for decoration.
-3. Concrete Event: Show what happened, what is proposed, or what remains uncertain. Faces are optional and should have a natural expression; do not manufacture shock or a fabricated product demonstration.
+3. Concrete Event: Show what happened, what is proposed, or what remains uncertain. When a face serves that story, prefer including it with a clear, natural expression of curiosity, concern, concentration or surprise. Do not manufacture extreme shock, an endorsement or a fabricated product demonstration.
 4. Relevant Props: Use a chip only for a chip story, money only when the financial detail is the actual subject, and no decorative gold coins. Do not repeat generic chips, robots or server racks across unrelated stories. One relevant prop is enough; avoid stacks of repeated chip imagery.
 5. Simplified Storytelling: Tell one clear story instantly. Remove competing objects, decorative arrows and background motifs. An arrow is justified only if it clarifies a specific relationship that would otherwise be hard to see.
 
-Lighting and Color: Natural, even lighting; a restrained palette, crisp silhouettes and instant legibility on a small mobile screen. Do not add a large channel logo or series title. If a series corner label is used, keep it within 20% of canvas width and 9% of canvas height; story-essential company names are separate subject identifiers.
+Lighting and Color: Natural, even lighting; a restrained palette, crisp silhouettes and instant legibility on a small mobile screen. Do not add a large channel logo or series title. If a series corner label is used, keep it within 20% of canvas width and 9% of canvas height. This limit applies only to Bytefront/channel branding, not to the story-essential company logos, which should be large enough to recognize instantly.
 
 Dead Zones: Keep all critical information, text, faces, and focal details away from the bottom-right timestamp area and away from the bottom 15% of the frame.
 
 Derive and explicitly describe these content decisions from the title and script:
 
 - MAIN SUBJECT
+- HUMAN SUBJECT / IDENTITY (only when a face is used)
 - CORE CURIOSITY ELEMENT
 - BACKGROUND SCENE
 - DESIRED EMOTION / MOOD
@@ -49,6 +52,23 @@ Factual framing rules (apply to both the hook text and the depicted action):
   or completed handshake. Rewrite or simplify the concept if the necessary
   qualification would otherwise become fine print.
 
+Human subject rules:
+
+- Faces are optional. Use one where it makes the story clearer or conveys its
+  human stakes; omit it naturally when the brand/product tells the story better.
+  For a face-led composition, prefer one real person explicitly named in the
+  final narration and central to the chosen lead story; retain their
+  recognizable identity. Never insert an unrelated celebrity or an unmentioned
+  CEO merely because their company appears in the script.
+- If the narration centers on an affected human role, an anonymous representative
+  of that role may be used. Do not imply they are a named source, actual interview
+  subject, witness or product endorser. When no human angle is supported, use the
+  actual brand/product as the focal subject instead of inventing a person.
+- When using a face, make it large enough to read on mobile, with the gaze or gesture tied
+  to the same event or meaningful prop. Avoid several unrelated faces or an
+  exaggerated reaction collage. In HUMAN SUBJECT / IDENTITY, specify the person
+  or role and its narration basis. Omit this field when no face is used.
+
 Brand and product identity rules:
 
 - First resolve whether a capitalized or ambiguous title term is a named company,
@@ -58,16 +78,17 @@ Brand and product identity rules:
   server or abstract building.
 - When the chosen story depends on named companies or products, make their exact
   recognizable identities part of the one visual story. Name every required
-  entity explicitly in BRAND / PRODUCT FIDELITY. A large, correctly spelled
-  company/product name can supply that identity without extra logos. If using
-  an official mark, preserve its spelling, proportions and established colors;
-  do not invent, approximate, parody, or replace it with a generic lookalike.
-- Use one clear identity anchor per entity when two companies must be
-  distinguished at thumbnail size. If the image model cannot
+  entity explicitly in BRAND / PRODUCT FIDELITY. Require the recognizable official
+  logo, wordmark or product icon for the core brand; for a two-company story,
+  include both core brands. Prefer one clear mark per entity, integrated with the
+  face/subject and headline. Preserve its spelling, proportions and established
+  colors; do not invent, approximate, parody, or replace it with a generic lookalike.
+- Do not remove a relevant brand mark merely to achieve minimalism or replace it
+  by default with ordinary headline text. If the image model cannot
   render an official mark faithfully, require the exact name in bold clean text
   using the brand's established visual language; never substitute an unrelated
-  object. Keep identity labels integrated with the main headline where possible,
-  rather than adding another layer of small text.
+  object. This is a fidelity fallback, not the preferred style. Keep necessary
+  identity labels integrated with the main headline rather than adding small text.
 - Brand marks must remain crisp, unobstructed, and recognizable on a small mobile
   screen. A conflict between two brands still counts as one story when their
   relationship is the single curiosity gap.
@@ -75,7 +96,7 @@ Brand and product identity rules:
 Final constraints:
 
 - Use exactly one visual story and one curiosity gap.
-- Prefer a human face only when the story benefits from one; never invent a recognizable real person unless the source clearly calls for that person.
+- Include a relevant face when it helps the story; faces are optional and need not appear in every thumbnail. Preserve story-essential brand marks. Never invent an unsupported recognizable person or brand mark.
 - Prefer 3-7 familiar words of large clean hook text. Allow a short, clearly readable attribution line when needed for accuracy; do not sacrifice the subject or a material caveat to a word limit. Prefer cream or white on navy with one muted accent, without heavy black outlines. Specify no hook only when the visual alone unambiguously identifies both subject and event.
 - Never place text or faces in the bottom-right corner or bottom 15%.
 - Do not include UI chrome, watermarks, captions, fine print, collages,

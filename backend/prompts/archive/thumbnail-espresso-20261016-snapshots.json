@@ -1,0 +1,18 @@
+{
+  "snapshots": [
+    {
+      "file": "thumbnail-espresso-20261016-original.txt",
+      "source_commit": "41811402788d71414e9c192aa2c0eaa1d3da1ad6",
+      "source_path": "backend/prompts/thumbnail.txt",
+      "sha256": "beb7beeee0ed8456eea4798e439d08787370c8b49301d2eba0f5849e02da002d",
+      "bytes": 5456
+    },
+    {
+      "file": "thumbnail-espresso-20261016-editorial-v1.txt",
+      "source_commit": "b56514e261a20f4331a88210cfaab03b636bcf4c",
+      "source_path": "backend/prompts/thumbnail.txt",
+      "sha256": "8ba3fb7621f5b46f60346b621f078852a114daab57eb41aca8ffb22055cf951f",
+      "bytes": 6625
+    }
+  ]
+}
