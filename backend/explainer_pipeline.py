@@ -39,6 +39,7 @@ FPS = 30
 WIDTH, HEIGHT = 1920, 1080
 SAMPLE_RATE = 48000
 CONTRACT_VERSION = 1
+TEXT_LAYOUT_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 Log = Callable[[str], None]
@@ -260,32 +261,12 @@ def _wrap(text: str, font: ImageFont.FreeTypeFont, width: int) -> list[str]:
     return lines
 
 
-def _overlay(scene: dict, project: dict, path: Path) -> None:
-    """Rasterize text ourselves: Homebrew ffmpeg may have no libass filters."""
-    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+def _text_layout(scene: dict, project: dict) -> dict:
+    """Reserve separate lower bands for the short label and optional narration."""
     language = project.get("language", "en")
-    style = project.get("style") or {}
-    title = str(scene.get("on_screen_text") or "").strip()
-    if title:
-        font = _font(52, language)
-        lines = _wrap(title, font, WIDTH - 240)
-        if len(lines) > 3:
-            raise ValueError("On-screen text is too long; shorten it to three lines")
-        width = max(font.getlength(line) for line in lines) + 64
-        left, right = (WIDTH - width) / 2, (WIDTH + width) / 2
-        # Illustration prompts reserve the lower quarter. Use that space for
-        # closing beats when captions do not need it, keeping faces unobscured.
-        top = (HEIGHT - 90 - len(lines) * 65
-               if (scene.get("ending_role") or scene.get("_brand_role")) and not project.get("captions_enabled", False) else 188 if scene.get("_brand_role") else 56)
-        draw.rounded_rectangle((left, top, right, top + 34 + len(lines) * 65), radius=18,
-                               fill=style.get("background_color", "#F4EBDD"))
-        draw.line((left + 24, top + 9, right - 24, top + 9), fill=style.get("accent_color", "#C56545"), width=5)
-        for index, line in enumerate(lines):
-            draw.text((WIDTH / 2, top + 30 + index * 65), line, font=font, anchor="mt",
-                      fill=style.get("ink_color", "#302A25"))
+    layout = {"image_height": HEIGHT, "title": None, "captions": None}
+    bottom = HEIGHT - 56
     if project.get("captions_enabled", False):
-        lines: list[str] = []
         for size in (48, 44, 40, 36, 32):
             font = _font(size, language)
             lines = _wrap(scene["narration"], font, WIDTH - 220)
@@ -295,9 +276,48 @@ def _overlay(scene: dict, project: dict, path: Path) -> None:
             raise ValueError("Scene narration is too long for readable captions; split this scene")
         line_height = int(font.size * 1.35)
         top = HEIGHT - 76 - len(lines) * line_height
-        draw.rounded_rectangle((75, top - 18, WIDTH - 75, HEIGHT - 48), radius=20, fill=(28, 25, 23, 218))
-        for index, line in enumerate(lines):
-            draw.text((WIDTH / 2, top + index * line_height), line, font=font, anchor="mt", fill="#FFFFFF")
+        layout["captions"] = {"lines": lines, "font_size": size, "line_height": line_height,
+                              "top": top, "box": (75, top - 18, WIDTH - 75, HEIGHT - 48)}
+        bottom = top - 18 - 24
+        layout["image_height"] = bottom // 2 * 2
+    title = str(scene.get("on_screen_text") or "").strip()
+    if title:
+        font = _font(52, language)
+        lines = _wrap(title, font, WIDTH - 240)
+        if len(lines) > 3:
+            raise ValueError("On-screen text is too long; shorten it to three lines")
+        width = max(font.getlength(line) for line in lines) + 64
+        left, right = (WIDTH - width) / 2, (WIDTH + width) / 2
+        top = bottom - 34 - len(lines) * 65
+        layout["title"] = {"lines": lines, "top": top, "box": (left, top, right, bottom)}
+        layout["image_height"] = (top - 24) // 2 * 2
+    return layout
+
+
+def _overlay(scene: dict, project: dict, path: Path) -> None:
+    """Rasterize text ourselves: Homebrew ffmpeg may have no libass filters."""
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    language = project.get("language", "en")
+    style = project.get("style") or {}
+    layout = _text_layout(scene, project)
+    title = layout["title"]
+    if title:
+        font = _font(52, language)
+        left, top, right, _ = title["box"]
+        draw.rounded_rectangle(title["box"], radius=18,
+                               fill=style.get("background_color", "#F4EBDD"))
+        draw.line((left + 24, top + 9, right - 24, top + 9), fill=style.get("accent_color", "#C56545"), width=5)
+        for index, line in enumerate(title["lines"]):
+            draw.text((WIDTH / 2, top + 30 + index * 65), line, font=font, anchor="mt",
+                      fill=style.get("ink_color", "#302A25"))
+    captions = layout["captions"]
+    if captions:
+        font = _font(captions["font_size"], language)
+        draw.rounded_rectangle(captions["box"], radius=20, fill=(28, 25, 23, 218))
+        for index, line in enumerate(captions["lines"]):
+            draw.text((WIDTH / 2, captions["top"] + index * captions["line_height"]),
+                      line, font=font, anchor="mt", fill="#FFFFFF")
     overlay.save(path)
 
 
@@ -763,6 +783,7 @@ async def _paced_audio(scene: dict, path: Path, audio: dict, root: Path, *,
 async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | None,
                         audio: dict, root: Path) -> tuple[Path, dict]:
     style = project.get("style") or {}
+    text_layout = _text_layout(scene, project)
     motion_probe = await _probe(motion) if motion else None
     watermark_repair = None
     if motion and style.get("gemini_watermark_removal", True):
@@ -776,8 +797,7 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
                  "background": style.get("background_color", "#F4EBDD"),
                  "ink": style.get("ink_color", "#302A25"),
                  "accent": style.get("accent_color", "#C56545")}
-    if scene.get("ending_role") and not project.get("captions_enabled", False):
-        render_inputs["closing_title_position"] = "lower_safe_area"
+    render_inputs["text_layout_version"] = TEXT_LAYOUT_VERSION
     if scene.get("_brand_role"):
         render_inputs["series_brand"] = {"version": BRAND_VERSION, "role": scene["_brand_role"]}
     closing_hold = (audio.get("pacing") or {}).get("closing_hold_seconds", 0)
@@ -796,7 +816,10 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     if scene.get("_brand_role"):
         _brand_overlay(stage / "brand.png", scene["_brand_role"])
     color = style.get("background_color", "#F4EBDD").replace("#", "0x")
-    base = f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color={color},setsar=1"
+    image_height = text_layout["image_height"]
+    # Fit the entire illustration/video above the text. Never crop its subjects
+    # or rely on generated artwork having an empty caption-safe region.
+    base = f"scale={WIDTH}:{image_height}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:({image_height}-ih)/2:color={color},setsar=1"
     if watermark_repair:
         # Repair at native resolution before scaling, padding, titles or captions.
         # Fold it into the existing encode; keep the downloaded motion untouched.
@@ -846,7 +869,8 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     final = stage / "clip.mp4"
     (stage / "clip.partial.mp4").replace(final)
     return final, _complete(stage, key, [final, stage / "overlay.png"], root,
-                            motion_playback=motion_playback, watermark_repair=watermark_repair)
+                            motion_playback=motion_playback, watermark_repair=watermark_repair,
+                            text_layout_version=TEXT_LAYOUT_VERSION, text_layout=text_layout)
 
 
 def _validate(project: dict, root: Path) -> list[dict]:

@@ -125,6 +125,58 @@ def test_gemini_mode_cannot_silently_render_zero_videos(tmp_path, providers):
     assert providers.audio_calls == providers.image_calls == providers.motion_calls == []
 
 
+@pytest.mark.parametrize("role", ["", "intro", "outro"])
+@pytest.mark.parametrize("captions", [False, True])
+def test_labels_stay_below_artwork_and_above_optional_captions(tmp_path, role, captions):
+    project = _project()
+    project["captions_enabled"] = captions
+    scene = {**project["scenes"][0], "_brand_role": role, "on_screen_text": "No advantage",
+             "narration": "Explain the reasoning, then try a different problem without the answer. " * 3}
+    layout = pipeline._text_layout(scene, project)
+    title_box = layout["title"]["box"]
+    assert 0 < layout["image_height"] < title_box[1] < title_box[3] <= pipeline.HEIGHT - 48
+    if captions:
+        assert title_box[3] + 24 <= layout["captions"]["box"][1]
+    else:
+        assert title_box[1] >= 900
+    path = tmp_path / "overlay.png"
+    pipeline._overlay(scene, project, path)
+    with Image.open(path) as overlay:
+        assert overlay.crop((0, 0, pipeline.WIDTH, layout["image_height"])).getbbox() is None
+        assert overlay.getbbox()[1] == title_box[1]
+
+
+def test_footer_migration_recomposes_without_regenerating_provider_media(tmp_path, providers, monkeypatch):
+    async def run():
+        project = _project()
+        project["captions_enabled"] = False
+        project["style"].update(motion_mode="gemini", motion_every_n_scenes=1)
+        monkeypatch.setattr(pipeline, "TEXT_LAYOUT_VERSION", 1)
+        previous = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        calls = [len(providers.audio_calls), len(providers.image_calls), len(providers.motion_calls)]
+        monkeypatch.setattr(pipeline, "TEXT_LAYOUT_VERSION", 2)
+        updated = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
+        assert calls == [len(providers.audio_calls), len(providers.image_calls), len(providers.motion_calls)]
+        assert previous["duration_seconds"] == updated["duration_seconds"]
+        for before, after in zip(previous["scene_artifacts"], updated["scene_artifacts"], strict=True):
+            for key in ("audio_path", "image_path", "motion_path", "source_audio_sha256"):
+                assert before[key] == after[key]
+            assert before["clip_path"] != after["clip_path"]
+            assert (tmp_path / before["clip_path"]).is_file()
+        first = updated["scene_artifacts"][0]
+        clip = tmp_path / first["clip_path"]
+        frame = tmp_path / "footer-frame.png"
+        await pipeline._command(["ffmpeg", "-y", "-v", "error", "-i", str(clip), "-frames:v", "1", str(frame)])
+        with Image.open(frame) as rendered:
+            assert rendered.size == (1920, 1080)
+            # The encoded file, not just the transparent overlay, contains
+            # dark label glyphs in the reserved footer.
+            footer = rendered.convert("L").crop((600, 950, 1320, 1024))
+            assert sum(count for value, count in enumerate(footer.histogram()) if value < 100) > 500
+        assert await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None) == updated
+    asyncio.run(run())
+
+
 def test_speech_edge_requires_source_text_audio_and_pcm_binding(tmp_path, providers):
     async def run():
         import hashlib
@@ -168,7 +220,8 @@ def test_closing_hold_fades_after_speech_and_reuses_original_media(tmp_path, pro
         before, moved = original["scene_artifacts"][-1], relayout["scene_artifacts"][-1]
         assert before["audio_path"] == moved["audio_path"]
         assert before["image_path"] == moved["image_path"]
-        assert before["clip_path"] != moved["clip_path"]
+        # All labels now occupy the same footer, including ordinary scenes.
+        assert before["clip_path"] == moved["clip_path"]
         overlay = Image.open((tmp_path / moved["clip_path"]).parent / "overlay.png")
         assert overlay.getbbox()[1] >= 780
         project["style"]["closing_hold_seconds"] = 2.4
@@ -672,8 +725,12 @@ def test_watermark_repair_pixels_retry_and_cache_preserve_provider_media(tmp_pat
                 "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
             ])
 
-        assert min(await pixel(before, 1740, 900)) > 240
-        assert max(await pixel(after, 1740, 900)) < 110
+        image_height = pipeline._text_layout(project["scenes"][0], project)["image_height"]
+        scale = min(pipeline.WIDTH / 640, image_height / 360)
+        mark_x = int((pipeline.WIDTH - 640 * scale) / 2 + 580 * scale)
+        mark_y = int((image_height - 360 * scale) / 2 + 300 * scale)
+        assert min(await pixel(before, mark_x, mark_y)) > 240
+        assert max(await pixel(after, mark_x, mark_y)) < 110
         # Pixels outside the repair retain the scene; the title overlay is unchanged.
         assert max(abs(a - b) for a, b in zip(await pixel(before, 200, 300), await pixel(after, 200, 300))) < 5
         assert pipeline._sha((tmp_path / before["clip_path"]).with_name("overlay.png")) == pipeline._sha((tmp_path / after["clip_path"]).with_name("overlay.png"))

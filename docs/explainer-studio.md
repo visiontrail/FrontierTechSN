@@ -148,6 +148,8 @@ npm run build
 
 ## Byte By Byte series contract
 
+Every scene's short `on_screen_text` label sits in a centered footer below the illustration, including the opening and ending. The renderer fits the full image or video above that footer without cropping it. If narration captions are enabled, they occupy a separate band beneath the short label. This layout is versioned in render caches, so existing projects recompose from their accepted image, motion and narration assets without requesting them again.
+
 Explainers belong to **Bytefront / Byte By Byte**. Every rendered episode generates a 16:9 cover before its first scene, using the Morning Desk navy/cyan/copper identity with warm paper and line characters. Cover inputs are bound to the title and narration; the prompt, provider checkpoint and image hash are cached with the project. The Task page shows and downloads the cover, including while motion generation is waiting. Covers never substitute for final video completion.
 
 The opening places the series identity over the first 2.2 seconds of the existing hook; it adds no silent pre-roll. The final scene includes the same identity, following the script's callback, practical action and takeaway beats. These overlays are local composition and consume no Gemini generation requests. Source images, narration and existing Gemini footage retain their content-addressed caches.
