@@ -60,6 +60,16 @@ with the format cue and date at the end. Do not add episode numbers or keyword
 lists. This suffix is a publication format cue, not a rename of the spoken show.
 For standalone explainers and other non-daily videos, do not add a daily-brief
 label or a date; retain a natural subject-specific title.
+For Byte by Byte, lead with the viewer's concrete question or dilemma. Keep
+Bytefront, Byte by Byte and Episode 1 / episode numbers out of the publication
+title; put the series identity in the playlist, a small cover corner label and
+the description instead. Remove academic subtitle clauses when the plain main
+question already states the video's promise. Prefer familiar verbs such as
+learn, finish, explain and try over research terminology such as assistance
+transfer, unless the term itself is what the episode explains. For an episode
+that actually examines AI-assisted completion versus independent learning,
+"Does AI Help You Learn—or Just Finish?" is a possible title, not a fixed
+template or a claim that AI can never support learning.
 
 5. Compare and check before returning one title.
 Privately consider a few distinct phrasings and choose by factual fidelity,

@@ -24,11 +24,15 @@ def validate_motion_budget(scenes: list[dict], style: dict) -> None:
 def thumbnail_prompt(project: dict) -> str:
     narration = " ".join(scene["narration"] for scene in project["scenes"])
     return f"""Create one finished landscape 16:9 YouTube thumbnail for Bytefront's educational series, Byte By Byte.
-Blend the ByteFront Espresso Morning Desk identity (deep navy, restrained cyan circuits, warm amber highlights,
-strong editorial typography and one instantly readable visual story) with warm textured paper and original
-charcoal line illustration. A friendly round-headed slender character wears a terracotta shirt. No photorealistic
-people, glossy 3D, crowded collage or invented product logos. Navy transitions into cream paper; generous space.
-Use a small clean 'Bytefront' wordmark, a copper rule, and the exact series label 'Byte By Byte'.
+Use deep navy, warm cream paper, muted amber and terracotta with original charcoal line illustration.
+A friendly round-headed slender character wears a terracotta shirt. Keep this character design, paper texture
+and restrained palette consistent across episodes; let the episode's question and concrete props distinguish it.
+No photorealistic people, glossy 3D, crowded collage, decorative circuits, glow effects or invented product logos.
+Let the character and story-essential props occupy roughly 55-65% of the frame, with generous breathing room.
+Navy may support the hook text, but must not become a large branding panel.
+Use ONE discreet top-left identity lockup: a small clean 'Bytefront' wordmark and the exact label 'Byte by Byte'.
+Together they must fit within 20% of canvas width and 9% of canvas height. No large logo or decorative divider.
+The visual hierarchy is character/action and hook first, essential props second, series branding last.
 Derive ONE curiosity gap from the episode and choose no more than four large English hook words
 (or eight Chinese characters for a Chinese episode). The hook must preserve uncertainty and the script's claims.
 Use one coherent action with recognizable props. Keep words and faces above the bottom 15% and clear of the
