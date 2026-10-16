@@ -8,21 +8,27 @@ The channel presents Byte by Byte as the main explainer series and retains Espre
 
 ### Current banner
 
-- Upload file: `outputs/channel-branding-20261016/bytefront-studio-banner.jpg`
-- Export: 2560 × 1440 pixels, 910,860 bytes.
-- SHA-256: `a43f71a524994def813ef614473617e133b33d1755c38800faa13d47470745a2`
-- Created with the built-in `image_gen` tool and the existing `data/outros/bytefront-logo-transparent.png` as a brand reference. The generated artwork was 1672 × 941 pixels; `sips` resized and exported the final JPEG. It is not a native 2560 pixel generation.
-- Art direction: ink navy, cobalt circuitry and B monogram, warm paper textures, restrained terracotta accents. Keep the complete brand lockup, tagline and both series labels in the central area visible on all devices.
+- Upload file: `outputs/channel-branding-20261016/green-v1/channel-banner-upload.jpg`
+- Export: 2560 × 1440 pixels, 551,152 bytes.
+- SHA-256: `c8310d4b5f29506edf693858c31d7e77e0adb197bb6b34e99bb7f6f0f6e5922f`
+- Created with the built-in `image_gen` tool by extending the reviewed green banner preview into a full YouTube canvas. The generated artwork was 1672 × 941 pixels; `sips` resized and exported the final JPEG. It is not a native 2560 pixel generation. The exact adaptation prompt is saved in `green-v1/channel-banner-upload-prompt.txt`.
+- Art direction: warm ivory `#FDFBF7`, forest green `#1A4A3A`, muted green `#426454`, sparse dark gold `#80601B` and subtle paper texture, following the XChineseTrans light identity while preserving Bytefront's own logo and naming. Keep the complete brand lockup, tagline and both series labels in the central area visible on all devices.
 - YouTube's upload crop preview and the live desktop channel header were visually checked. The new banner is published.
 
 Exact copy:
 
 ```text
-BYTEFRONT STUDIO
+Bytefront Studio
 Understand technology. See what changes.
 Byte by Byte · Visual explainers
 Bytefront Espresso · Tech news
 ```
+
+### Current avatar and playlist artwork
+
+- Avatar: `outputs/channel-branding-20261016/green-v1/avatar.png`, 1254 × 1254 pixels, 1,856,311 bytes; SHA-256 `d03df54c05e64b88df75930776f35f816f731f4c0590d2972f7f51a3208afc85`. Green B monogram on ivory, with no small wordmark. The circle crop and live channel rendering were visually checked.
+- Espresso playlist cover: `outputs/channel-branding-20261016/green-v1/espresso-series-cover-v2.png`, 1672 × 941 pixels, 1,683,337 bytes; SHA-256 `ac4e65c808ecb137a1c40c796ad995e3a5cf45b09ac23230d0a503841359e7a6`. Published through `Edit Thumbnail` on the public playlist page and verified after reload. Its text is `Bytefront Espresso`, `Tech News Briefings`, and `AI · Chips · Robotics · Business`. The rejected `THE CHIP RACE` example was not uploaded.
+- Byte by Byte has no videos. Its live playlist page has no thumbnail upload control, so its local sample remains unapplied. No placeholder video was added. Existing episode thumbnails and production generation settings remain unchanged by this synchronization.
 
 ### Channel description
 
@@ -60,10 +66,14 @@ Concise briefings from Bytefront Studio on AI, chips, robotics, and the business
 
 ### Verification
 
-- The public channel displays the new name, banner and complete description.
+- Studio reported `All changes saved` after publishing the green banner and avatar. After a propagation delay and reload, the public channel displayed both new green assets along with the existing name and description.
 - The public Playlists page displays Espresso's updated title and its 22 videos. The empty Byte by Byte playlist is present in Studio but is not listed on the public channel's Playlists page.
 - Studio reload confirms the published homepage order. After a short propagation delay, the public Home page displays Espresso followed by Popular videos. The empty Byte by Byte section is hidden publicly while its first position remains saved in Studio.
-- Evidence screenshots: `outputs/channel-branding-20261016/channel-home-published.jpg` and `outputs/channel-branding-20261016/studio-layout-published.jpg`. Generated media and screenshots remain in ignored `outputs/`.
+- Current green artwork evidence: `outputs/channel-branding-20261016/green-v1/channel-home-published.png`, `green-v1/espresso-playlist-published.png`, and `green-v1/byte-by-byte-empty-playlist.png` under the same branding directory. Earlier layout evidence remains at `outputs/channel-branding-20261016/studio-layout-published.jpg`. Generated media and screenshots remain in ignored `outputs/`.
+
+## Superseded Studio banner — earlier October 16, 2026
+
+The earlier navy/cobalt/terracotta Studio banner was published before the green identity was selected. Its upload file is `outputs/channel-branding-20261016/bytefront-studio-banner.jpg` (2560 × 1440 pixels, 910,860 bytes; SHA-256 `a43f71a524994def813ef614473617e133b33d1755c38800faa13d47470745a2`). It used the same tagline and series labels, with the title in uppercase. The green banner and avatar above supersede that channel appearance.
 
 ## Historical banner — September 20, 2026
 

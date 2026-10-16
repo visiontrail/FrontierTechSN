@@ -1,6 +1,16 @@
 # Bytefront green identity previews
 
-Prepared October 16, 2026 for visual review. These assets extend the green banner preview into an avatar and two reusable cover directions. They are not published, do not replace the existing channel artwork, and do not change the production generation settings.
+Prepared October 16, 2026 for visual review, then synchronized to YouTube at the user's request. The green banner, avatar and corrected Espresso series cover are now published and visually verified on the channel/playlist pages after refreshing. Byte by Byte's cover remains a local episode-layout sample. Production generation settings are unchanged.
+
+## YouTube synchronization — October 16, 2026
+
+- Published `channel-banner-upload.jpg` and `avatar.png` through Studio's Profile tab. Studio reported `All changes saved`; the public channel subsequently displayed both green assets.
+- Published `espresso-series-cover-v2.png` through the public Espresso playlist's `Edit Thumbnail` control. A refreshed playlist page displayed the corrected general-technology cover while retaining all 22 existing videos.
+- Byte by Byte is still an empty public playlist. Its page has no thumbnail region or `Edit Thumbnail` control, and its menu exposes only collaboration, playlist settings and deletion. No cover could be applied through the available UI. The episode sample `WHY WE OVERTHINK` was not assigned as a permanent series cover.
+- Studio's homepage order remains Byte by Byte, Espresso, Popular videos. The empty Byte by Byte section stays hidden on the public homepage. No episode was uploaded or published, and existing video thumbnails were not changed in this synchronization.
+- Evidence under the same ignored asset directory: `channel-home-published.png`, `espresso-playlist-published.png`, and `byte-by-byte-empty-playlist.png`.
+
+See [the channel branding record](YOUTUBE_CHANNEL_BANNER.md) for upload hashes and the current public configuration.
 
 ## Deliverables
 
@@ -8,6 +18,8 @@ All generated assets remain in ignored `outputs/channel-branding-20261016/green-
 
 | File | Actual dimensions | Role |
 | --- | --- | --- |
+| `channel-banner-upload.jpg` | 2560 × 1440 | Published green channel banner, extended from the reviewed horizontal preview for YouTube's all-device crop |
+| `channel-banner-upload-prompt.txt` | Text | Exact image-generation prompt for adapting the banner canvas |
 | `avatar.png` | 1254 × 1254 | Forest-green B monogram on warm ivory; generous circular-crop clearance |
 | `byte-by-byte-cover-sample.png` | 1672 × 941 | Illustrated explainer cover, sample hook `WHY WE OVERTHINK` |
 | `espresso-series-cover-v2.png` | 1672 × 941 | Current Espresso series cover: `Bytefront Espresso / Tech News Briefings`, spanning AI, chips, robotics and business |
@@ -77,4 +89,4 @@ For future episode covers, derive the headline and subject imagery from the revi
 
 Generated with the built-in `image_gen` tool. The avatar used the existing B logo as a shape reference; the initial covers used the green banner as a style reference. The superseded Espresso iteration had its decorative background circuits removed. Following the user's scope correction, v2 replaced the chip and topical headline with the permanent series title, briefing descriptor, full coverage line and general news-sheet illustration.
 
-The images were visually inspected for spelling, recognizable identity, spacing, consistent palette and subject clarity. Espresso v2 was also checked against the series definition: no chip-race headline or dominant single-sector subject, and all four coverage areas appear in the scope line. PNG dimensions were read from their headers after copying them into the workspace. No automated test suite was needed for these image previews. Approval of these visual directions is separate from publishing or integrating them into the production prompts.
+The images were visually inspected for spelling, recognizable identity, spacing, consistent palette and subject clarity. Espresso v2 was also checked against the series definition: no chip-race headline or dominant single-sector subject, and all four coverage areas appear in the scope line. PNG dimensions were read from their headers after copying them into the workspace. The banner's title, logo, tagline and both series labels fit the all-device crop; the avatar fits the circular crop. The public channel and Espresso playlist were visually checked after publication and reload. No automated test suite was needed for these artwork and documentation changes. Integration into production generation prompts remains separate from this channel synchronization.
