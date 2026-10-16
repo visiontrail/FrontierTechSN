@@ -148,7 +148,7 @@ npm run build
 
 ## Byte By Byte series contract
 
-Every scene's short `on_screen_text` label sits in a centered footer below the illustration, including the opening and ending. The renderer fits the full image or video above that footer without cropping it. If narration captions are enabled, they occupy a separate band beneath the short label. This layout is versioned in render caches, so existing projects recompose from their accepted image, motion and narration assets without requesting them again.
+Every scene's short `on_screen_text` label is centered inside the lower part of the illustration, including the opening and ending. The image or video retains its full-frame composition; a translucent paper tint blends the text into the image while keeping it readable. If narration captions are enabled, the short label sits above them without overlap. This layout is versioned in render caches, so existing projects recompose from their accepted image, motion and narration assets without requesting them again.
 
 Explainers belong to **Bytefront / Byte By Byte**. Every rendered episode generates a 16:9 cover before its first scene, using the Morning Desk navy/cyan/copper identity with warm paper and line characters. Cover inputs are bound to the title and narration; the prompt, provider checkpoint and image hash are cached with the project. The Task page shows and downloads the cover, including while motion generation is waiting. Covers never substitute for final video completion.
 

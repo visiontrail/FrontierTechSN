@@ -127,14 +127,15 @@ def test_gemini_mode_cannot_silently_render_zero_videos(tmp_path, providers):
 
 @pytest.mark.parametrize("role", ["", "intro", "outro"])
 @pytest.mark.parametrize("captions", [False, True])
-def test_labels_stay_below_artwork_and_above_optional_captions(tmp_path, role, captions):
+def test_labels_overlay_lower_image_above_optional_captions(tmp_path, role, captions):
     project = _project()
     project["captions_enabled"] = captions
     scene = {**project["scenes"][0], "_brand_role": role, "on_screen_text": "No advantage",
              "narration": "Explain the reasoning, then try a different problem without the answer. " * 3}
     layout = pipeline._text_layout(scene, project)
     title_box = layout["title"]["box"]
-    assert 0 < layout["image_height"] < title_box[1] < title_box[3] <= pipeline.HEIGHT - 48
+    assert layout["image_height"] == pipeline.HEIGHT
+    assert 0 < title_box[1] < title_box[3] <= pipeline.HEIGHT - 48
     if captions:
         assert title_box[3] + 24 <= layout["captions"]["box"][1]
     else:
@@ -142,19 +143,20 @@ def test_labels_stay_below_artwork_and_above_optional_captions(tmp_path, role, c
     path = tmp_path / "overlay.png"
     pipeline._overlay(scene, project, path)
     with Image.open(path) as overlay:
-        assert overlay.crop((0, 0, pipeline.WIDTH, layout["image_height"])).getbbox() is None
+        assert overlay.crop((0, 0, pipeline.WIDTH, title_box[1])).getbbox() is None
         assert overlay.getbbox()[1] == title_box[1]
+        assert overlay.getpixel((int(title_box[0]) + 30, int(title_box[1]) + 20))[3] == 218
 
 
-def test_footer_migration_recomposes_without_regenerating_provider_media(tmp_path, providers, monkeypatch):
+def test_label_migration_recomposes_without_regenerating_provider_media(tmp_path, providers, monkeypatch):
     async def run():
         project = _project()
         project["captions_enabled"] = False
         project["style"].update(motion_mode="gemini", motion_every_n_scenes=1)
-        monkeypatch.setattr(pipeline, "TEXT_LAYOUT_VERSION", 1)
+        monkeypatch.setattr(pipeline, "TEXT_LAYOUT_VERSION", 2)
         previous = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
         calls = [len(providers.audio_calls), len(providers.image_calls), len(providers.motion_calls)]
-        monkeypatch.setattr(pipeline, "TEXT_LAYOUT_VERSION", 2)
+        monkeypatch.setattr(pipeline, "TEXT_LAYOUT_VERSION", 3)
         updated = await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None)
         assert calls == [len(providers.audio_calls), len(providers.image_calls), len(providers.motion_calls)]
         assert previous["duration_seconds"] == updated["duration_seconds"]
@@ -170,7 +172,7 @@ def test_footer_migration_recomposes_without_regenerating_provider_media(tmp_pat
         with Image.open(frame) as rendered:
             assert rendered.size == (1920, 1080)
             # The encoded file, not just the transparent overlay, contains
-            # dark label glyphs in the reserved footer.
+            # dark label glyphs within the lower part of the full image.
             footer = rendered.convert("L").crop((600, 950, 1320, 1024))
             assert sum(count for value, count in enumerate(footer.histogram()) if value < 100) > 500
         assert await pipeline.render_project(project, tmp_path, lambda _: None, lambda _: None) == updated
@@ -220,7 +222,7 @@ def test_closing_hold_fades_after_speech_and_reuses_original_media(tmp_path, pro
         before, moved = original["scene_artifacts"][-1], relayout["scene_artifacts"][-1]
         assert before["audio_path"] == moved["audio_path"]
         assert before["image_path"] == moved["image_path"]
-        # All labels now occupy the same footer, including ordinary scenes.
+        # All labels now occupy the same lower image area, including ordinary scenes.
         assert before["clip_path"] == moved["clip_path"]
         overlay = Image.open((tmp_path / moved["clip_path"]).parent / "overlay.png")
         assert overlay.getbbox()[1] >= 780

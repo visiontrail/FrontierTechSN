@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 from backend import config
 from backend.explainer_series import BRAND_VERSION, SERIES_NAME, motion_indices, validate_motion_budget, thumbnail_prompt
@@ -39,7 +39,7 @@ FPS = 30
 WIDTH, HEIGHT = 1920, 1080
 SAMPLE_RATE = 48000
 CONTRACT_VERSION = 1
-TEXT_LAYOUT_VERSION = 2
+TEXT_LAYOUT_VERSION = 3
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 Log = Callable[[str], None]
@@ -262,7 +262,7 @@ def _wrap(text: str, font: ImageFont.FreeTypeFont, width: int) -> list[str]:
 
 
 def _text_layout(scene: dict, project: dict) -> dict:
-    """Reserve separate lower bands for the short label and optional narration."""
+    """Place short labels inside the full image, above optional narration captions."""
     language = project.get("language", "en")
     layout = {"image_height": HEIGHT, "title": None, "captions": None}
     bottom = HEIGHT - 56
@@ -279,7 +279,6 @@ def _text_layout(scene: dict, project: dict) -> dict:
         layout["captions"] = {"lines": lines, "font_size": size, "line_height": line_height,
                               "top": top, "box": (75, top - 18, WIDTH - 75, HEIGHT - 48)}
         bottom = top - 18 - 24
-        layout["image_height"] = bottom // 2 * 2
     title = str(scene.get("on_screen_text") or "").strip()
     if title:
         font = _font(52, language)
@@ -290,7 +289,6 @@ def _text_layout(scene: dict, project: dict) -> dict:
         left, right = (WIDTH - width) / 2, (WIDTH + width) / 2
         top = bottom - 34 - len(lines) * 65
         layout["title"] = {"lines": lines, "top": top, "box": (left, top, right, bottom)}
-        layout["image_height"] = (top - 24) // 2 * 2
     return layout
 
 
@@ -305,8 +303,9 @@ def _overlay(scene: dict, project: dict, path: Path) -> None:
     if title:
         font = _font(52, language)
         left, top, right, _ = title["box"]
-        draw.rounded_rectangle(title["box"], radius=18,
-                               fill=style.get("background_color", "#F4EBDD"))
+        # Let the illustration's texture show through the label's paper tint.
+        tint = (*ImageColor.getrgb(style.get("background_color", "#F4EBDD")), 218)
+        draw.rounded_rectangle(title["box"], radius=18, fill=tint)
         draw.line((left + 24, top + 9, right - 24, top + 9), fill=style.get("accent_color", "#C56545"), width=5)
         for index, line in enumerate(title["lines"]):
             draw.text((WIDTH / 2, top + 30 + index * 65), line, font=font, anchor="mt",
@@ -816,10 +815,8 @@ async def _render_scene(scene: dict, project: dict, image: Path, motion: Path | 
     if scene.get("_brand_role"):
         _brand_overlay(stage / "brand.png", scene["_brand_role"])
     color = style.get("background_color", "#F4EBDD").replace("#", "0x")
-    image_height = text_layout["image_height"]
-    # Fit the entire illustration/video above the text. Never crop its subjects
-    # or rely on generated artwork having an empty caption-safe region.
-    base = f"scale={WIDTH}:{image_height}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:({image_height}-ih)/2:color={color},setsar=1"
+    # Labels overlay the lower part of the original full-frame composition.
+    base = f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color={color},setsar=1"
     if watermark_repair:
         # Repair at native resolution before scaling, padding, titles or captions.
         # Fold it into the existing encode; keep the downloaded motion untouched.
